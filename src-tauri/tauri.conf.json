@@ -13,18 +13,16 @@
     "windows": [
       {
         "title": "ContextSplit",
-        "width": 300,
-        "height": 100,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "center": false
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {
       "csp": null
-    },
-    "macOSPrivateApi": true
+    }
   },
   "bundle": {
     "active": true,
