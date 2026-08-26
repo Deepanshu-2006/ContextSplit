@@ -1,24 +1,18 @@
 import { useState, useRef, useEffect } from "react";
 import { Plus, LayoutTemplate, Trash2, Pencil } from "lucide-react";
 import { Workspace } from "../../services/db";
+import { useWorkspaceStore } from "../../store/workspaceStore";
 
-interface SidebarProps {
-  workspaces: Workspace[];
-  activeWorkspaceId: string | null;
-  onSelect: (id: string) => void;
-  onCreate: () => void;
-  onRename: (id: string, newName: string) => void;
-  onDelete: (id: string) => void;
-}
+export function Sidebar() {
+  const {
+    workspaces,
+    activeWorkspaceId,
+    selectWorkspace,
+    createWorkspace,
+    renameWorkspace,
+    deleteWorkspace,
+  } = useWorkspaceStore();
 
-export function Sidebar({
-  workspaces,
-  activeWorkspaceId,
-  onSelect,
-  onCreate,
-  onRename,
-  onDelete,
-}: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -37,7 +31,7 @@ export function Sidebar({
 
   const handleRenameSubmit = () => {
     if (editingId && editValue.trim() !== "") {
-      onRename(editingId, editValue.trim());
+      renameWorkspace(editingId, editValue.trim());
     }
     setEditingId(null);
   };
@@ -68,7 +62,7 @@ export function Sidebar({
             return (
               <div
                 key={workspace.id}
-                onClick={() => !isEditing && onSelect(workspace.id)}
+                onClick={() => !isEditing && selectWorkspace(workspace.id)}
                 className={`group flex items-center justify-between px-2 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
                   isActive
                     ? "bg-black/5 text-gray-900"
@@ -108,7 +102,7 @@ export function Sidebar({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        onDelete(workspace.id);
+                        deleteWorkspace(workspace.id);
                       }}
                       className="p-1 text-gray-400 hover:text-red-500 rounded"
                       title="Delete"
@@ -128,7 +122,7 @@ export function Sidebar({
 
       <div className="px-4 mt-auto">
         <button 
-          onClick={onCreate}
+          onClick={() => createWorkspace("New Workspace")}
           className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg border border-black/5 text-[13px] font-medium text-gray-600 hover:bg-black/5 hover:text-gray-900 transition-colors shadow-sm bg-white"
         >
           <Plus size={14} />

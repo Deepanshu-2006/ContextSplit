@@ -1,11 +1,10 @@
 import { BoxSelect, LayoutTemplate } from "lucide-react";
-import { Workspace } from "../../services/db";
+import { useWorkspaceStore } from "../../store/workspaceStore";
 
-interface CanvasProps {
-  activeWorkspace?: Workspace;
-}
+export function Canvas() {
+  const { workspaces, activeWorkspaceId } = useWorkspaceStore();
+  const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
 
-export function Canvas({ activeWorkspace }: CanvasProps) {
   if (!activeWorkspace) {
     return (
       <div 
