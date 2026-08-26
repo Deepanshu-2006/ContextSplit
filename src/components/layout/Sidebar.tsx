@@ -1,4 +1,4 @@
-import { Plus, LayoutGrid, Search, LayoutTemplate, Layers } from "lucide-react";
+import { Plus, LayoutGrid, LayoutTemplate, Layers } from "lucide-react";
 
 const WORKSPACES = [
   { id: "1", name: "Portfolio Website", icon: LayoutTemplate, active: true },
