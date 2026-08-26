@@ -7,3 +7,15 @@ pub struct Workspace {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Item {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub item_type: String, // "text", "image", "url", "file"
+    pub content: String,
+    pub title: Option<String>,
+    pub metadata: String, // JSON string
+    pub created_at: String,
+    pub updated_at: String,
+}

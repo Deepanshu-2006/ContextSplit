@@ -39,7 +39,7 @@ export function Canvas() {
         fitView
       >
         <Background 
-          color="#E5E7EB" 
+          color="#9CA3AF" 
           variant={BackgroundVariant.Dots} 
           gap={24} 
           size={2} 

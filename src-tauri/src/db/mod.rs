@@ -14,21 +14,50 @@ pub fn init(app_data_dir: PathBuf) -> std::result::Result<Connection, Box<dyn st
     let conn = Connection::open(db_path)?;
 
     // Run migrations (create tables)
-    create_schema(&conn)?;
+    run_migrations(&conn)?;
 
     Ok(conn)
 }
 
-fn create_schema(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS workspaces (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-        [],
-    )?;
+fn run_migrations(conn: &Connection) -> Result<()> {
+    let mut user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    if user_version < 1 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        user_version = 1;
+    }
+
+    if user_version < 2 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS items (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT,
+                item_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                title TEXT,
+                metadata TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        
+        user_version = 2;
+    }
+
+    conn.pragma_update(None, "user_version", user_version)?;
     
+    // Enable foreign key support
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+
     Ok(())
 }
