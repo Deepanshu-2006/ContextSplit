@@ -4,10 +4,9 @@ pub mod operations;
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
 
-pub fn init(app_data_dir: PathBuf) -> Result<Connection> {
+pub fn init(app_data_dir: PathBuf) -> std::result::Result<Connection, Box<dyn std::error::Error>> {
     // Ensure the app data directory exists
-    std::fs::create_dir_all(&app_data_dir)
-        .expect("Failed to create application data directory");
+    std::fs::create_dir_all(&app_data_dir)?;
 
     let db_path = app_data_dir.join("contextsplit.db");
     

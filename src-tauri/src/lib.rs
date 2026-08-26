@@ -10,31 +10,31 @@ struct AppState {
 
 #[tauri::command]
 fn create_workspace(name: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
-    let conn = state.db_conn.lock().unwrap();
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::create_workspace(&conn, name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_workspace(id: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
-    let conn = state.db_conn.lock().unwrap();
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::get_workspace(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String> {
-    let conn = state.db_conn.lock().unwrap();
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::list_workspaces(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn update_workspace(id: &str, name: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
-    let conn = state.db_conn.lock().unwrap();
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::update_workspace(&conn, id, name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_workspace(id: &str, state: State<'_, AppState>) -> Result<(), String> {
-    let conn = state.db_conn.lock().unwrap();
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::delete_workspace(&conn, id).map_err(|e| e.to_string())
 }
 
@@ -42,8 +42,8 @@ fn delete_workspace(id: &str, state: State<'_, AppState>) -> Result<(), String> 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
-            let conn = db::init(app_data_dir).expect("Failed to initialize database");
+            let app_data_dir = app.path().app_data_dir().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let conn = db::init(app_data_dir)?;
             
             app.manage(AppState {
                 db_conn: Mutex::new(conn),
