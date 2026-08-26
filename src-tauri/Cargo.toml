@@ -25,4 +25,5 @@ serde_json = "1"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 uuid = { version = "1.8.0", features = ["v4"] }
 chrono = "0.4.38"
+tauri-plugin-dialog = "2.7.2"
 
