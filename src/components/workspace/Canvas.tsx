@@ -1,13 +1,30 @@
-import { BoxSelect, LayoutTemplate } from "lucide-react";
-import { ReactFlow, Background, BackgroundVariant } from "@xyflow/react";
+import { useMemo } from "react";
+import { BoxSelect, LayoutTemplate, Inbox } from "lucide-react";
+import { ReactFlow, Background, BackgroundVariant, Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 
 export function Canvas() {
-  const { workspaces, activeWorkspaceId } = useWorkspaceStore();
+  const { workspaces, activeWorkspaceId, activeItems } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
+  const isInbox = activeWorkspaceId === "inbox";
 
-  if (!activeWorkspace) {
+  // Map active items to basic React Flow nodes
+  const nodes: Node[] = useMemo(() => {
+    return activeItems.map((item, index) => {
+      // Very basic grid layout for now: 3 columns
+      const col = index % 3;
+      const row = Math.floor(index / 3);
+      return {
+        id: item.id,
+        position: { x: 100 + col * 350, y: 100 + row * 200 },
+        data: { label: item.title || item.content.substring(0, 50) + "..." },
+        type: 'default',
+      };
+    });
+  }, [activeItems]);
+
+  if (!activeWorkspace && !isInbox) {
     return (
       <div 
         className="flex-1 w-full h-full relative bg-[#FDFDFD] flex items-center justify-center"
@@ -27,10 +44,15 @@ export function Canvas() {
     );
   }
 
+  const title = isInbox ? "Inbox" : activeWorkspace?.name;
+  const description = isInbox
+    ? "Your Inbox is empty. Captured items will appear here."
+    : "This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.";
+
   return (
     <div className="flex-1 w-full h-full relative bg-[#FDFDFD] overflow-hidden flex flex-col">
       <ReactFlow
-        nodes={[]}
+        nodes={nodes}
         edges={[]}
         minZoom={0.1}
         maxZoom={4}
@@ -46,19 +68,25 @@ export function Canvas() {
         />
         
         {/* Empty State Overlay */}
-        <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8 z-10">
-          <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mb-6 shadow-sm">
-            <BoxSelect className="text-gray-300" size={32} strokeWidth={1.5} />
+        {activeItems.length === 0 && (
+          <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8 z-10">
+            <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mb-6 shadow-sm">
+              {isInbox ? (
+                <Inbox className="text-gray-300" size={32} strokeWidth={1.5} />
+              ) : (
+                <BoxSelect className="text-gray-300" size={32} strokeWidth={1.5} />
+              )}
+            </div>
+            
+            <h2 className="text-xl font-medium text-gray-900 mb-2 tracking-tight">
+              {title}
+            </h2>
+            
+            <p className="text-[14px] text-gray-500 max-w-sm text-center leading-relaxed">
+              {description}
+            </p>
           </div>
-          
-          <h2 className="text-xl font-medium text-gray-900 mb-2 tracking-tight">
-            {activeWorkspace.name}
-          </h2>
-          
-          <p className="text-[14px] text-gray-500 max-w-sm text-center leading-relaxed">
-            This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.
-          </p>
-        </div>
+        )}
       </ReactFlow>
     </div>
   );

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Plus, LayoutTemplate, Trash2, Pencil } from "lucide-react";
+import { Plus, LayoutTemplate, Trash2, Pencil, Inbox } from "lucide-react";
 import { Workspace } from "../../services/db";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 
@@ -7,6 +7,7 @@ export function Sidebar() {
   const {
     workspaces,
     activeWorkspaceId,
+    inboxCount,
     selectWorkspace,
     createWorkspace,
     renameWorkspace,
@@ -48,6 +49,27 @@ export function Sidebar() {
         <h1 className="font-semibold text-[15px] tracking-tight text-gray-900">
           ContextSplit
         </h1>
+      </div>
+
+      <div className="px-4 mb-6">
+        <div
+          onClick={() => selectWorkspace("inbox")}
+          className={`flex items-center justify-between px-2 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
+            activeWorkspaceId === "inbox"
+              ? "bg-black/5 text-gray-900"
+              : "text-gray-500 hover:text-gray-900 hover:bg-black/[0.02]"
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            <Inbox size={14} className={activeWorkspaceId === "inbox" ? "text-gray-900" : "text-gray-400"} />
+            <span>Inbox</span>
+          </div>
+          {inboxCount > 0 && (
+            <span className="bg-black/5 text-gray-500 px-1.5 py-0.5 rounded-md text-[11px] font-semibold">
+              {inboxCount}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="px-4 mb-2">

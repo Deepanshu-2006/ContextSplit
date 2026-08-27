@@ -1,34 +1,68 @@
 import { create } from 'zustand';
-import { db, Workspace } from '../services/db';
+import { db, Workspace, Item } from '../services/db';
 import { confirm } from '@tauri-apps/plugin-dialog';
 
 interface WorkspaceState {
   workspaces: Workspace[];
-  activeWorkspaceId: string | null;
+  activeWorkspaceId: string | "inbox" | null;
+  activeItems: Item[];
+  inboxCount: number;
   isLoading: boolean;
   loadWorkspaces: () => Promise<void>;
+  loadItems: (workspaceId: string | "inbox" | null) => Promise<void>;
   createWorkspace: (name: string) => Promise<void>;
-  selectWorkspace: (id: string) => void;
+  selectWorkspace: (id: string | "inbox") => void;
   renameWorkspace: (id: string, newName: string) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
 }
 
-export const useWorkspaceStore = create<WorkspaceState>((set) => ({
+export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
+  activeItems: [],
+  inboxCount: 0,
   isLoading: true,
 
   loadWorkspaces: async () => {
     try {
-      const workspaces = await db.listWorkspaces();
+      const [workspaces, inboxItems] = await Promise.all([
+        db.listWorkspaces(),
+        db.listItems(null)
+      ]);
+      
+      const defaultActiveId = workspaces.length > 0 ? workspaces[0].id : null;
+      
       set({
         workspaces,
-        activeWorkspaceId: workspaces.length > 0 ? workspaces[0].id : null,
+        inboxCount: inboxItems.length,
+        activeWorkspaceId: defaultActiveId,
         isLoading: false,
       });
+      
+      if (defaultActiveId) {
+        get().loadItems(defaultActiveId);
+      }
     } catch (err) {
       console.error("Failed to load workspaces:", err);
       set({ isLoading: false });
+    }
+  },
+
+  loadItems: async (workspaceId: string | "inbox" | null) => {
+    if (!workspaceId) {
+      set({ activeItems: [] });
+      return;
+    }
+    try {
+      const idToFetch = workspaceId === "inbox" ? null : workspaceId;
+      const items = await db.listItems(idToFetch);
+      set({ activeItems: items });
+      
+      if (workspaceId === "inbox") {
+        set({ inboxCount: items.length });
+      }
+    } catch (err) {
+      console.error("Failed to load items:", err);
     }
   },
 
@@ -37,15 +71,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       const newWs = await db.createWorkspace(name);
       set((state) => ({
         workspaces: [newWs, ...state.workspaces],
-        activeWorkspaceId: newWs.id,
       }));
+      get().selectWorkspace(newWs.id);
     } catch (err) {
       console.error("Failed to create workspace:", err);
     }
   },
 
-  selectWorkspace: (id: string) => {
+  selectWorkspace: (id: string | "inbox") => {
     set({ activeWorkspaceId: id });
+    get().loadItems(id);
   },
 
   renameWorkspace: async (id: string, newName: string) => {
@@ -69,19 +104,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
     try {
       await db.deleteWorkspace(id);
-      set((state) => {
-        const filtered = state.workspaces.filter((ws) => ws.id !== id);
-        return {
-          workspaces: filtered,
-          // Select the first available workspace if the active one was deleted
-          activeWorkspaceId:
-            state.activeWorkspaceId === id
-              ? filtered.length > 0
-                ? filtered[0].id
-                : null
-              : state.activeWorkspaceId,
-        };
+      const state = get();
+      const filtered = state.workspaces.filter((ws) => ws.id !== id);
+      
+      let nextActiveId = state.activeWorkspaceId;
+      if (state.activeWorkspaceId === id) {
+        nextActiveId = filtered.length > 0 ? filtered[0].id : null;
+      }
+      
+      set({
+        workspaces: filtered,
+        activeWorkspaceId: nextActiveId,
       });
+      
+      if (nextActiveId) {
+        get().loadItems(nextActiveId);
+      } else {
+        set({ activeItems: [] });
+      }
     } catch (err) {
       console.error("Failed to delete workspace:", err);
     }
