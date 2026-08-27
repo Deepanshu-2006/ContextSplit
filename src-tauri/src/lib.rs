@@ -1,11 +1,12 @@
 mod db;
+mod clipboard;
 
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use db::models::{Workspace, Item};
 
-struct AppState {
-    db_conn: Mutex<rusqlite::Connection>,
+pub struct AppState {
+    pub db_conn: Mutex<rusqlite::Connection>,
 }
 
 #[tauri::command]
@@ -91,6 +92,10 @@ pub fn run() {
             app.manage(AppState {
                 db_conn: Mutex::new(conn),
             });
+            
+            // Start the clipboard monitor loop
+            let app_handle = app.handle().clone();
+            clipboard::start_monitor(app_handle);
             
             Ok(())
         })

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db, Workspace, Item } from '../services/db';
 import { confirm } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 
 interface WorkspaceState {
   workspaces: Workspace[];
@@ -14,6 +15,7 @@ interface WorkspaceState {
   selectWorkspace: (id: string | "inbox") => void;
   renameWorkspace: (id: string, newName: string) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
+  listenForClipboard: () => Promise<void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -126,4 +128,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       console.error("Failed to delete workspace:", err);
     }
   },
+
+  listenForClipboard: async () => {
+    await listen<Item>('clipboard://new-item', (event) => {
+      const newItem = event.payload;
+      const state = get();
+      
+      set({ inboxCount: state.inboxCount + 1 });
+      
+      if (state.activeWorkspaceId === "inbox") {
+        set({ activeItems: [newItem, ...state.activeItems] });
+      }
+    });
+  }
 }));

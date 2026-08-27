@@ -6,11 +6,12 @@ import { useWorkspaceStore } from "./store/workspaceStore";
 import "./App.css";
 
 function App() {
-  const { isLoading, loadWorkspaces } = useWorkspaceStore();
+  const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
 
   useEffect(() => {
     loadWorkspaces();
-  }, [loadWorkspaces]);
+    listenForClipboard();
+  }, [loadWorkspaces, listenForClipboard]);
 
   if (isLoading) {
     return <div className="w-screen h-screen bg-white flex items-center justify-center">Loading...</div>;

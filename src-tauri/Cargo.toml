@@ -26,4 +26,9 @@ rusqlite = { version = "0.31.0", features = ["bundled"] }
 uuid = { version = "1.8.0", features = ["v4"] }
 chrono = "0.4.38"
 tauri-plugin-dialog = "2.7.2"
+arboard = "3.6.1"
+clipboard-master = "4.0.0"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+image = "0.25.10"
 
