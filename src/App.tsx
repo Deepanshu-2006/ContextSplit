@@ -3,6 +3,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { Canvas } from "./components/workspace/Canvas";
 import { useWorkspaceStore } from "./store/workspaceStore";
+import { Toaster } from 'sonner';
 import "./App.css";
 
 function App() {
@@ -34,6 +35,7 @@ function App() {
         <TopBar />
         <Canvas />
       </div>
+      <Toaster position="bottom-right" />
     </div>
   );
 }

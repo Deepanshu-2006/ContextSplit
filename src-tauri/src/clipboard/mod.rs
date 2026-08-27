@@ -9,8 +9,6 @@ use base64::{engine::general_purpose, Engine as _};
 use std::io::Cursor;
 use std::time::Duration;
 
-use tauri_plugin_notification::NotificationExt;
-
 pub struct Monitor {
     app_handle: AppHandle,
     last_hash: String,
@@ -62,11 +60,14 @@ impl Monitor {
                 )?;
                 let _ = self.app_handle.emit("clipboard://new-item", &item);
                 
-                let display_type = if is_url { "URL" } else { "Text" };
-                let _ = self.app_handle.notification()
-                    .title("Captured to Inbox")
-                    .body(format!("{} captured", display_type))
-                    .show();
+                #[cfg(target_os = "macos")]
+                {
+                    let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
+                        .spawn();
+                }
             }
             return Ok(());
         }
@@ -104,10 +105,13 @@ impl Monitor {
                 )?;
                 let _ = self.app_handle.emit("clipboard://new-item", &item);
                 
-                let _ = self.app_handle.notification()
-                    .title("Captured to Inbox")
-                    .body("Image captured")
-                    .show();
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"Image saved 🖼️\"")
+                        .spawn();
+                }
             }
             return Ok(());
         }

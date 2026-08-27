@@ -1,7 +1,11 @@
 import { create } from 'zustand';
 import { db, Workspace, Item } from '../services/db';
+import { v4 as uuidv4 } from 'uuid';
+import { toast } from 'sonner';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
+import React from 'react';
+import { Image as ImageIcon, Link as LinkIcon, FileText } from 'lucide-react';
 
 interface WorkspaceState {
   workspaces: Workspace[];
