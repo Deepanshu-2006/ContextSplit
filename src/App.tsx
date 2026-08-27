@@ -10,7 +10,17 @@ function App() {
 
   useEffect(() => {
     loadWorkspaces();
-    listenForClipboard();
+    
+    let unlisten: (() => void) | undefined;
+    listenForClipboard().then((unlistenFn) => {
+      unlisten = unlistenFn;
+    });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
   }, [loadWorkspaces, listenForClipboard]);
 
   if (isLoading) {

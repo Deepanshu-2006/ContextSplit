@@ -31,4 +31,5 @@ clipboard-master = "4.0.0"
 sha2 = "0.11.0"
 base64 = "0.23.1"
 image = "0.25.10"
+tauri-plugin-notification = "2"
 

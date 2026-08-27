@@ -15,7 +15,7 @@ interface WorkspaceState {
   selectWorkspace: (id: string | "inbox") => void;
   renameWorkspace: (id: string, newName: string) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
-  listenForClipboard: () => Promise<void>;
+  listenForClipboard: () => Promise<() => void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -130,9 +130,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   listenForClipboard: async () => {
-    await listen<Item>('clipboard://new-item', (event) => {
+    const unlisten = await listen<Item>('clipboard://new-item', (event) => {
       const newItem = event.payload;
       const state = get();
+      
+      // Prevent duplicates by checking if the item already exists
+      if (state.activeWorkspaceId === "inbox" && state.activeItems.some(item => item.id === newItem.id)) {
+        return;
+      }
       
       set({ inboxCount: state.inboxCount + 1 });
       
@@ -140,5 +145,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ activeItems: [newItem, ...state.activeItems] });
       }
     });
+    return unlisten;
   }
 }));
