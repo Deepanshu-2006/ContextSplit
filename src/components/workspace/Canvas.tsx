@@ -3,6 +3,11 @@ import { BoxSelect, LayoutTemplate, Inbox } from "lucide-react";
 import { ReactFlow, Background, BackgroundVariant, Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useWorkspaceStore } from "../../store/workspaceStore";
+import { ItemNode } from "./nodes/ItemNode";
+
+const nodeTypes = {
+  itemNode: ItemNode,
+};
 
 export function Canvas() {
   const { workspaces, activeWorkspaceId, activeItems } = useWorkspaceStore();
@@ -18,8 +23,8 @@ export function Canvas() {
       return {
         id: item.id,
         position: { x: 100 + col * 350, y: 100 + row * 200 },
-        data: { label: item.title || item.content.substring(0, 50) + "..." },
-        type: 'default',
+        data: { item },
+        type: 'itemNode',
       };
     });
   }, [activeItems]);
@@ -53,6 +58,7 @@ export function Canvas() {
     <div className="flex-1 w-full h-full relative bg-[#FDFDFD] overflow-hidden flex flex-col">
       <ReactFlow
         nodes={nodes}
+        nodeTypes={nodeTypes}
         edges={[]}
         minZoom={0.1}
         maxZoom={4}
