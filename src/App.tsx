@@ -11,13 +11,19 @@ function App() {
 
   useEffect(() => {
     loadWorkspaces();
-    
+    let isMounted = true;
     let unlisten: (() => void) | undefined;
+    
     listenForClipboard().then((unlistenFn) => {
-      unlisten = unlistenFn;
+      if (isMounted) {
+        unlisten = unlistenFn;
+      } else {
+        unlistenFn();
+      }
     });
 
     return () => {
+      isMounted = false;
       if (unlisten) {
         unlisten();
       }

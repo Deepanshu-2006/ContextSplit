@@ -16,9 +16,26 @@ pub struct Monitor {
 
 impl Monitor {
     pub fn new(app_handle: AppHandle) -> Self {
+        let mut initial_hash = String::new();
+        
+        // Prevent duplicate capture on startup by pre-hashing the current clipboard
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if let Ok(text) = clipboard.get_text() {
+                if !text.trim().is_empty() {
+                    let mut hasher = Sha256::new();
+                    hasher.update(text.as_bytes());
+                    initial_hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+                }
+            } else if let Ok(image) = clipboard.get_image() {
+                let mut hasher = Sha256::new();
+                hasher.update(&image.bytes);
+                initial_hash = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+            }
+        }
+        
         Self {
             app_handle,
-            last_hash: String::new(),
+            last_hash: initial_hash,
         }
     }
     
@@ -28,8 +45,6 @@ impl Monitor {
         // Give the OS a tiny moment to actually write the data to the clipboard.
         // Sometimes the event fires before the data is fully available.
         std::thread::sleep(Duration::from_millis(50));
-        
-        let state = self.app_handle.state::<AppState>();
         
         // Try getting text first
         if let Ok(text) = clipboard.get_text() {
@@ -49,26 +64,41 @@ impl Monitor {
             let is_url = text.starts_with("http://") || text.starts_with("https://");
             let item_type = if is_url { "url" } else { "text" };
             
-            if let Ok(conn) = state.db_conn.lock() {
-                let item = operations::create_item(
-                    &conn,
-                    None, // Inbox
-                    item_type,
-                    &text,
-                    None,
-                    "{}"
-                )?;
-                let _ = self.app_handle.emit("clipboard://new-item", &item);
-                
-                #[cfg(target_os = "macos")]
-                {
-                    let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
-                    let _ = std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
-                        .spawn();
-                }
-            }
+            let app_handle = self.app_handle.clone();
+            std::thread::spawn(move || {
+                let state = app_handle.state::<AppState>();
+                if let Ok(conn) = state.db_conn.lock() {
+                    if let Ok(item) = operations::create_item(
+                        &conn,
+                        None, // Inbox
+                        item_type,
+                        &text,
+                        None,
+                        "{}"
+                    ) {
+                        let _ = app_handle.emit("clipboard://new-item", &item);
+                        
+                        #[cfg(target_os = "macos")]
+                        {
+                            let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
+                            let _ = std::process::Command::new("osascript")
+                                .arg("-e")
+                                .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
+                                .status(); // Use status() instead of spawn() to wait and reap the zombie process
+                        }
+                        
+                        #[cfg(target_os = "windows")]
+                        {
+                            use tauri_plugin_notification::NotificationExt;
+                            let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
+                            let _ = app_handle.notification()
+                                .title("ContextSplit")
+                                .body(format!("{} {}", action, emoji))
+                                .show();
+                        }
+                    }
+                };
+            });
             return Ok(());
         }
         
@@ -83,36 +113,55 @@ impl Monitor {
             }
             self.last_hash = hash;
             
-            let rgba_image = RgbaImage::from_raw(
-                image.width.try_into()?,
-                image.height.try_into()?,
-                image.bytes.into_owned()
-            ).ok_or("Failed to create RgbaImage")?;
+            let app_handle = self.app_handle.clone();
+            let image_bytes = image.bytes.into_owned();
+            let width = image.width;
+            let height = image.height;
             
-            let mut buf = Cursor::new(Vec::new());
-            rgba_image.write_to(&mut buf, ImageFormat::Png)?;
-            let b64 = general_purpose::STANDARD.encode(buf.into_inner());
-            let data_uri = format!("data:image/png;base64,{}", b64);
-            
-            if let Ok(conn) = state.db_conn.lock() {
-                let item = operations::create_item(
-                    &conn,
-                    None, // Inbox
-                    "image",
-                    &data_uri,
-                    None,
-                    "{}"
-                )?;
-                let _ = self.app_handle.emit("clipboard://new-item", &item);
-                
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"Image saved 🖼️\"")
-                        .spawn();
+            std::thread::spawn(move || {
+                if let Some(rgba_image) = RgbaImage::from_raw(
+                    width.try_into().unwrap_or(0),
+                    height.try_into().unwrap_or(0),
+                    image_bytes
+                ) {
+                    let mut buf = Cursor::new(Vec::new());
+                    if rgba_image.write_to(&mut buf, ImageFormat::Png).is_ok() {
+                        let b64 = general_purpose::STANDARD.encode(buf.into_inner());
+                        let data_uri = format!("data:image/png;base64,{}", b64);
+                        
+                        let state = app_handle.state::<AppState>();
+                        if let Ok(conn) = state.db_conn.lock() {
+                            if let Ok(item) = operations::create_item(
+                                &conn,
+                                None, // Inbox
+                                "image",
+                                &data_uri,
+                                None,
+                                "{}"
+                            ) {
+                                let _ = app_handle.emit("clipboard://new-item", &item);
+                                
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = std::process::Command::new("osascript")
+                                        .arg("-e")
+                                        .arg("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"Image saved 🖼️\"")
+                                        .status();
+                                }
+                                
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use tauri_plugin_notification::NotificationExt;
+                                    let _ = app_handle.notification()
+                                        .title("ContextSplit")
+                                        .body("Image saved 🖼️")
+                                        .show();
+                                }
+                            }
+                        };
+                    }
                 }
-            }
+            });
             return Ok(());
         }
         
