@@ -17,6 +17,6 @@ pub trait CaptureTarget: Send + Sync {
     fn hide(&self) -> Result<(), String>;
     fn set_active(&self, active: bool) -> Result<(), String>;
     fn handle_drop(&self, request: CaptureRequest) -> Result<(), String>;
-    fn report_success(&self) -> Result<(), String>;
+    fn report_success(&self, req: &CaptureRequest) -> Result<(), String>;
     fn report_failure(&self, error: &str) -> Result<(), String>;
 }

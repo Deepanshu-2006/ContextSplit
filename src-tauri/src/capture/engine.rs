@@ -34,30 +34,10 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     // 3. Emit Tauri Event
     let _ = app_handle.emit("clipboard://new-item", &item);
 
-    // 4. Show Notification
-    let (emoji, action) = match req.data_type.as_str() {
-        "url" => ("🔗", "Link grabbed"),
-        "image" => ("🖼️", "Image saved"),
-        "file" => ("📄", "File saved"),
-        _ => ("📝", "Text saved"),
-    };
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
-            .status(); 
-    }
-    
-    #[cfg(target_os = "windows")]
-    {
-        use tauri_plugin_notification::NotificationExt;
-        let _ = app_handle.notification()
-            .title("ContextSplit")
-            .body(format!("{} {}", action, emoji))
-            .show();
-    }
+    // 4. Show Notification via OS-specific target
+    let system_target = app_handle.state::<super::SystemTarget>();
+    use super::target::CaptureTarget;
+    let _ = system_target.report_success(&req);
 
     Ok(())
 }

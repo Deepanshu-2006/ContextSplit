@@ -71,9 +71,19 @@ impl CaptureTarget for MacOSTarget {
         Ok(())
     }
 
-    fn report_success(&self) -> Result<(), String> {
-        // TODO: Trigger success animation
-        println!("MacOSTarget: report_success()");
+    fn report_success(&self, req: &CaptureRequest) -> Result<(), String> {
+        let (emoji, action) = match req.data_type.as_str() {
+            "url" => ("🔗", "Link grabbed"),
+            "image" => ("🖼️", "Image saved"),
+            "file" => ("📄", "File saved"),
+            _ => ("📝", "Text saved"),
+        };
+        
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
+            .status(); 
+            
         Ok(())
     }
 

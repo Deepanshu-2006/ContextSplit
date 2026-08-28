@@ -120,9 +120,6 @@ pub fn run() {
             let system_target = capture::SystemTarget::new(app_handle.clone());
             app.manage(system_target);
             
-            // Temporary: instantiate Windows orb for local testing
-            let _windows_target = capture::windows::WindowsTarget::new(app_handle.clone());
-            
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
