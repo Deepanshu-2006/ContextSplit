@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { Canvas } from "./components/workspace/Canvas";
@@ -6,15 +6,23 @@ import { useWorkspaceStore } from "./store/workspaceStore";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import "./App.css";
 
 function App() {
   const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
+  const [isNotchTarget, setIsNotchTarget] = useState(false);
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
 
   useEffect(() => {
+    // Check if we are rendering in the secondary macOS overlay window
+    if (getCurrentWindow().label === "macos-notch-target") {
+      setIsNotchTarget(true);
+      return; // Skip loading workspaces and clipboard for the notch window
+    }
+
     loadWorkspaces();
     let isMounted = true;
     let unlisten: (() => void) | undefined;
@@ -34,6 +42,14 @@ function App() {
       }
     };
   }, [loadWorkspaces, listenForClipboard]);
+
+  if (isNotchTarget) {
+    return (
+      <div className="w-screen h-screen flex justify-center bg-transparent">
+        <CaptureTarget />
+      </div>
+    );
+  }
 
   if (isLoading) {
     return <div className="w-screen h-screen bg-white flex items-center justify-center">Loading...</div>;

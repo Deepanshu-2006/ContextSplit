@@ -88,6 +88,18 @@ fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -
     capture::engine::process_capture(app, req)
 }
 
+#[tauri::command]
+fn show_notch(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
+    use capture::target::CaptureTarget;
+    state.show()
+}
+
+#[tauri::command]
+fn hide_notch(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
+    use capture::target::CaptureTarget;
+    state.hide()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -102,7 +114,11 @@ pub fn run() {
             
             // Start the clipboard monitor loop
             let app_handle = app.handle().clone();
-            clipboard::start_monitor(app_handle);
+            clipboard::start_monitor(app_handle.clone());
+            
+            // Initialize Capture Target Overlay
+            let system_target = capture::SystemTarget::new(app_handle);
+            app.manage(system_target);
             
             Ok(())
         })
@@ -119,7 +135,9 @@ pub fn run() {
             list_items,
             update_item,
             delete_item,
-            handle_capture
+            handle_capture,
+            show_notch,
+            hide_notch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
