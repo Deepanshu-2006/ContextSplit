@@ -2,9 +2,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureRequest {
-    pub data_type: String,
+    pub data_type: String, // "text", "url", "image", "file"
     pub content: String,
     pub title: Option<String>,
+    pub source: Option<String>,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub original_url: Option<String>,
+    pub size: Option<usize>,
 }
 
 pub trait CaptureTarget: Send + Sync {

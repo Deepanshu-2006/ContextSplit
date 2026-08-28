@@ -1,9 +1,7 @@
 use clipboard_master::{Master, ClipboardHandler, CallbackResult};
 use arboard::Clipboard;
 use sha2::{Sha256, Digest};
-use tauri::{AppHandle, Emitter, Manager};
-use crate::db::operations;
-use crate::AppState;
+use tauri::AppHandle;
 use image::{RgbaImage, ImageFormat};
 use base64::{engine::general_purpose, Engine as _};
 use std::io::Cursor;
@@ -66,38 +64,20 @@ impl Monitor {
             
             let app_handle = self.app_handle.clone();
             std::thread::spawn(move || {
-                let state = app_handle.state::<AppState>();
-                if let Ok(conn) = state.db_conn.lock() {
-                    if let Ok(item) = operations::create_item(
-                        &conn,
-                        None, // Inbox
-                        item_type,
-                        &text,
-                        None,
-                        "{}"
-                    ) {
-                        let _ = app_handle.emit("clipboard://new-item", &item);
-                        
-                        #[cfg(target_os = "macos")]
-                        {
-                            let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
-                            let _ = std::process::Command::new("osascript")
-                                .arg("-e")
-                                .arg(format!("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"{} {}\"", action, emoji))
-                                .status(); // Use status() instead of spawn() to wait and reap the zombie process
-                        }
-                        
-                        #[cfg(target_os = "windows")]
-                        {
-                            use tauri_plugin_notification::NotificationExt;
-                            let (emoji, action) = if is_url { ("🔗", "Link grabbed") } else { ("📝", "Text saved") };
-                            let _ = app_handle.notification()
-                                .title("ContextSplit")
-                                .body(format!("{} {}", action, emoji))
-                                .show();
-                        }
-                    }
+                use crate::capture::{engine, target::CaptureRequest};
+                
+                let req = CaptureRequest {
+                    data_type: item_type.to_string(),
+                    content: text,
+                    title: None,
+                    source: Some("clipboard".to_string()),
+                    filename: None,
+                    mime_type: if is_url { Some("text/uri-list".to_string()) } else { Some("text/plain".to_string()) },
+                    original_url: None,
+                    size: None,
                 };
+                
+                let _ = engine::process_capture(app_handle, req);
             });
             return Ok(());
         }
@@ -129,36 +109,19 @@ impl Monitor {
                         let b64 = general_purpose::STANDARD.encode(buf.into_inner());
                         let data_uri = format!("data:image/png;base64,{}", b64);
                         
-                        let state = app_handle.state::<AppState>();
-                        if let Ok(conn) = state.db_conn.lock() {
-                            if let Ok(item) = operations::create_item(
-                                &conn,
-                                None, // Inbox
-                                "image",
-                                &data_uri,
-                                None,
-                                "{}"
-                            ) {
-                                let _ = app_handle.emit("clipboard://new-item", &item);
-                                
-                                #[cfg(target_os = "macos")]
-                                {
-                                    let _ = std::process::Command::new("osascript")
-                                        .arg("-e")
-                                        .arg("display notification \"Ready in your Inbox\" with title \"ContextSplit\" subtitle \"Image saved 🖼️\"")
-                                        .status();
-                                }
-                                
-                                #[cfg(target_os = "windows")]
-                                {
-                                    use tauri_plugin_notification::NotificationExt;
-                                    let _ = app_handle.notification()
-                                        .title("ContextSplit")
-                                        .body("Image saved 🖼️")
-                                        .show();
-                                }
-                            }
+                        use crate::capture::{engine, target::CaptureRequest};
+                        let req = CaptureRequest {
+                            data_type: "image".to_string(),
+                            content: data_uri,
+                            title: None,
+                            source: Some("clipboard".to_string()),
+                            filename: None,
+                            mime_type: Some("image/png".to_string()),
+                            original_url: None,
+                            size: None,
                         };
+                        
+                        let _ = engine::process_capture(app_handle, req);
                     }
                 }
             });
