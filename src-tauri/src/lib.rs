@@ -1,5 +1,6 @@
 mod db;
 mod clipboard;
+pub mod capture;
 
 use std::sync::Mutex;
 use tauri::{Manager, State};
