@@ -53,6 +53,7 @@ export function Sidebar() {
 
       <div className="px-4 mb-6">
         <div
+          data-workspace-target-id="inbox"
           onClick={() => selectWorkspace("inbox")}
           className={`flex items-center justify-between px-2 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
             activeWorkspaceId === "inbox"
@@ -84,6 +85,7 @@ export function Sidebar() {
             return (
               <div
                 key={workspace.id}
+                data-workspace-target-id={workspace.id}
                 onClick={() => !isEditing && selectWorkspace(workspace.id)}
                 className={`group flex items-center justify-between px-2 py-1.5 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
                   isActive

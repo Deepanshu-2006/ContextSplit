@@ -106,9 +106,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   moveItemToWorkspace: async (itemId: string, targetWorkspaceId: string | "inbox") => {
+    const state = get();
+    const itemToMove = state.activeItems.find(i => i.id === itemId);
+    
+    if (!itemToMove) return;
+
     try {
-      const state = get();
-      
       // Optimistically remove from current view
       set({
         activeItems: state.activeItems.filter(item => item.id !== itemId)
@@ -127,7 +130,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       
     } catch (err) {
       console.error("Failed to move item:", err);
-      // In a real app we'd roll back the optimistic update here on failure
+      // Rollback the optimistic update
+      const currentState = get();
+      
+      set({
+        activeItems: [itemToMove, ...currentState.activeItems]
+      });
+
+      // Revert inbox count if necessary
+      if (currentState.activeWorkspaceId === "inbox") {
+        set({ inboxCount: currentState.inboxCount + 1 });
+      } else if (targetWorkspaceId === "inbox") {
+        set({ inboxCount: Math.max(0, currentState.inboxCount - 1) });
+      }
+      
+      alert("Failed to move item to workspace. Please try again.");
     }
   },
 

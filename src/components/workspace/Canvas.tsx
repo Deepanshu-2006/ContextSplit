@@ -10,7 +10,7 @@ const nodeTypes = {
 };
 
 export function Canvas() {
-  const { workspaces, activeWorkspaceId, activeItems, updateItemPosition } = useWorkspaceStore();
+  const { workspaces, activeWorkspaceId, activeItems, updateItemPosition, moveItemToWorkspace } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
 
@@ -55,9 +55,33 @@ export function Canvas() {
 
   const onNodeDragStop = useCallback(
     (_event: any, node: Node) => {
+      // Find element under cursor to detect if dropped on a Sidebar item
+      let clientX = 0;
+      let clientY = 0;
+      
+      if ('clientX' in _event) {
+        clientX = _event.clientX;
+        clientY = _event.clientY;
+      } else if ('changedTouches' in _event && _event.changedTouches.length > 0) {
+        clientX = _event.changedTouches[0].clientX;
+        clientY = _event.changedTouches[0].clientY;
+      }
+
+      const dropElement = document.elementFromPoint(clientX, clientY);
+      const workspaceTarget = dropElement?.closest('[data-workspace-target-id]');
+      
+      if (workspaceTarget) {
+        const targetWorkspaceId = workspaceTarget.getAttribute('data-workspace-target-id');
+        if (targetWorkspaceId && targetWorkspaceId !== activeWorkspaceId) {
+          moveItemToWorkspace(node.id, targetWorkspaceId);
+          return;
+        }
+      }
+
+      // If no valid drop target, just update position
       updateItemPosition(node.id, node.position.x, node.position.y);
     },
-    [updateItemPosition]
+    [updateItemPosition, activeWorkspaceId, moveItemToWorkspace]
   );
 
   if (!activeWorkspace && !isInbox) {
