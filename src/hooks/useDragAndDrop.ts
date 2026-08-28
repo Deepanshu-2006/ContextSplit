@@ -13,16 +13,14 @@ export function useDragAndDrop() {
       e.stopPropagation();
       dragCounter++;
       if (dragCounter === 1) {
-        setCaptureState('approaching');
+        setCaptureState('visible');
       }
     };
 
     const handleDragOver = (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      // We could use mouse position to scale from approaching to active based on proximity to center top
-      // For now, if they are dragging over, we just consider it active
-      setCaptureState('active');
+      // Visual proximity state is now handled independently in CaptureTarget
     };
 
     const handleDragLeave = (e: DragEvent) => {
