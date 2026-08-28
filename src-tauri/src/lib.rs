@@ -83,6 +83,11 @@ fn delete_item(id: &str, state: State<'_, AppState>) -> Result<(), String> {
     db::operations::delete_item(&conn, id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
+    capture::engine::process_capture(app, req)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -113,7 +118,8 @@ pub fn run() {
             get_item,
             list_items,
             update_item,
-            delete_item
+            delete_item,
+            handle_capture
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

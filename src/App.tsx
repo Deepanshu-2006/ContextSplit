@@ -5,10 +5,14 @@ import { Canvas } from "./components/workspace/Canvas";
 import { useWorkspaceStore } from "./store/workspaceStore";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
+import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import "./App.css";
 
 function App() {
   const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
+  
+  // Initialize global drag and drop listeners
+  useDragAndDrop();
 
   useEffect(() => {
     loadWorkspaces();
