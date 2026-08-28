@@ -13,14 +13,14 @@ export function ItemNode({ data }: NodeProps) {
   
   switch (item.item_type) {
     case 'text':
-      return <TextCard content={item.content} title={item.title} />;
+      return <TextCard content={item.content} title={item.title} itemId={item.id} />;
     case 'image':
-      return <ImageCard content={item.content} title={item.title} />;
+      return <ImageCard content={item.content} title={item.title} itemId={item.id} />;
     case 'url':
-      return <UrlCard content={item.content} title={item.title} />;
+      return <UrlCard content={item.content} title={item.title} itemId={item.id} />;
     case 'file':
-      return <FileCard content={item.content} title={item.title} />;
+      return <FileCard content={item.content} title={item.title} itemId={item.id} />;
     default:
-      return <FileCard content={item.content} title={item.title} />;
+      return <FileCard content={item.content} title={item.title} itemId={item.id} />;
   }
 }

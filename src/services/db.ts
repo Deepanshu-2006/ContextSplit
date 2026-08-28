@@ -56,6 +56,10 @@ export const db = {
     return invoke("update_item", { id, content, title, metadata });
   },
 
+  async moveItem(id: string, workspaceId: string | null): Promise<Item> {
+    return invoke("move_item", { id, workspaceId });
+  },
+
   async deleteItem(id: string): Promise<void> {
     return invoke("delete_item", { id });
   }

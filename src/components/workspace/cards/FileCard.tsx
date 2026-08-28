@@ -4,13 +4,14 @@ import { File } from "lucide-react";
 interface FileCardProps {
   content: string; // The base64 Data URI or file path
   title?: string | null;
+  itemId?: string;
 }
 
-export function FileCard({ content, title }: FileCardProps) {
+export function FileCard({ content, title, itemId }: FileCardProps) {
   const displayTitle = title || "Generic File";
 
   return (
-    <BaseCard icon={<File size={14} />} title={displayTitle}>
+    <BaseCard icon={<File size={14} />} title={displayTitle} itemId={itemId}>
       <div className="flex flex-col items-center justify-center py-6 px-4 bg-gray-50 rounded-lg border border-gray-100">
         <div className="w-12 h-12 bg-white rounded-xl shadow-sm border border-gray-200 flex items-center justify-center mb-3">
           <File className="text-gray-400" size={24} strokeWidth={1.5} />

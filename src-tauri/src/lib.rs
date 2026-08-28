@@ -84,6 +84,16 @@ fn delete_item(id: &str, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn move_item(
+    id: &str,
+    workspace_id: Option<&str>,
+    state: State<'_, AppState>,
+) -> Result<Item, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::move_item(&conn, id, workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -135,6 +145,7 @@ pub fn run() {
             list_items,
             update_item,
             delete_item,
+            move_item,
             handle_capture,
             show_notch,
             hide_notch

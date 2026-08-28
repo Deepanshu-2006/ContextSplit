@@ -189,3 +189,18 @@ pub fn delete_item(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+pub fn move_item(
+    conn: &Connection,
+    id: &str,
+    workspace_id: Option<&str>,
+) -> Result<super::models::Item> {
+    let now = Utc::now().to_rfc3339();
+    
+    conn.execute(
+        "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![workspace_id, now, id],
+    )?;
+    
+    get_item(conn, id)
+}

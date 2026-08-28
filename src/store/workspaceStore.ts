@@ -21,6 +21,7 @@ interface WorkspaceState {
   listenForClipboard: () => Promise<() => void>;
   setCaptureState: (state: CaptureTargetState) => void;
   updateItemPosition: (id: string, x: number, y: number) => Promise<void>;
+  moveItemToWorkspace: (itemId: string, targetWorkspaceId: string | "inbox") => Promise<void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -101,6 +102,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       await db.updateItem(id, undefined, undefined, newMetadataStr);
     } catch (err) {
       console.error("Failed to update item position:", err);
+    }
+  },
+
+  moveItemToWorkspace: async (itemId: string, targetWorkspaceId: string | "inbox") => {
+    try {
+      const state = get();
+      
+      // Optimistically remove from current view
+      set({
+        activeItems: state.activeItems.filter(item => item.id !== itemId)
+      });
+
+      // Update inbox count if necessary
+      if (state.activeWorkspaceId === "inbox") {
+        set({ inboxCount: Math.max(0, state.inboxCount - 1) });
+      } else if (targetWorkspaceId === "inbox") {
+        set({ inboxCount: state.inboxCount + 1 });
+      }
+
+      // Background DB sync
+      const dbTargetId = targetWorkspaceId === "inbox" ? null : targetWorkspaceId;
+      await db.moveItem(itemId, dbTargetId);
+      
+    } catch (err) {
+      console.error("Failed to move item:", err);
+      // In a real app we'd roll back the optimistic update here on failure
     }
   },
 

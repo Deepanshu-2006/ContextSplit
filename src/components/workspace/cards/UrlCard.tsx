@@ -1,7 +1,13 @@
 import { Link, ExternalLink } from "lucide-react";
 import { BaseCard } from "./BaseCard";
 
-export function UrlCard({ content, title }: { content: string, title?: string }) {
+interface UrlCardProps {
+  content: string;
+  title?: string | null;
+  itemId?: string;
+}
+
+export function UrlCard({ content, title, itemId }: UrlCardProps) {
   let domain = "";
   try {
     const url = new URL(content);
@@ -11,7 +17,7 @@ export function UrlCard({ content, title }: { content: string, title?: string })
   }
 
   return (
-    <BaseCard icon={<Link size={14} />} title={domain}>
+    <BaseCard icon={<Link size={14} />} title={domain} itemId={itemId}>
       <div className="flex flex-col gap-2">
         <h4 className="text-sm font-medium text-gray-900 line-clamp-2">
           {title || content}

@@ -3,14 +3,14 @@ import { AlignLeft, Maximize2, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { BaseCard } from "./BaseCard";
 
-export function TextCard({ content, title }: { content: string, title?: string }) {
+export function TextCard({ content, title, itemId }: { content: string, title?: string, itemId?: string }) {
   const [expanded, setExpanded] = useState(false);
   const isLong = content.length > 200;
   const displayContent = expanded ? content : (isLong ? content.substring(0, 200) + "..." : content);
 
   return (
     <>
-      <BaseCard icon={<AlignLeft size={14} />} title={title || "Text Snippet"}>
+      <BaseCard icon={<AlignLeft size={14} />} title={title || "Text Snippet"} itemId={itemId}>
         <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">
           {displayContent}
         </div>
