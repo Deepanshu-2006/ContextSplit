@@ -23,7 +23,9 @@ interface WorkspaceState {
   listenForClipboard: () => Promise<() => void>;
   setCaptureState: (state: CaptureTargetState) => void;
   updateItemPosition: (id: string, x: number, y: number) => Promise<void>;
+  updateItemPositions: (updates: {id: string, x: number, y: number}[]) => Promise<void>;
   moveItemToWorkspace: (itemId: string, targetWorkspaceId: string | "inbox") => Promise<void>;
+  moveItemsToWorkspace: (itemIds: string[], targetWorkspaceId: string | "inbox") => Promise<void>;
   setIsDraggingCard: (isDragging: boolean) => void;
   setHoveredWorkspaceId: (id: string | null) => void;
 }
@@ -86,73 +88,92 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   updateItemPosition: async (id: string, x: number, y: number) => {
+    get().updateItemPositions([{ id, x, y }]);
+  },
+
+  updateItemPositions: async (updates: {id: string, x: number, y: number}[]) => {
+    if (updates.length === 0) return;
+
     try {
       const state = get();
-      const item = state.activeItems.find(i => i.id === id);
-      if (!item) return;
+      
+      // Map of id -> new metadata string
+      const newMetadatas: Record<string, string> = {};
+      
+      updates.forEach(update => {
+        const item = state.activeItems.find(i => i.id === update.id);
+        if (item) {
+          let meta = {};
+          try { meta = JSON.parse(item.metadata || '{}'); } catch (e) {}
+          meta = { ...meta, pos_x: update.x, pos_y: update.y };
+          newMetadatas[update.id] = JSON.stringify(meta);
+        }
+      });
 
-      let meta = {};
-      try {
-        meta = JSON.parse(item.metadata || '{}');
-      } catch (e) {}
-
-      meta = { ...meta, pos_x: x, pos_y: y };
-      const newMetadataStr = JSON.stringify(meta);
+      if (Object.keys(newMetadatas).length === 0) return;
 
       // Optimistic UI update
-      set((state) => ({
+      set(state => ({
         activeItems: state.activeItems.map(i => 
-          i.id === id ? { ...i, metadata: newMetadataStr } : i
+          newMetadatas[i.id] ? { ...i, metadata: newMetadatas[i.id] } : i
         )
       }));
 
-      // Background DB sync
-      await db.updateItem(id, undefined, undefined, newMetadataStr);
+      // Background DB sync (concurrently)
+      await Promise.all(
+        Object.entries(newMetadatas).map(([id, metaStr]) => 
+          db.updateItem(id, undefined, undefined, metaStr)
+        )
+      );
     } catch (err) {
-      console.error("Failed to update item position:", err);
+      console.error("Failed to update item positions:", err);
     }
   },
 
   moveItemToWorkspace: async (itemId: string, targetWorkspaceId: string | "inbox") => {
-    const state = get();
-    const itemToMove = state.activeItems.find(i => i.id === itemId);
+    get().moveItemsToWorkspace([itemId], targetWorkspaceId);
+  },
+
+  moveItemsToWorkspace: async (itemIds: string[], targetWorkspaceId: string | "inbox") => {
+    if (itemIds.length === 0) return;
     
-    if (!itemToMove) return;
+    const state = get();
+    const itemsToMove = state.activeItems.filter(i => itemIds.includes(i.id));
+    
+    if (itemsToMove.length === 0) return;
 
     try {
       // Optimistically remove from current view
-      set({
-        activeItems: state.activeItems.filter(item => item.id !== itemId)
-      });
+      set(state => ({
+        activeItems: state.activeItems.filter(item => !itemIds.includes(item.id))
+      }));
 
       // Update inbox count if necessary
       if (state.activeWorkspaceId === "inbox") {
-        set({ inboxCount: Math.max(0, state.inboxCount - 1) });
+        set(state => ({ inboxCount: Math.max(0, state.inboxCount - itemsToMove.length) }));
       } else if (targetWorkspaceId === "inbox") {
-        set({ inboxCount: state.inboxCount + 1 });
+        set(state => ({ inboxCount: state.inboxCount + itemsToMove.length }));
       }
 
-      // Background DB sync
+      // Background DB sync (concurrently)
       const dbTargetId = targetWorkspaceId === "inbox" ? null : targetWorkspaceId;
-      await db.moveItem(itemId, dbTargetId);
+      await Promise.all(itemsToMove.map(item => db.moveItem(item.id, dbTargetId)));
       
     } catch (err) {
-      console.error("Failed to move item:", err);
+      console.error("Failed to move items:", err);
       // Rollback the optimistic update
-      const currentState = get();
-      
-      set({
-        activeItems: [itemToMove, ...currentState.activeItems]
-      });
+      set(state => ({
+        activeItems: [...itemsToMove, ...state.activeItems]
+      }));
 
       // Revert inbox count if necessary
-      if (currentState.activeWorkspaceId === "inbox") {
-        set({ inboxCount: currentState.inboxCount + 1 });
+      if (state.activeWorkspaceId === "inbox") {
+        set(state => ({ inboxCount: state.inboxCount + itemsToMove.length }));
       } else if (targetWorkspaceId === "inbox") {
-        set({ inboxCount: Math.max(0, currentState.inboxCount - 1) });
+        set(state => ({ inboxCount: Math.max(0, state.inboxCount - itemsToMove.length) }));
       }
       
-      alert("Failed to move item to workspace. Please try again.");
+      alert("Failed to move items to workspace. Please try again.");
     }
   },
 

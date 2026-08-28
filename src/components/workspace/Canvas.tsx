@@ -12,7 +12,7 @@ const nodeTypes = {
 export function Canvas() {
   const { 
     workspaces, activeWorkspaceId, activeItems, 
-    updateItemPosition, moveItemToWorkspace,
+    updateItemPositions, moveItemsToWorkspace,
     setIsDraggingCard, setHoveredWorkspaceId 
   } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
@@ -90,9 +90,12 @@ export function Canvas() {
   );
 
   const onNodeDragStop = useCallback(
-    (_event: any, node: Node) => {
+    (_event: any, node: Node, draggedNodes: Node[]) => {
       setIsDraggingCard(false);
       setHoveredWorkspaceId(null);
+
+      // We might have single-dragged or multi-dragged. If draggedNodes is missing/empty, use [node]
+      const nodesToProcess = draggedNodes && draggedNodes.length > 0 ? draggedNodes : [node];
 
       // Find element under cursor to detect if dropped on a Sidebar item
       let clientX = 0;
@@ -112,15 +115,21 @@ export function Canvas() {
       if (workspaceTarget) {
         const targetWorkspaceId = workspaceTarget.getAttribute('data-workspace-target-id');
         if (targetWorkspaceId && targetWorkspaceId !== activeWorkspaceId) {
-          moveItemToWorkspace(node.id, targetWorkspaceId);
+          const itemIds = nodesToProcess.map(n => n.id);
+          moveItemsToWorkspace(itemIds, targetWorkspaceId);
           return;
         }
       }
 
-      // If no valid drop target, just update position
-      updateItemPosition(node.id, node.position.x, node.position.y);
+      // If no valid drop target, just update positions
+      const updates = nodesToProcess.map(n => ({
+        id: n.id,
+        x: n.position.x,
+        y: n.position.y
+      }));
+      updateItemPositions(updates);
     },
-    [updateItemPosition, activeWorkspaceId, moveItemToWorkspace]
+    [updateItemPositions, activeWorkspaceId, moveItemsToWorkspace]
   );
 
   if (!activeWorkspace && !isInbox) {
