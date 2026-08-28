@@ -1,25 +1,57 @@
 use super::target::{CaptureTarget, CaptureRequest};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
 
 pub struct WindowsTarget {
-    // Windows specific handles (e.g. HWND or similar) can go here
+    app_handle: AppHandle,
 }
 
 impl WindowsTarget {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(app_handle: AppHandle) -> Self {
+        if app_handle.get_webview_window("windows-orb-target").is_none() {
+            let _ = WebviewWindowBuilder::new(
+                &app_handle,
+                "windows-orb-target",
+                WebviewUrl::App("index.html".into())
+            )
+            .title("ContextSplit Capture Orb")
+            .inner_size(300.0, 150.0) // slightly taller for orb expansion
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(true)
+            .accept_first_mouse(true)
+            .build()
+            .map(|window| {
+                if let Ok(Some(monitor)) = window.primary_monitor() {
+                    let monitor_size = monitor.size();
+                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(300, 150));
+                    
+                    // Top center, detached slightly
+                    let x = (monitor_size.width as i32 / 2) - (window_size.width as i32 / 2);
+                    let y = 32; 
+                    
+                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                }
+            });
+        }
+        
+        Self { app_handle }
     }
 }
 
 impl CaptureTarget for WindowsTarget {
     fn show(&self) -> Result<(), String> {
-        // TODO: Implement Windows specific show logic (e.g. Capture Orb)
-        println!("WindowsTarget: show()");
+        if let Some(window) = self.app_handle.get_webview_window("windows-orb-target") {
+            window.show().map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
     fn hide(&self) -> Result<(), String> {
-        // TODO: Implement Windows specific hide logic
-        println!("WindowsTarget: hide()");
+        if let Some(window) = self.app_handle.get_webview_window("windows-orb-target") {
+            window.hide().map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 

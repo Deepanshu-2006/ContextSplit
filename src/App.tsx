@@ -5,6 +5,7 @@ import { Canvas } from "./components/workspace/Canvas";
 import { useWorkspaceStore } from "./store/workspaceStore";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
+import { CaptureOrb } from "./components/workspace/CaptureOrb";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import "./App.css";
@@ -12,6 +13,7 @@ import "./App.css";
 function App() {
   const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
   const [isNotchTarget, setIsNotchTarget] = useState(false);
+  const [isOrbTarget, setIsOrbTarget] = useState(false);
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
@@ -21,6 +23,11 @@ function App() {
     if (getCurrentWindow().label === "macos-notch-target") {
       setIsNotchTarget(true);
       return; // Skip loading workspaces and clipboard for the notch window
+    }
+
+    if (getCurrentWindow().label === "windows-orb-target") {
+      setIsOrbTarget(true);
+      return;
     }
 
     loadWorkspaces();
@@ -47,6 +54,14 @@ function App() {
     return (
       <div className="w-screen h-screen flex justify-center bg-transparent">
         <CaptureTarget />
+      </div>
+    );
+  }
+
+  if (isOrbTarget) {
+    return (
+      <div className="w-screen h-screen flex justify-center bg-transparent">
+        <CaptureOrb />
       </div>
     );
   }

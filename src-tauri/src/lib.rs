@@ -117,8 +117,11 @@ pub fn run() {
             clipboard::start_monitor(app_handle.clone());
             
             // Initialize Capture Target Overlay
-            let system_target = capture::SystemTarget::new(app_handle);
+            let system_target = capture::SystemTarget::new(app_handle.clone());
             app.manage(system_target);
+            
+            // Temporary: instantiate Windows orb for local testing
+            let _windows_target = capture::windows::WindowsTarget::new(app_handle.clone());
             
             Ok(())
         })
