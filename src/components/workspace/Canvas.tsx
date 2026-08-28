@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { BoxSelect, LayoutTemplate, Inbox } from "lucide-react";
-import { ReactFlow, Background, BackgroundVariant, Node } from "@xyflow/react";
+import { ReactFlow, Background, BackgroundVariant, Node, applyNodeChanges, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 import { ItemNode } from "./nodes/ItemNode";
@@ -10,24 +10,54 @@ const nodeTypes = {
 };
 
 export function Canvas() {
-  const { workspaces, activeWorkspaceId, activeItems } = useWorkspaceStore();
+  const { workspaces, activeWorkspaceId, activeItems, updateItemPosition } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
 
-  // Map active items to basic React Flow nodes
-  const nodes: Node[] = useMemo(() => {
-    return activeItems.map((item, index) => {
-      // Very basic grid layout for now: 3 columns
-      const col = index % 3;
-      const row = Math.floor(index / 3);
-      return {
-        id: item.id,
-        position: { x: 100 + col * 350, y: 100 + row * 200 },
-        data: { item },
-        type: 'itemNode',
-      };
-    });
+  const [nodes, setNodes] = useState<Node[]>([]);
+
+  // Sync local ReactFlow state with our global Zustand store when activeItems changes
+  useEffect(() => {
+    setNodes(
+      activeItems.map((item, index) => {
+        let x, y;
+        try {
+          const meta = JSON.parse(item.metadata || '{}');
+          if (typeof meta.pos_x === 'number' && typeof meta.pos_y === 'number') {
+            x = meta.pos_x;
+            y = meta.pos_y;
+          }
+        } catch (e) {}
+
+        if (x === undefined || y === undefined) {
+          // Fallback basic grid layout for items without saved positions
+          const col = index % 3;
+          const row = Math.floor(index / 3);
+          x = 100 + col * 350;
+          y = 100 + row * 200;
+        }
+
+        return {
+          id: item.id,
+          position: { x, y },
+          data: { item },
+          type: 'itemNode',
+        };
+      })
+    );
   }, [activeItems]);
+
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds)),
+    []
+  );
+
+  const onNodeDragStop = useCallback(
+    (_event: any, node: Node) => {
+      updateItemPosition(node.id, node.position.x, node.position.y);
+    },
+    [updateItemPosition]
+  );
 
   if (!activeWorkspace && !isInbox) {
     return (
@@ -58,6 +88,8 @@ export function Canvas() {
     <div className="flex-1 w-full h-full relative bg-[#FDFDFD] overflow-hidden flex flex-col">
       <ReactFlow
         nodes={nodes}
+        onNodesChange={onNodesChange}
+        onNodeDragStop={onNodeDragStop}
         nodeTypes={nodeTypes}
         edges={[]}
         minZoom={0.1}

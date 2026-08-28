@@ -20,6 +20,7 @@ interface WorkspaceState {
   deleteWorkspace: (id: string) => Promise<void>;
   listenForClipboard: () => Promise<() => void>;
   setCaptureState: (state: CaptureTargetState) => void;
+  updateItemPosition: (id: string, x: number, y: number) => Promise<void>;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -72,6 +73,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
     } catch (err) {
       console.error("Failed to load items:", err);
+    }
+  },
+
+  updateItemPosition: async (id: string, x: number, y: number) => {
+    try {
+      const state = get();
+      const item = state.activeItems.find(i => i.id === id);
+      if (!item) return;
+
+      let meta = {};
+      try {
+        meta = JSON.parse(item.metadata || '{}');
+      } catch (e) {}
+
+      meta = { ...meta, pos_x: x, pos_y: y };
+      const newMetadataStr = JSON.stringify(meta);
+
+      // Optimistic UI update
+      set((state) => ({
+        activeItems: state.activeItems.map(i => 
+          i.id === id ? { ...i, metadata: newMetadataStr } : i
+        )
+      }));
+
+      // Background DB sync
+      await db.updateItem(id, undefined, undefined, newMetadataStr);
+    } catch (err) {
+      console.error("Failed to update item position:", err);
     }
   },
 
