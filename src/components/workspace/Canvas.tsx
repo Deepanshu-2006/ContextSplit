@@ -10,7 +10,11 @@ const nodeTypes = {
 };
 
 export function Canvas() {
-  const { workspaces, activeWorkspaceId, activeItems, updateItemPosition, moveItemToWorkspace } = useWorkspaceStore();
+  const { 
+    workspaces, activeWorkspaceId, activeItems, 
+    updateItemPosition, moveItemToWorkspace,
+    setIsDraggingCard, setHoveredWorkspaceId 
+  } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
 
@@ -53,8 +57,43 @@ export function Canvas() {
     []
   );
 
+  const onNodeDragStart = useCallback(() => {
+    setIsDraggingCard(true);
+  }, [setIsDraggingCard]);
+
+  const onNodeDrag = useCallback(
+    (_event: any) => {
+      let clientX = 0;
+      let clientY = 0;
+      
+      if ('clientX' in _event) {
+        clientX = _event.clientX;
+        clientY = _event.clientY;
+      } else if ('changedTouches' in _event && _event.changedTouches.length > 0) {
+        clientX = _event.changedTouches[0].clientX;
+        clientY = _event.changedTouches[0].clientY;
+      }
+
+      const dropElement = document.elementFromPoint(clientX, clientY);
+      const workspaceTarget = dropElement?.closest('[data-workspace-target-id]');
+      
+      if (workspaceTarget) {
+        const targetWorkspaceId = workspaceTarget.getAttribute('data-workspace-target-id');
+        if (targetWorkspaceId && targetWorkspaceId !== activeWorkspaceId) {
+          setHoveredWorkspaceId(targetWorkspaceId);
+          return;
+        }
+      }
+      setHoveredWorkspaceId(null);
+    },
+    [activeWorkspaceId, setHoveredWorkspaceId]
+  );
+
   const onNodeDragStop = useCallback(
     (_event: any, node: Node) => {
+      setIsDraggingCard(false);
+      setHoveredWorkspaceId(null);
+
       // Find element under cursor to detect if dropped on a Sidebar item
       let clientX = 0;
       let clientY = 0;
@@ -114,6 +153,8 @@ export function Canvas() {
       <ReactFlow
         nodes={nodes}
         onNodesChange={onNodesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
         nodeTypes={nodeTypes}
         edges={[]}

@@ -12,6 +12,8 @@ interface WorkspaceState {
   inboxCount: number;
   isLoading: boolean;
   captureState: CaptureTargetState;
+  isDraggingCard: boolean;
+  hoveredWorkspaceId: string | null;
   loadWorkspaces: () => Promise<void>;
   loadItems: (workspaceId: string | "inbox" | null) => Promise<void>;
   createWorkspace: (name: string) => Promise<void>;
@@ -22,6 +24,8 @@ interface WorkspaceState {
   setCaptureState: (state: CaptureTargetState) => void;
   updateItemPosition: (id: string, x: number, y: number) => Promise<void>;
   moveItemToWorkspace: (itemId: string, targetWorkspaceId: string | "inbox") => Promise<void>;
+  setIsDraggingCard: (isDragging: boolean) => void;
+  setHoveredWorkspaceId: (id: string | null) => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -31,8 +35,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   inboxCount: 0,
   isLoading: true,
   captureState: 'hidden',
+  isDraggingCard: false,
+  hoveredWorkspaceId: null,
 
   setCaptureState: (state) => set({ captureState: state }),
+  setIsDraggingCard: (isDragging) => set({ isDraggingCard: isDragging }),
+  setHoveredWorkspaceId: (id) => set({ hoveredWorkspaceId: id }),
 
   loadWorkspaces: async () => {
     try {
