@@ -42,6 +42,7 @@ export function Canvas() {
           position: { x, y },
           data: { item },
           type: 'itemNode',
+          dragHandle: '.custom-drag-handle',
         };
       })
     );

@@ -9,9 +9,10 @@ interface BaseCardProps {
   children: ReactNode;
   className?: string;
   itemId?: string;
+  selected?: boolean;
 }
 
-export function BaseCard({ icon, title, children, className = "", itemId }: BaseCardProps) {
+export function BaseCard({ icon, title, children, className = "", itemId, selected }: BaseCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   
@@ -28,19 +29,19 @@ export function BaseCard({ icon, title, children, className = "", itemId }: Base
   }, []);
 
   return (
-    <div className={`bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col w-[300px] ${className}`}>
+    <div className={`bg-white rounded-xl border ${selected ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-gray-200'} shadow-sm overflow-hidden flex flex-col w-[300px] transition-shadow ${className}`}>
       {/* Invisible Handles for ReactFlow */}
       <Handle type="target" position={Position.Top} className="opacity-0" />
       
-      {/* Header */}
+      {/* Header (Drag Handle) */}
       {(icon || title || itemId) && (
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 bg-gray-50/50 relative">
+        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2 border-b border-gray-100 bg-gray-50/50 relative cursor-grab active:cursor-grabbing">
           {icon && <div className="text-gray-400">{icon}</div>}
           {title && <h3 className="text-xs font-medium text-gray-600 truncate flex-1">{title}</h3>}
           {!title && <div className="flex-1" />}
           
           {itemId && (
-            <div ref={menuRef}>
+            <div ref={menuRef} className="nodrag">
               <button 
                 onClick={() => setMenuOpen(!menuOpen)}
                 className="p-1 rounded hover:bg-gray-200 text-gray-500 transition-colors"
@@ -91,7 +92,7 @@ export function BaseCard({ icon, title, children, className = "", itemId }: Base
       )}
       
       {/* Content */}
-      <div className="p-3">
+      <div className="p-3 nodrag">
         {children}
       </div>
 

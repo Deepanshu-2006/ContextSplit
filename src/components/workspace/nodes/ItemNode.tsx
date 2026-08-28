@@ -4,7 +4,7 @@ import { ImageCard } from "../cards/ImageCard";
 import { UrlCard } from "../cards/UrlCard";
 import { FileCard } from "../cards/FileCard";
 
-export function ItemNode({ data }: NodeProps) {
+export function ItemNode({ data, selected }: NodeProps) {
   const { item } = data as any;
   
   if (!item) {
@@ -13,14 +13,14 @@ export function ItemNode({ data }: NodeProps) {
   
   switch (item.item_type) {
     case 'text':
-      return <TextCard content={item.content} title={item.title} itemId={item.id} />;
+      return <TextCard content={item.content} title={item.title} itemId={item.id} selected={selected} />;
     case 'image':
-      return <ImageCard content={item.content} title={item.title} itemId={item.id} />;
+      return <ImageCard content={item.content} title={item.title} itemId={item.id} selected={selected} />;
     case 'url':
-      return <UrlCard content={item.content} title={item.title} itemId={item.id} />;
+      return <UrlCard content={item.content} title={item.title} itemId={item.id} selected={selected} />;
     case 'file':
-      return <FileCard content={item.content} title={item.title} itemId={item.id} />;
+      return <FileCard content={item.content} title={item.title} itemId={item.id} selected={selected} />;
     default:
-      return <FileCard content={item.content} title={item.title} itemId={item.id} />;
+      return <FileCard content={item.content} title={item.title} itemId={item.id} selected={selected} />;
   }
 }

@@ -5,9 +5,10 @@ interface UrlCardProps {
   content: string;
   title?: string | null;
   itemId?: string;
+  selected?: boolean;
 }
 
-export function UrlCard({ content, title, itemId }: UrlCardProps) {
+export function UrlCard({ content, title, itemId, selected }: UrlCardProps) {
   let domain = "";
   try {
     const url = new URL(content);
@@ -17,7 +18,7 @@ export function UrlCard({ content, title, itemId }: UrlCardProps) {
   }
 
   return (
-    <BaseCard icon={<Link size={14} />} title={domain} itemId={itemId}>
+    <BaseCard icon={<Link size={14} />} title={domain} itemId={itemId} selected={selected}>
       <div className="flex flex-col gap-2">
         <h4 className="text-sm font-medium text-gray-900 line-clamp-2">
           {title || content}
