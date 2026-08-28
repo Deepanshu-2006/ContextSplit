@@ -22,7 +22,7 @@ export function Canvas() {
 
   // Sync local ReactFlow state with our global Zustand store when activeItems changes
   useEffect(() => {
-    setNodes(
+    setNodes(prevNodes => 
       activeItems.map((item, index) => {
         let x, y;
         try {
@@ -41,12 +41,15 @@ export function Canvas() {
           y = 100 + row * 200;
         }
 
+        const existingNode = prevNodes.find(n => n.id === item.id);
+
         return {
           id: item.id,
           position: { x, y },
           data: { item },
           type: 'itemNode',
           dragHandle: '.custom-drag-handle',
+          selected: existingNode ? existingNode.selected : false,
         };
       })
     );
