@@ -1,11 +1,9 @@
 import { create } from 'zustand';
 import { db, Workspace, Item } from '../services/db';
-import { v4 as uuidv4 } from 'uuid';
-import { toast } from 'sonner';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import React from 'react';
-import { Image as ImageIcon, Link as LinkIcon, FileText } from 'lucide-react';
+
+export type CaptureTargetState = 'hidden' | 'visible' | 'approaching' | 'active' | 'success' | 'failure';
 
 interface WorkspaceState {
   workspaces: Workspace[];
@@ -13,6 +11,7 @@ interface WorkspaceState {
   activeItems: Item[];
   inboxCount: number;
   isLoading: boolean;
+  captureState: CaptureTargetState;
   loadWorkspaces: () => Promise<void>;
   loadItems: (workspaceId: string | "inbox" | null) => Promise<void>;
   createWorkspace: (name: string) => Promise<void>;
@@ -20,6 +19,7 @@ interface WorkspaceState {
   renameWorkspace: (id: string, newName: string) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
   listenForClipboard: () => Promise<() => void>;
+  setCaptureState: (state: CaptureTargetState) => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -28,6 +28,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   activeItems: [],
   inboxCount: 0,
   isLoading: true,
+  captureState: 'hidden',
+
+  setCaptureState: (state) => set({ captureState: state }),
 
   loadWorkspaces: async () => {
     try {

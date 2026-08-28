@@ -145,11 +145,22 @@ export function Sidebar() {
       <div className="px-4 mt-auto">
         <button 
           onClick={() => createWorkspace("New Workspace")}
-          className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg border border-black/5 text-[13px] font-medium text-gray-600 hover:bg-black/5 hover:text-gray-900 transition-colors shadow-sm bg-white"
+          className="w-full flex items-center justify-center gap-2 px-2 py-2 rounded-lg border border-black/5 text-[13px] font-medium text-gray-600 hover:bg-black/5 hover:text-gray-900 transition-colors shadow-sm bg-white mb-4"
         >
           <Plus size={14} />
           New Workspace
         </button>
+        
+        {/* Debug controls for CaptureTarget */}
+        <div className="pt-4 border-t border-black/5 flex flex-wrap gap-1">
+          <div className="w-full text-[10px] font-medium text-gray-400 mb-1">CAPTURE TARGET DEBUG</div>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('hidden')} className="px-2 py-1 bg-gray-100 rounded text-[10px]">Hide</button>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('visible')} className="px-2 py-1 bg-gray-100 rounded text-[10px]">Vis</button>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('approaching')} className="px-2 py-1 bg-gray-100 rounded text-[10px]">Appr</button>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('active')} className="px-2 py-1 bg-gray-100 rounded text-[10px]">Actv</button>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('success')} className="px-2 py-1 bg-green-100 text-green-700 rounded text-[10px]">Succ</button>
+          <button onClick={() => useWorkspaceStore.getState().setCaptureState('failure')} className="px-2 py-1 bg-red-100 text-red-700 rounded text-[10px]">Fail</button>
+        </div>
       </div>
     </aside>
   );

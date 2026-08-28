@@ -4,6 +4,7 @@ import { TopBar } from "./components/layout/TopBar";
 import { Canvas } from "./components/workspace/Canvas";
 import { useWorkspaceStore } from "./store/workspaceStore";
 import { Toaster } from 'sonner';
+import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import "./App.css";
 
 function App() {
@@ -36,6 +37,7 @@ function App() {
 
   return (
     <div className="w-screen h-screen flex overflow-hidden bg-white font-sans text-gray-900">
+      <CaptureTarget />
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
         <TopBar />
