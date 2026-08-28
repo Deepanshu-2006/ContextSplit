@@ -29,22 +29,22 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   }, []);
 
   return (
-    <div className={`bg-white rounded-xl border ${selected ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-gray-200'} shadow-sm overflow-hidden flex flex-col w-[300px] transition-shadow ${className}`}>
+    <div className={`bg-white rounded-xl border ${selected ? 'border-gray-800 shadow-xl ring-1 ring-gray-900/10' : 'border-black/5 shadow-sm hover:shadow-md hover:border-black/10'} overflow-hidden flex flex-col w-[300px] transition-all duration-200 ${className}`}>
       {/* Invisible Handles for ReactFlow */}
       <Handle type="target" position={Position.Top} className="opacity-0" />
       
       {/* Header (Drag Handle) */}
       {(icon || title || itemId) && (
-        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2 border-b border-gray-100 bg-gray-50/50 relative cursor-grab active:cursor-grabbing">
+        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2.5 border-b border-black/[0.03] bg-white relative cursor-grab active:cursor-grabbing">
           {icon && <div className="text-gray-400">{icon}</div>}
-          {title && <h3 className="text-xs font-medium text-gray-600 truncate flex-1">{title}</h3>}
+          {title && <h3 className="text-[12px] font-medium text-gray-700 tracking-tight truncate flex-1">{title}</h3>}
           {!title && <div className="flex-1" />}
           
           {itemId && (
             <div ref={menuRef} className="nodrag">
               <button 
                 onClick={() => setMenuOpen(!menuOpen)}
-                className="p-1 rounded hover:bg-gray-200 text-gray-500 transition-colors"
+                className="p-1 rounded-md hover:bg-black/5 text-gray-400 hover:text-gray-900 transition-colors"
                 title="Move Item"
               >
                 <MoreHorizontal size={14} />

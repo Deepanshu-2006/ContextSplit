@@ -128,14 +128,14 @@ export function Canvas() {
       <div 
         className="flex-1 w-full h-full relative bg-[#FDFDFD] flex items-center justify-center"
       >
-        <div className="flex flex-col items-center text-center p-8 max-w-sm">
-          <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mb-6 shadow-sm">
+        <div className="flex flex-col items-center text-center p-8 max-w-sm opacity-60">
+          <div className="w-16 h-16 rounded-2xl bg-gray-50 flex items-center justify-center mb-6">
             <LayoutTemplate className="text-gray-300" size={32} strokeWidth={1.5} />
           </div>
-          <h2 className="text-xl font-medium text-gray-900 mb-2 tracking-tight">
+          <h2 className="text-lg font-medium text-gray-800 mb-2 tracking-tight">
             No Workspace Selected
           </h2>
-          <p className="text-[14px] text-gray-500 leading-relaxed">
+          <p className="text-[13px] text-gray-500 leading-relaxed">
             Create a new workspace from the sidebar to start collecting your context.
           </p>
         </div>
@@ -162,33 +162,51 @@ export function Canvas() {
         maxZoom={4}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         proOptions={{ hideAttribution: true }}
+        panOnScroll={true}
+        selectionOnDrag={true}
+        panOnDrag={false}
+        zoomOnPinch={true}
+        zoomOnScroll={false}
+        zoomActivationKeyCode="Meta"
         fitView
       >
         <Background 
           color="#9CA3AF" 
           variant={BackgroundVariant.Dots} 
-          gap={24} 
-          size={2} 
+          gap={32} 
+          size={1.5} 
+          className="opacity-50"
         />
         
+        {/* Floating Workspace Title */}
+        <div className="absolute top-8 left-8 z-10 pointer-events-none">
+          <div className="flex items-center gap-3 opacity-40">
+            {isInbox ? (
+              <Inbox size={20} strokeWidth={2} />
+            ) : (
+              <BoxSelect size={20} strokeWidth={2} />
+            )}
+            <h1 className="text-2xl font-semibold tracking-tight text-gray-900">
+              {title}
+            </h1>
+          </div>
+        </div>
+
         {/* Empty State Overlay */}
         {activeItems.length === 0 && (
           <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8 z-10">
-            <div className="w-16 h-16 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mb-6 shadow-sm">
-              {isInbox ? (
-                <Inbox className="text-gray-300" size={32} strokeWidth={1.5} />
-              ) : (
-                <BoxSelect className="text-gray-300" size={32} strokeWidth={1.5} />
-              )}
+            <div className="flex flex-col items-center text-center opacity-40">
+              <div className="w-12 h-12 rounded-xl bg-gray-50 flex items-center justify-center mb-4">
+                {isInbox ? (
+                  <Inbox className="text-gray-400" size={24} strokeWidth={1.5} />
+                ) : (
+                  <BoxSelect className="text-gray-400" size={24} strokeWidth={1.5} />
+                )}
+              </div>
+              <p className="text-[13px] text-gray-500 max-w-[240px] leading-relaxed">
+                {description}
+              </p>
             </div>
-            
-            <h2 className="text-xl font-medium text-gray-900 mb-2 tracking-tight">
-              {title}
-            </h2>
-            
-            <p className="text-[14px] text-gray-500 max-w-sm text-center leading-relaxed">
-              {description}
-            </p>
           </div>
         )}
       </ReactFlow>
