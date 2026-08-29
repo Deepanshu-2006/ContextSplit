@@ -6,9 +6,12 @@ pub mod context_engine;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use db::models::{Workspace, Item, ContextSignal};
+use context_engine::engine::{ContextEngine, ContextEvent};
+use context_engine::providers::{CaptureContextProvider, UserActionContextProvider, WorkspaceContextProvider};
 
 pub struct AppState {
     pub db_conn: Mutex<rusqlite::Connection>,
+    pub context_engine: Mutex<ContextEngine>,
 }
 
 #[tauri::command]
@@ -97,20 +100,13 @@ fn move_item(
     
     let new_item = db::operations::move_item(&conn, id, workspace_id).map_err(|e| e.to_string())?;
     
-    let payload = serde_json::json!({
-        "action": "moved_to_workspace",
-        "source_workspace": source_ws,
-        "destination_workspace": workspace_id,
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    ce.process_event(&conn, ContextEvent::UserAction {
+        item_id: id.to_string(),
+        action: "moved_to_workspace".to_string(),
+        source_workspace: source_ws,
+        destination_workspace: workspace_id.map(|s| s.to_string()),
     });
-    
-    let _ = context_engine::operations::create_context_signal(
-        &conn,
-        workspace_id,
-        Some(id),
-        "user_action",
-        None,
-        &payload.to_string()
-    );
     
     Ok(new_item)
 }
@@ -169,8 +165,15 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let conn = db::init(app_data_dir)?;
             
+            let mut ce = ContextEngine::new();
+            ce.register(Box::new(CaptureContextProvider));
+            ce.register(Box::new(UserActionContextProvider));
+            ce.register(Box::new(WorkspaceContextProvider));
+            ce.initialize_all().map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error>)?;
+            
             app.manage(AppState {
                 db_conn: Mutex::new(conn),
+                context_engine: Mutex::new(ce),
             });
             
             // Start the clipboard monitor loop

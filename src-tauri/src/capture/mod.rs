@@ -1,6 +1,5 @@
 pub mod target;
 pub mod engine;
-pub mod context;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

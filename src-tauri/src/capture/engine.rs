@@ -29,7 +29,23 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     ).map_err(|e| e.to_string())?;
 
     // --- Collect Context Signals ---
-    crate::capture::context::collect_and_store_signals(&conn, &req, &item);
+    let state = app_handle.state::<crate::AppState>();
+    if let Ok(ce) = state.context_engine.lock() {
+        let metadata = serde_json::json!({
+            "filename": req.filename,
+            "mime_type": req.mime_type,
+            "original_url": req.original_url,
+            "size": req.size,
+        });
+        
+        ce.process_event(&conn, crate::context_engine::engine::ContextEvent::Capture {
+            item_id: item.id.clone(),
+            workspace_id: req.workspace_id.clone(),
+            source: req.source.clone().unwrap_or_else(|| "unknown".to_string()),
+            data_type: req.data_type.clone(),
+            metadata,
+        });
+    }
 
     // Drop the mutex guard before emitting events or showing notifications to prevent deadlocks
     drop(conn);
