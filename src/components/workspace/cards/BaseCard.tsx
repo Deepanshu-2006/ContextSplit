@@ -2,6 +2,8 @@ import { ReactNode, useState, useRef, useEffect } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { MoreHorizontal, Inbox, BoxSelect } from "lucide-react";
 import { useWorkspaceStore } from "../../../store/workspaceStore";
+import { ContextInspector } from "../ContextInspector";
+import { Search } from "lucide-react";
 
 interface BaseCardProps {
   icon?: ReactNode;
@@ -14,6 +16,7 @@ interface BaseCardProps {
 
 export function BaseCard({ icon, title, children, className = "", itemId, selected }: BaseCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   
   const { workspaces, activeWorkspaceId, moveItemToWorkspace } = useWorkspaceStore();
@@ -52,7 +55,22 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
               
               {menuOpen && (
                 <div className="absolute right-2 top-8 w-48 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
-                  <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                  <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider border-b border-gray-100 pb-2 mb-1">
+                    Actions
+                  </div>
+                  
+                  <button
+                    className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100"
+                    onClick={() => {
+                      setInspectorOpen(true);
+                      setMenuOpen(false);
+                    }}
+                  >
+                    <Search size={14} className="text-gray-400" />
+                    Inspect Context
+                  </button>
+
+                  <div className="px-3 py-2 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
                     Move to
                   </div>
                   
@@ -97,6 +115,13 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
       </div>
 
       <Handle type="source" position={Position.Bottom} className="opacity-0" />
+      
+      {inspectorOpen && itemId && (
+        <ContextInspector 
+          itemId={itemId} 
+          onClose={() => setInspectorOpen(false)} 
+        />
+      )}
     </div>
   );
 }
