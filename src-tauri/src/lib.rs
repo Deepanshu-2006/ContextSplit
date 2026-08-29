@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use tauri::{Manager, State};
 use db::models::{Workspace, Item, ContextSignal};
 use context_engine::engine::{ContextEngine, ContextEvent};
-use context_engine::providers::{CaptureContextProvider, UserActionContextProvider, WorkspaceContextProvider, ActiveAppProvider};
+use context_engine::providers::{CaptureContextProvider, UserActionContextProvider, WorkspaceContextProvider, ActiveAppProvider, UrlContextProvider};
 
 pub struct AppState {
     pub db_conn: Mutex<rusqlite::Connection>,
@@ -170,6 +170,7 @@ pub fn run() {
             ce.register(Box::new(UserActionContextProvider));
             ce.register(Box::new(WorkspaceContextProvider));
             ce.register(Box::new(ActiveAppProvider));
+            ce.register(Box::new(UrlContextProvider));
             ce.initialize_all().map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error>)?;
             
             app.manage(AppState {

@@ -36,6 +36,7 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
             "mime_type": req.mime_type,
             "original_url": req.original_url,
             "size": req.size,
+            "content": if req.data_type == "url" { Some(req.content.clone()) } else { None }
         });
         
         ce.process_event(&conn, crate::context_engine::engine::ContextEvent::Capture {
