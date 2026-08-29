@@ -19,7 +19,7 @@ pub fn init(app_data_dir: PathBuf) -> std::result::Result<Connection, Box<dyn st
     Ok(conn)
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
+pub fn run_migrations(conn: &Connection) -> Result<()> {
     let mut user_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if user_version < 1 {

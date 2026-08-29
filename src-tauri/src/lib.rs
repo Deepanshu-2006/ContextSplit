@@ -132,12 +132,21 @@ fn get_context_signal(id: &str, state: State<'_, AppState>) -> Result<ContextSig
 
 #[tauri::command]
 fn list_context_signals(
+    state: State<'_, AppState>,
     workspace_id: Option<&str>,
     item_id: Option<&str>,
-    state: State<'_, AppState>,
 ) -> Result<Vec<ContextSignal>, String> {
-    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let conn = state.db_conn.lock().unwrap();
     context_engine::operations::list_context_signals(&conn, workspace_id, item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn score_item(
+    state: State<'_, AppState>,
+    item_id: &str,
+) -> Result<Vec<crate::context_engine::scoring::WorkspaceScore>, String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::context_engine::scoring::score_item(&conn, item_id)
 }
 
 #[tauri::command]
@@ -207,7 +216,8 @@ pub fn run() {
             hide_notch,
             create_context_signal,
             get_context_signal,
-            list_context_signals
+            list_context_signals,
+            score_item
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

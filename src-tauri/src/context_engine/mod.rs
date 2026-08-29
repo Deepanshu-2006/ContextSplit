@@ -1,6 +1,7 @@
 pub mod operations;
 pub mod engine;
 pub mod providers;
+pub mod scoring;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
