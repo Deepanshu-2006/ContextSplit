@@ -54,6 +54,26 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 2;
     }
 
+    if user_version < 3 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_signals (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT,
+                item_id TEXT,
+                signal_type TEXT NOT NULL,
+                session_id TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL,
+                FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE SET NULL
+            )",
+            [],
+        )?;
+        
+        user_version = 3;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

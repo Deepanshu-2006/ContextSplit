@@ -18,6 +18,17 @@ export interface Item {
   updated_at: string;
 }
 
+export interface ContextSignal {
+  id: string;
+  workspace_id: string | null;
+  item_id: string | null;
+  signal_type: string;
+  session_id: string | null;
+  payload: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -62,5 +73,24 @@ export const db = {
 
   async deleteItem(id: string): Promise<void> {
     return invoke("delete_item", { id });
+  },
+
+  // Context Signal operations
+  async createContextSignal(
+    workspaceId: string | null,
+    itemId: string | null,
+    signalType: string,
+    sessionId: string | null,
+    payload: string
+  ): Promise<ContextSignal> {
+    return invoke("create_context_signal", { workspaceId, itemId, signalType, sessionId, payload });
+  },
+
+  async getContextSignal(id: string): Promise<ContextSignal> {
+    return invoke("get_context_signal", { id });
+  },
+
+  async listContextSignals(workspaceId: string | null = null, itemId: string | null = null): Promise<ContextSignal[]> {
+    return invoke("list_context_signals", { workspaceId, itemId });
   }
 };

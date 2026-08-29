@@ -1,10 +1,11 @@
 mod db;
 mod clipboard;
 pub mod capture;
+pub mod context_engine;
 
 use std::sync::Mutex;
 use tauri::{Manager, State};
-use db::models::{Workspace, Item};
+use db::models::{Workspace, Item, ContextSignal};
 
 pub struct AppState {
     pub db_conn: Mutex<rusqlite::Connection>,
@@ -94,6 +95,35 @@ fn move_item(
 }
 
 #[tauri::command]
+fn create_context_signal(
+    workspace_id: Option<&str>,
+    item_id: Option<&str>,
+    signal_type: &str,
+    session_id: Option<&str>,
+    payload: &str,
+    state: State<'_, AppState>,
+) -> Result<ContextSignal, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::operations::create_context_signal(&conn, workspace_id, item_id, signal_type, session_id, payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_context_signal(id: &str, state: State<'_, AppState>) -> Result<ContextSignal, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::operations::get_context_signal(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_context_signals(
+    workspace_id: Option<&str>,
+    item_id: Option<&str>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ContextSignal>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::operations::list_context_signals(&conn, workspace_id, item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -148,7 +178,10 @@ pub fn run() {
             move_item,
             handle_capture,
             show_notch,
-            hide_notch
+            hide_notch,
+            create_context_signal,
+            get_context_signal,
+            list_context_signals
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
