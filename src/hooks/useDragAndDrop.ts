@@ -45,6 +45,8 @@ export function useDragAndDrop() {
 
       try {
         let req = null;
+        const currentWs = useWorkspaceStore.getState().activeWorkspaceId;
+        const targetWs = currentWs === 'inbox' ? null : currentWs;
 
         // 1. Check for files (images or generic files)
         if (dt.files && dt.files.length > 0) {
@@ -66,11 +68,12 @@ export function useDragAndDrop() {
             data_type: isImage ? 'image' : 'file',
             content: dataUri,
             title: null,
-            source: 'drag_and_drop',
+            source: 'drag_drop',
             filename: file.name,
             mime_type: file.type || null,
             original_url: null,
             size: file.size,
+            workspace_id: targetWs,
           };
         } 
         // 2. Check for URLs
@@ -80,11 +83,12 @@ export function useDragAndDrop() {
             data_type: 'url',
             content: url,
             title: null,
-            source: 'drag_and_drop',
+            source: 'drag_drop',
             filename: null,
             mime_type: 'text/uri-list',
             original_url: url,
             size: url.length,
+            workspace_id: targetWs,
           };
         } 
         // 3. Check for plain text
@@ -94,11 +98,12 @@ export function useDragAndDrop() {
             data_type: 'text',
             content: text,
             title: null,
-            source: 'drag_and_drop',
+            source: 'drag_drop',
             filename: null,
             mime_type: 'text/plain',
             original_url: null,
             size: text.length,
+            workspace_id: targetWs,
           };
         }
 

@@ -10,6 +10,7 @@ pub struct CaptureRequest {
     pub mime_type: Option<String>,
     pub original_url: Option<String>,
     pub size: Option<usize>,
+    pub workspace_id: Option<String>,
 }
 
 pub trait CaptureTarget: Send + Sync {

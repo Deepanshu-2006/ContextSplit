@@ -28,6 +28,9 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
         &metadata,
     ).map_err(|e| e.to_string())?;
 
+    // --- Collect Context Signals ---
+    crate::capture::context::collect_and_store_signals(&conn, &req, &item);
+
     // Drop the mutex guard before emitting events or showing notifications to prevent deadlocks
     drop(conn);
 

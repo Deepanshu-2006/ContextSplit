@@ -75,6 +75,7 @@ impl Monitor {
                     mime_type: if is_url { Some("text/uri-list".to_string()) } else { Some("text/plain".to_string()) },
                     original_url: None,
                     size: None,
+                    workspace_id: None,
                 };
                 
                 let _ = engine::process_capture(app_handle, req);
@@ -119,6 +120,7 @@ impl Monitor {
                             mime_type: Some("image/png".to_string()),
                             original_url: None,
                             size: None,
+                            workspace_id: None,
                         };
                         
                         let _ = engine::process_capture(app_handle, req);
