@@ -91,7 +91,28 @@ fn move_item(
     state: State<'_, AppState>,
 ) -> Result<Item, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-    db::operations::move_item(&conn, id, workspace_id).map_err(|e| e.to_string())
+    
+    let old_item = db::operations::get_item(&conn, id).map_err(|e| e.to_string())?;
+    let source_ws = old_item.workspace_id;
+    
+    let new_item = db::operations::move_item(&conn, id, workspace_id).map_err(|e| e.to_string())?;
+    
+    let payload = serde_json::json!({
+        "action": "moved_to_workspace",
+        "source_workspace": source_ws,
+        "destination_workspace": workspace_id,
+    });
+    
+    let _ = context_engine::operations::create_context_signal(
+        &conn,
+        workspace_id,
+        Some(id),
+        "user_action",
+        None,
+        &payload.to_string()
+    );
+    
+    Ok(new_item)
 }
 
 #[tauri::command]
