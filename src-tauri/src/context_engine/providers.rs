@@ -73,3 +73,30 @@ impl ContextProvider for WorkspaceContextProvider {
         }
     }
 }
+
+pub struct ActiveAppProvider;
+
+impl ContextProvider for ActiveAppProvider {
+    fn name(&self) -> &'static str {
+        "active_app"
+    }
+
+    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+        if let Some(ContextEvent::Capture { item_id, workspace_id, .. }) = event {
+            if let Some(app_info) = super::get_active_app() {
+                return vec![ContextSignalParams {
+                    workspace_id: workspace_id.clone(),
+                    item_id: Some(item_id.clone()),
+                    signal_type: "active_app".to_string(),
+                    payload: json!({
+                        "app_name": app_info.app_name,
+                        "process_name": app_info.process_name,
+                        "process_id": app_info.process_id,
+                        "window_title": app_info.window_title,
+                    }),
+                }];
+            }
+        }
+        vec![]
+    }
+}
