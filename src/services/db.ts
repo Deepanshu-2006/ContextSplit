@@ -29,6 +29,12 @@ export interface ContextSignal {
   updated_at: string;
 }
 
+export interface WorkspaceScore {
+  workspace_id: string;
+  score: number;
+  reasons: string[];
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -92,5 +98,10 @@ export const db = {
 
   async listContextSignals(workspaceId: string | null = null, itemId: string | null = null): Promise<ContextSignal[]> {
     return invoke("list_context_signals", { workspaceId, itemId });
+  },
+
+  // Context Engine
+  async scoreItem(itemId: string): Promise<WorkspaceScore[]> {
+    return invoke("score_item", { itemId });
   }
 };

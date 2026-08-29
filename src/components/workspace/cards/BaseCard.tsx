@@ -4,6 +4,8 @@ import { MoreHorizontal, Inbox, BoxSelect } from "lucide-react";
 import { useWorkspaceStore } from "../../../store/workspaceStore";
 import { ContextInspector } from "../ContextInspector";
 import { Search } from "lucide-react";
+import { db, WorkspaceScore } from "../../../services/db";
+import { ContextSuggestion } from "./ContextSuggestion";
 
 interface BaseCardProps {
   icon?: ReactNode;
@@ -20,6 +22,71 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   const menuRef = useRef<HTMLDivElement>(null);
   
   const { workspaces, activeWorkspaceId, moveItemToWorkspace } = useWorkspaceStore();
+  const [suggestionScore, setSuggestionScore] = useState<WorkspaceScore | null>(null);
+  const [suggestionDismissed, setSuggestionDismissed] = useState(false);
+
+  useEffect(() => {
+    async function fetchSuggestion() {
+      if (activeWorkspaceId === "inbox" && itemId) {
+        try {
+          // Check if it was dismissed
+          const signals = await db.listContextSignals(null, itemId);
+          const isDismissed = signals.some(s => 
+            s.signal_type === "user_action" && 
+            s.payload.includes("suggestion_dismissed")
+          );
+          
+          if (isDismissed) {
+            setSuggestionDismissed(true);
+            return;
+          }
+          
+          const scores = await db.scoreItem(itemId);
+          if (scores.length > 0 && scores[0].score > 0.1) {
+            setSuggestionScore(scores[0]);
+          }
+        } catch (e) {
+          console.error("Failed to fetch suggestions", e);
+        }
+      }
+    }
+    fetchSuggestion();
+  }, [activeWorkspaceId, itemId]);
+
+  const handleAcceptSuggestion = async (suggestedWorkspaceId: string) => {
+    if (!itemId) return;
+    setSuggestionDismissed(true); // hide immediately
+    try {
+      await db.createContextSignal(suggestedWorkspaceId, itemId, "user_action", null, JSON.stringify({ action: "suggestion_accepted" }));
+      moveItemToWorkspace(itemId, suggestedWorkspaceId);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleDismissSuggestion = async () => {
+    if (!itemId || !suggestionScore) return;
+    setSuggestionDismissed(true);
+    try {
+      await db.createContextSignal(null, itemId, "user_action", null, JSON.stringify({ action: "suggestion_dismissed", suggested_workspace: suggestionScore.workspace_id }));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleManualMove = async (wsId: string) => {
+    if (!itemId) return;
+    
+    // If a suggestion was visible and they chose another workspace, log it
+    if (suggestionScore && !suggestionDismissed && suggestionScore.workspace_id !== wsId) {
+       try {
+         await db.createContextSignal(wsId, itemId, "user_action", null, JSON.stringify({ action: "suggestion_changed", suggested_workspace: suggestionScore.workspace_id }));
+       } catch(e) {}
+    }
+    
+    moveItemToWorkspace(itemId, wsId);
+    setMenuOpen(false);
+  };
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -77,10 +144,7 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
                   {activeWorkspaceId !== "inbox" && (
                     <button
                       className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
-                      onClick={() => {
-                        moveItemToWorkspace(itemId, "inbox");
-                        setMenuOpen(false);
-                      }}
+                      onClick={() => handleManualMove("inbox")}
                     >
                       <Inbox size={14} className="text-gray-400" />
                       Inbox
@@ -93,10 +157,7 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
                       <button
                         key={ws.id}
                         className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
-                        onClick={() => {
-                          moveItemToWorkspace(itemId, ws.id);
-                          setMenuOpen(false);
-                        }}
+                        onClick={() => handleManualMove(ws.id)}
                       >
                         <BoxSelect size={14} className="text-gray-400" />
                         <span className="truncate">{ws.name}</span>
@@ -115,6 +176,16 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
       </div>
 
       <Handle type="source" position={Position.Bottom} className="opacity-0" />
+      
+      {/* Context Suggestion */}
+      {suggestionScore && !suggestionDismissed && itemId && (
+        <ContextSuggestion 
+          itemId={itemId}
+          score={suggestionScore}
+          onAccept={handleAcceptSuggestion}
+          onDismiss={handleDismissSuggestion}
+        />
+      )}
       
       {inspectorOpen && itemId && (
         <ContextInspector 
