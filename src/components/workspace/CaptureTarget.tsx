@@ -56,7 +56,7 @@ export const CaptureTarget: React.FC = () => {
   return (
     <div ref={targetRef} className={`${baseClasses} ${stateClasses}`}>
       <div className="flex items-center justify-center w-full h-full relative">
-        <div className="absolute inset-0 bg-gradient-to-b from-white/40 to-transparent pointer-events-none mix-blend-overlay"></div>
+        <div className="absolute inset-0 bg-linear-to-b from-white/40 to-transparent pointer-events-none mix-blend-overlay"></div>
         <div className="relative z-10 flex items-center justify-center w-full text-center">
           {content}
         </div>

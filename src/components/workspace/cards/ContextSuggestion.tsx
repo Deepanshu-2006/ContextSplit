@@ -10,7 +10,7 @@ interface ContextSuggestionProps {
   onDismiss: () => void;
 }
 
-export function ContextSuggestion({ itemId, score, onAccept, onDismiss }: ContextSuggestionProps) {
+export function ContextSuggestion({ score, onAccept, onDismiss }: ContextSuggestionProps) {
   const { workspaces } = useWorkspaceStore();
   const [showReasons, setShowReasons] = useState(false);
 

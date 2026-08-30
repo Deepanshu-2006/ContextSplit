@@ -215,7 +215,7 @@ export function Canvas() {
                   <BoxSelect className="text-gray-400" size={24} strokeWidth={1.5} />
                 )}
               </div>
-              <p className="text-[13px] text-gray-500 max-w-[240px] leading-relaxed">
+              <p className="text-[13px] text-gray-500 max-w-60 leading-relaxed">
                 {description}
               </p>
             </div>

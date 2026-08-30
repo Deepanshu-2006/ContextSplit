@@ -18,7 +18,7 @@ export function TextCard({ content, title, itemId, selected }: TextCardProps) {
   return (
     <>
       <BaseCard icon={<AlignLeft size={14} />} title={title || "Text Snippet"} itemId={itemId} selected={selected}>
-        <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+        <div className="text-sm text-gray-800 whitespace-pre-wrap wrap-break-word">
           {displayContent}
         </div>
         {!expanded && isLong && (

@@ -45,7 +45,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="w-64 h-full bg-[#FAFAFA] border-r border-black/[0.04] flex flex-col pt-8 pb-4 select-none">
+    <aside className="w-64 h-full bg-[#FAFAFA] border-r border-black/4 flex flex-col pt-8 pb-4 select-none">
       <div className="px-6 mb-8 flex items-center gap-2">
         <div className="w-5 h-5 rounded-md bg-black shadow-sm" />
         <h1 className="font-semibold text-[15px] tracking-tight text-gray-900">
@@ -64,7 +64,7 @@ export function Sidebar() {
               ? "bg-black/5 text-gray-900"
               : isDraggingCard
               ? "text-gray-400 hover:text-gray-600"
-              : "text-gray-500 hover:text-gray-900 hover:bg-black/[0.02]"
+              : "text-gray-500 hover:text-gray-900 hover:bg-black/2"
           }`}
         >
           <div className="flex items-center gap-2.5">
@@ -101,7 +101,7 @@ export function Sidebar() {
                     ? "bg-black/5 text-gray-900"
                     : isDraggingCard
                     ? "text-gray-400 hover:text-gray-600"
-                    : "text-gray-500 hover:text-gray-900 hover:bg-black/[0.02]"
+                    : "text-gray-500 hover:text-gray-900 hover:bg-black/2"
                 }`}
               >
                 <div className="flex items-center gap-2.5 flex-1 min-w-0">

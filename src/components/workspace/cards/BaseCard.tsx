@@ -99,13 +99,13 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   }, []);
 
   return (
-    <div className={`bg-white rounded-xl border ${selected ? 'border-gray-800 shadow-xl ring-1 ring-gray-900/10' : 'border-black/5 shadow-sm hover:shadow-md hover:border-black/10'} overflow-hidden flex flex-col w-[300px] transition-all duration-200 ${className}`}>
+    <div className={`bg-white rounded-xl border ${selected ? 'border-gray-800 shadow-xl ring-1 ring-gray-900/10' : 'border-black/5 shadow-sm hover:shadow-md hover:border-black/10'} overflow-hidden flex flex-col w-75 transition-all duration-200 ${className}`}>
       {/* Invisible Handles for ReactFlow */}
       <Handle type="target" position={Position.Top} className="opacity-0" />
       
       {/* Header (Drag Handle) */}
       {(icon || title || itemId) && (
-        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2.5 border-b border-black/[0.03] bg-white relative cursor-grab active:cursor-grabbing">
+        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2.5 border-b border-black/3 bg-white relative active:cursor-grabbing">
           {icon && <div className="text-gray-400">{icon}</div>}
           {title && <h3 className="text-[12px] font-medium text-gray-700 tracking-tight truncate flex-1">{title}</h3>}
           {!title && <div className="flex-1" />}

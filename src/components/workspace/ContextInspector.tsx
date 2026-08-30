@@ -44,7 +44,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden border border-gray-200" onClick={(e) => e.stopPropagation()}>
         
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-gray-50/50">
@@ -98,7 +98,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                         <div className="grid grid-cols-1 gap-2">
                           {Object.entries(parsedPayload).map(([key, value]) => (
                             <div key={key} className="flex text-sm">
-                              <span className="w-32 flex-shrink-0 text-gray-500 font-medium capitalize text-xs pt-0.5">
+                              <span className="w-32 shrink-0 text-gray-500 font-medium capitalize text-xs pt-0.5">
                                 {key.replace(/_/g, ' ')}
                               </span>
                               <span className="text-gray-900 font-mono text-xs break-all bg-gray-50 px-2 py-1 rounded w-full border border-gray-100">

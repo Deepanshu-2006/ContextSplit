@@ -5,7 +5,7 @@ export function TopBar() {
     <header 
       // data-tauri-drag-region allows the user to drag the window from the top bar if decorations are disabled
       data-tauri-drag-region 
-      className="h-14 w-full flex items-center justify-between px-6 bg-white/50 backdrop-blur-md border-b border-black/[0.04] select-none sticky top-0 z-10"
+      className="h-14 w-full flex items-center justify-between px-6 bg-white/50 backdrop-blur-md border-b border-black/4 select-none sticky top-0 z-10"
     >
       <div className="flex items-center gap-4 flex-1">
         <div className="relative group w-64">
@@ -15,7 +15,7 @@ export function TopBar() {
           <input
             type="text"
             placeholder="Search anything..."
-            className="w-full bg-gray-50/50 hover:bg-gray-100/50 focus:bg-white border border-transparent focus:border-black/10 rounded-md py-1.5 pl-9 pr-3 text-[13px] text-gray-900 placeholder-gray-400 focus:outline-none transition-all shadow-sm"
+            className="w-full bg-gray-50/50 hover:bg-gray-100/50 border border-transparent rounded-md py-1.5 pl-9 pr-3 text-[13px] placeholder-gray-400 focus:outline-none transition-all shadow-sm"
           />
         </div>
       </div>
