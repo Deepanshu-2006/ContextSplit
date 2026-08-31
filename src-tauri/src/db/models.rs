@@ -61,3 +61,12 @@ pub struct ItemEmbedding {
     pub model: String,
     pub created_at: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkspaceEmbedding {
+    pub workspace_id: String,
+    pub embedding: Vec<f32>,
+    pub provider: String,
+    pub model: String,
+    pub updated_at: String,
+}

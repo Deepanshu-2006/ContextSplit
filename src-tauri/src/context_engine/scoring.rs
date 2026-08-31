@@ -25,6 +25,7 @@ pub struct ScoringWeights {
     pub related_item_per_match: f32,
     pub related_item_max: f32,
     pub semantic_similarity_max: f32,
+    pub workspace_profile_similarity_max: f32,
 }
 
 impl Default for ScoringWeights {
@@ -42,6 +43,7 @@ impl Default for ScoringWeights {
             related_item_per_match: 0.2,
             related_item_max: 0.5,
             semantic_similarity_max: 0.4,
+            workspace_profile_similarity_max: 0.45,
         }
     }
 }
@@ -62,6 +64,9 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
     }
     
     let mut scores = Vec::new();
+    
+    // Fetch Target Embedding
+    let target_embedding = crate::db::operations::get_item_embedding(conn, item_id).unwrap_or(None);
     
     // --- Pre-compute Relationships ---
     let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
@@ -123,11 +128,25 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             }
         }
         
-        // --- 3. Semantic Similarity ---
+        // --- 3. Item Relationships Semantic Similarity ---
         if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
             let s = (*sem_max).min(weights.semantic_similarity_max);
             score += s;
             reasons.push(format!("Semantic similarity with {} Items: {:.2}", ws.name, sem_max));
+        }
+        
+        // --- 4. Workspace Semantic Profile ---
+        if let Some(t_emb) = &target_embedding {
+            if let Ok(Some(ws_profile)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
+                if t_emb.provider == ws_profile.provider && t_emb.model == ws_profile.model {
+                    let sim = crate::semantic::cosine_similarity(&t_emb.embedding, &ws_profile.embedding);
+                    if sim > 0.0 {
+                        let s = sim.min(weights.workspace_profile_similarity_max);
+                        score += s;
+                        reasons.push(format!("Matches {} semantic profile: {:.2}", ws.name, sim));
+                    }
+                }
+            }
         }
         
         // --- Prepare for signal comparisons ---
@@ -446,5 +465,30 @@ mod tests {
         // Both end up very close. Let's verify reasons.
         assert!(score_semantic.reasons.iter().any(|r| r == "Semantic similarity with AI Workspace Items: 0.95"));
         assert!(score_history.reasons.iter().any(|r| r == "User previously organized similar Items into Manual Workspace"));
+    }
+    
+    #[test]
+    fn test_scoring_with_workspace_profile() {
+        let conn = setup_in_memory_db();
+        
+        let ws = create_workspace(&conn, "Profile WS").unwrap();
+        
+        let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
+        crate::db::operations::save_item_embedding(&conn, &target.id, &[1.0, 0.0, 0.0], "test", "test").unwrap();
+        
+        // Mock a workspace profile that is identical to target
+        let bytes: Vec<u8> = vec![1.0f32, 0.0, 0.0].iter().flat_map(|&f| f.to_ne_bytes()).collect();
+        conn.execute(
+            "INSERT INTO workspace_embeddings (workspace_id, embedding, provider, model, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![ws.id, bytes, "test", "test", "time"],
+        ).unwrap();
+        
+        let scores = score_item(&conn, &target.id).unwrap();
+        assert_eq!(scores.len(), 1);
+        
+        let score = &scores[0];
+        // 0.45 from profile similarity max.
+        assert!((score.total_score - 0.45).abs() < f32::EPSILON);
+        assert!(score.reasons.iter().any(|r| r == "Matches Profile WS semantic profile: 1.00"));
     }
 }
