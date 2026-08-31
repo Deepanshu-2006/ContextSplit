@@ -191,7 +191,14 @@ pub fn update_item(
 }
 
 pub fn delete_item(conn: &Connection, id: &str) -> Result<()> {
+    let old_ws = get_item(conn, id).ok().and_then(|i| i.workspace_id);
+    
     conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+    
+    if let Some(ws_id) = old_ws {
+        let _ = recalculate_workspace_profile(conn, &ws_id);
+    }
+    
     Ok(())
 }
 
@@ -202,10 +209,28 @@ pub fn move_item(
 ) -> Result<super::models::Item> {
     let now = Utc::now().to_rfc3339();
     
+    // Get old workspace
+    let old_item = get_item(conn, id)?;
+    let old_workspace_id = old_item.workspace_id.clone();
+    
     conn.execute(
         "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![workspace_id, now, id],
     )?;
+    
+    // Recalculate old workspace profile if it existed and is different
+    if let Some(old_ws) = &old_workspace_id {
+        if Some(old_ws.as_str()) != workspace_id {
+            let _ = recalculate_workspace_profile(conn, old_ws);
+        }
+    }
+    
+    // Recalculate new workspace profile
+    if let Some(new_ws) = workspace_id {
+        if Some(new_ws) != old_workspace_id.as_deref() {
+            let _ = recalculate_workspace_profile(conn, new_ws);
+        }
+    }
     
     get_item(conn, id)
 }
@@ -389,6 +414,13 @@ pub fn save_item_embedding(
         rusqlite::params![item_id, bytes, provider, model, now],
     )?;
     
+    // If this item belongs to a workspace, recalculate its profile
+    if let Ok(item) = get_item(conn, item_id) {
+        if let Some(ws_id) = item.workspace_id {
+            let _ = recalculate_workspace_profile(conn, &ws_id);
+        }
+    }
+    
     Ok(())
 }
 
@@ -425,6 +457,161 @@ pub fn delete_item_relationship(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn get_workspace_embedding(conn: &Connection, workspace_id: &str) -> Result<Option<crate::db::models::WorkspaceEmbedding>> {
+    let mut stmt = conn.prepare("SELECT workspace_id, embedding, provider, model, updated_at FROM workspace_embeddings WHERE workspace_id = ?1")?;
+    
+    let mut rows = stmt.query(rusqlite::params![workspace_id])?;
+    if let Some(row) = rows.next()? {
+        let workspace_id: String = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let provider: String = row.get(2)?;
+        let model: String = row.get(3)?;
+        let updated_at: String = row.get(4)?;
+        
+        let mut embedding = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            embedding.push(f32::from_ne_bytes(chunk.try_into().unwrap()));
+        }
+        
+        Ok(Some(crate::db::models::WorkspaceEmbedding {
+            workspace_id,
+            embedding,
+            provider,
+            model,
+            updated_at,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn recalculate_workspace_profile(conn: &Connection, workspace_id: &str) -> Result<Option<crate::db::models::WorkspaceEmbedding>> {
+    let items = list_items(conn, Some(workspace_id))?;
+    
+    if items.is_empty() {
+        conn.execute("DELETE FROM workspace_embeddings WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
+        return Ok(None);
+    }
+    
+    let item_ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    let placeholders = vec!["?"; item_ids.len()].join(",");
+    
+    // Fetch all embeddings for these items
+    let sql = format!("SELECT item_id, embedding, provider, model FROM item_embeddings WHERE item_id IN ({})", placeholders);
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(item_ids.iter());
+    
+    struct TempEmb {
+        item_id: String,
+        emb: Vec<f32>,
+        provider: String,
+        model: String,
+    }
+    
+    let mut item_embs = Vec::new();
+    let mut model_counts: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    
+    let iter = stmt.query_map(params, |row| {
+        let id: String = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let provider: String = row.get(2)?;
+        let model: String = row.get(3)?;
+        
+        let mut emb = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            emb.push(f32::from_ne_bytes(chunk.try_into().unwrap()));
+        }
+        
+        Ok(TempEmb { item_id: id, emb, provider, model })
+    })?;
+    
+    for row_res in iter {
+        if let Ok(temp) = row_res {
+            *model_counts.entry((temp.provider.clone(), temp.model.clone())).or_insert(0) += 1;
+            item_embs.push(temp);
+        }
+    }
+    
+    if item_embs.is_empty() {
+        conn.execute("DELETE FROM workspace_embeddings WHERE workspace_id = ?1", rusqlite::params![workspace_id])?;
+        return Ok(None);
+    }
+    
+    // Find the dominant model
+    let (dominant_provider, dominant_model) = model_counts
+        .into_iter()
+        .max_by_key(|&(_, count)| count)
+        .map(|(k, _)| k)
+        .unwrap();
+    
+    // Fetch user actions for weighting
+    let sig_sql = format!("SELECT item_id, payload FROM context_signals WHERE item_id IN ({}) AND signal_type = 'user_action'", placeholders);
+    let mut sig_stmt = conn.prepare(&sig_sql)?;
+    let sig_params = rusqlite::params_from_iter(item_ids.iter());
+    
+    let mut explicit_items = std::collections::HashSet::new();
+    let sig_iter = sig_stmt.query_map(sig_params, |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    
+    for row_res in sig_iter {
+        if let Ok((id, payload_str)) = row_res {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                if payload.get("action").and_then(|v| v.as_str()) == Some("moved_to_workspace") {
+                    if payload.get("destination_workspace").and_then(|v| v.as_str()) == Some(workspace_id) {
+                        explicit_items.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Compute centroid
+    let mut centroid = Vec::new();
+    let mut total_weight = 0.0_f32;
+    
+    for item_emb in item_embs {
+        if item_emb.provider == dominant_provider && item_emb.model == dominant_model {
+            let weight = if explicit_items.contains(&item_emb.item_id) { 2.0 } else { 1.0 };
+            
+            if centroid.is_empty() {
+                centroid = vec![0.0; item_emb.emb.len()];
+            }
+            
+            for (i, val) in item_emb.emb.iter().enumerate() {
+                if i < centroid.len() {
+                    centroid[i] += val * weight;
+                }
+            }
+            total_weight += weight;
+        }
+    }
+    
+    if total_weight > 0.0 {
+        for val in centroid.iter_mut() {
+            *val /= total_weight;
+        }
+    }
+    
+    // Store it
+    let now = chrono::Utc::now().to_rfc3339();
+    let bytes: Vec<u8> = centroid.iter().flat_map(|&f| f.to_ne_bytes()).collect();
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO workspace_embeddings (workspace_id, embedding, provider, model, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![workspace_id, bytes, dominant_provider, dominant_model, now],
+    )?;
+    
+    Ok(Some(crate::db::models::WorkspaceEmbedding {
+        workspace_id: workspace_id.to_string(),
+        embedding: centroid,
+        provider: dominant_provider,
+        model: dominant_model,
+        updated_at: now,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +621,47 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         conn
+    }
+    
+    #[test]
+    fn test_workspace_profile_recalculation() {
+        let conn = setup_db();
+        
+        let ws = create_workspace(&conn, "Test WS").unwrap();
+        
+        // Add item 1
+        let i1 = create_item(&conn, Some(&ws.id), None, "text", "c1", None, "{}").unwrap();
+        save_item_embedding(&conn, &i1.id, &[1.0, 0.0, 0.0], "test_prov", "test_model").unwrap();
+        
+        // Add item 2
+        let i2 = create_item(&conn, Some(&ws.id), None, "text", "c2", None, "{}").unwrap();
+        save_item_embedding(&conn, &i2.id, &[0.0, 1.0, 0.0], "test_prov", "test_model").unwrap();
+        
+        // Add user_action for i2
+        let payload = serde_json::json!({
+            "action": "moved_to_workspace",
+            "destination_workspace": ws.id
+        }).to_string();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&i2.id),
+            "user_action",
+            None,
+            &payload
+        ).unwrap();
+        
+        // Recalculate manually (normally done by save_item_embedding hook or move_item hook)
+        let profile = recalculate_workspace_profile(&conn, &ws.id).unwrap().unwrap();
+        
+        // i1 weight = 1.0, i2 weight = 2.0. Total = 3.0.
+        // i1 vector = [1, 0, 0]
+        // i2 vector = [0, 1, 0] * 2 = [0, 2, 0]
+        // sum = [1, 2, 0] / 3 = [0.333, 0.666, 0]
+        
+        assert!((profile.embedding[0] - 0.3333333).abs() < 0.0001);
+        assert!((profile.embedding[1] - 0.6666667).abs() < 0.0001);
+        assert_eq!(profile.embedding[2], 0.0);
     }
 
     #[test]
