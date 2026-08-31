@@ -231,6 +231,25 @@ pub fn create_session(conn: &Connection) -> Result<Session> {
     })
 }
 
+pub fn get_latest_session(conn: &Connection) -> Result<Option<Session>> {
+    let mut stmt = conn.prepare("SELECT id, started_at, last_activity_at, ended_at, status FROM sessions ORDER BY started_at DESC LIMIT 1")?;
+    let mut session_iter = stmt.query_map([], |row| {
+        Ok(Session {
+            id: row.get(0)?,
+            started_at: row.get(1)?,
+            last_activity_at: row.get(2)?,
+            ended_at: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+
+    if let Some(session_result) = session_iter.next() {
+        Ok(Some(session_result?))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn get_session(conn: &Connection, id: &str) -> Result<Session> {
     let mut stmt = conn.prepare("SELECT id, started_at, last_activity_at, ended_at, status FROM sessions WHERE id = ?1")?;
     let session = stmt.query_row(params![id], |row| {

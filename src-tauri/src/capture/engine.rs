@@ -15,14 +15,20 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
 
     let title_opt = req.title.as_deref();
 
-    // 2. Insert into Database
     let state = app_handle.state::<AppState>();
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    
+    // Determine active session
+    let session_id_opt = if let Ok(ce) = state.context_engine.lock() {
+        ce.get_or_update_active_session(&conn).ok()
+    } else {
+        None
+    };
     
     let item = operations::create_item(
         &conn,
         None, // Inbox
-        None,
+        session_id_opt.as_deref(),
         &req.data_type,
         &req.content,
         title_opt,
