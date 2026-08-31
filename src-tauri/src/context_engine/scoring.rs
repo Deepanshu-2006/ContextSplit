@@ -21,6 +21,8 @@ pub struct ScoringWeights {
     pub same_session_max: f32,
     pub same_content_type_per_match: f32,
     pub same_content_type_max: f32,
+    pub related_item_per_match: f32,
+    pub related_item_max: f32,
 }
 
 impl Default for ScoringWeights {
@@ -35,6 +37,8 @@ impl Default for ScoringWeights {
             same_session_max: 0.3,
             same_content_type_per_match: 0.02,
             same_content_type_max: 0.1,
+            related_item_per_match: 0.2,
+            related_item_max: 0.5,
         }
     }
 }
@@ -55,6 +59,21 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
     }
     
     let mut scores = Vec::new();
+    
+    // --- Pre-compute Relationships ---
+    let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
+    let mut ws_relationship_scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+    let mut ws_relationship_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    
+    for rel in &relationships {
+        let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
+        if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
+            if let Some(ws_id) = other_item.workspace_id {
+                *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += rel.strength as f32;
+                *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
+            }
+        }
+    }
     
     for ws in workspaces {
         let mut score = 0.0;
@@ -81,7 +100,16 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         
         if has_history {
             score += weights.workspace_history;
-            reasons.push("Previously organized into this workspace".to_string());
+            reasons.push(format!("Previously moved similar items to {}", ws.name));
+        }
+        
+        // --- 2. Item Relationships ---
+        if let Some(rel_score) = ws_relationship_scores.get(&ws.id) {
+            if let Some(count) = ws_relationship_counts.get(&ws.id) {
+                let s = (*rel_score * weights.related_item_per_match).min(weights.related_item_max);
+                score += s;
+                reasons.push(format!("Related to {} items in {}", count, ws.name));
+            }
         }
         
         // --- Prepare for signal comparisons ---
@@ -99,7 +127,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             if content_type_matches > 0 {
                 let s = (content_type_matches as f32 * weights.same_content_type_per_match).min(weights.same_content_type_max);
                 score += s;
-                reasons.push(format!("Shares content type with {} items", content_type_matches));
+                reasons.push(format!("Shares content type with {} items in {}", content_type_matches, ws.name));
             }
             
             // Check Context Signals for the workspace's items
@@ -153,7 +181,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
                             if match_count > 0 {
                                 let s = (match_count as f32 * weights.same_source_app_per_match).min(weights.same_source_app_max);
                                 score += s;
-                                reasons.push(format!("Same source app as {} items", match_count));
+                                reasons.push(format!("Same source app as existing {} items", ws.name));
                             }
                         }
                     }
@@ -164,7 +192,18 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
                             if match_count > 0 {
                                 let s = (match_count as f32 * weights.same_domain_per_match).min(weights.same_domain_max);
                                 score += s;
-                                reasons.push(format!("Same URL domain as {} items", match_count));
+                                let display_domain = t_domain.strip_prefix("www.").unwrap_or(t_domain);
+                                let domain_name = display_domain.split('.').next().unwrap_or(t_domain);
+                                // Capitalize the first letter for a nice reason (e.g. figma.com -> Figma)
+                                let mut chars = domain_name.chars();
+                                let mut pretty_domain = match chars.next() {
+                                    None => String::new(),
+                                    Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                                };
+                                if pretty_domain.is_empty() {
+                                    pretty_domain = t_domain.to_string();
+                                }
+                                reasons.push(format!("Same {} domain as existing {} items", pretty_domain, ws.name));
                             }
                         }
                     }
@@ -182,7 +221,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             if session_match_count > 0 {
                 let s = (session_match_count as f32 * weights.same_session_per_match).min(weights.same_session_max);
                 score += s;
-                reasons.push(format!("Captured in the same session as {} items", session_match_count));
+                reasons.push(format!("Captured during the same activity session as existing {} items", ws.name));
             }
         }
         
@@ -258,7 +297,7 @@ mod tests {
         
         assert!(w2_score.score >= 0.4);
         assert_eq!(w1_score.score, 0.04);
-        assert_eq!(w1_score.reasons[0], "Shares content type with 2 items");
+        assert_eq!(w1_score.reasons[0], "Shares content type with 2 items in Work");
     }
     
     #[test]
@@ -294,6 +333,49 @@ mod tests {
         // domain_match = 1 (0.1)
         // Total = 0.12
         assert!((score.score - 0.12).abs() < f32::EPSILON);
-        assert!(score.reasons.iter().any(|r| r == "Same URL domain as 1 items"));
+        assert!(score.reasons.iter().any(|r| r.contains("Same Example domain as existing Research items")));
+    }
+    
+    #[test]
+    fn test_scoring_with_relationships() {
+        let conn = setup_in_memory_db();
+        
+        let ws = create_workspace(&conn, "Portfolio").unwrap();
+        
+        let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
+        let related_item_1 = create_item(&conn, Some(&ws.id), None, "text", "r1", None, "{}").unwrap();
+        let related_item_2 = create_item(&conn, Some(&ws.id), None, "text", "r2", None, "{}").unwrap();
+        
+        // Target -> related 1 (strength 0.6)
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &target.id,
+            &related_item_1.id,
+            "temporal_proximity",
+            0.6,
+            None
+        ).unwrap();
+        
+        // Target -> related 2 (strength 0.4)
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &target.id,
+            &related_item_2.id,
+            "same_session",
+            0.4,
+            None
+        ).unwrap();
+        
+        let scores = score_item(&conn, &target.id).unwrap();
+        assert_eq!(scores.len(), 1);
+        
+        let score = &scores[0];
+        assert_eq!(score.workspace_id, ws.id);
+        
+        // Content type match for 2 items: 2 * 0.02 = 0.04
+        // Relationships: (0.6 + 0.4) = 1.0 * related_item_per_match (0.2) = 0.2
+        // Total = 0.24
+        assert!((score.score - 0.24).abs() < f32::EPSILON);
+        assert!(score.reasons.iter().any(|r| r == "Related to 2 items in Portfolio"));
     }
 }
