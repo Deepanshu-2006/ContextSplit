@@ -44,6 +44,7 @@ pub trait ContextProvider: Send + Sync {
 pub struct ContextEngine {
     providers: Vec<Box<dyn ContextProvider>>,
     pub semantic_provider: Option<Arc<Box<dyn crate::semantic::SemanticProvider>>>,
+    pub semantic_similarity: std::sync::Mutex<crate::semantic::similarity::SemanticSimilarityService>,
     pub inactivity_threshold_secs: i64,
 }
 
@@ -52,6 +53,7 @@ impl ContextEngine {
         Self { 
             providers: vec![],
             semantic_provider: None,
+            semantic_similarity: std::sync::Mutex::new(crate::semantic::similarity::SemanticSimilarityService::new(1000)),
             inactivity_threshold_secs: 1800, // 30 minutes default
         }
     }
@@ -161,6 +163,14 @@ impl ContextEngine {
     
     pub fn get_semantic_provider(&self) -> Option<Arc<Box<dyn crate::semantic::SemanticProvider>>> {
         self.semantic_provider.clone()
+    }
+    
+    pub fn get_semantic_similarity(&self, conn: &Connection, item1_id: &str, item2_id: &str) -> Option<f32> {
+        if let Ok(mut similarity_service) = self.semantic_similarity.lock() {
+            similarity_service.calculate_similarity(conn, item1_id, item2_id)
+        } else {
+            None
+        }
     }
 }
 

@@ -39,4 +39,5 @@ core-graphics = "0.25.0"
 url = "2.5.8"
 regex = "1.13.1"
 fastembed = "6.0.2"
+lru = "0.18.3"
 
