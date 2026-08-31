@@ -3,6 +3,7 @@ pub mod engine;
 pub mod providers;
 pub mod scoring;
 pub mod relationships;
+pub mod graph;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
