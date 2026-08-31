@@ -2,6 +2,7 @@ mod db;
 mod clipboard;
 pub mod capture;
 pub mod context_engine;
+pub mod semantic;
 
 use std::sync::Mutex;
 use tauri::{Manager, State};

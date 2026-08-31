@@ -42,6 +42,7 @@ pub trait ContextProvider: Send + Sync {
 
 pub struct ContextEngine {
     providers: Vec<Box<dyn ContextProvider>>,
+    pub semantic_provider: Option<Box<dyn crate::semantic::SemanticProvider>>,
     pub inactivity_threshold_secs: i64,
 }
 
@@ -49,8 +50,13 @@ impl ContextEngine {
     pub fn new() -> Self {
         Self { 
             providers: vec![],
+            semantic_provider: None,
             inactivity_threshold_secs: 1800, // 30 minutes default
         }
+    }
+    
+    pub fn set_semantic_provider(&mut self, provider: Box<dyn crate::semantic::SemanticProvider>) {
+        self.semantic_provider = Some(provider);
     }
     
     pub fn register(&mut self, provider: Box<dyn ContextProvider>) {
@@ -127,6 +133,40 @@ impl ContextEngine {
             }
         }
     }
+    
+    pub fn index_item_semantically(&self, conn: &Connection, item_id: &str) -> Result<(), String> {
+        // If there's no semantic provider, this is a no-op
+        if let Some(provider) = &self.semantic_provider {
+            // Fetch the item
+            let item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
+            
+            // Only embed if there's textual content (or title)
+            let mut text_to_embed = String::new();
+            if let Some(title) = &item.title {
+                text_to_embed.push_str(title);
+                text_to_embed.push_str(" ");
+            }
+            if item.item_type == "text" || item.item_type == "url" {
+                text_to_embed.push_str(&item.content);
+            }
+            
+            if !text_to_embed.trim().is_empty() {
+                // Generate the embedding
+                let embedding = provider.generate_embedding(&text_to_embed)?;
+                
+                // Save it to SQLite
+                let status = provider.status();
+                crate::db::operations::save_item_embedding(
+                    conn,
+                    item_id,
+                    &embedding,
+                    &status.model_name,
+                    &status.model_name
+                ).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +180,12 @@ mod tests {
     fn test_session_detection_lifecycle() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
+        crate::db::settings::update_settings(&conn, crate::db::settings::PrivacySettings {
+            enable_active_app: true,
+            enable_window_title: true,
+            enable_browser_domain: true,
+            enable_session_tracking: true,
+        }).unwrap();
 
         let mut ce = ContextEngine::new();
         // Use a short threshold for testing
@@ -174,6 +220,12 @@ mod tests {
     fn test_multiple_items_same_session() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
+        crate::db::settings::update_settings(&conn, crate::db::settings::PrivacySettings {
+            enable_active_app: true,
+            enable_window_title: true,
+            enable_browser_domain: true,
+            enable_session_tracking: true,
+        }).unwrap();
 
         let mut ce = ContextEngine::new();
         ce.inactivity_threshold_secs = 60; // 1 minute

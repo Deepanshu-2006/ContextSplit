@@ -41,6 +41,8 @@ mod tests {
         ce.register(Box::new(UserActionContextProvider));
         ce.register(Box::new(WorkspaceContextProvider));
         ce.register(Box::new(UrlContextProvider));
+        // Add Mock Semantic Provider
+        ce.set_semantic_provider(Box::new(crate::semantic::MockSemanticProvider::new()));
         // Note: Skipping ActiveAppProvider in test since it relies on actual OS window state which we can't easily mock in a standard Cargo test without trait refactoring.
         // We will simulate it via standard Capture requests.
         ce
@@ -241,6 +243,38 @@ mod tests {
         let signals_for_5 = crate::context_engine::operations::list_context_signals(&conn2, None, Some(&item_5.id)).unwrap();
         // Should only have "capture_event", no "url_metadata"
         assert!(!signals_for_5.iter().any(|s| s.signal_type == "url_metadata"), "URL metadata signal should NOT be collected");
+        
+        // Clean up
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_semantic_layer_optionality() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_engine(); // Engine has MockSemanticProvider now
+
+        // Create an item
+        let item = operations::create_item(
+            &conn, 
+            None, 
+            None, 
+            "text", 
+            "Test semantic embedding", 
+            Some("Title"), 
+            "{}"
+        ).unwrap();
+
+        // Index it semantically
+        engine.index_item_semantically(&conn, &item.id).unwrap();
+
+        // Verify embedding was stored
+        let embedding_record = operations::get_item_embedding(&conn, &item.id).unwrap();
+        assert!(embedding_record.is_some(), "Embedding should be saved in the database");
+        
+        let record = embedding_record.unwrap();
+        assert_eq!(record.item_id, item.id);
+        assert_eq!(record.embedding.len(), 3); // Mock provider generates size 3
+        assert_eq!(record.model, "mock-semantic-v1");
         
         // Clean up
         let _ = fs::remove_dir_all(db_path.parent().unwrap());

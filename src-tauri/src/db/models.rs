@@ -52,3 +52,12 @@ pub struct ItemRelationship {
     pub metadata: Option<String>,
     pub created_at: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ItemEmbedding {
+    pub item_id: String,
+    pub embedding: Vec<f32>,
+    pub provider: String,
+    pub model: String,
+    pub created_at: String,
+}

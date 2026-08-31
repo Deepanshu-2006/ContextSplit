@@ -372,6 +372,54 @@ pub fn get_item_relationships(conn: &Connection, item_id: &str) -> Result<Vec<su
     Ok(relationships)
 }
 
+pub fn save_item_embedding(
+    conn: &Connection,
+    item_id: &str,
+    embedding: &[f32],
+    provider: &str,
+    model: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    let bytes: Vec<u8> = embedding.iter().flat_map(|&f| f.to_ne_bytes()).collect();
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO item_embeddings (item_id, embedding, provider, model, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![item_id, bytes, provider, model, now],
+    )?;
+    
+    Ok(())
+}
+
+pub fn get_item_embedding(conn: &Connection, item_id: &str) -> Result<Option<crate::db::models::ItemEmbedding>> {
+    let mut stmt = conn.prepare("SELECT item_id, embedding, provider, model, created_at FROM item_embeddings WHERE item_id = ?1")?;
+    
+    let mut rows = stmt.query(rusqlite::params![item_id])?;
+    if let Some(row) = rows.next()? {
+        let item_id: String = row.get(0)?;
+        let bytes: Vec<u8> = row.get(1)?;
+        let provider: String = row.get(2)?;
+        let model: String = row.get(3)?;
+        let created_at: String = row.get(4)?;
+        
+        let mut embedding = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            embedding.push(f32::from_ne_bytes(chunk.try_into().unwrap()));
+        }
+        
+        Ok(Some(crate::db::models::ItemEmbedding {
+            item_id,
+            embedding,
+            provider,
+            model,
+            created_at,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn delete_item_relationship(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM item_relationships WHERE id = ?1", params![id])?;
     Ok(())
