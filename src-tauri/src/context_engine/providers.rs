@@ -8,7 +8,7 @@ impl ContextProvider for CaptureContextProvider {
         "capture_context"
     }
 
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+    fn collect(&self, _conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
         if let Some(ContextEvent::Capture { item_id, workspace_id, source, data_type, metadata }) = event {
             vec![ContextSignalParams {
                 workspace_id: workspace_id.clone(),
@@ -33,7 +33,7 @@ impl ContextProvider for UserActionContextProvider {
         "user_action_context"
     }
 
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+    fn collect(&self, _conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
         if let Some(ContextEvent::UserAction { item_id, action, source_workspace, destination_workspace }) = event {
             vec![ContextSignalParams {
                 workspace_id: destination_workspace.clone(), // Use destination as the primary workspace context
@@ -58,7 +58,7 @@ impl ContextProvider for WorkspaceContextProvider {
         "workspace_context"
     }
 
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+    fn collect(&self, _conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
         if let Some(ContextEvent::WorkspaceSelected { workspace_id }) = event {
             vec![ContextSignalParams {
                 workspace_id: Some(workspace_id.clone()),
@@ -81,19 +81,35 @@ impl ContextProvider for ActiveAppProvider {
         "active_app"
     }
 
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+    fn collect(&self, conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+        let settings = crate::db::settings::get_settings(conn).unwrap_or(crate::db::settings::PrivacySettings {
+            enable_active_app: false,
+            enable_window_title: false,
+            enable_browser_domain: false,
+            enable_session_tracking: false,
+        });
+
+        if !settings.enable_active_app {
+            return vec![];
+        }
+
         if let Some(ContextEvent::Capture { item_id, workspace_id, .. }) = event {
             if let Some(app_info) = super::get_active_app() {
+                let mut payload = json!({
+                    "app_name": app_info.app_name,
+                    "process_name": app_info.process_name,
+                    "process_id": app_info.process_id,
+                });
+                
+                if settings.enable_window_title {
+                    payload.as_object_mut().unwrap().insert("window_title".to_string(), json!(app_info.window_title));
+                }
+
                 return vec![ContextSignalParams {
                     workspace_id: workspace_id.clone(),
                     item_id: Some(item_id.clone()),
                     signal_type: "active_app".to_string(),
-                    payload: json!({
-                        "app_name": app_info.app_name,
-                        "process_name": app_info.process_name,
-                        "process_id": app_info.process_id,
-                        "window_title": app_info.window_title,
-                    }),
+                    payload,
                 }];
             }
         }
@@ -108,7 +124,18 @@ impl ContextProvider for UrlContextProvider {
         "url_context"
     }
 
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+    fn collect(&self, conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
+        let settings = crate::db::settings::get_settings(conn).unwrap_or(crate::db::settings::PrivacySettings {
+            enable_active_app: false,
+            enable_window_title: false,
+            enable_browser_domain: false,
+            enable_session_tracking: false,
+        });
+
+        if !settings.enable_browser_domain {
+            return vec![];
+        }
+
         if let Some(ContextEvent::Capture { item_id, workspace_id, metadata, .. }) = event {
             let mut raw_url = None;
             

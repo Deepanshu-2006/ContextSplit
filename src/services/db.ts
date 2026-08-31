@@ -32,8 +32,16 @@ export interface ContextSignal {
 
 export interface WorkspaceScore {
   workspace_id: string;
-  score: number;
+  total_score: number;
+  confidence: number;
   reasons: string[];
+}
+
+export interface PrivacySettings {
+  enable_active_app: boolean;
+  enable_window_title: boolean;
+  enable_browser_domain: boolean;
+  enable_session_tracking: boolean;
 }
 
 export interface ItemRelationship {
@@ -118,5 +126,9 @@ export const db = {
 
   async getStrongestRelationships(itemId: string, limit: number): Promise<ItemRelationship[]> {
     return invoke("get_strongest_relationships", { itemId, limit });
-  }
+  },
+
+  // Settings
+  getSettings: () => invoke<PrivacySettings>('get_settings'),
+  updateSettings: (settings: PrivacySettings) => invoke<void>('update_settings', { settings }),
 };

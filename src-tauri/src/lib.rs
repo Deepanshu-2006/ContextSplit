@@ -160,6 +160,18 @@ fn get_strongest_relationships(
 }
 
 #[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Result<crate::db::settings::PrivacySettings, String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::db::settings::get_settings(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_settings(settings: crate::db::settings::PrivacySettings, state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::db::settings::update_settings(&conn, settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -228,7 +240,9 @@ pub fn run() {
             get_context_signal,
             list_context_signals,
             score_item,
-            get_strongest_relationships
+            get_strongest_relationships,
+            get_settings,
+            update_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -37,7 +37,7 @@ pub trait ContextProvider: Send + Sync {
     fn cleanup(&mut self) -> Result<(), String> { Ok(()) }
     
     // For push-based (event-driven) and pull-based contextual signals
-    fn collect(&self, event: Option<&ContextEvent>) -> Vec<ContextSignalParams>;
+    fn collect(&self, conn: &Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams>;
 }
 
 pub struct ContextEngine {
@@ -77,6 +77,14 @@ impl ContextEngine {
                         if diff > self.inactivity_threshold_secs {
                             // Expired. End it and create a new one.
                             let _ = operations::end_session(conn, &session.id);
+                            
+                            // Check if session tracking is enabled
+                            if let Ok(settings) = crate::db::settings::get_settings(conn) {
+                                if !settings.enable_session_tracking {
+                                    return Err("Session tracking disabled".to_string());
+                                }
+                            }
+                            
                             let new_session = operations::create_session(conn)
                                 .map_err(|e| e.to_string())?;
                             return Ok(new_session.id);
@@ -89,12 +97,26 @@ impl ContextEngine {
                 }
                 
                 // If it was ended, or parsing failed, create new.
+                // Check if session tracking is enabled
+                if let Ok(settings) = crate::db::settings::get_settings(conn) {
+                    if !settings.enable_session_tracking {
+                        return Err("Session tracking disabled".to_string());
+                    }
+                }
+                
                 let new_session = operations::create_session(conn)
                     .map_err(|e| e.to_string())?;
                 Ok(new_session.id)
             },
             Ok(None) | Err(_) => {
                 // No sessions exist yet, create first one
+                // Check if session tracking is enabled
+                if let Ok(settings) = crate::db::settings::get_settings(conn) {
+                    if !settings.enable_session_tracking {
+                        return Err("Session tracking disabled".to_string());
+                    }
+                }
+                
                 let new_session = operations::create_session(conn)
                     .map_err(|e| e.to_string())?;
                 Ok(new_session.id)
@@ -106,7 +128,7 @@ impl ContextEngine {
         let session_id_opt = self.get_or_update_active_session(conn).ok();
         
         for provider in &self.providers {
-            let signal_params = provider.collect(Some(&event));
+            let signal_params = provider.collect(conn, Some(&event));
             for param in signal_params {
                 let _ = super::operations::create_context_signal(
                     conn,

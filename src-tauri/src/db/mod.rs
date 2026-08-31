@@ -1,5 +1,6 @@
 pub mod models;
 pub mod operations;
+pub mod settings;
 
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
@@ -111,6 +112,28 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         
         user_version = 5;
+    }
+
+    if user_version < 6 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                id TEXT PRIMARY KEY,
+                enable_active_app INTEGER NOT NULL DEFAULT 0,
+                enable_window_title INTEGER NOT NULL DEFAULT 0,
+                enable_browser_domain INTEGER NOT NULL DEFAULT 0,
+                enable_session_tracking INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        
+        // Insert default row
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (id, enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking) 
+             VALUES ('default', 0, 0, 0, 0)",
+            [],
+        )?;
+        
+        user_version = 6;
     }
 
     conn.pragma_update(None, "user_version", user_version)?;

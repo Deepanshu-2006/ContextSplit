@@ -1,6 +1,10 @@
+import { useState } from "react";
 import { Search, Bell, Settings } from "lucide-react";
+import { SettingsModal } from "../settings/SettingsModal";
 
 export function TopBar() {
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   return (
     <header 
       // data-tauri-drag-region allows the user to drag the window from the top bar if decorations are disabled
@@ -24,10 +28,17 @@ export function TopBar() {
         <button className="text-gray-400 hover:text-gray-900 transition-colors">
           <Bell size={16} />
         </button>
-        <button className="text-gray-400 hover:text-gray-900 transition-colors">
+        <button 
+          className="text-gray-400 hover:text-gray-900 transition-colors"
+          onClick={() => setIsSettingsOpen(true)}
+        >
           <Settings size={16} />
         </button>
       </div>
+      
+      {isSettingsOpen && (
+        <SettingsModal onClose={() => setIsSettingsOpen(false)} />
+      )}
     </header>
   );
 }
