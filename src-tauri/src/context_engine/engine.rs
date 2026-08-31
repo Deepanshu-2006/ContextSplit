@@ -65,6 +65,13 @@ impl ContextEngine {
     }
     
     pub fn get_or_update_active_session(&self, conn: &Connection) -> Result<String, String> {
+        // Check if session tracking is enabled first
+        if let Ok(settings) = crate::db::settings::get_settings(conn) {
+            if !settings.enable_session_tracking {
+                return Err("Session tracking disabled".to_string());
+            }
+        }
+
         // Find latest session
         match operations::get_latest_session(conn) {
             Ok(Some(session)) => {
@@ -78,13 +85,6 @@ impl ContextEngine {
                             // Expired. End it and create a new one.
                             let _ = operations::end_session(conn, &session.id);
                             
-                            // Check if session tracking is enabled
-                            if let Ok(settings) = crate::db::settings::get_settings(conn) {
-                                if !settings.enable_session_tracking {
-                                    return Err("Session tracking disabled".to_string());
-                                }
-                            }
-                            
                             let new_session = operations::create_session(conn)
                                 .map_err(|e| e.to_string())?;
                             return Ok(new_session.id);
@@ -97,26 +97,12 @@ impl ContextEngine {
                 }
                 
                 // If it was ended, or parsing failed, create new.
-                // Check if session tracking is enabled
-                if let Ok(settings) = crate::db::settings::get_settings(conn) {
-                    if !settings.enable_session_tracking {
-                        return Err("Session tracking disabled".to_string());
-                    }
-                }
-                
                 let new_session = operations::create_session(conn)
                     .map_err(|e| e.to_string())?;
                 Ok(new_session.id)
             },
             Ok(None) | Err(_) => {
                 // No sessions exist yet, create first one
-                // Check if session tracking is enabled
-                if let Ok(settings) = crate::db::settings::get_settings(conn) {
-                    if !settings.enable_session_tracking {
-                        return Err("Session tracking disabled".to_string());
-                    }
-                }
-                
                 let new_session = operations::create_session(conn)
                     .map_err(|e| e.to_string())?;
                 Ok(new_session.id)

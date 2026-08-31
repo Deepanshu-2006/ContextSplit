@@ -5,6 +5,9 @@ pub mod scoring;
 pub mod relationships;
 pub mod graph;
 
+#[cfg(test)]
+pub mod workflow_tests;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 

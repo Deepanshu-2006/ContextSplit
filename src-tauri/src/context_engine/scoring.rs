@@ -6,7 +6,8 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceScore {
     pub workspace_id: String,
-    pub score: f32,
+    pub total_score: f32,
+    pub confidence: f32,
     pub reasons: Vec<String>,
 }
 
@@ -232,14 +233,15 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         if score > 0.0 {
             scores.push(WorkspaceScore {
                 workspace_id: ws.id.clone(),
-                score,
+                total_score: score,
+                confidence: score, // UI handles percentage mapping
                 reasons,
             });
         }
     }
     
     // Sort descending
-    scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    scores.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(Ordering::Equal));
     
     Ok(scores)
 }
@@ -295,8 +297,8 @@ mod tests {
         let w2_score = scores.iter().find(|s| s.workspace_id == ws2.id).unwrap();
         let w1_score = scores.iter().find(|s| s.workspace_id == ws1.id).unwrap();
         
-        assert!(w2_score.score >= 0.4);
-        assert_eq!(w1_score.score, 0.04);
+        assert!(w2_score.total_score >= 0.4);
+        assert_eq!(w1_score.total_score, 0.04);
         assert_eq!(w1_score.reasons[0], "Shares content type with 2 items in Work");
     }
     
@@ -332,7 +334,7 @@ mod tests {
         // content_type_matches = 1 (0.02)
         // domain_match = 1 (0.1)
         // Total = 0.12
-        assert!((score.score - 0.12).abs() < f32::EPSILON);
+        assert!((score.total_score - 0.12).abs() < f32::EPSILON);
         assert!(score.reasons.iter().any(|r| r.contains("Same Example domain as existing Research items")));
     }
     
@@ -375,7 +377,7 @@ mod tests {
         // Content type match for 2 items: 2 * 0.02 = 0.04
         // Relationships: (0.6 + 0.4) = 1.0 * related_item_per_match (0.2) = 0.2
         // Total = 0.24
-        assert!((score.score - 0.24).abs() < f32::EPSILON);
+        assert!((score.total_score - 0.24).abs() < f32::EPSILON);
         assert!(score.reasons.iter().any(|r| r == "Related to 2 items in Portfolio"));
     }
 }
