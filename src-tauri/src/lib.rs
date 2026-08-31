@@ -179,6 +179,38 @@ fn update_settings(settings: crate::db::settings::PrivacySettings, state: State<
 }
 
 #[tauri::command]
+fn delete_semantic_data(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::db::operations::delete_semantic_data(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rebuild_semantic_data(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::db::operations::rebuild_semantic_data(&conn).map_err(|e| e.to_string())?;
+    
+    // Spawn background retry loop for all the newly pending items
+    let app_handle_clone = app_handle.clone();
+    std::thread::spawn(move || {
+        if let Some(state) = app_handle_clone.try_state::<AppState>() {
+            if let Ok(conn) = state.db_conn.lock() {
+                if let Ok(settings) = crate::db::settings::get_settings(&conn) {
+                    if settings.enable_semantic_processing {
+                        if let Ok(pending_items) = crate::db::operations::get_pending_or_failed_items(&conn, 3) {
+                            for item_id in pending_items {
+                                crate::capture::engine::retry_item_embedding(app_handle_clone.clone(), &item_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    
+    Ok(())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -271,7 +303,9 @@ pub fn run() {
             get_strongest_relationships,
             get_item_semantic_status,
             get_settings,
-            update_settings
+            update_settings,
+            delete_semantic_data,
+            rebuild_semantic_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

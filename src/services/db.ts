@@ -42,6 +42,9 @@ export interface PrivacySettings {
   enable_window_title: boolean;
   enable_browser_domain: boolean;
   enable_session_tracking: boolean;
+  enable_semantic_processing: boolean;
+  semantic_provider: string;
+  enable_semantic_suggestions: boolean;
 }
 
 export interface ItemRelationship {
@@ -131,4 +134,7 @@ export const db = {
   // Settings
   getSettings: () => invoke<PrivacySettings>('get_settings'),
   updateSettings: (settings: PrivacySettings) => invoke<void>('update_settings', { settings }),
+  
+  deleteSemanticData: () => invoke<void>('delete_semantic_data'),
+  rebuildSemanticData: () => invoke<void>('rebuild_semantic_data'),
 };

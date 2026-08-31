@@ -53,6 +53,10 @@ impl Default for ScoringWeights {
 pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore>, String> {
     let weights = ScoringWeights::default();
     
+    let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
+        settings.enable_semantic_suggestions
+    } else { true };
+    
     // Fetch Target Item
     let target_item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
     
@@ -131,21 +135,25 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         }
         
         // --- 3. Item Relationships Semantic Similarity ---
-        if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
-            let s = (*sem_max).min(weights.semantic_similarity_max);
-            score += s;
-            reasons.push(format!("Semantic similarity with {} Items: {:.2}", ws.name, sem_max));
+        if enable_semantic {
+            if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
+                let s = (*sem_max).min(weights.semantic_similarity_max);
+                score += s;
+                reasons.push(format!("Semantic similarity with {} Items: {:.2}", ws.name, sem_max));
+            }
         }
         
         // --- 4. Workspace Semantic Profile ---
-        if let Some(t_emb) = &target_embedding {
-            if let Ok(Some(ws_profile)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
-                if t_emb.provider == ws_profile.provider && t_emb.model == ws_profile.model {
-                    let sim = crate::semantic::cosine_similarity(&t_emb.embedding, &ws_profile.embedding);
-                    if sim > 0.0 {
-                        let s = sim.min(weights.workspace_profile_similarity_max);
-                        score += s;
-                        reasons.push(format!("Matches {} semantic profile: {:.2}", ws.name, sim));
+        if enable_semantic {
+            if let Some(t_emb) = &target_embedding {
+                if let Ok(Some(ws_profile)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
+                    if t_emb.provider == ws_profile.provider && t_emb.model == ws_profile.model {
+                        let sim = crate::semantic::cosine_similarity(&t_emb.embedding, &ws_profile.embedding);
+                        if sim > 0.0 {
+                            let s = sim.min(weights.workspace_profile_similarity_max);
+                            score += s;
+                            reasons.push(format!("Matches {} semantic profile: {:.2}", ws.name, sim));
+                        }
                     }
                 }
             }

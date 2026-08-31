@@ -671,6 +671,21 @@ pub fn get_pending_or_failed_items(conn: &Connection, max_retries: i32) -> Resul
     Ok(items)
 }
 
+pub fn delete_semantic_data(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM item_embeddings", [])?;
+    conn.execute("DELETE FROM workspace_embeddings", [])?;
+    conn.execute("DELETE FROM item_relationships WHERE relationship_type = 'semantic_similarity'", [])?;
+    conn.execute("UPDATE item_semantic_status SET status = 'deleted', retries = 0", [])?;
+    Ok(())
+}
+
+pub fn rebuild_semantic_data(conn: &Connection) -> Result<()> {
+    delete_semantic_data(conn)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute("INSERT OR REPLACE INTO item_semantic_status (item_id, status, retries, updated_at) SELECT id, 'pending', 0, ?1 FROM items", rusqlite::params![now])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

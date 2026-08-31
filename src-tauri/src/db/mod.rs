@@ -181,6 +181,13 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 9;
     }
 
+    if user_version < 10 {
+        conn.execute("ALTER TABLE settings ADD COLUMN enable_semantic_processing INTEGER DEFAULT 1", [])?;
+        conn.execute("ALTER TABLE settings ADD COLUMN semantic_provider TEXT DEFAULT 'local'", [])?;
+        conn.execute("ALTER TABLE settings ADD COLUMN enable_semantic_suggestions INTEGER DEFAULT 1", [])?;
+        user_version = 10;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

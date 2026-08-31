@@ -87,6 +87,9 @@ impl ContextProvider for ActiveAppProvider {
             enable_window_title: false,
             enable_browser_domain: false,
             enable_session_tracking: false,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
         });
 
         if !settings.enable_active_app {
@@ -130,6 +133,9 @@ impl ContextProvider for UrlContextProvider {
             enable_window_title: false,
             enable_browser_domain: false,
             enable_session_tracking: false,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
         });
 
         if !settings.enable_browser_domain {

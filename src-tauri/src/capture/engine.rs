@@ -58,7 +58,12 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
         let _ = crate::context_engine::relationships::generate_relationships(&conn, &item.id);
         
         // --- Asynchronous Semantic Embedding ---
-        if let Some(provider) = ce.get_semantic_provider() {
+        let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(&conn) {
+            settings.enable_semantic_processing
+        } else { true };
+        
+        if enable_semantic {
+            if let Some(provider) = ce.get_semantic_provider() {
             let builder = crate::semantic::builder::SemanticContentBuilder::new();
             let text_to_embed = builder.build(&item);
             
@@ -134,8 +139,13 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
                 let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "ready", None);
             }
         } else {
+            // Processing disabled by settings
             let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "failed", None);
         }
+    } else {
+        // Disabled by settings or no provider
+        let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "failed", None);
+    }
     }
 
     // Drop the mutex guard before emitting events or showing notifications to prevent deadlocks
@@ -166,7 +176,14 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
     
     if let Some(item) = item_opt {
         if let Ok(ce) = state.context_engine.lock() {
-            if let Some(provider) = ce.get_semantic_provider() {
+            let enable_semantic = if let Ok(conn) = state.db_conn.lock() {
+                if let Ok(settings) = crate::db::settings::get_settings(&conn) {
+                    settings.enable_semantic_processing
+                } else { true }
+            } else { true };
+            
+            if enable_semantic {
+                if let Some(provider) = ce.get_semantic_provider() {
                 let builder = crate::semantic::builder::SemanticContentBuilder::new();
                 let text_to_embed = builder.build(&item);
                 
@@ -239,4 +256,5 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
             }
         }
     }
+}
 }

@@ -110,6 +110,95 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 onChange={() => handleToggle("enable_session_tracking")}
               />
 
+              <div className="pt-6 mt-6 border-t border-gray-100">
+                <div className="flex items-center gap-2 text-gray-900 mb-6">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-purple-500"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-5.224 4.668ab4.8 4.8 0 0 0 1.554 4.316 4 4 0 0 0 2.87 5.068 3 3 0 1 0 5.485 2.115 4 4 0 0 0 5.224-4.668 4.8 4.8 0 0 0-1.554-4.316 4 4 0 0 0-2.87-5.068A3 3 0 1 0 12 5Z"/><path d="M9.12 11.23a3 3 0 0 0 2.21-1.39"/><path d="M9.47 16a3 3 0 0 0 4.14-1.12"/><path d="M12.92 10.92a3 3 0 0 0 2.45 1.05"/></svg>
+                  <h3 className="text-base font-semibold tracking-tight">AI & Semantic Context</h3>
+                </div>
+
+                <div className="space-y-6">
+                  <ToggleRow 
+                    icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>}
+                    title="Semantic Processing"
+                    description="Analyze captured text to understand its meaning. All analysis happens locally on your device."
+                    checked={settings.enable_semantic_processing}
+                    onChange={() => handleToggle("enable_semantic_processing")}
+                  />
+
+                  <div className={`flex items-start gap-4 ${!settings.enable_semantic_processing ? 'opacity-50' : ''}`}>
+                    <div className="p-2 rounded-lg mt-0.5 bg-gray-100 text-gray-500">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="3" x2="21" y1="9" y2="9"/><line x1="9" x2="9" y1="21" y2="9"/></svg>
+                    </div>
+                    <div className="flex-1">
+                      <label className="flex flex-col gap-2">
+                        <div>
+                          <div className="font-medium text-gray-900 text-sm">Semantic Provider</div>
+                          <div className="text-sm text-gray-500 leading-relaxed mt-0.5">Select the backend used to generate meaning representations.</div>
+                        </div>
+                        <select 
+                          className="w-full mt-2 bg-gray-50 border border-gray-200 text-gray-900 text-sm rounded-lg focus:ring-purple-500 focus:border-purple-500 block p-2.5"
+                          value={settings.semantic_provider}
+                          onChange={(e) => {
+                            const newSettings = { ...settings, semantic_provider: e.target.value };
+                            setSettings(newSettings);
+                            db.updateSettings(newSettings).catch(console.error);
+                          }}
+                          disabled={!settings.enable_semantic_processing}
+                        >
+                          <option value="local">Local ONNX Model (FastEmbed)</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+
+                  <ToggleRow 
+                    icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"/></svg>}
+                    title="Semantic Suggestions"
+                    description="Use meaning to suggest Workspaces when capturing similar items."
+                    checked={settings.enable_semantic_suggestions}
+                    onChange={() => handleToggle("enable_semantic_suggestions")}
+                    disabled={!settings.enable_semantic_processing}
+                  />
+
+                  <div className="pt-4 mt-2">
+                    <div className="flex gap-3">
+                      <button 
+                        onClick={async () => {
+                          if (window.confirm("Are you sure you want to delete all generated semantic data? Your original items will NOT be deleted.")) {
+                            try {
+                              await db.deleteSemanticData();
+                              alert("Semantic data deleted successfully.");
+                            } catch (e) {
+                              console.error(e);
+                              alert("Failed to delete semantic data.");
+                            }
+                          }
+                        }}
+                        className="px-4 py-2 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors"
+                      >
+                        Delete Semantic Data
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          if (window.confirm("This will delete and regenerate all semantic data in the background. Your items will not be duplicated. Continue?")) {
+                            try {
+                              await db.rebuildSemanticData();
+                              alert("Rebuilding semantic data in the background.");
+                            } catch (e) {
+                              console.error(e);
+                              alert("Failed to start rebuilding process.");
+                            }
+                          }
+                        }}
+                        className="px-4 py-2 text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors"
+                      >
+                        Rebuild Semantic Data
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
             </div>
           )}
         </div>
