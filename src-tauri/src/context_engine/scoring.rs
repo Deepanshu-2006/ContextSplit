@@ -24,6 +24,7 @@ pub struct ScoringWeights {
     pub same_content_type_max: f32,
     pub related_item_per_match: f32,
     pub related_item_max: f32,
+    pub semantic_similarity_max: f32,
 }
 
 impl Default for ScoringWeights {
@@ -40,6 +41,7 @@ impl Default for ScoringWeights {
             same_content_type_max: 0.1,
             related_item_per_match: 0.2,
             related_item_max: 0.5,
+            semantic_similarity_max: 0.4,
         }
     }
 }
@@ -65,13 +67,21 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
     let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
     let mut ws_relationship_scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
     let mut ws_relationship_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut ws_semantic_max: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
     
     for rel in &relationships {
         let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
         if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
             if let Some(ws_id) = other_item.workspace_id {
-                *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += rel.strength as f32;
-                *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
+                if rel.relationship_type == "semantic_similarity" {
+                    let current_max = ws_semantic_max.entry(ws_id.clone()).or_insert(0.0);
+                    if rel.strength as f32 > *current_max {
+                        *current_max = rel.strength as f32;
+                    }
+                } else {
+                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += rel.strength as f32;
+                    *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
+                }
             }
         }
     }
@@ -101,7 +111,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         
         if has_history {
             score += weights.workspace_history;
-            reasons.push(format!("Previously moved similar items to {}", ws.name));
+            reasons.push(format!("User previously organized similar Items into {}", ws.name));
         }
         
         // --- 2. Item Relationships ---
@@ -109,8 +119,15 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             if let Some(count) = ws_relationship_counts.get(&ws.id) {
                 let s = (*rel_score * weights.related_item_per_match).min(weights.related_item_max);
                 score += s;
-                reasons.push(format!("Related to {} items in {}", count, ws.name));
+                reasons.push(format!("{} related Items already belong to {}", count, ws.name));
             }
+        }
+        
+        // --- 3. Semantic Similarity ---
+        if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
+            let s = (*sem_max).min(weights.semantic_similarity_max);
+            score += s;
+            reasons.push(format!("Semantic similarity with {} Items: {:.2}", ws.name, sem_max));
         }
         
         // --- Prepare for signal comparisons ---
@@ -128,6 +145,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             if content_type_matches > 0 {
                 let s = (content_type_matches as f32 * weights.same_content_type_per_match).min(weights.same_content_type_max);
                 score += s;
+                // Avoid spamming reasons for content type if it's very minor, but include for accuracy
                 reasons.push(format!("Shares content type with {} items in {}", content_type_matches, ws.name));
             }
             
@@ -182,7 +200,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
                             if match_count > 0 {
                                 let s = (match_count as f32 * weights.same_source_app_per_match).min(weights.same_source_app_max);
                                 score += s;
-                                reasons.push(format!("Same source app as existing {} items", ws.name));
+                                reasons.push(format!("Same {} source app", t_app));
                             }
                         }
                     }
@@ -204,7 +222,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
                                 if pretty_domain.is_empty() {
                                     pretty_domain = t_domain.to_string();
                                 }
-                                reasons.push(format!("Same {} domain as existing {} items", pretty_domain, ws.name));
+                                reasons.push(format!("Same {} domain", pretty_domain));
                             }
                         }
                     }
@@ -222,7 +240,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             if session_match_count > 0 {
                 let s = (session_match_count as f32 * weights.same_session_per_match).min(weights.same_session_max);
                 score += s;
-                reasons.push(format!("Captured during the same activity session as existing {} items", ws.name));
+                reasons.push("Same Context Session".to_string());
             }
         }
         
@@ -335,7 +353,7 @@ mod tests {
         // domain_match = 1 (0.1)
         // Total = 0.12
         assert!((score.total_score - 0.12).abs() < f32::EPSILON);
-        assert!(score.reasons.iter().any(|r| r.contains("Same Example domain as existing Research items")));
+        assert!(score.reasons.iter().any(|r| r.contains("Same Example domain")));
     }
     
     #[test]
@@ -378,6 +396,55 @@ mod tests {
         // Relationships: (0.6 + 0.4) = 1.0 * related_item_per_match (0.2) = 0.2
         // Total = 0.24
         assert!((score.total_score - 0.24).abs() < f32::EPSILON);
-        assert!(score.reasons.iter().any(|r| r == "Related to 2 items in Portfolio"));
+        assert!(score.reasons.iter().any(|r| r == "2 related Items already belong to Portfolio"));
+    }
+    
+    #[test]
+    fn test_scoring_with_semantic_similarity() {
+        let conn = setup_in_memory_db();
+        
+        let ws_semantic = create_workspace(&conn, "AI Workspace").unwrap();
+        let ws_history = create_workspace(&conn, "Manual Workspace").unwrap();
+        
+        let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
+        let related_sem = create_item(&conn, Some(&ws_semantic.id), None, "text", "r_sem", None, "{}").unwrap();
+        
+        // Semantic relationship with high score
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &target.id,
+            &related_sem.id,
+            "semantic_similarity",
+            0.95,
+            None
+        ).unwrap();
+        
+        // User explicitly moved an item to ws_history
+        let payload = serde_json::json!({
+            "action": "moved_to_workspace",
+            "destination_workspace": ws_history.id
+        }).to_string();
+        
+        let _ = create_context_signal(
+            &conn,
+            None,
+            Some(&target.id),
+            "user_action",
+            None,
+            &payload
+        ).unwrap();
+        
+        let scores = score_item(&conn, &target.id).unwrap();
+        assert_eq!(scores.len(), 2);
+        
+        let score_history = scores.iter().find(|s| s.workspace_id == ws_history.id).unwrap();
+        let score_semantic = scores.iter().find(|s| s.workspace_id == ws_semantic.id).unwrap();
+        
+        // History should give 0.4.
+        // Semantic should be capped at 0.4 (from 0.95). 
+        // Content type match for Semantic Workspace adds 0.02.
+        // Both end up very close. Let's verify reasons.
+        assert!(score_semantic.reasons.iter().any(|r| r == "Semantic similarity with AI Workspace Items: 0.95"));
+        assert!(score_history.reasons.iter().any(|r| r == "User previously organized similar Items into Manual Workspace"));
     }
 }
