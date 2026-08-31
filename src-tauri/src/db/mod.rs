@@ -136,6 +136,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 6;
     }
 
+    if user_version < 7 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS item_embeddings (
+                item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        
+        user_version = 7;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support
