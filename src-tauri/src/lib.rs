@@ -150,6 +150,16 @@ fn score_item(
 }
 
 #[tauri::command]
+fn get_strongest_relationships(
+    item_id: &str,
+    limit: usize,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ItemRelationship>, String> {
+    let conn = state.db_conn.lock().unwrap();
+    crate::context_engine::graph::get_strongest_relationships(&conn, item_id, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -217,7 +227,8 @@ pub fn run() {
             create_context_signal,
             get_context_signal,
             list_context_signals,
-            score_item
+            score_item,
+            get_strongest_relationships
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

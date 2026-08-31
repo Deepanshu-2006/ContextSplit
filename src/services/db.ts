@@ -10,6 +10,7 @@ export interface Workspace {
 export interface Item {
   id: string;
   workspace_id: string | null;
+  session_id: string | null;
   item_type: string;
   content: string;
   title: string | null;
@@ -33,6 +34,16 @@ export interface WorkspaceScore {
   workspace_id: string;
   score: number;
   reasons: string[];
+}
+
+export interface ItemRelationship {
+  id: string;
+  item_a_id: string;
+  item_b_id: string;
+  relationship_type: string;
+  strength: number;
+  created_at: string;
+  metadata: string | null;
 }
 
 export const db = {
@@ -103,5 +114,9 @@ export const db = {
   // Context Engine
   async scoreItem(itemId: string): Promise<WorkspaceScore[]> {
     return invoke("score_item", { itemId });
+  },
+
+  async getStrongestRelationships(itemId: string, limit: number): Promise<ItemRelationship[]> {
+    return invoke("get_strongest_relationships", { itemId, limit });
   }
 };
