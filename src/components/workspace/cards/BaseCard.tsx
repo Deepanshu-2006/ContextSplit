@@ -42,7 +42,7 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
           }
           
           const scores = await db.scoreItem(itemId);
-          if (scores.length > 0 && scores[0].score > 0.1) {
+          if (scores.length > 0 && scores[0].score >= 0.3) {
             setSuggestionScore(scores[0]);
           }
         } catch (e) {
