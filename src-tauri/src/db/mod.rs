@@ -95,6 +95,24 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 4;
     }
 
+    if user_version < 5 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS item_relationships (
+                id TEXT PRIMARY KEY,
+                item_a_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                item_b_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                relationship_type TEXT NOT NULL,
+                strength REAL NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(item_a_id, item_b_id, relationship_type)
+            )",
+            [],
+        )?;
+        
+        user_version = 5;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

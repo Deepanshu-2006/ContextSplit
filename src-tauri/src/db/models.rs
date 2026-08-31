@@ -41,3 +41,14 @@ pub struct Session {
     pub ended_at: Option<String>,
     pub status: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ItemRelationship {
+    pub id: String,
+    pub item_a_id: String,
+    pub item_b_id: String,
+    pub relationship_type: String,
+    pub strength: f64,
+    pub metadata: Option<String>,
+    pub created_at: String,
+}
