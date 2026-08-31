@@ -70,3 +70,12 @@ pub struct WorkspaceEmbedding {
     pub model: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ItemSemanticStatus {
+    pub item_id: String,
+    pub status: String,
+    pub retries: i32,
+    pub model_version: Option<String>,
+    pub updated_at: String,
+}

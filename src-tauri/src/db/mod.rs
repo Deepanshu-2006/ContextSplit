@@ -166,6 +166,21 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 8;
     }
 
+    if user_version < 9 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS item_semantic_status (
+                item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                retries INTEGER NOT NULL DEFAULT 0,
+                model_version TEXT,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        
+        user_version = 9;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

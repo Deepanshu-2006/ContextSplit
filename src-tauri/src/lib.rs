@@ -89,6 +89,12 @@ fn delete_item(id: &str, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_item_semantic_status(id: &str, state: State<'_, AppState>) -> Result<Option<db::models::ItemSemanticStatus>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::get_item_semantic_status(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn move_item(
     id: &str,
     workspace_id: Option<&str>,
@@ -221,6 +227,15 @@ pub fn run() {
                     if let Some(state) = app_handle_for_embed.try_state::<AppState>() {
                         if let Ok(mut ce) = state.context_engine.lock() {
                             ce.set_semantic_provider(Box::new(provider));
+                            
+                            // Retry failed embeddings on startup
+                            if let Ok(conn) = state.db_conn.lock() {
+                                if let Ok(failed_items) = crate::db::operations::get_pending_or_failed_items(&conn, 3) {
+                                    for item_id in failed_items {
+                                        crate::capture::engine::retry_item_embedding(app_handle_for_embed.clone(), &item_id);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -254,6 +269,7 @@ pub fn run() {
             list_context_signals,
             score_item,
             get_strongest_relationships,
+            get_item_semantic_status,
             get_settings,
             update_settings
         ])

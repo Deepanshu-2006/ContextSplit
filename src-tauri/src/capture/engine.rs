@@ -66,6 +66,9 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
                 let item_id = item.id.clone();
                 let app_handle_clone = app_handle.clone();
                 
+                // Mark as processing
+                let _ = crate::db::operations::update_item_semantic_status(&conn, &item_id, "processing", None);
+                
                 tauri::async_runtime::spawn(async move {
                     // Offload CPU-intensive embedding generation to a blocking thread
                     let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
@@ -75,10 +78,14 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
                         }
                     });
                     
+                    let mut success = false;
+                    let mut final_model = None;
+                    
                     if let Ok(result) = join_handle.await {
                         if let Ok(tuple_res) = result {
                             let embedding: Vec<f32> = tuple_res.0;
                             let model_name: String = tuple_res.1;
+                            final_model = Some(model_name.clone());
                             
                             // After generation, get DB lock briefly to save
                             if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
@@ -93,13 +100,41 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
                                         if let Ok(ce) = state.context_engine.lock() {
                                             let _ = crate::context_engine::relationships::generate_semantic_relationships(&ce, &conn, &item_id);
                                         }
+                                        success = true;
                                     }
                                 }
                             }
                         }
                     }
+                    
+                    // Final state update
+                    if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                        if let Ok(conn) = state.db_conn.lock() {
+                            if success {
+                                let _ = crate::db::operations::update_item_semantic_status(
+                                    &conn,
+                                    &item_id,
+                                    "ready",
+                                    final_model.as_deref()
+                                );
+                            } else {
+                                let _ = crate::db::operations::update_item_semantic_status(
+                                    &conn,
+                                    &item_id,
+                                    "failed",
+                                    None
+                                );
+                                let _ = crate::db::operations::increment_semantic_retries(&conn, &item_id);
+                            }
+                        }
+                    }
                 });
+            } else {
+                // If there's no text to embed, mark as ready immediately
+                let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "ready", None);
             }
+        } else {
+            let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "failed", None);
         }
     }
 
@@ -115,4 +150,93 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     let _ = system_target.report_success(&req);
 
     Ok(())
+}
+
+pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
+    let state = app_handle.state::<AppState>();
+    
+    // Fetch item
+    let item_opt = {
+        if let Ok(conn) = state.db_conn.lock() {
+            if let Ok(i) = crate::db::operations::get_item(&conn, item_id) {
+                Some(i)
+            } else { None }
+        } else { None }
+    };
+    
+    if let Some(item) = item_opt {
+        if let Ok(ce) = state.context_engine.lock() {
+            if let Some(provider) = ce.get_semantic_provider() {
+                let builder = crate::semantic::builder::SemanticContentBuilder::new();
+                let text_to_embed = builder.build(&item);
+                
+                if !text_to_embed.trim().is_empty() {
+                    let app_handle_clone = app_handle.clone();
+                    let item_id_clone = item_id.to_string();
+                    
+                    if let Ok(conn) = state.db_conn.lock() {
+                        let _ = crate::db::operations::update_item_semantic_status(&conn, &item_id_clone, "processing", None);
+                    }
+                    
+                    tauri::async_runtime::spawn(async move {
+                        let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
+                            match provider.generate_embedding(&text_to_embed) {
+                                Ok(emb) => Ok((emb, provider.status().model_name.clone())),
+                                Err(e) => Err(e),
+                            }
+                        });
+                        
+                        let mut success = false;
+                        let mut final_model = None;
+                        
+                        if let Ok(result) = join_handle.await {
+                            if let Ok(tuple_res) = result {
+                                let embedding = tuple_res.0;
+                                let model_name = tuple_res.1;
+                                final_model = Some(model_name.clone());
+                                
+                                if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                                    if let Ok(conn) = state.db_conn.lock() {
+                                        if crate::db::operations::save_item_embedding(
+                                            &conn,
+                                            &item_id_clone,
+                                            &embedding,
+                                            &model_name,
+                                            &model_name
+                                        ).is_ok() {
+                                            if let Ok(ce) = state.context_engine.lock() {
+                                                let _ = crate::context_engine::relationships::generate_semantic_relationships(&ce, &conn, &item_id_clone);
+                                            }
+                                            success = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                            if let Ok(conn) = state.db_conn.lock() {
+                                if success {
+                                    let _ = crate::db::operations::update_item_semantic_status(
+                                        &conn,
+                                        &item_id_clone,
+                                        "ready",
+                                        final_model.as_deref()
+                                    );
+                                } else {
+                                    let _ = crate::db::operations::update_item_semantic_status(
+                                        &conn,
+                                        &item_id_clone,
+                                        "failed",
+                                        None
+                                    );
+                                    let _ = crate::db::operations::increment_semantic_retries(&conn, &item_id_clone);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
 }

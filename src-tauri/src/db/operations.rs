@@ -86,8 +86,8 @@ pub fn create_item(
         params![id, workspace_id, session_id, item_type, content, title, metadata, now, now],
     )?;
 
-    Ok(super::models::Item {
-        id,
+    let item = super::models::Item {
+        id: id.to_string(),
         workspace_id: workspace_id.map(|s| s.to_string()),
         session_id: session_id.map(|s| s.to_string()),
         item_type: item_type.to_string(),
@@ -95,8 +95,16 @@ pub fn create_item(
         title: title.map(|s| s.to_string()),
         metadata: metadata.to_string(),
         created_at: now.clone(),
-        updated_at: now,
-    })
+        updated_at: now.clone(),
+    };
+    
+    // Create pending semantic status
+    conn.execute(
+        "INSERT INTO item_semantic_status (item_id, status, retries, updated_at) VALUES (?1, ?2, 0, ?3)",
+        rusqlite::params![item.id, "pending", now],
+    )?;
+    
+    Ok(item)
 }
 
 pub fn get_item(conn: &Connection, id: &str) -> Result<super::models::Item> {
@@ -612,6 +620,57 @@ pub fn recalculate_workspace_profile(conn: &Connection, workspace_id: &str) -> R
     }))
 }
 
+pub fn get_item_semantic_status(conn: &Connection, item_id: &str) -> Result<Option<crate::db::models::ItemSemanticStatus>> {
+    let mut stmt = conn.prepare("SELECT status, retries, model_version, updated_at FROM item_semantic_status WHERE item_id = ?1")?;
+    let mut rows = stmt.query(rusqlite::params![item_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(crate::db::models::ItemSemanticStatus {
+            item_id: item_id.to_string(),
+            status: row.get(0)?,
+            retries: row.get(1)?,
+            model_version: row.get(2)?,
+            updated_at: row.get(3)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_item_semantic_status(
+    conn: &Connection,
+    item_id: &str,
+    status: &str,
+    model_version: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE item_semantic_status SET status = ?1, model_version = ?2, updated_at = ?3 WHERE item_id = ?4",
+        rusqlite::params![status, model_version, now, item_id],
+    )?;
+    Ok(())
+}
+
+pub fn increment_semantic_retries(conn: &Connection, item_id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE item_semantic_status SET retries = retries + 1, updated_at = ?1 WHERE item_id = ?2",
+        rusqlite::params![now, item_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_pending_or_failed_items(conn: &Connection, max_retries: i32) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT item_id FROM item_semantic_status WHERE status IN ('pending', 'failed') AND retries < ?1")?;
+    let rows = stmt.query_map(rusqlite::params![max_retries], |row| row.get(0))?;
+    let mut items = Vec::new();
+    for row in rows {
+        if let Ok(id) = row {
+            items.push(id);
+        }
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +721,37 @@ mod tests {
         assert!((profile.embedding[0] - 0.3333333).abs() < 0.0001);
         assert!((profile.embedding[1] - 0.6666667).abs() < 0.0001);
         assert_eq!(profile.embedding[2], 0.0);
+    }
+    
+    #[test]
+    fn test_semantic_status_lifecycle() {
+        let conn = setup_db();
+        
+        let item = create_item(&conn, None, None, "text", "c1", None, "{}").unwrap();
+        
+        let status = get_item_semantic_status(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(status.status, "pending");
+        assert_eq!(status.retries, 0);
+        
+        update_item_semantic_status(&conn, &item.id, "processing", None).unwrap();
+        let status2 = get_item_semantic_status(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(status2.status, "processing");
+        
+        increment_semantic_retries(&conn, &item.id).unwrap();
+        increment_semantic_retries(&conn, &item.id).unwrap();
+        update_item_semantic_status(&conn, &item.id, "failed", None).unwrap();
+        
+        let status3 = get_item_semantic_status(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(status3.status, "failed");
+        assert_eq!(status3.retries, 2);
+        
+        let failed_items = get_pending_or_failed_items(&conn, 3).unwrap();
+        assert_eq!(failed_items.len(), 1);
+        assert_eq!(failed_items[0], item.id);
+        
+        // At max retries
+        let failed_items_max = get_pending_or_failed_items(&conn, 2).unwrap();
+        assert_eq!(failed_items_max.len(), 0);
     }
 
     #[test]
