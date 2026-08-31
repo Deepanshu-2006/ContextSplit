@@ -22,6 +22,7 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     let item = operations::create_item(
         &conn,
         None, // Inbox
+        None,
         &req.data_type,
         &req.content,
         title_opt,

@@ -54,7 +54,7 @@ fn create_item(
     state: State<'_, AppState>,
 ) -> Result<Item, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-    db::operations::create_item(&conn, workspace_id, item_type, content, title, metadata).map_err(|e| e.to_string())
+    db::operations::create_item(&conn, workspace_id, None, item_type, content, title, metadata).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

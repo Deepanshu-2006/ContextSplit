@@ -226,11 +226,11 @@ mod tests {
         let ws2 = create_workspace(&conn, "Personal").unwrap();
         
         // Item in WS1 (Text)
-        let _i1 = create_item(&conn, Some(&ws1.id), "text", "test content 1", None, "{}").unwrap();
-        let _i2 = create_item(&conn, Some(&ws1.id), "text", "test content 2", None, "{}").unwrap();
+        let _i1 = create_item(&conn, Some(&ws1.id), None, "text", "test content 1", None, "{}").unwrap();
+        let _i2 = create_item(&conn, Some(&ws1.id), None, "text", "test content 2", None, "{}").unwrap();
         
         // Item in Inbox (Text)
-        let target = create_item(&conn, None, "text", "target text", None, "{}").unwrap();
+        let target = create_item(&conn, None, None, "text", "target text", None, "{}").unwrap();
         
         // Mock a move signal indicating target WAS previously in WS2
         let payload = serde_json::json!({
@@ -268,7 +268,7 @@ mod tests {
         let ws = create_workspace(&conn, "Research").unwrap();
         
         // Item in WS
-        let i1 = create_item(&conn, Some(&ws.id), "url", "https://example.com", None, "{}").unwrap();
+        let i1 = create_item(&conn, Some(&ws.id), None, "url", "https://example.com", None, "{}").unwrap();
         
         // Signal for i1
         let payload1 = serde_json::json!({
@@ -277,7 +277,7 @@ mod tests {
         let _ = create_context_signal(&conn, Some(&ws.id), Some(&i1.id), "url_metadata", None, &payload1).unwrap();
         
         // Target Item
-        let target = create_item(&conn, None, "url", "https://example.com/2", None, "{}").unwrap();
+        let target = create_item(&conn, None, None, "url", "https://example.com/2", None, "{}").unwrap();
         
         let payload2 = serde_json::json!({
             "domain": "example.com"

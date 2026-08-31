@@ -74,6 +74,27 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 3;
     }
 
+    if user_version < 4 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                ended_at TEXT,
+                status TEXT NOT NULL
+            )",
+            [],
+        )?;
+        
+        // Add session_id to items
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL",
+            [],
+        )?;
+        
+        user_version = 4;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

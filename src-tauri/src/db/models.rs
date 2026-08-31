@@ -12,6 +12,7 @@ pub struct Workspace {
 pub struct Item {
     pub id: String,
     pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
     pub item_type: String, // "text", "image", "url", "file"
     pub content: String,
     pub title: Option<String>,
@@ -30,4 +31,13 @@ pub struct ContextSignal {
     pub payload: String, // JSON string
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub started_at: String,
+    pub last_activity_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
 }
