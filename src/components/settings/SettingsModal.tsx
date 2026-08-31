@@ -12,6 +12,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     enable_window_title: false,
     enable_browser_domain: false,
     enable_session_tracking: false,
+    enable_semantic_processing: false,
+    semantic_provider: "local",
+    enable_semantic_suggestions: false,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

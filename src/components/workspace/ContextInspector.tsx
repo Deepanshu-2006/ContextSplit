@@ -284,8 +284,8 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                 {scores.length === 0 ? (
                   <p className="text-xs text-gray-500 italic">No scores calculated.</p>
                 ) : (
-                  scores.sort((a,b) => b.score - a.score).map(score => {
-                    const conf = Math.round(score.score * 100);
+                  scores.sort((a,b) => b.confidence - a.confidence).map(score => {
+                    const conf = Math.round(score.confidence * 100);
                     return (
                       <div key={score.workspace_id} className="border border-indigo-100 bg-indigo-50/30 rounded p-3">
                         <div className="flex justify-between items-center mb-2">

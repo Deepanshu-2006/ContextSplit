@@ -28,6 +28,9 @@ mod tests {
             enable_window_title: true,
             enable_browser_domain: true,
             enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -212,6 +215,9 @@ mod tests {
             enable_window_title: false,
             enable_browser_domain: false,
             enable_session_tracking: false,
+            enable_semantic_processing: false,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: false,
         };
         crate::db::settings::update_settings(&conn2, settings_off).unwrap();
 

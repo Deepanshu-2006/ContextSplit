@@ -20,13 +20,38 @@ export function ContextSuggestion({ score, onAccept, onDismiss }: ContextSuggest
     return null;
   }
 
-  const confidence = Math.round(score.score * 100);
+  const confidence = Math.round(score.confidence * 100);
+  const isMedium = score.confidence_band === "Medium";
+
+  if (isMedium) {
+    return (
+      <div className="bg-gray-50 border-t border-gray-100 p-2 text-xs flex flex-col nodrag">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500 font-medium text-[11px]">Suggestion: {suggestedWorkspace.name}</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => onAccept(score.workspace_id)}
+              className="text-blue-600 hover:text-blue-800 font-medium text-[11px]"
+            >
+              Move
+            </button>
+            <button
+              onClick={onDismiss}
+              className="text-gray-400 hover:text-gray-600 text-[11px]"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-gradient-to-br from-blue-50 to-indigo-50/30 border-t border-blue-100 p-3 text-xs flex flex-col nodrag">
       <div className="flex flex-col gap-0.5">
         <span className="text-blue-900 font-medium">Looks related to {suggestedWorkspace.name}</span>
-        <span className="text-blue-600/80 font-medium text-[10px] uppercase tracking-wider">{confidence}% confidence</span>
+        <span className="text-blue-600/80 font-medium text-[10px] uppercase tracking-wider">{confidence}% confidence • {score.confidence_band}</span>
       </div>
       
       <div className="mt-2 mb-1">

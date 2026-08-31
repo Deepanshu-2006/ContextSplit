@@ -8,6 +8,7 @@ pub struct WorkspaceScore {
     pub workspace_id: String,
     pub total_score: f32,
     pub confidence: f32,
+    pub confidence_band: String,
     pub reasons: Vec<String>,
 }
 
@@ -26,7 +27,9 @@ pub struct ScoringWeights {
     pub related_item_max: f32,
     pub semantic_similarity_max: f32,
     pub workspace_profile_similarity_max: f32,
-    pub suggestion_threshold: f32,
+    pub threshold_high: f32,
+    pub threshold_medium: f32,
+    pub threshold_low: f32,
 }
 
 impl Default for ScoringWeights {
@@ -45,7 +48,9 @@ impl Default for ScoringWeights {
             related_item_max: 0.5,
             semantic_similarity_max: 0.4,
             workspace_profile_similarity_max: 0.45,
-            suggestion_threshold: 0.3,
+            threshold_high: 0.6,
+            threshold_medium: 0.4,
+            threshold_low: 0.2,
         }
     }
 }
@@ -276,12 +281,21 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         // Cap at 1.0
         score = score.min(1.0);
         
+        let confidence_band = if score >= weights.threshold_high {
+            "High"
+        } else if score >= weights.threshold_medium {
+            "Medium"
+        } else {
+            "Low"
+        };
+        
         // Add minimal threshold to not spam
-        if score >= weights.suggestion_threshold {
+        if score >= weights.threshold_low {
             scores.push(WorkspaceScore {
                 workspace_id: ws.id.clone(),
                 total_score: score,
                 confidence: score, // UI handles percentage mapping
+                confidence_band: confidence_band.to_string(),
                 reasons,
             });
         }
@@ -514,5 +528,56 @@ mod tests {
         // 0.45 from profile similarity max.
         assert!((score.total_score - 0.45).abs() < f32::EPSILON);
         assert!(score.reasons.iter().any(|r| r == "Matches Profile WS semantic profile: 1.00"));
+    }
+
+    #[test]
+    fn test_scoring_confidence_bands() {
+        let conn = setup_in_memory_db();
+        
+        let ws_high = create_workspace(&conn, "High WS").unwrap();
+        let ws_med = create_workspace(&conn, "Medium WS").unwrap();
+        let ws_low = create_workspace(&conn, "Low WS").unwrap();
+        let ws_filtered = create_workspace(&conn, "Filtered WS").unwrap();
+        
+        let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
+        
+        // High WS: score should be >= 0.6
+        // history (0.4) + relationships (0.2) = 0.6
+        let r_high = create_item(&conn, Some(&ws_high.id), None, "text", "rh", None, "{}").unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_high.id, "same_app", 1.0, None).unwrap();
+        let payload_high = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_high.id}).to_string();
+        let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_high).unwrap();
+        
+        // Medium WS: score should be >= 0.4 and < 0.6
+        // history (0.4) + content_type (0.02) = 0.42
+        let _ = create_item(&conn, Some(&ws_med.id), None, "text", "rm", None, "{}").unwrap();
+        let payload_med = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_med.id}).to_string();
+        let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_med).unwrap();
+        
+        // Low WS: score should be >= 0.2 and < 0.4
+        // relationship (0.2) + content_type (0.02) = 0.22
+        let r_low = create_item(&conn, Some(&ws_low.id), None, "text", "rl", None, "{}").unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_low.id, "same_app", 1.0, None).unwrap();
+        
+        // Filtered WS: score < 0.2
+        // Just content type = 0.02 -> should not be returned
+        let _ = create_item(&conn, Some(&ws_filtered.id), None, "text", "rf", None, "{}").unwrap();
+        
+        let scores = score_item(&conn, &target.id).unwrap();
+        
+        // Should only return high, med, low (filtered is below 0.2)
+        assert_eq!(scores.len(), 3);
+        
+        let high_score = scores.iter().find(|s| s.workspace_id == ws_high.id).unwrap();
+        assert_eq!(high_score.confidence_band, "High");
+        
+        let med_score = scores.iter().find(|s| s.workspace_id == ws_med.id).unwrap();
+        assert_eq!(med_score.confidence_band, "Medium");
+        
+        let low_score = scores.iter().find(|s| s.workspace_id == ws_low.id).unwrap();
+        assert_eq!(low_score.confidence_band, "Low");
+        
+        let filtered_score = scores.iter().find(|s| s.workspace_id == ws_filtered.id);
+        assert!(filtered_score.is_none());
     }
 }

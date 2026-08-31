@@ -190,6 +190,9 @@ mod tests {
             enable_window_title: true,
             enable_browser_domain: true,
             enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();
@@ -230,6 +233,9 @@ mod tests {
             enable_window_title: true,
             enable_browser_domain: true,
             enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();

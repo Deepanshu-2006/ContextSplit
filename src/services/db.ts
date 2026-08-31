@@ -34,7 +34,24 @@ export interface WorkspaceScore {
   workspace_id: string;
   total_score: number;
   confidence: number;
+  confidence_band: string;
   reasons: string[];
+}
+
+export interface ItemSemanticStatus {
+  item_id: string;
+  status: "pending" | "processing" | "ready" | "failed";
+  retries: number;
+  model_version?: string;
+  updated_at: string;
+}
+
+export interface ItemEmbeddingMetadata {
+  item_id: string;
+  provider: string;
+  model: string;
+  created_at: string;
+  dimensions: number;
 }
 
 export interface PrivacySettings {
