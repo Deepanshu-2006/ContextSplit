@@ -53,6 +53,9 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
             data_type: req.data_type.clone(),
             metadata,
         });
+        
+        // Generate relationships with recent items
+        let _ = crate::context_engine::relationships::generate_relationships(&conn, &item.id);
     }
 
     // Drop the mutex guard before emitting events or showing notifications to prevent deadlocks
