@@ -26,6 +26,7 @@ pub struct ScoringWeights {
     pub related_item_max: f32,
     pub semantic_similarity_max: f32,
     pub workspace_profile_similarity_max: f32,
+    pub suggestion_threshold: f32,
 }
 
 impl Default for ScoringWeights {
@@ -44,6 +45,7 @@ impl Default for ScoringWeights {
             related_item_max: 0.5,
             semantic_similarity_max: 0.4,
             workspace_profile_similarity_max: 0.45,
+            suggestion_threshold: 0.3,
         }
     }
 }
@@ -267,7 +269,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         score = score.min(1.0);
         
         // Add minimal threshold to not spam
-        if score > 0.0 {
+        if score >= weights.suggestion_threshold {
             scores.push(WorkspaceScore {
                 workspace_id: ws.id.clone(),
                 total_score: score,
@@ -326,17 +328,11 @@ mod tests {
         ).unwrap();
         
         let scores = score_item(&conn, &target.id).unwrap();
-        assert_eq!(scores.len(), 2);
-        
-        // WS2 should win due to history (0.4)
-        // WS1 should get (2 * 0.02) = 0.04 for content type
+        assert_eq!(scores.len(), 1);
         
         let w2_score = scores.iter().find(|s| s.workspace_id == ws2.id).unwrap();
-        let w1_score = scores.iter().find(|s| s.workspace_id == ws1.id).unwrap();
         
         assert!(w2_score.total_score >= 0.4);
-        assert_eq!(w1_score.total_score, 0.04);
-        assert_eq!(w1_score.reasons[0], "Shares content type with 2 items in Work");
     }
     
     #[test]
@@ -362,16 +358,25 @@ mod tests {
         }).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "url_metadata", None, &payload2).unwrap();
         
+        // score is 0.12, but threshold is 0.3. Wait, we should add history or lower threshold for test.
+        // Let's add history to push it above threshold
+        let payload3 = serde_json::json!({
+            "action": "moved_to_workspace",
+            "destination_workspace": ws.id
+        }).to_string();
+        let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload3).unwrap();
+        
         let scores = score_item(&conn, &target.id).unwrap();
         assert_eq!(scores.len(), 1);
         
         let score = &scores[0];
         assert_eq!(score.workspace_id, ws.id);
         
+        // history = 0.4
         // content_type_matches = 1 (0.02)
         // domain_match = 1 (0.1)
-        // Total = 0.12
-        assert!((score.total_score - 0.12).abs() < f32::EPSILON);
+        // Total = 0.52
+        assert!((score.total_score - 0.52).abs() < f32::EPSILON);
         assert!(score.reasons.iter().any(|r| r.contains("Same Example domain")));
     }
     
@@ -405,17 +410,28 @@ mod tests {
             None
         ).unwrap();
         
+        // Target -> related 3 (strength 0.8) to push score above threshold
+        let related_item_3 = create_item(&conn, Some(&ws.id), None, "text", "r3", None, "{}").unwrap();
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &target.id,
+            &related_item_3.id,
+            "same_app",
+            0.8,
+            None
+        ).unwrap();
+        
         let scores = score_item(&conn, &target.id).unwrap();
         assert_eq!(scores.len(), 1);
         
         let score = &scores[0];
         assert_eq!(score.workspace_id, ws.id);
         
-        // Content type match for 2 items: 2 * 0.02 = 0.04
-        // Relationships: (0.6 + 0.4) = 1.0 * related_item_per_match (0.2) = 0.2
-        // Total = 0.24
-        assert!((score.total_score - 0.24).abs() < f32::EPSILON);
-        assert!(score.reasons.iter().any(|r| r == "2 related Items already belong to Portfolio"));
+        // Content type match for 3 items: 3 * 0.02 = 0.06
+        // Relationships: (0.6 + 0.4 + 0.8) = 1.8 * related_item_per_match (0.2) = 0.36
+        // Total = 0.42
+        assert!((score.total_score - 0.42).abs() < f32::EPSILON);
+        assert!(score.reasons.iter().any(|r| r == "3 related Items already belong to Portfolio"));
     }
     
     #[test]
