@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search } from "lucide-react";
-import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship } from "../../services/db";
+import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit } from "lucide-react";
+import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata } from "../../services/db";
 
 interface ContextInspectorProps {
   itemId: string;
@@ -12,22 +12,28 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   const [signals, setSignals] = useState<ContextSignal[]>([]);
   const [scores, setScores] = useState<WorkspaceScore[]>([]);
   const [relationships, setRelationships] = useState<ItemRelationship[]>([]);
+  const [semanticStatus, setSemanticStatus] = useState<ItemSemanticStatus | null>(null);
+  const [embeddingMeta, setEmbeddingMeta] = useState<ItemEmbeddingMetadata | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function fetchData() {
       try {
         setLoading(true);
-        const [fetchedItem, fetchedSignals, fetchedScores, fetchedRels] = await Promise.all([
+        const [fetchedItem, fetchedSignals, fetchedScores, fetchedRels, fetchedSemStatus, fetchedEmbMeta] = await Promise.all([
           db.getItem(itemId),
           db.listContextSignals(null, itemId),
           db.scoreItem(itemId),
           db.getStrongestRelationships(itemId, 10),
+          db.getItemSemanticStatus(itemId),
+          db.getItemEmbeddingMetadata(itemId),
         ]);
         setItem(fetchedItem);
         setSignals(fetchedSignals);
         setScores(fetchedScores);
         setRelationships(fetchedRels);
+        setSemanticStatus(fetchedSemStatus);
+        setEmbeddingMeta(fetchedEmbMeta);
       } catch (err) {
         console.error("Failed to fetch context data", err);
       } finally {
@@ -111,10 +117,46 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
               </div>
             </div>
 
-            {/* Section 2: Capture Signals */}
+            {/* Section 2: Semantic Processing */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">2. Capture Signals</h3>
+                <h3 className="text-sm font-semibold text-gray-800">2. Semantic Status</h3>
+                <span className="text-[10px] uppercase font-bold tracking-wider text-green-700 bg-green-100 px-2 py-0.5 rounded">Observed</span>
+              </div>
+              <div className="p-4 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Status</span>
+                  <span className={`font-mono font-medium ${
+                    semanticStatus?.status === 'ready' ? 'text-green-600' :
+                    semanticStatus?.status === 'failed' ? 'text-red-600' :
+                    'text-amber-600'
+                  }`}>
+                    {semanticStatus?.status || 'unknown'}
+                  </span>
+                </div>
+                {semanticStatus?.status === 'failed' && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Retries</span>
+                    <span className="font-mono text-red-600">{semanticStatus.retries}</span>
+                  </div>
+                )}
+                {embeddingMeta && (
+                  <>
+                    <div className="flex justify-between"><span className="text-gray-500">Provider</span><span className="font-mono text-gray-900">{embeddingMeta.provider}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-500">Model</span><span className="font-mono text-gray-900">{embeddingMeta.model}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-500">Dimensions</span><span className="font-mono text-gray-900">{embeddingMeta.dimensions}</span></div>
+                  </>
+                )}
+                {!embeddingMeta && semanticStatus?.status === 'ready' && (
+                  <div className="text-xs text-gray-400 italic text-right mt-1">Embedding data missing</div>
+                )}
+              </div>
+            </div>
+
+            {/* Section 3: Capture Signals */}
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-800">3. Capture Signals</h3>
                 <span className="text-[10px] uppercase font-bold tracking-wider text-green-700 bg-green-100 px-2 py-0.5 rounded">Observed</span>
               </div>
               <div className="p-4 space-y-3">
@@ -152,10 +194,10 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
               </div>
             </div>
 
-            {/* Section 7: User Feedback History */}
+            {/* Section 4: User Feedback History */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">7. User Feedback</h3>
+                <h3 className="text-sm font-semibold text-gray-800">4. User Feedback</h3>
                 <span className="text-[10px] uppercase font-bold tracking-wider text-green-700 bg-green-100 px-2 py-0.5 rounded">Observed</span>
               </div>
               <div className="p-4 space-y-2">
@@ -180,10 +222,10 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
           {/* RIGHT COLUMN: INFERRED ENGINE DATA */}
           <div className="space-y-6">
             
-            {/* Section 3: Context Session */}
+            {/* Section 5: Context Session */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">3. Current Session</h3>
+                <h3 className="text-sm font-semibold text-gray-800">5. Current Session</h3>
                 <span className="text-[10px] uppercase font-bold tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded">Inferred</span>
               </div>
               <div className="p-4">
@@ -198,10 +240,10 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
               </div>
             </div>
 
-            {/* Section 4: Related Items */}
+            {/* Section 6: Related Items */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">4. Context Graph Edges</h3>
+                <h3 className="text-sm font-semibold text-gray-800">6. Context Graph Edges</h3>
                 <span className="text-[10px] uppercase font-bold tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded">Inferred</span>
               </div>
               <div className="p-4 space-y-2">
@@ -211,17 +253,18 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                   relationships.map(rel => {
                     const otherId = rel.item_a_id === itemId ? rel.item_b_id : rel.item_a_id;
                     const percent = Math.round(rel.strength * 100);
+                    const isSemantic = rel.relationship_type === 'semantic_similarity';
                     return (
-                      <div key={rel.id} className="text-xs p-2 bg-gray-50 border border-gray-100 rounded flex flex-col gap-1.5">
+                      <div key={rel.id} className={`text-xs p-2 border rounded flex flex-col gap-1.5 ${isSemantic ? 'bg-cyan-50 border-cyan-100' : 'bg-gray-50 border-gray-100'}`}>
                         <div className="flex justify-between items-center">
                           <div className="flex items-center gap-1.5 text-gray-700 font-mono">
-                            <Network size={12} className="text-blue-500" />
+                            {isSemantic ? <BrainCircuit size={12} className="text-cyan-500" /> : <Network size={12} className="text-blue-500" />}
                             {otherId}
                           </div>
-                          <span className="font-semibold text-blue-600">{percent}% match</span>
+                          <span className={`font-semibold ${isSemantic ? 'text-cyan-600' : 'text-blue-600'}`}>{percent}% match</span>
                         </div>
                         <div className="w-full bg-gray-200 rounded-full h-1.5">
-                          <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${percent}%` }}></div>
+                          <div className={`h-1.5 rounded-full ${isSemantic ? 'bg-cyan-500' : 'bg-blue-500'}`} style={{ width: `${percent}%` }}></div>
                         </div>
                         <span className="text-gray-400 capitalize">Signal: {rel.relationship_type.replace(/_/g, ' ')}</span>
                       </div>
@@ -231,10 +274,10 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
               </div>
             </div>
 
-            {/* Section 5 & 6: Workspace Scores and Explanation */}
+            {/* Section 7 & 8: Workspace Scores and Explanation */}
             <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
               <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-800">5 & 6. Workspace Scoring</h3>
+                <h3 className="text-sm font-semibold text-gray-800">7 & 8. Workspace Scoring</h3>
                 <span className="text-[10px] uppercase font-bold tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded">Inferred</span>
               </div>
               <div className="p-4 space-y-3">
@@ -251,12 +294,19 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                         </div>
                         {score.reasons.length > 0 ? (
                           <ul className="text-xs space-y-1 mt-2 text-gray-600">
-                            {score.reasons.map((reason, idx) => (
-                              <li key={idx} className="flex gap-1.5">
-                                <span className="text-indigo-400">•</span>
-                                <span>{reason}</span>
-                              </li>
-                            ))}
+                            {score.reasons.map((reason, idx) => {
+                              const isSemanticReason = reason.includes("semantic") || reason.includes("Semantic");
+                              return (
+                                <li key={idx} className="flex gap-1.5 items-start">
+                                  {isSemanticReason ? (
+                                    <BrainCircuit size={12} className="text-cyan-500 mt-0.5 shrink-0" />
+                                  ) : (
+                                    <span className="text-indigo-400 shrink-0">•</span>
+                                  )}
+                                  <span className={isSemanticReason ? "text-cyan-800" : ""}>{reason}</span>
+                                </li>
+                              );
+                            })}
                           </ul>
                         ) : (
                           <p className="text-xs text-gray-400 italic">No specific reasons provided.</p>

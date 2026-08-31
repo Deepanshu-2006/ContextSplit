@@ -63,6 +63,15 @@ pub struct ItemEmbedding {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ItemEmbeddingMetadata {
+    pub item_id: String,
+    pub provider: String,
+    pub model: String,
+    pub created_at: String,
+    pub dimensions: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WorkspaceEmbedding {
     pub workspace_id: String,
     pub embedding: Vec<f32>,

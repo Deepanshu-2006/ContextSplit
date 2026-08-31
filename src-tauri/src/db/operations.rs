@@ -460,6 +460,29 @@ pub fn get_item_embedding(conn: &Connection, item_id: &str) -> Result<Option<cra
     }
 }
 
+pub fn get_item_embedding_metadata(conn: &Connection, item_id: &str) -> Result<Option<crate::db::models::ItemEmbeddingMetadata>> {
+    let mut stmt = conn.prepare("SELECT item_id, length(embedding), provider, model, created_at FROM item_embeddings WHERE item_id = ?1")?;
+    
+    let mut rows = stmt.query(rusqlite::params![item_id])?;
+    if let Some(row) = rows.next()? {
+        let item_id: String = row.get(0)?;
+        let byte_len: usize = row.get(1)?;
+        let provider: String = row.get(2)?;
+        let model: String = row.get(3)?;
+        let created_at: String = row.get(4)?;
+        
+        Ok(Some(crate::db::models::ItemEmbeddingMetadata {
+            item_id,
+            provider,
+            model,
+            created_at,
+            dimensions: byte_len / 4,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn delete_item_relationship(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM item_relationships WHERE id = ?1", params![id])?;
     Ok(())

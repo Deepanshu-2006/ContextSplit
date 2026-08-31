@@ -95,6 +95,12 @@ fn get_item_semantic_status(id: &str, state: State<'_, AppState>) -> Result<Opti
 }
 
 #[tauri::command]
+fn get_item_embedding_metadata(id: &str, state: State<'_, AppState>) -> Result<Option<db::models::ItemEmbeddingMetadata>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::get_item_embedding_metadata(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn move_item(
     id: &str,
     workspace_id: Option<&str>,
@@ -302,6 +308,7 @@ pub fn run() {
             score_item,
             get_strongest_relationships,
             get_item_semantic_status,
+            get_item_embedding_metadata,
             get_settings,
             update_settings,
             delete_semantic_data,

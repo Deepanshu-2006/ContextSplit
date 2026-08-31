@@ -124,11 +124,19 @@ export const db = {
 
   // Context Engine
   async scoreItem(itemId: string): Promise<WorkspaceScore[]> {
-    return invoke("score_item", { itemId });
+    return await invoke("score_item", { itemId });
   },
 
-  async getStrongestRelationships(itemId: string, limit: number): Promise<ItemRelationship[]> {
-    return invoke("get_strongest_relationships", { itemId, limit });
+  async getStrongestRelationships(itemId: string, limit: number = 5): Promise<ItemRelationship[]> {
+    return await invoke("get_strongest_relationships", { itemId, limit });
+  },
+
+  async getItemSemanticStatus(id: string): Promise<ItemSemanticStatus | null> {
+    return await invoke("get_item_semantic_status", { id });
+  },
+
+  async getItemEmbeddingMetadata(id: string): Promise<ItemEmbeddingMetadata | null> {
+    return await invoke("get_item_embedding_metadata", { id });
   },
 
   // Settings
