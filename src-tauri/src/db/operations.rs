@@ -307,6 +307,76 @@ pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+// Item Relationships
+
+pub fn create_item_relationship(
+    conn: &Connection,
+    item_1_id: &str,
+    item_2_id: &str,
+    relationship_type: &str,
+    strength: f64,
+    metadata: Option<&str>,
+) -> Result<super::models::ItemRelationship> {
+    // Lexicographically sort IDs to ensure consistent undirected edges
+    let (item_a_id, item_b_id) = if item_1_id < item_2_id {
+        (item_1_id, item_2_id)
+    } else {
+        (item_2_id, item_1_id)
+    };
+
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO item_relationships (id, item_a_id, item_b_id, relationship_type, strength, metadata, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, item_a_id, item_b_id, relationship_type, strength, metadata, now],
+    )?;
+
+    Ok(super::models::ItemRelationship {
+        id,
+        item_a_id: item_a_id.to_string(),
+        item_b_id: item_b_id.to_string(),
+        relationship_type: relationship_type.to_string(),
+        strength,
+        metadata: metadata.map(|s| s.to_string()),
+        created_at: now,
+    })
+}
+
+pub fn get_item_relationships(conn: &Connection, item_id: &str) -> Result<Vec<super::models::ItemRelationship>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, item_a_id, item_b_id, relationship_type, strength, metadata, created_at 
+         FROM item_relationships 
+         WHERE item_a_id = ?1 OR item_b_id = ?1
+         ORDER BY created_at DESC"
+    )?;
+    
+    let rel_iter = stmt.query_map(params![item_id], |row| {
+        Ok(super::models::ItemRelationship {
+            id: row.get(0)?,
+            item_a_id: row.get(1)?,
+            item_b_id: row.get(2)?,
+            relationship_type: row.get(3)?,
+            strength: row.get(4)?,
+            metadata: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+
+    let mut relationships = Vec::new();
+    for rel in rel_iter {
+        relationships.push(rel?);
+    }
+    
+    Ok(relationships)
+}
+
+pub fn delete_item_relationship(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM item_relationships WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +430,58 @@ mod tests {
         
         let retrieved = get_item(&conn, &item.id).unwrap();
         assert_eq!(retrieved.session_id, Some(session.id));
+    }
+
+    #[test]
+    fn test_item_relationships() {
+        let conn = setup_db();
+        
+        let item1 = create_item(&conn, None, None, "text", "Content 1", None, "{}").unwrap();
+        let item2 = create_item(&conn, None, None, "text", "Content 2", None, "{}").unwrap();
+        
+        // 1. Create a relationship (item2 first, then item1 to test sorting)
+        let rel = create_item_relationship(
+            &conn,
+            &item2.id,
+            &item1.id,
+            "temporal_proximity",
+            0.8,
+            Some("{\"time_diff_secs\": 10}"),
+        ).unwrap();
+        
+        // Verify lexicographical sort
+        let expected_a = if item1.id < item2.id { &item1.id } else { &item2.id };
+        let expected_b = if item1.id < item2.id { &item2.id } else { &item1.id };
+        
+        assert_eq!(rel.item_a_id, *expected_a);
+        assert_eq!(rel.item_b_id, *expected_b);
+        assert_eq!(rel.relationship_type, "temporal_proximity");
+        assert_eq!(rel.strength, 0.8);
+        
+        // 2. Fetch for item1
+        let rels_for_1 = get_item_relationships(&conn, &item1.id).unwrap();
+        assert_eq!(rels_for_1.len(), 1);
+        assert_eq!(rels_for_1[0].id, rel.id);
+        
+        // 3. Fetch for item2
+        let rels_for_2 = get_item_relationships(&conn, &item2.id).unwrap();
+        assert_eq!(rels_for_2.len(), 1);
+        assert_eq!(rels_for_2[0].id, rel.id);
+        
+        // 4. Duplicate should fail (UNIQUE constraint)
+        let dup_result = create_item_relationship(
+            &conn,
+            &item1.id,
+            &item2.id,
+            "temporal_proximity",
+            0.9,
+            None,
+        );
+        assert!(dup_result.is_err(), "Duplicate relationship types between the same items should fail");
+        
+        // 5. Delete relationship
+        delete_item_relationship(&conn, &rel.id).unwrap();
+        let rels_after_delete = get_item_relationships(&conn, &item1.id).unwrap();
+        assert_eq!(rels_after_delete.len(), 0);
     }
 }
