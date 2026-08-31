@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod fastembed_provider;
 
 use serde::{Serialize, Deserialize};
 

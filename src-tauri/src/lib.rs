@@ -214,6 +214,18 @@ pub fn run() {
             let app_handle = app.handle().clone();
             clipboard::start_monitor(app_handle.clone());
             
+            // Initialize FastEmbedProvider asynchronously to avoid blocking startup
+            let app_handle_for_embed = app_handle.clone();
+            std::thread::spawn(move || {
+                if let Ok(provider) = crate::semantic::fastembed_provider::FastEmbedProvider::try_new() {
+                    if let Some(state) = app_handle_for_embed.try_state::<AppState>() {
+                        if let Ok(mut ce) = state.context_engine.lock() {
+                            ce.set_semantic_provider(Box::new(provider));
+                        }
+                    }
+                }
+            });
+            
             // Initialize Capture Target Overlay
             let system_target = capture::SystemTarget::new(app_handle.clone());
             app.manage(system_target);

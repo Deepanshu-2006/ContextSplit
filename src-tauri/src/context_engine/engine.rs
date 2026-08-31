@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use serde_json::Value;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use crate::db::operations;
 
 pub enum ContextEvent {
@@ -42,7 +43,7 @@ pub trait ContextProvider: Send + Sync {
 
 pub struct ContextEngine {
     providers: Vec<Box<dyn ContextProvider>>,
-    pub semantic_provider: Option<Box<dyn crate::semantic::SemanticProvider>>,
+    pub semantic_provider: Option<Arc<Box<dyn crate::semantic::SemanticProvider>>>,
     pub inactivity_threshold_secs: i64,
 }
 
@@ -56,7 +57,7 @@ impl ContextEngine {
     }
     
     pub fn set_semantic_provider(&mut self, provider: Box<dyn crate::semantic::SemanticProvider>) {
-        self.semantic_provider = Some(provider);
+        self.semantic_provider = Some(Arc::new(provider));
     }
     
     pub fn register(&mut self, provider: Box<dyn ContextProvider>) {
@@ -134,21 +135,17 @@ impl ContextEngine {
         }
     }
     
+    // Note: We leave this function here for synchronous usage (e.g. tests)
     pub fn index_item_semantically(&self, conn: &Connection, item_id: &str) -> Result<(), String> {
-        // If there's no semantic provider, this is a no-op
         if let Some(provider) = &self.semantic_provider {
-            // Fetch the item
             let item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
             
-            // Use the SemanticContentBuilder
             let builder = crate::semantic::builder::SemanticContentBuilder::new();
             let text_to_embed = builder.build(&item);
             
             if !text_to_embed.trim().is_empty() {
-                // Generate the embedding
                 let embedding = provider.generate_embedding(&text_to_embed)?;
                 
-                // Save it to SQLite
                 let status = provider.status();
                 crate::db::operations::save_item_embedding(
                     conn,
@@ -160,6 +157,10 @@ impl ContextEngine {
             }
         }
         Ok(())
+    }
+    
+    pub fn get_semantic_provider(&self) -> Option<Arc<Box<dyn crate::semantic::SemanticProvider>>> {
+        self.semantic_provider.clone()
     }
 }
 

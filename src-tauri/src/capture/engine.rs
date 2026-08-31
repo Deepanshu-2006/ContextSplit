@@ -56,6 +56,47 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
         
         // Generate relationships with recent items
         let _ = crate::context_engine::relationships::generate_relationships(&conn, &item.id);
+        
+        // --- Asynchronous Semantic Embedding ---
+        if let Some(provider) = ce.get_semantic_provider() {
+            let builder = crate::semantic::builder::SemanticContentBuilder::new();
+            let text_to_embed = builder.build(&item);
+            
+            if !text_to_embed.trim().is_empty() {
+                let item_id = item.id.clone();
+                let app_handle_clone = app_handle.clone();
+                
+                tauri::async_runtime::spawn(async move {
+                    // Offload CPU-intensive embedding generation to a blocking thread
+                    let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
+                        match provider.generate_embedding(&text_to_embed) {
+                            Ok(emb) => Ok((emb, provider.status().model_name.clone())),
+                            Err(e) => Err(e),
+                        }
+                    });
+                    
+                    if let Ok(result) = join_handle.await {
+                        if let Ok(tuple_res) = result {
+                            let embedding: Vec<f32> = tuple_res.0;
+                            let model_name: String = tuple_res.1;
+                            
+                            // After generation, get DB lock briefly to save
+                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
+                                if let Ok(conn) = state.db_conn.lock() {
+                                    let _ = crate::db::operations::save_item_embedding(
+                                        &conn,
+                                        &item_id,
+                                        &embedding,
+                                        &model_name,
+                                        &model_name
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
     }
 
     // Drop the mutex guard before emitting events or showing notifications to prevent deadlocks
