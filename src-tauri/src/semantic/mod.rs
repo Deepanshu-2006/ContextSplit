@@ -1,3 +1,5 @@
+pub mod builder;
+
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone)]

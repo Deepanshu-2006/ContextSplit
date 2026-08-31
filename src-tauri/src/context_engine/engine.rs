@@ -140,15 +140,9 @@ impl ContextEngine {
             // Fetch the item
             let item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
             
-            // Only embed if there's textual content (or title)
-            let mut text_to_embed = String::new();
-            if let Some(title) = &item.title {
-                text_to_embed.push_str(title);
-                text_to_embed.push_str(" ");
-            }
-            if item.item_type == "text" || item.item_type == "url" {
-                text_to_embed.push_str(&item.content);
-            }
+            // Use the SemanticContentBuilder
+            let builder = crate::semantic::builder::SemanticContentBuilder::new();
+            let text_to_embed = builder.build(&item);
             
             if !text_to_embed.trim().is_empty() {
                 // Generate the embedding
