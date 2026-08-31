@@ -83,13 +83,17 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
                             // After generation, get DB lock briefly to save
                             if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
                                 if let Ok(conn) = state.db_conn.lock() {
-                                    let _ = crate::db::operations::save_item_embedding(
+                                    if crate::db::operations::save_item_embedding(
                                         &conn,
                                         &item_id,
                                         &embedding,
                                         &model_name,
                                         &model_name
-                                    );
+                                    ).is_ok() {
+                                        if let Ok(ce) = state.context_engine.lock() {
+                                            let _ = crate::context_engine::relationships::generate_semantic_relationships(&ce, &conn, &item_id);
+                                        }
+                                    }
                                 }
                             }
                         }

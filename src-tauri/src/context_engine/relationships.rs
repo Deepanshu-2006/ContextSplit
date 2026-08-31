@@ -2,6 +2,50 @@ use rusqlite::Connection;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+pub fn generate_semantic_relationships(ce: &crate::context_engine::engine::ContextEngine, conn: &Connection, new_item_id: &str) -> Result<(), String> {
+    let min_threshold = 0.85;
+    let time_window_secs = 86400; // 24 hours
+    
+    let now = Utc::now();
+    let window_start = now - chrono::Duration::seconds(time_window_secs);
+    let window_start_str = window_start.to_rfc3339();
+    
+    // Fetch recent items (excluding self)
+    let mut stmt = conn.prepare(
+        "SELECT id FROM items WHERE created_at >= ?1 AND id != ?2"
+    ).map_err(|e| e.to_string())?;
+    
+    let iter = stmt.query_map(rusqlite::params![window_start_str, new_item_id], |row| {
+        row.get::<_, String>(0)
+    }).map_err(|e| e.to_string())?;
+    
+    for row in iter {
+        if let Ok(recent_id) = row {
+            if let Some(score) = ce.get_semantic_similarity(conn, new_item_id, &recent_id) {
+                if score >= min_threshold {
+                    let primary_reason = "semantic_similarity".to_string();
+                    let meta = serde_json::json!({
+                        "reasons": ["semantic_similarity"]
+                    }).to_string();
+                    
+                    // Create relationship, ignoring error if it already exists
+                    let _ = crate::db::operations::create_item_relationship(
+                        conn,
+                        new_item_id,
+                        &recent_id,
+                        &primary_reason,
+                        score as f64,
+                        Some(&meta),
+                    );
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+
 pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<(), String> {
     let min_threshold = 0.3;
     let time_window_secs = 86400; // 24 hours
@@ -240,5 +284,37 @@ mod tests {
         // Since diff > 5 mins, no time proximity score. 
         // No session, no app, no domain. Score = 0.0, which is < min_threshold (0.3).
         assert_eq!(rels.len(), 0);
+    }
+    
+    #[test]
+    fn test_generate_semantic_relationships() {
+        let conn = setup_in_memory_db();
+        let ce = crate::context_engine::engine::ContextEngine::new();
+        
+        let i1 = create_item(&conn, None, None, "text", "Apple", None, "{}").unwrap();
+        let i2 = create_item(&conn, None, None, "text", "Banana", None, "{}").unwrap();
+        let i3 = create_item(&conn, None, None, "text", "Cherry", None, "{}").unwrap();
+        
+        // Save identical embeddings for i1 and i2 to force a 1.0 similarity score
+        let emb_a = vec![1.0, 0.0];
+        let emb_b = vec![1.0, 0.0];
+        crate::db::operations::save_item_embedding(&conn, &i1.id, &emb_a, "test", "test").unwrap();
+        crate::db::operations::save_item_embedding(&conn, &i2.id, &emb_b, "test", "test").unwrap();
+        
+        // No embedding for i3
+        
+        // Generate semantic relationships for i2
+        generate_semantic_relationships(&ce, &conn, &i2.id).unwrap();
+        
+        // Verify relationship created between i1 and i2
+        let rels = get_item_relationships(&conn, &i2.id).unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].relationship_type, "semantic_similarity");
+        assert_eq!(rels[0].strength, 1.0);
+        
+        // Generate for i3, should do nothing
+        generate_semantic_relationships(&ce, &conn, &i3.id).unwrap();
+        let rels3 = get_item_relationships(&conn, &i3.id).unwrap();
+        assert_eq!(rels3.len(), 0);
     }
 }
