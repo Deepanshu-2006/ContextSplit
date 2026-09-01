@@ -320,6 +320,7 @@ pub fn end_session(conn: &Connection, id: &str) -> Result<Session> {
     get_session(conn, id)
 }
 
+#[allow(dead_code)]
 pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     let mut stmt = conn.prepare("SELECT id, started_at, last_activity_at, ended_at, status FROM sessions ORDER BY started_at DESC")?;
     let session_iter = stmt.query_map([], |row| {
@@ -483,6 +484,7 @@ pub fn get_item_embedding_metadata(conn: &Connection, item_id: &str) -> Result<O
     }
 }
 
+#[allow(dead_code)]
 pub fn delete_item_relationship(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM item_relationships WHERE id = ?1", params![id])?;
     Ok(())

@@ -1,3 +1,6 @@
+#![allow(unexpected_cfgs)]
+#![allow(deprecated)]
+
 use super::super::ActiveAppInfo;
 use cocoa::base::id;
 use objc::{class, msg_send, sel, sel_impl};

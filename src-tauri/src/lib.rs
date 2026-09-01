@@ -199,16 +199,19 @@ fn rebuild_semantic_data(app_handle: tauri::AppHandle, state: State<'_, AppState
     let app_handle_clone = app_handle.clone();
     std::thread::spawn(move || {
         if let Some(state) = app_handle_clone.try_state::<AppState>() {
+            let mut items_to_retry = Vec::new();
             if let Ok(conn) = state.db_conn.lock() {
                 if let Ok(settings) = crate::db::settings::get_settings(&conn) {
                     if settings.enable_semantic_processing {
                         if let Ok(pending_items) = crate::db::operations::get_pending_or_failed_items(&conn, 3) {
-                            for item_id in pending_items {
-                                crate::capture::engine::retry_item_embedding(app_handle_clone.clone(), &item_id);
-                            }
+                            items_to_retry = pending_items;
                         }
                     }
                 }
+            }
+            
+            for item_id in items_to_retry {
+                crate::capture::engine::retry_item_embedding(app_handle_clone.clone(), &item_id);
             }
         }
     });
@@ -265,15 +268,18 @@ pub fn run() {
                     if let Some(state) = app_handle_for_embed.try_state::<AppState>() {
                         if let Ok(mut ce) = state.context_engine.lock() {
                             ce.set_semantic_provider(Box::new(provider));
-                            
-                            // Retry failed embeddings on startup
-                            if let Ok(conn) = state.db_conn.lock() {
-                                if let Ok(failed_items) = crate::db::operations::get_pending_or_failed_items(&conn, 3) {
-                                    for item_id in failed_items {
-                                        crate::capture::engine::retry_item_embedding(app_handle_for_embed.clone(), &item_id);
-                                    }
-                                }
+                        }
+                        
+                        // Retry failed embeddings on startup (moved outside the lock!)
+                        let mut items_to_retry = Vec::new();
+                        if let Ok(conn) = state.db_conn.lock() {
+                            if let Ok(failed_items) = crate::db::operations::get_pending_or_failed_items(&conn, 3) {
+                                items_to_retry = failed_items;
                             }
+                        }
+                        
+                        for item_id in items_to_retry {
+                            crate::capture::engine::retry_item_embedding(app_handle_for_embed.clone(), &item_id);
                         }
                     }
                 }

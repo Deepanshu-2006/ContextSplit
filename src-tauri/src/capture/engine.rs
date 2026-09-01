@@ -175,13 +175,14 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
     };
     
     if let Some(item) = item_opt {
+        // Fix lock ordering: always acquire db_conn BEFORE context_engine to prevent deadlocks
+        let enable_semantic = if let Ok(conn) = state.db_conn.lock() {
+            if let Ok(settings) = crate::db::settings::get_settings(&conn) {
+                settings.enable_semantic_processing
+            } else { true }
+        } else { true };
+        
         if let Ok(ce) = state.context_engine.lock() {
-            let enable_semantic = if let Ok(conn) = state.db_conn.lock() {
-                if let Ok(settings) = crate::db::settings::get_settings(&conn) {
-                    settings.enable_semantic_processing
-                } else { true }
-            } else { true };
-            
             if enable_semantic {
                 if let Some(provider) = ce.get_semantic_provider() {
                 let builder = crate::semantic::builder::SemanticContentBuilder::new();
