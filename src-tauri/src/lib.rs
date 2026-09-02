@@ -455,6 +455,20 @@ fn delete_context_membership(
 }
 
 // ---------------------------------------------------------------------------
+// Context Timeline commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_context_timeline(
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextTimeline, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::timeline::get_context_timeline(&conn, workspace_id)
+}
+
+
+// ---------------------------------------------------------------------------
 
 #[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
@@ -578,7 +592,9 @@ pub fn run() {
             list_workspace_context_memberships,
             confirm_context_membership,
             dismiss_context_membership,
-            delete_context_membership
+            delete_context_membership,
+            // Context Timeline
+            get_context_timeline
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

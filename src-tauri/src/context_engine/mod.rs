@@ -5,6 +5,7 @@ pub mod scoring;
 pub mod relationships;
 pub mod graph;
 pub mod discovery;
+pub mod timeline;
 
 #[cfg(test)]
 pub mod workflow_tests;

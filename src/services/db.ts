@@ -214,6 +214,64 @@ export interface UnifiedContextInterpretation {
   summary: string;
 }
 
+export interface TimelineItemSummary {
+  id: string;
+  title?: string | null;
+  item_type: string;
+  content_snippet: string;
+  captured_at: string;
+  session_id?: string | null;
+  app_name?: string | null;
+  domain?: string | null;
+  membership_type: string;
+}
+
+export interface TimelineSession {
+  id: string;
+  started_at: string;
+  last_activity_at: string;
+  ended_at?: string | null;
+  status: string;
+  item_count: number;
+  items: TimelineItemSummary[];
+}
+
+export interface TimelineUserAction {
+  signal_id: string;
+  action_type: string;
+  item_id?: string | null;
+  item_title?: string | null;
+  timestamp: string;
+  description: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TimelineEvent {
+  id: string;
+  event_type: string;
+  timestamp: string;
+  title: string;
+  description: string;
+  item_id?: string | null;
+  session_id?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface ContextTimeline {
+  workspace_id: string;
+  workspace_name: string;
+  created_at: string;
+  total_items: number;
+  total_sessions: number;
+  first_activity_at?: string | null;
+  latest_activity_at?: string | null;
+  sessions: TimelineSession[];
+  items: TimelineItemSummary[];
+  major_actions: TimelineUserAction[];
+  chronological_activity: TimelineEvent[];
+}
+
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -406,5 +464,9 @@ export const db = {
 
   deleteContextMembership: (id: string) =>
     invoke<void>("delete_context_membership", { id }),
+
+  // Context Timeline
+  getContextTimeline: (workspaceId: string) =>
+    invoke<ContextTimeline>("get_context_timeline", { workspaceId }),
 };
 

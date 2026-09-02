@@ -277,5 +277,69 @@ pub struct UnifiedContextInterpretation {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineItemSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub item_type: String,
+    pub content_snippet: String,
+    pub captured_at: String,
+    pub session_id: Option<String>,
+    pub app_name: Option<String>,
+    pub domain: Option<String>,
+    pub membership_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineSession {
+    pub id: String,
+    pub started_at: String,
+    pub last_activity_at: String,
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub item_count: usize,
+    pub items: Vec<TimelineItemSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineUserAction {
+    pub signal_id: String,
+    pub action_type: String,
+    pub item_id: Option<String>,
+    pub item_title: Option<String>,
+    pub timestamp: String,
+    pub description: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub id: String,
+    /// "item_captured" | "session_started" | "session_ended" | "user_action" | "relationship_formed"
+    pub event_type: String,
+    pub timestamp: String,
+    pub title: String,
+    pub description: String,
+    pub item_id: Option<String>,
+    pub session_id: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextTimeline {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub created_at: String,
+    pub total_items: usize,
+    pub total_sessions: usize,
+    pub first_activity_at: Option<String>,
+    pub latest_activity_at: Option<String>,
+    pub sessions: Vec<TimelineSession>,
+    pub items: Vec<TimelineItemSummary>,
+    pub major_actions: Vec<TimelineUserAction>,
+    pub chronological_activity: Vec<TimelineEvent>,
+}
+
+
 
 
