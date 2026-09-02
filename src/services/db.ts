@@ -271,6 +271,26 @@ export interface ContextTimeline {
   chronological_activity: TimelineEvent[];
 }
 
+export interface ContextEvidenceItem {
+  category: string;
+  explanation: string;
+  weight: number;
+  related_item_ids: string[];
+}
+
+export interface ContextExplanation {
+  item_id: string;
+  workspace_id: string;
+  workspace_name: string;
+  membership_type: string;
+  confidence: number;
+  confidence_percentage: string;
+  summary: string;
+  explanations: string[];
+  evidence: ContextEvidenceItem[];
+}
+
+
 
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
@@ -468,5 +488,9 @@ export const db = {
   // Context Timeline
   getContextTimeline: (workspaceId: string) =>
     invoke<ContextTimeline>("get_context_timeline", { workspaceId }),
+
+  // Context Explanation
+  explainContextAssociation: (itemId: string, workspaceId: string) =>
+    invoke<ContextExplanation>("explain_context_association", { itemId, workspaceId }),
 };
 

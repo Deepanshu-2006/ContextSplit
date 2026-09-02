@@ -467,6 +467,21 @@ fn get_context_timeline(
     crate::context_engine::timeline::get_context_timeline(&conn, workspace_id)
 }
 
+// ---------------------------------------------------------------------------
+// Context Explanation commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn explain_context_association(
+    item_id: &str,
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextExplanation, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::explanation::explain_context_association(&conn, item_id, workspace_id)
+}
+
+
 
 // ---------------------------------------------------------------------------
 
@@ -594,7 +609,9 @@ pub fn run() {
             dismiss_context_membership,
             delete_context_membership,
             // Context Timeline
-            get_context_timeline
+            get_context_timeline,
+            // Context Explanation
+            explain_context_association
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

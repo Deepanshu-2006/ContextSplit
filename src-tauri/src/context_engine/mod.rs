@@ -6,6 +6,7 @@ pub mod relationships;
 pub mod graph;
 pub mod discovery;
 pub mod timeline;
+pub mod explanation;
 
 #[cfg(test)]
 pub mod workflow_tests;

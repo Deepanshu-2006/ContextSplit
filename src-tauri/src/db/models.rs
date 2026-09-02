@@ -340,6 +340,28 @@ pub struct ContextTimeline {
     pub chronological_activity: Vec<TimelineEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEvidenceItem {
+    pub category: String,
+    pub explanation: String,
+    pub weight: f64,
+    pub related_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextExplanation {
+    pub item_id: String,
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub membership_type: String,
+    pub confidence: f64,
+    pub confidence_percentage: String,
+    pub summary: String,
+    pub explanations: Vec<String>,
+    pub evidence: Vec<ContextEvidenceItem>,
+}
+
+
 
 
 

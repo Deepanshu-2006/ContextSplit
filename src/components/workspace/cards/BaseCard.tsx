@@ -43,11 +43,17 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
           if (existingSuggested) {
             const ws = workspaces.find(w => w.id === existingSuggested.workspace_id);
             if (ws) {
+              let reasons: string[] = [];
+              try {
+                const expl = await db.explainContextAssociation(itemId, ws.id);
+                reasons = expl.explanations;
+              } catch (e) {}
+
               setSuggestionData({
                 workspaceId: ws.id,
                 workspaceName: ws.name,
                 confidence: Math.round(existingSuggested.confidence * 100),
-                reasons: [],
+                reasons,
               });
               return;
             }

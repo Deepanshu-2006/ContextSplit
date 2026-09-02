@@ -512,9 +512,14 @@ pub fn evaluate_item_context(
             "Low"
         };
 
-        if reasons.is_empty() {
-            reasons.push("Baseline comparison; minimal overlap".to_string());
-        }
+        let contextual_reasons = crate::context_engine::explanation::get_concise_explanations(conn, item_id, &ws.id);
+        let final_reasons = if !contextual_reasons.is_empty() && clamped_score >= 0.20 {
+            contextual_reasons
+        } else if !reasons.is_empty() {
+            reasons
+        } else {
+            vec![format!("Baseline comparison with minimal contextual overlap with {}.", ws.name)]
+        };
 
         existing_workspaces.push(crate::db::models::ExistingWorkspaceEvaluation {
             workspace_id: ws.id.clone(),
@@ -523,7 +528,7 @@ pub fn evaluate_item_context(
             confidence: clamped_score,
             confidence_percentage: format!("{:.0}%", (clamped_score * 100.0).round()),
             confidence_band: confidence_band.to_string(),
-            reasons,
+            reasons: final_reasons,
         });
     }
 
