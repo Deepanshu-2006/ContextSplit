@@ -7,6 +7,7 @@ import { useDiscoveryStore } from "./store/discoveryStore";
 import { DiscoveryNotificationCard } from "./components/discovery/DiscoveryNotificationCard";
 import { CandidateReviewModal } from "./components/discovery/CandidateReviewModal";
 import { ContextTimelineDrawer } from "./components/timeline/ContextTimelineDrawer";
+import { ContextOverviewPanel } from "./components/workspace/ContextOverviewPanel";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
@@ -88,6 +89,7 @@ function App() {
       <DiscoveryNotificationCard />
       <CandidateReviewModal />
       <ContextTimelineDrawer />
+      <ContextOverviewPanel />
       <Toaster position="bottom-right" />
     </div>
   );

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Sparkles, Settings, Clock } from "lucide-react";
+import { Search, Sparkles, Settings, Clock, Layers } from "lucide-react";
 import { SettingsModal } from "../settings/SettingsModal";
 import { useDiscoveryStore } from "../../store/discoveryStore";
 import { useWorkspaceStore } from "../../store/workspaceStore";
@@ -7,7 +7,7 @@ import { useWorkspaceStore } from "../../store/workspaceStore";
 export function TopBar() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const { candidates, runDiscoveryScan, isLoading } = useDiscoveryStore();
-  const { activeWorkspaceId, workspaces, openTimeline } = useWorkspaceStore();
+  const { activeWorkspaceId, workspaces, openTimeline, openOverview } = useWorkspaceStore();
 
   const currentWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const detectedCount = candidates.filter((c) => c.status === "detected").length;
@@ -33,14 +33,25 @@ export function TopBar() {
 
       <div className="flex items-center gap-2.5">
         {currentWorkspace && (
-          <button
-            onClick={() => openTimeline(currentWorkspace.id)}
-            title={`View ${currentWorkspace.name} Context Timeline`}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100/70 rounded-lg border border-indigo-200/60 transition-colors cursor-pointer"
-          >
-            <Clock size={13} className="text-indigo-600" />
-            <span>Timeline</span>
-          </button>
+          <>
+            <button
+              onClick={() => openOverview(currentWorkspace.id)}
+              title={`View ${currentWorkspace.name} Context Overview`}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-violet-700 bg-violet-50/70 hover:bg-violet-100/70 rounded-lg border border-violet-200/60 transition-colors cursor-pointer"
+            >
+              <Layers size={13} className="text-violet-600" />
+              <span>Overview</span>
+            </button>
+
+            <button
+              onClick={() => openTimeline(currentWorkspace.id)}
+              title={`View ${currentWorkspace.name} Context Timeline`}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100/70 rounded-lg border border-indigo-200/60 transition-colors cursor-pointer"
+            >
+              <Clock size={13} className="text-indigo-600" />
+              <span>Timeline</span>
+            </button>
+          </>
         )}
 
         <button

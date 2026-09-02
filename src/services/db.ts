@@ -274,6 +274,29 @@ export interface ContextTimeline {
   chronological_activity: TimelineEvent[];
 }
 
+export interface AppUsageSummary {
+  name: string;
+  item_count: number;
+}
+
+export interface DomainUsageSummary {
+  domain: string;
+  item_count: number;
+}
+
+export interface ContextOverview {
+  workspace_id: string;
+  name: string;
+  lifecycle_state: "active" | "dormant" | "archived";
+  item_count: number;
+  recent_activity?: string | null;
+  session_count: number;
+  related_applications: AppUsageSummary[];
+  important_domains: DomainUsageSummary[];
+  recent_items: TimelineItemSummary[];
+  timeline: ContextTimeline;
+}
+
 export interface ContextEvidenceItem {
   category: string;
   explanation: string;
@@ -532,5 +555,9 @@ export const db = {
       id,
       inactivityDaysThreshold: inactivityDaysThreshold ?? null,
     }),
+
+  // Context Overview
+  getContextOverview: (workspaceId: string) =>
+    invoke<ContextOverview>("get_context_overview", { workspaceId }),
 };
 

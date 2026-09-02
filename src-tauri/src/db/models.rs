@@ -364,6 +364,33 @@ pub struct ContextExplanation {
     pub evidence: Vec<ContextEvidenceItem>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageSummary {
+    pub name: String,
+    pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainUsageSummary {
+    pub domain: String,
+    pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextOverview {
+    pub workspace_id: String,
+    pub name: String,
+    pub lifecycle_state: String,
+    pub item_count: usize,
+    pub recent_activity: Option<String>,
+    pub session_count: usize,
+    pub related_applications: Vec<AppUsageSummary>,
+    pub important_domains: Vec<DomainUsageSummary>,
+    pub recent_items: Vec<TimelineItemSummary>,
+    pub timeline: ContextTimeline,
+}
+
+
 
 
 

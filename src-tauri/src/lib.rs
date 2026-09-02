@@ -528,6 +528,19 @@ fn explain_context_association(
 }
 
 // ---------------------------------------------------------------------------
+// Context Overview command
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_context_overview(
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextOverview, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::overview::get_context_overview(&conn, workspace_id)
+}
+
+// ---------------------------------------------------------------------------
 // Temporal Context Weighting commands
 // ---------------------------------------------------------------------------
 
@@ -687,7 +700,9 @@ pub fn run() {
             update_workspace_lifecycle_state,
             archive_workspace,
             unarchive_workspace,
-            evaluate_workspace_lifecycle
+            evaluate_workspace_lifecycle,
+            // Context Overview
+            get_context_overview
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
