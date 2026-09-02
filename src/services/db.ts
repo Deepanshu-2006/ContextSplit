@@ -485,6 +485,12 @@ export const db = {
   deleteContextMembership: (id: string) =>
     invoke<void>("delete_context_membership", { id }),
 
+  recalculateWorkspaceMemberships: (workspaceId: string, triggerItemId?: string) =>
+    invoke<ContextMembership[]>("recalculate_workspace_suggested_memberships", {
+      workspaceId,
+      triggerItemId: triggerItemId ?? null,
+    }),
+
   // Context Timeline
   getContextTimeline: (workspaceId: string) =>
     invoke<ContextTimeline>("get_context_timeline", { workspaceId }),

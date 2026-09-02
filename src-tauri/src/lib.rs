@@ -454,6 +454,20 @@ fn delete_context_membership(
     crate::db::operations::delete_membership(&conn, id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn recalculate_workspace_suggested_memberships(
+    workspace_id: &str,
+    trigger_item_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ContextMembership>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::scoring::recalculate_workspace_suggested_memberships(
+        &conn,
+        workspace_id,
+        trigger_item_id.as_deref(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Context Timeline commands
 // ---------------------------------------------------------------------------
@@ -608,6 +622,7 @@ pub fn run() {
             confirm_context_membership,
             dismiss_context_membership,
             delete_context_membership,
+            recalculate_workspace_suggested_memberships,
             // Context Timeline
             get_context_timeline,
             // Context Explanation

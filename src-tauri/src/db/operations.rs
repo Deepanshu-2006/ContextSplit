@@ -107,6 +107,7 @@ pub fn create_item(
     if let Some(ws_id) = workspace_id {
         if ws_id != "inbox" && !ws_id.is_empty() {
             let _ = create_or_update_membership(conn, &id, ws_id, "confirmed", 1.0, "user");
+            let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(conn, ws_id, Some(&id));
         }
     }
     
@@ -251,10 +252,11 @@ pub fn move_item(
         }
     }
     
-    // Recalculate new workspace profile
+    // Recalculate new workspace profile and dynamically recalculate suggested memberships
     if let Some(new_ws) = workspace_id {
         if Some(new_ws) != old_workspace_id.as_deref() {
             let _ = recalculate_workspace_profile(conn, new_ws);
+            let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(conn, new_ws, Some(id));
         }
     }
     

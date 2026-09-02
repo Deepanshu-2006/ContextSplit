@@ -686,6 +686,142 @@ pub fn evaluate_item_context(
     })
 }
 
+/// Recalculates confidence for suggested ContextMemberships associated with a workspace.
+/// Triggered when new items are added or moved into the workspace.
+///
+/// Rules:
+/// - Keep calculation deterministic.
+/// - Do NOT silently convert suggested into confirmed membership.
+/// - User-confirmed membership remains authoritative.
+/// - Store the latest confidence in context_memberships.
+/// - Preserve meaningful history when confidence changes (via context_signals).
+/// - Avoid recalculating every item unnecessarily (only targets suggested items and directly related unassigned items).
+pub fn recalculate_workspace_suggested_memberships(
+    conn: &Connection,
+    workspace_id: &str,
+    trigger_item_id: Option<&str>,
+) -> Result<Vec<crate::db::models::ContextMembership>, String> {
+    let ws = crate::db::operations::get_workspace(conn, workspace_id)
+        .map_err(|e| format!("Workspace '{}' not found: {}", workspace_id, e))?;
+
+    // 1. Identify candidate items to recalculate without scanning the entire database:
+    let mut target_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // a) Items currently having a 'suggested' membership for this workspace
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT item_id FROM context_memberships WHERE workspace_id = ?1 AND membership_type = 'suggested'"
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![workspace_id], |row| row.get::<_, String>(0)) {
+            for r in rows.flatten() {
+                target_ids.insert(r);
+            }
+        }
+    }
+
+    // b) If trigger_item_id is provided, also look for unassigned items related to this trigger item
+    if let Some(t_id) = trigger_item_id {
+        if let Ok(mut rel_stmt) = conn.prepare(
+            "SELECT DISTINCT CASE WHEN r.item_a_id = ?1 THEN r.item_b_id ELSE r.item_a_id END as other_id
+             FROM item_relationships r
+             JOIN items other ON other.id = (CASE WHEN r.item_a_id = ?1 THEN r.item_b_id ELSE r.item_a_id END)
+             WHERE (r.item_a_id = ?1 OR r.item_b_id = ?1)
+               AND other.workspace_id IS NULL
+               AND r.strength >= 0.40"
+        ) {
+            if let Ok(rows) = rel_stmt.query_map(rusqlite::params![t_id], |row| row.get::<_, String>(0)) {
+                for r in rows.flatten() {
+                    target_ids.insert(r);
+                }
+            }
+        }
+    }
+
+    if target_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut updated_memberships = Vec::new();
+
+    for target_item_id in target_ids {
+        // Exclude trigger_item itself
+        if Some(target_item_id.as_str()) == trigger_item_id {
+            continue;
+        }
+
+        // Never touch confirmed or dismissed memberships (User-confirmed is authoritative)
+        let existing_membership = crate::db::operations::get_item_workspace_membership(conn, &target_item_id, workspace_id)
+            .ok()
+            .flatten();
+
+        if let Some(ref m) = existing_membership {
+            if m.membership_type == "confirmed" || m.membership_type == "dismissed" {
+                continue;
+            }
+        }
+
+        // Also check if item physically belongs to this or another workspace
+        if let Ok(item) = crate::db::operations::get_item(conn, &target_item_id) {
+            if item.workspace_id.is_some() && item.workspace_id.as_deref() != Some(workspace_id) {
+                // Item is physically in another workspace and user-assigned; skip
+                continue;
+            }
+        }
+
+        // Deterministic recalculation
+        let scores = score_item(conn, &target_item_id).unwrap_or_default();
+        let new_score = scores.into_iter().find(|s| s.workspace_id == workspace_id);
+        let new_confidence = new_score.map(|s| s.confidence as f64).unwrap_or(0.0).clamp(0.0, 1.0);
+
+        let old_confidence = existing_membership.as_ref().map(|m| m.confidence).unwrap_or(0.0);
+        let delta = (new_confidence - old_confidence).abs();
+
+        // If changed by >= 1% or new suggested membership qualified
+        if delta >= 0.01 || (existing_membership.is_none() && new_confidence >= 0.35) {
+            // NEVER silently convert suggested to confirmed: always keeps "suggested"
+            let membership = crate::db::operations::create_or_update_membership(
+                conn,
+                &target_item_id,
+                workspace_id,
+                "suggested",
+                new_confidence,
+                "context_engine",
+            ).map_err(|e| e.to_string())?;
+
+            // Preserve meaningful history when confidence changes
+            let payload = serde_json::json!({
+                "action": "membership_confidence_recalculated",
+                "workspace_id": workspace_id,
+                "workspace_name": ws.name,
+                "item_id": target_item_id,
+                "previous_confidence": old_confidence,
+                "new_confidence": new_confidence,
+                "delta": new_confidence - old_confidence,
+                "trigger_item_id": trigger_item_id,
+                "reason": format!(
+                    "Confidence dynamically updated from {:.0}% to {:.0}% as new items were added to {}",
+                    old_confidence * 100.0,
+                    new_confidence * 100.0,
+                    ws.name
+                )
+            }).to_string();
+
+            let _ = crate::context_engine::operations::create_context_signal(
+                conn,
+                Some(workspace_id),
+                Some(&target_item_id),
+                "context_signal",
+                None,
+                &payload,
+            );
+
+            updated_memberships.push(membership);
+        }
+    }
+
+    Ok(updated_memberships)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1033,5 +1169,121 @@ mod tests {
         let target_after = crate::db::operations::get_item(&conn, &target.id).unwrap();
         assert_eq!(target_after.workspace_id, None);
         assert_eq!(crate::db::operations::list_items(&conn, Some(&ws_paris.id)).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_dynamic_context_membership_confidence_recalculation() {
+        let conn = setup_in_memory_db();
+
+        // 1. Create Workspace
+        let ws_paris = create_workspace(&conn, "Paris Trip").unwrap();
+
+        // 2. Initial item in Paris Trip
+        let initial_item = create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://booking.com/paris-hotel",
+            Some("Paris Hotel"),
+            "{\"app_name\":\"Safari\",\"original_url\":\"https://booking.com/paris-hotel\"}",
+        ).unwrap();
+
+        // 3. Unassigned Inbox Item: Paris restaurant
+        let restaurant = create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://tripadvisor.com/paris-bistro",
+            Some("Paris restaurant"),
+            "{\"app_name\":\"Safari\",\"original_url\":\"https://tripadvisor.com/paris-bistro\"}",
+        ).unwrap();
+
+        // Establish initial connection with initial_item
+        let _ = crate::db::operations::create_item_relationship(&conn, &restaurant.id, &initial_item.id, "same_app", 1.0, None).unwrap();
+
+        // Initial suggested membership: ~61%
+        let initial_membership = crate::db::operations::create_or_update_membership(
+            &conn,
+            &restaurant.id,
+            &ws_paris.id,
+            "suggested",
+            0.61,
+            "context_engine",
+        ).unwrap();
+        assert_eq!(initial_membership.confidence, 0.61);
+        assert_eq!(initial_membership.membership_type, "suggested");
+
+        // 4. Add additional related Items to Paris Trip
+        let flight = create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://airfrance.com/flight-paris",
+            Some("Paris Flight"),
+            "{\"app_name\":\"Safari\",\"original_url\":\"https://airfrance.com/flight-paris\"}",
+        ).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &restaurant.id, &flight.id, "same_app", 1.0, None).unwrap();
+
+        let museum = create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "text",
+            "Louvre tickets 10am, Orsay 3pm",
+            Some("Paris Museum Guide"),
+            "{\"app_name\":\"Safari\"}",
+        ).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &restaurant.id, &museum.id, "same_app", 1.0, None).unwrap();
+
+        // History signal: user previously moved items to Paris Trip
+        let hist_payload = serde_json::json!({
+            "action": "moved_to_workspace",
+            "destination_workspace": ws_paris.id
+        }).to_string();
+        let _ = create_context_signal(&conn, None, Some(&restaurant.id), "user_action", None, &hist_payload).unwrap();
+
+        // 5. Trigger dynamic recalculation
+        let updated = recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, Some(&museum.id)).unwrap();
+        assert!(!updated.is_empty(), "Should have updated the suggested membership");
+
+        // 6. Verify updated membership in DB
+        let stored_membership = crate::db::operations::get_item_workspace_membership(&conn, &restaurant.id, &ws_paris.id)
+            .unwrap()
+            .unwrap();
+
+        // Requirements verification:
+        // a) Confidence increased dynamically (from 61% to high confidence ~89%)
+        assert!(
+            stored_membership.confidence >= 0.80,
+            "Confidence should increase after additional related items (actual: {})",
+            stored_membership.confidence
+        );
+
+        // b) Deterministic: recalculating again produces same result
+        let rerun = recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, None).unwrap();
+        assert!(rerun.is_empty(), "Rerunning without new changes should not produce delta");
+
+        // c) Do not silently convert suggested into confirmed membership
+        assert_eq!(stored_membership.membership_type, "suggested");
+
+        // d) Physical location remains in Inbox
+        let target_item_after = crate::db::operations::get_item(&conn, &restaurant.id).unwrap();
+        assert_eq!(target_item_after.workspace_id, None);
+
+        // e) Meaningful history preserved in context_signals
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws_paris.id), Some(&restaurant.id)).unwrap();
+        let recalc_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.payload.contains("membership_confidence_recalculated"))
+            .collect();
+        assert!(!recalc_signals.is_empty(), "Should record confidence update signal in history");
+
+        let latest_payload: serde_json::Value = serde_json::from_str(&recalc_signals.first().unwrap().payload).unwrap();
+        assert!(latest_payload["new_confidence"].as_f64().unwrap() >= 0.80);
+        assert!(latest_payload["delta"].as_f64().unwrap() != 0.0);
+        assert_eq!(latest_payload["workspace_id"].as_str().unwrap(), ws_paris.id);
     }
 }
