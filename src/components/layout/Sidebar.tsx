@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Plus, LayoutTemplate, Trash2, Pencil, Inbox } from "lucide-react";
 import { Workspace } from "../../services/db";
 import { useWorkspaceStore } from "../../store/workspaceStore";
+import { DiscoverySection } from "../discovery/DiscoverySection";
 
 export function Sidebar() {
   const {
@@ -45,7 +46,7 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="w-64 h-full bg-[#FAFAFA] border-r border-black/4 flex flex-col pt-8 pb-4 select-none">
+    <aside className="w-64 h-full bg-[#FAFAFA] border-r border-black/4 flex flex-col pt-8 pb-4 select-none overflow-y-auto">
       <div className="px-6 mb-8 flex items-center gap-2">
         <div className="w-5 h-5 rounded-md bg-black shadow-sm" />
         <h1 className="font-semibold text-[15px] tracking-tight text-gray-900">
@@ -53,7 +54,7 @@ export function Sidebar() {
         </h1>
       </div>
 
-      <div className="px-4 mb-6">
+      <div className="px-4 mb-4">
         <div
           data-workspace-target-id="inbox"
           onClick={() => selectWorkspace("inbox")}
@@ -78,6 +79,9 @@ export function Sidebar() {
           )}
         </div>
       </div>
+
+      {/* Discovered Contexts Section (Separate from Workspaces) */}
+      <DiscoverySection />
 
       <div className="px-4 mb-2">
         <p className="px-2 text-xs font-medium text-gray-400 tracking-wider uppercase mb-2">

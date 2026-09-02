@@ -35,16 +35,22 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
 
   checkForCandidates: async () => {
     try {
-      const candidates = await db.listContextCandidates('detected');
+      const [detected, suggested] = await Promise.all([
+        db.listContextCandidates('detected'),
+        db.listContextCandidates('suggested'),
+      ]);
+      const combined = [...detected, ...suggested];
       
       // Filter candidates with confidence >= 0.70 (high confidence only)
-      const highConfidenceList = candidates.filter(
-        (c) => c.confidence >= HIGH_CONFIDENCE_THRESHOLD && c.status === 'detected'
+      const highConfidenceList = combined.filter(
+        (c) => c.confidence >= HIGH_CONFIDENCE_THRESHOLD && (c.status === 'detected' || c.status === 'suggested')
       );
 
+      const highDetected = detected.filter((c) => c.confidence >= HIGH_CONFIDENCE_THRESHOLD);
+
       set({
-        candidates,
-        highConfidenceCandidate: highConfidenceList.length > 0 ? highConfidenceList[0] : null,
+        candidates: highConfidenceList,
+        highConfidenceCandidate: highDetected.length > 0 ? highDetected[0] : null,
       });
     } catch (err) {
       console.error('Failed to check for context candidates:', err);
