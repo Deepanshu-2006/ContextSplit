@@ -426,6 +426,17 @@ fn confirm_context_membership(
 }
 
 #[tauri::command]
+fn dismiss_context_membership(
+    item_id: &str,
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextMembership, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::dismiss_membership(&conn, item_id, workspace_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn delete_context_membership(
     id: &str,
     state: State<'_, AppState>,
@@ -556,6 +567,7 @@ pub fn run() {
             list_item_context_memberships,
             list_workspace_context_memberships,
             confirm_context_membership,
+            dismiss_context_membership,
             delete_context_membership
         ])
         .run(tauri::generate_context!())

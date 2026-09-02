@@ -895,6 +895,32 @@ pub fn confirm_membership(
     create_or_update_membership(conn, item_id, workspace_id, "confirmed", 1.0, "user")
 }
 
+pub fn dismiss_membership(
+    conn: &Connection,
+    item_id: &str,
+    workspace_id: &str,
+) -> Result<super::models::ContextMembership> {
+    let mem = create_or_update_membership(conn, item_id, workspace_id, "dismissed", 0.0, "user")?;
+    
+    // Also record user feedback signal
+    let now = Utc::now().to_rfc3339();
+    let signal_id = Uuid::new_v4().to_string();
+    let payload = serde_json::json!({
+        "item_id": item_id,
+        "workspace_id": workspace_id,
+        "action": "membership_dismissed",
+        "created_at": now
+    }).to_string();
+
+    let _ = conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'membership_dismissed', NULL, ?4, ?5, ?5)",
+        params![signal_id, workspace_id, item_id, payload, now],
+    );
+
+    Ok(mem)
+}
+
 pub fn delete_membership(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM context_memberships WHERE id = ?1", params![id])?;
     Ok(())
@@ -1210,5 +1236,96 @@ mod tests {
 
         delete_workspace(&conn, &ws.id).unwrap();
         assert_eq!(list_item_memberships(&conn, &item2.id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_physical_organization_vs_contextual_association() {
+        let conn = setup_db();
+
+        // 1. Inbox Item with suggested membership
+        // Item: Paris restaurant
+        // Physical location: Inbox
+        // Context membership: Paris Trip (suggested, 87%)
+        let ws_paris = create_workspace(&conn, "Paris Trip").unwrap();
+        let item_restaurant = create_item(&conn, None, None, "url", "https://le-gabriel.paris", Some("Paris restaurant"), "{}").unwrap();
+        
+        // Physical location must remain in Inbox
+        assert_eq!(item_restaurant.workspace_id, None);
+        assert_eq!(list_items(&conn, None).unwrap().iter().filter(|i| i.id == item_restaurant.id).count(), 1);
+        assert_eq!(list_items(&conn, Some(&ws_paris.id)).unwrap().len(), 0);
+
+        // Add suggested membership from Context Engine with 87% confidence
+        let suggested_mem = create_or_update_membership(
+            &conn,
+            &item_restaurant.id,
+            &ws_paris.id,
+            "suggested",
+            0.87,
+            "context_engine",
+        ).unwrap();
+        assert_eq!(suggested_mem.membership_type, "suggested");
+        assert_eq!(suggested_mem.confidence, 0.87);
+        assert_eq!(suggested_mem.source, "context_engine");
+
+        // Verify physical location is STILL in Inbox (user is not forced to move item)
+        let item_still_inbox = get_item(&conn, &item_restaurant.id).unwrap();
+        assert_eq!(item_still_inbox.workspace_id, None);
+        assert_eq!(list_items(&conn, Some(&ws_paris.id)).unwrap().len(), 0);
+
+        // Contextual membership is accessible via membership queries
+        let ws_suggested = list_workspace_memberships(&conn, &ws_paris.id, Some("suggested")).unwrap();
+        assert_eq!(ws_suggested.len(), 1);
+        assert_eq!(ws_suggested[0].item_id, item_restaurant.id);
+        assert_eq!(ws_suggested[0].confidence, 0.87);
+
+        // 2. Confirmed Workspace Item
+        // Item: Flight to Paris
+        // Physical location: Paris Trip
+        // Context membership: Paris Trip (confirmed, 100%, user)
+        let item_flight = create_item(&conn, Some(&ws_paris.id), None, "url", "https://airfrance.com/flight", Some("Flight to Paris"), "{}").unwrap();
+        assert_eq!(item_flight.workspace_id.as_deref(), Some(ws_paris.id.as_str()));
+        
+        // Appears in Paris Trip workspace items list
+        let ws_paris_items = list_items(&conn, Some(&ws_paris.id)).unwrap();
+        assert_eq!(ws_paris_items.iter().filter(|i| i.id == item_flight.id).count(), 1);
+
+        // Confirmed membership exists
+        let flight_mem = get_item_workspace_membership(&conn, &item_flight.id, &ws_paris.id).unwrap().unwrap();
+        assert_eq!(flight_mem.membership_type, "confirmed");
+        assert_eq!(flight_mem.confidence, 1.0);
+        assert_eq!(flight_mem.source, "user");
+
+        // 3. Changing a confirmed Workspace
+        let ws_europe = create_workspace(&conn, "Europe Vacation").unwrap();
+        let moved_flight = move_item(&conn, &item_flight.id, Some(&ws_europe.id)).unwrap();
+        assert_eq!(moved_flight.workspace_id.as_deref(), Some(ws_europe.id.as_str()));
+
+        // Old workspace no longer contains the item
+        assert_eq!(list_items(&conn, Some(&ws_paris.id)).unwrap().iter().filter(|i| i.id == item_flight.id).count(), 0);
+        assert!(get_item_workspace_membership(&conn, &item_flight.id, &ws_paris.id).unwrap().is_none());
+
+        // New workspace contains the item and has confirmed membership
+        assert_eq!(list_items(&conn, Some(&ws_europe.id)).unwrap().iter().filter(|i| i.id == item_flight.id).count(), 1);
+        let europe_mem = get_item_workspace_membership(&conn, &item_flight.id, &ws_europe.id).unwrap().unwrap();
+        assert_eq!(europe_mem.membership_type, "confirmed");
+        assert_eq!(europe_mem.source, "user");
+
+        // 4. Dismissing a suggestion
+        let dismissed_mem = dismiss_membership(&conn, &item_restaurant.id, &ws_paris.id).unwrap();
+        assert_eq!(dismissed_mem.membership_type, "dismissed");
+        assert_eq!(dismissed_mem.confidence, 0.0);
+        assert_eq!(dismissed_mem.source, "user");
+
+        // Item still physically in Inbox
+        let item_after_dismiss = get_item(&conn, &item_restaurant.id).unwrap();
+        assert_eq!(item_after_dismiss.workspace_id, None);
+
+        // No longer in suggested memberships list
+        let active_suggestions = list_workspace_memberships(&conn, &ws_paris.id, Some("suggested")).unwrap();
+        assert_eq!(active_suggestions.len(), 0);
+
+        // Feedback signal recorded for future engine learning
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws_paris.id), Some(&item_restaurant.id)).unwrap();
+        assert_eq!(signals.iter().filter(|s| s.signal_type == "membership_dismissed").count(), 1);
     }
 }

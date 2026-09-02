@@ -172,7 +172,7 @@ export interface CandidateScore {
 
 // --- Context Membership ---
 
-export type MembershipType = "confirmed" | "suggested";
+export type MembershipType = "confirmed" | "suggested" | "dismissed";
 export type MembershipSource = "user" | "context_engine" | "context_discovery";
 
 export interface ContextMembership {
@@ -362,6 +362,12 @@ export const db = {
 
   confirmContextMembership: (itemId: string, workspaceId: string) =>
     invoke<ContextMembership>("confirm_context_membership", {
+      itemId,
+      workspaceId,
+    }),
+
+  dismissContextMembership: (itemId: string, workspaceId: string) =>
+    invoke<ContextMembership>("dismiss_context_membership", {
       itemId,
       workspaceId,
     }),
