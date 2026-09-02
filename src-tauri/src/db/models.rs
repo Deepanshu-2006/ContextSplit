@@ -152,6 +152,27 @@ pub struct ContributingItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceRequirements {
+    pub min_item_count: usize,
+    pub min_avg_relationship_strength: f64,
+    pub min_semantic_coherence: f64,
+    pub min_independent_signals: usize,
+    pub min_confidence: f64,
+}
+
+impl Default for EvidenceRequirements {
+    fn default() -> Self {
+        Self {
+            min_item_count: 2,
+            min_avg_relationship_strength: 0.50,
+            min_semantic_coherence: 0.40,
+            min_independent_signals: 2,
+            min_confidence: 0.45,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateScoringWeights {
     pub item_count_weight: f64,
     pub item_count_saturation: usize,
@@ -164,6 +185,7 @@ pub struct CandidateScoringWeights {
     pub unassigned_items_weight: f64,
     pub user_history_weight: f64,
     pub workspace_suppression_threshold: f64,
+    pub evidence_requirements: EvidenceRequirements,
 }
 
 impl Default for CandidateScoringWeights {
@@ -180,6 +202,7 @@ impl Default for CandidateScoringWeights {
             unassigned_items_weight: 0.05,
             user_history_weight: 0.00,
             workspace_suppression_threshold: 0.60,
+            evidence_requirements: EvidenceRequirements::default(),
         }
     }
 }
@@ -204,5 +227,7 @@ pub struct CandidateScore {
     pub contributing_items: Vec<ContributingItem>,
     pub component_scores: std::collections::HashMap<String, f64>,
     pub workspace_match: Option<WorkspaceSuppressionMatch>,
+    pub is_evidence_sufficient: bool,
+    pub insufficient_evidence_reasons: Vec<String>,
 }
 

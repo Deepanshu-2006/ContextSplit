@@ -126,6 +126,14 @@ export interface ContributingItem {
   primary_signal: string | null;
 }
 
+export interface EvidenceRequirements {
+  min_item_count: number;
+  min_avg_relationship_strength: number;
+  min_semantic_coherence: number;
+  min_independent_signals: number;
+  min_confidence: number;
+}
+
 export interface CandidateScoringWeights {
   item_count_weight: number;
   item_count_saturation: number;
@@ -138,6 +146,7 @@ export interface CandidateScoringWeights {
   unassigned_items_weight: number;
   user_history_weight: number;
   workspace_suppression_threshold: number;
+  evidence_requirements?: EvidenceRequirements;
 }
 
 export interface WorkspaceSuppressionMatch {
@@ -157,6 +166,8 @@ export interface CandidateScore {
   contributing_items: ContributingItem[];
   component_scores: Record<string, number>;
   workspace_match?: WorkspaceSuppressionMatch | null;
+  is_evidence_sufficient: boolean;
+  insufficient_evidence_reasons: string[];
 }
 
 export const db = {

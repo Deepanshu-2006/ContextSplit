@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::db::models::{
     ContextCandidate, ContextCandidateItem, CandidateWithItems, CandidateMember,
     CandidateScore, StrongestRelationship, ContributingItem, CandidateScoringWeights,
-    WorkspaceSuppressionMatch,
+    WorkspaceSuppressionMatch, EvidenceRequirements,
 };
 
 // ---------------------------------------------------------------------------
@@ -370,6 +370,12 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
             }
         }
 
+        // ---- Minimum Evidence Requirements Check ----
+        // Precision over recall: if evidence is insufficient, do nothing (skip candidate creation)
+        if !score.is_evidence_sufficient {
+            continue;
+        }
+
         // Build metadata JSON with complete explainable score details
         let mut meta_val = serde_json::to_value(&score).unwrap_or(serde_json::json!({}));
         if let Some(obj) = meta_val.as_object_mut() {
@@ -411,6 +417,8 @@ pub fn score_candidate_group(
             contributing_items: vec![],
             component_scores: HashMap::new(),
             workspace_match: None,
+            is_evidence_sufficient: false,
+            insufficient_evidence_reasons: vec!["No items provided for candidate scoring".to_string()],
         });
     }
 
@@ -801,6 +809,25 @@ pub fn score_candidate_group(
         evidence.push("Novel context: no existing Workspaces match".to_string());
     }
 
+    // --- Metric 11: Minimum Evidence Requirements Evaluation ---
+    let rel_strengths: Vec<f64> = intra_rels.iter().map(|r| r.strength).collect();
+    let semantic_sims_all: Vec<f64> = semantic_rels.iter().map(|r| r.strength).collect();
+
+    let (is_evidence_sufficient, insufficient_evidence_reasons) = validate_evidence_requirements(
+        total_items,
+        &rel_strengths,
+        &semantic_sims_all,
+        confidence,
+        &component_scores,
+        &weights.evidence_requirements,
+    );
+
+    if !is_evidence_sufficient {
+        for reason in &insufficient_evidence_reasons {
+            evidence.push(format!("Insufficient evidence: {}", reason));
+        }
+    }
+
     Ok(CandidateScore {
         confidence,
         confidence_percentage,
@@ -809,7 +836,94 @@ pub fn score_candidate_group(
         contributing_items,
         component_scores,
         workspace_match,
+        is_evidence_sufficient,
+        insufficient_evidence_reasons,
     })
+}
+
+/// Validates whether a candidate group satisfies minimum evidence requirements.
+/// Enforces precision over recall by requiring minimum items, relationship strength,
+/// semantic coherence, independent contextual signals, and overall confidence.
+pub fn validate_evidence_requirements(
+    item_count: usize,
+    intra_rel_strengths: &[f64],
+    semantic_sims: &[f64],
+    confidence: f64,
+    component_scores: &HashMap<String, f64>,
+    reqs: &EvidenceRequirements,
+) -> (bool, Vec<String>) {
+    let mut reasons = Vec::new();
+
+    // 1. Minimum number of items (avoid single item candidates)
+    if item_count < reqs.min_item_count {
+        reasons.push(format!(
+            "Cluster size ({}) is below minimum required items ({})",
+            item_count, reqs.min_item_count
+        ));
+    }
+
+    // 2. Minimum average relationship strength
+    if !intra_rel_strengths.is_empty() {
+        let avg_strength: f64 = intra_rel_strengths.iter().sum::<f64>() / intra_rel_strengths.len() as f64;
+        if avg_strength < reqs.min_avg_relationship_strength {
+            reasons.push(format!(
+                "Average relationship strength ({:.2}) is below required minimum ({:.2})",
+                avg_strength, reqs.min_avg_relationship_strength
+            ));
+        }
+    } else if item_count > 1 {
+        reasons.push("No internal relationships found between candidate items".to_string());
+    }
+
+    // 3. Minimum semantic coherence (when semantic comparisons exist)
+    if !semantic_sims.is_empty() {
+        let avg_sim: f64 = semantic_sims.iter().sum::<f64>() / semantic_sims.len() as f64;
+        if avg_sim < reqs.min_semantic_coherence {
+            reasons.push(format!(
+                "Semantic coherence ({:.2}) is below required minimum ({:.2})",
+                avg_sim, reqs.min_semantic_coherence
+            ));
+        }
+    }
+
+    // 4. Minimum number of independent contextual signals
+    let mut independent_signals = 0;
+    if component_scores.get("relationship_strength").cloned().unwrap_or(0.0) >= 0.40 {
+        independent_signals += 1;
+    }
+    if component_scores.get("semantic_similarity").cloned().unwrap_or(0.0) >= 0.30 {
+        independent_signals += 1;
+    }
+    if component_scores.get("shared_session").cloned().unwrap_or(0.0) > 0.0 {
+        independent_signals += 1;
+    }
+    if component_scores.get("temporal_proximity").cloned().unwrap_or(0.0) > 0.0 {
+        independent_signals += 1;
+    }
+    if component_scores.get("common_domain").cloned().unwrap_or(0.0) > 0.0 {
+        independent_signals += 1;
+    }
+    if component_scores.get("common_app").cloned().unwrap_or(0.0) > 0.0 {
+        independent_signals += 1;
+    }
+
+    if independent_signals < reqs.min_independent_signals {
+        reasons.push(format!(
+            "Number of independent contextual signals ({}) is below minimum required ({})",
+            independent_signals, reqs.min_independent_signals
+        ));
+    }
+
+    // 5. Minimum overall confidence threshold
+    if confidence < reqs.min_confidence {
+        reasons.push(format!(
+            "Candidate confidence ({:.2}) is below required threshold ({:.2})",
+            confidence, reqs.min_confidence
+        ));
+    }
+
+    let is_sufficient = reasons.is_empty();
+    (is_sufficient, reasons)
 }
 
 /// Compares a group of candidate item IDs against all existing workspaces using
@@ -1487,5 +1601,114 @@ mod tests {
         assert!(score.workspace_match.is_some());
         let match_info = score.workspace_match.unwrap();
         assert!(!match_info.is_suppressed, "Ambiguous match must not be suppressed");
+    }
+
+    #[test]
+    fn test_evidence_requirements_single_item_rejected() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+
+        let score = score_candidate_group(&conn, &[i1.id], None).unwrap();
+        assert!(
+            !score.is_evidence_sufficient,
+            "Single item candidate must not satisfy minimum evidence requirements"
+        );
+        assert!(
+            score.insufficient_evidence_reasons.iter().any(|r| r.contains("below minimum required items")),
+            "Reasons should mention cluster size: {:?}",
+            score.insufficient_evidence_reasons
+        );
+    }
+
+    #[test]
+    fn test_evidence_requirements_weak_relationships_rejected() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+
+        // Weak relationship (0.25)
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.25, None).unwrap();
+
+        let score = score_candidate_group(&conn, &[i1.id, i2.id], None).unwrap();
+        assert!(
+            !score.is_evidence_sufficient,
+            "Candidate with weak relationships must be rejected"
+        );
+        assert!(
+            score.insufficient_evidence_reasons.iter().any(|r| r.contains("relationship strength") || r.contains("confidence")),
+            "Should report weak relationship or low confidence: {:?}",
+            score.insufficient_evidence_reasons
+        );
+    }
+
+    #[test]
+    fn test_evidence_requirements_insufficient_signals_rejected() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+
+        // Single relationship signal
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.8, None).unwrap();
+
+        // Require 3 independent signals
+        let mut weights = CandidateScoringWeights::default();
+        weights.evidence_requirements.min_independent_signals = 3;
+
+        let score = score_candidate_group(&conn, &[i1.id, i2.id], Some(&weights)).unwrap();
+        assert!(
+            !score.is_evidence_sufficient,
+            "Candidate with fewer independent signals than threshold must be rejected"
+        );
+        assert!(
+            score.insufficient_evidence_reasons.iter().any(|r| r.contains("independent contextual signals")),
+            "Should report insufficient independent signals: {:?}",
+            score.insufficient_evidence_reasons
+        );
+    }
+
+    #[test]
+    fn test_evidence_requirements_semantic_incoherence_rejected() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+
+        // Low semantic relationship (0.25)
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.25, None).unwrap();
+
+        let mut weights = CandidateScoringWeights::default();
+        weights.evidence_requirements.min_semantic_coherence = 0.50;
+
+        let score = score_candidate_group(&conn, &[i1.id, i2.id], Some(&weights)).unwrap();
+        assert!(
+            !score.is_evidence_sufficient,
+            "Incoherent semantic similarity must be rejected"
+        );
+        assert!(
+            score.insufficient_evidence_reasons.iter().any(|r| r.contains("Semantic coherence")),
+            "Should report semantic incoherence: {:?}",
+            score.insufficient_evidence_reasons
+        );
+    }
+
+    #[test]
+    fn test_evidence_requirements_sufficient_evidence_creates_candidate() {
+        let conn = setup_db();
+
+        // 3 unassigned items with strong semantic relationships and temporal proximity
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "React Docs", None, "{\"app_name\":\"Safari\"}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "React State", None, "{\"app_name\":\"Safari\"}").unwrap();
+        let i3 = crate::db::operations::create_item(&conn, None, None, "text", "React Hooks", None, "{\"app_name\":\"Safari\"}").unwrap();
+
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.90, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "semantic_similarity", 0.88, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "same_source_app", 0.85, None).unwrap();
+
+        let discovered = run_discovery(&conn).unwrap();
+        assert_eq!(discovered.len(), 1, "Candidate with sufficient evidence should be created");
+        assert_eq!(discovered[0].status, "detected");
+
+        let score = score_candidate_group(&conn, &[i1.id, i2.id, i3.id], None).unwrap();
+        assert!(score.is_evidence_sufficient, "Score should report evidence is sufficient");
+        assert!(score.insufficient_evidence_reasons.is_empty());
     }
 }
