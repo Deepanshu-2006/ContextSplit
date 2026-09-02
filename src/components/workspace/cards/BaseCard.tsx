@@ -4,8 +4,8 @@ import { Handle, Position } from "@xyflow/react";
 import { MoreHorizontal, Inbox, BoxSelect, Search } from "lucide-react";
 import { useWorkspaceStore } from "../../../store/workspaceStore";
 import { ContextInspector } from "../ContextInspector";
-import { db, WorkspaceScore } from "../../../services/db";
-import { ContextSuggestion } from "./ContextSuggestion";
+import { db } from "../../../services/db";
+import { ContextSuggestion, ContextSuggestionData } from "./ContextSuggestion";
 
 interface BaseCardProps {
   icon?: ReactNode;
@@ -24,28 +24,60 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   
   const { workspaces, activeWorkspaceId, moveItemToWorkspace } = useWorkspaceStore();
-  const [suggestionScore, setSuggestionScore] = useState<WorkspaceScore | null>(null);
+  const [suggestionData, setSuggestionData] = useState<ContextSuggestionData | null>(null);
   const [suggestionDismissed, setSuggestionDismissed] = useState(false);
 
   useEffect(() => {
     async function fetchSuggestion() {
       if (activeWorkspaceId === "inbox" && itemId) {
         try {
-          // Check if it was dismissed
-          const signals = await db.listContextSignals(null, itemId);
-          const isDismissed = signals.some(s => 
-            s.signal_type === "user_action" && 
-            s.payload.includes("suggestion_dismissed")
-          );
-          
+          // 1. Check if there are already existing memberships
+          const memberships = await db.listItemMemberships(itemId);
+          const isDismissed = memberships.some(m => m.membership_type === "dismissed");
           if (isDismissed) {
             setSuggestionDismissed(true);
             return;
           }
-          
-          const scores = await db.scoreItem(itemId);
-          if (scores.length > 0 && scores[0].confidence_band !== "Low") {
-            setSuggestionScore(scores[0]);
+
+          const existingSuggested = memberships.find(m => m.membership_type === "suggested" && m.confidence >= 0.60);
+          if (existingSuggested) {
+            const ws = workspaces.find(w => w.id === existingSuggested.workspace_id);
+            if (ws) {
+              setSuggestionData({
+                workspaceId: ws.id,
+                workspaceName: ws.name,
+                confidence: Math.round(existingSuggested.confidence * 100),
+                reasons: [],
+              });
+              return;
+            }
+          }
+
+          // 2. Evaluate item context against existing workspaces
+          const interpretation = await db.evaluateItemContext(itemId);
+          if (interpretation.existing_workspaces.length > 0) {
+            const top = interpretation.existing_workspaces[0];
+            if (top.confidence >= 0.60) {
+              // Persist as suggested membership for future loads
+              try {
+                await db.createContextMembership(
+                  itemId,
+                  top.workspace_id,
+                  "suggested",
+                  top.confidence,
+                  "context_engine"
+                );
+              } catch (err) {
+                // Ignore duplicate constraint if already inserted
+              }
+
+              setSuggestionData({
+                workspaceId: top.workspace_id,
+                workspaceName: top.workspace_name,
+                confidence: Math.round(top.confidence * 100),
+                reasons: top.reasons,
+              });
+            }
           }
         } catch (e) {
           console.error("Failed to fetch suggestions", e);
@@ -53,13 +85,23 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
       }
     }
     fetchSuggestion();
-  }, [activeWorkspaceId, itemId]);
+  }, [activeWorkspaceId, itemId, workspaces]);
 
   const handleAcceptSuggestion = async (suggestedWorkspaceId: string) => {
     if (!itemId) return;
     setSuggestionDismissed(true); // hide immediately
     try {
-      await db.createContextSignal(suggestedWorkspaceId, itemId, "user_action", null, JSON.stringify({ action: "suggestion_accepted" }));
+      // 1. Create confirmed membership
+      await db.confirmContextMembership(itemId, suggestedWorkspaceId);
+      // 2. Record user feedback signal
+      await db.createContextSignal(
+        suggestedWorkspaceId,
+        itemId,
+        "user_action",
+        null,
+        JSON.stringify({ action: "suggestion_accepted", workspace_id: suggestedWorkspaceId })
+      );
+      // 3. Update physical Workspace assignment according to existing product behavior
       moveItemToWorkspace(itemId, suggestedWorkspaceId);
     } catch (e) {
       console.error(e);
@@ -67,10 +109,21 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   };
 
   const handleDismissSuggestion = async () => {
-    if (!itemId || !suggestionScore) return;
+    if (!itemId || !suggestionData) return;
+    const wsId = suggestionData.workspaceId;
     setSuggestionDismissed(true);
     try {
-      await db.createContextSignal(null, itemId, "user_action", null, JSON.stringify({ action: "suggestion_dismissed", suggested_workspace: suggestionScore.workspace_id }));
+      // 1. Record dismissal on membership
+      await db.dismissContextMembership(itemId, wsId);
+      // 2. Record feedback signal
+      await db.createContextSignal(
+        wsId,
+        itemId,
+        "user_action",
+        null,
+        JSON.stringify({ action: "suggestion_dismissed", workspace_id: wsId })
+      );
+      // Item remains in Inbox; not deleted; no confirmed membership created
     } catch (e) {
       console.error(e);
     }
@@ -80,9 +133,9 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
     if (!itemId) return;
     
     // If a suggestion was visible and they chose another workspace, log it
-    if (suggestionScore && !suggestionDismissed && suggestionScore.workspace_id !== wsId) {
+    if (suggestionData && !suggestionDismissed && suggestionData.workspaceId !== wsId) {
        try {
-         await db.createContextSignal(wsId, itemId, "user_action", null, JSON.stringify({ action: "suggestion_changed", suggested_workspace: suggestionScore.workspace_id }));
+         await db.createContextSignal(wsId, itemId, "user_action", null, JSON.stringify({ action: "suggestion_changed", suggested_workspace: suggestionData.workspaceId }));
        } catch(e) {}
     }
     
@@ -196,10 +249,10 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
       <Handle type="source" position={Position.Bottom} className="opacity-0" />
       
       {/* Context Suggestion */}
-      {suggestionScore && !suggestionDismissed && itemId && (
+      {suggestionData && !suggestionDismissed && itemId && (
         <ContextSuggestion 
           itemId={itemId}
-          score={suggestionScore}
+          suggestion={suggestionData}
           onAccept={handleAcceptSuggestion}
           onDismiss={handleDismissSuggestion}
         />

@@ -1,86 +1,89 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
-import { WorkspaceScore } from "../../../services/db";
-import { useWorkspaceStore } from "../../../store/workspaceStore";
+import { ChevronDown, ChevronUp, Sparkles } from "lucide-react";
+
+export interface ContextSuggestionData {
+  workspaceId: string;
+  workspaceName: string;
+  confidence: number;
+  reasons?: string[];
+}
 
 interface ContextSuggestionProps {
   itemId: string;
-  score: WorkspaceScore;
-  onAccept: (workspaceId: string) => void;
-  onDismiss: () => void;
+  suggestion: ContextSuggestionData;
+  onAccept: (workspaceId: string) => void | Promise<void>;
+  onDismiss: () => void | Promise<void>;
 }
 
-export function ContextSuggestion({ score, onAccept, onDismiss }: ContextSuggestionProps) {
-  const { workspaces } = useWorkspaceStore();
+export function ContextSuggestion({ suggestion, onAccept, onDismiss }: ContextSuggestionProps) {
   const [showReasons, setShowReasons] = useState(false);
+  const [isActing, setIsActing] = useState(false);
 
-  const suggestedWorkspace = workspaces.find((w) => w.id === score.workspace_id);
+  const handleAccept = async () => {
+    setIsActing(true);
+    try {
+      await onAccept(suggestion.workspaceId);
+    } finally {
+      setIsActing(false);
+    }
+  };
 
-  if (!suggestedWorkspace) {
-    return null;
-  }
-
-  const confidence = Math.round(score.confidence * 100);
-  const isMedium = score.confidence_band === "Medium";
-
-  if (isMedium) {
-    return (
-      <div className="bg-gray-50 border-t border-gray-100 p-2 text-xs flex flex-col nodrag">
-        <div className="flex items-center justify-between">
-          <span className="text-gray-500 font-medium text-[11px]">Suggestion: {suggestedWorkspace.name}</span>
-          <div className="flex gap-2">
-            <button
-              onClick={() => onAccept(score.workspace_id)}
-              className="text-blue-600 hover:text-blue-800 font-medium text-[11px]"
-            >
-              Move
-            </button>
-            <button
-              onClick={onDismiss}
-              className="text-gray-400 hover:text-gray-600 text-[11px]"
-            >
-              Dismiss
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const handleDismiss = async () => {
+    setIsActing(true);
+    try {
+      await onDismiss();
+    } finally {
+      setIsActing(false);
+    }
+  };
 
   return (
-    <div className="bg-gradient-to-br from-blue-50 to-indigo-50/30 border-t border-blue-100 p-3 text-xs flex flex-col nodrag">
-      <div className="flex flex-col gap-0.5">
-        <span className="text-blue-900 font-medium">Looks related to {suggestedWorkspace.name}</span>
-        <span className="text-blue-600/80 font-medium text-[10px] uppercase tracking-wider">{confidence}% confidence • {score.confidence_band}</span>
+    <div className="bg-gradient-to-r from-blue-50/70 via-indigo-50/60 to-purple-50/40 border-t border-indigo-100/70 dark:border-indigo-900/30 p-2.5 text-xs flex flex-col nodrag transition-all">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Sparkles size={13} className="text-indigo-600 shrink-0" />
+          <span className="text-slate-800 font-medium text-[12px] truncate">
+            Related to <strong className="text-indigo-950 font-semibold">{suggestion.workspaceName}</strong>
+          </span>
+        </div>
+        <span className="text-indigo-600 font-semibold text-[11px] bg-indigo-100/60 px-1.5 py-0.5 rounded-md shrink-0">
+          {suggestion.confidence}% confidence
+        </span>
       </div>
-      
-      <div className="mt-2 mb-1">
-        <button 
-          onClick={() => setShowReasons(!showReasons)} 
-          className="text-blue-500 hover:text-blue-700 font-medium flex items-center gap-1 text-[11px]"
-        >
-          Why? {showReasons ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        </button>
-      </div>
-      
-      {showReasons && score.reasons.length > 0 && (
-        <ul className="text-[11px] text-blue-800/80 mb-3 ml-1 list-disc pl-3 flex flex-col gap-1">
-          {score.reasons.map((reason, idx) => (
-            <li key={idx}>{reason}</li>
-          ))}
-        </ul>
+
+      {suggestion.reasons && suggestion.reasons.length > 0 && (
+        <div className="mt-1">
+          <button
+            type="button"
+            onClick={() => setShowReasons(!showReasons)}
+            className="text-slate-400 hover:text-indigo-600 font-normal flex items-center gap-1 text-[10px] transition-colors cursor-pointer"
+          >
+            Why? {showReasons ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+          </button>
+          {showReasons && (
+            <ul className="text-[11px] text-slate-600 mt-1.5 mb-1 pl-4 list-disc space-y-0.5">
+              {suggestion.reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
-      
-      <div className="flex items-center gap-2 mt-2 pt-2 border-t border-blue-200/50">
+
+      <div className="flex items-center gap-2 mt-2 pt-1.5 border-t border-indigo-100/50">
         <button
-          onClick={() => onAccept(score.workspace_id)}
-          className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-1.5 rounded-md transition-colors text-center text-[11px] shadow-sm"
+          type="button"
+          disabled={isActing}
+          onClick={handleAccept}
+          className="flex-1 bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-medium py-1 px-2.5 rounded-md transition-colors text-center text-[11px] shadow-xs truncate cursor-pointer disabled:opacity-50"
         >
-          Move to {suggestedWorkspace.name}
+          Add to {suggestion.workspaceName}
         </button>
         <button
-          onClick={onDismiss}
-          className="flex-1 bg-white hover:bg-gray-50 text-gray-700 border border-gray-200 font-medium py-1.5 rounded-md transition-colors text-center text-[11px] shadow-sm"
+          type="button"
+          disabled={isActing}
+          onClick={handleDismiss}
+          className="bg-white hover:bg-slate-100 active:bg-slate-200 text-slate-600 border border-slate-200/80 font-medium py-1 px-2.5 rounded-md transition-colors text-center text-[11px] shadow-xs shrink-0 cursor-pointer disabled:opacity-50"
         >
           Dismiss
         </button>
