@@ -128,3 +128,66 @@ pub struct CandidateMember {
     pub membership: ContextCandidateItem,
     pub item: Item,
 }
+
+// ---------------------------------------------------------------------------
+// Candidate Scoring Models
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrongestRelationship {
+    pub item_a_id: String,
+    pub item_b_id: String,
+    pub relationship_type: String,
+    pub strength: f64,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContributingItem {
+    pub item_id: String,
+    pub relevance_score: f64,
+    pub title: Option<String>,
+    pub item_type: String,
+    pub primary_signal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateScoringWeights {
+    pub item_count_weight: f64,
+    pub item_count_saturation: usize,
+    pub relationship_strength_weight: f64,
+    pub semantic_similarity_weight: f64,
+    pub shared_session_weight: f64,
+    pub temporal_proximity_weight: f64,
+    pub common_domain_weight: f64,
+    pub common_app_weight: f64,
+    pub unassigned_items_weight: f64,
+    pub user_history_weight: f64,
+}
+
+impl Default for CandidateScoringWeights {
+    fn default() -> Self {
+        Self {
+            item_count_weight: 0.15,
+            item_count_saturation: 5,
+            relationship_strength_weight: 0.35,
+            semantic_similarity_weight: 0.15,
+            shared_session_weight: 0.10,
+            temporal_proximity_weight: 0.10,
+            common_domain_weight: 0.05,
+            common_app_weight: 0.05,
+            unassigned_items_weight: 0.05,
+            user_history_weight: 0.00,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateScore {
+    pub confidence: f64,
+    pub confidence_percentage: String,
+    pub evidence: Vec<String>,
+    pub strongest_relationships: Vec<StrongestRelationship>,
+    pub contributing_items: Vec<ContributingItem>,
+    pub component_scores: std::collections::HashMap<String, f64>,
+}

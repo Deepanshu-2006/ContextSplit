@@ -110,6 +110,44 @@ export interface CandidateWithItems {
   items: CandidateMember[];
 }
 
+export interface StrongestRelationship {
+  item_a_id: string;
+  item_b_id: string;
+  relationship_type: string;
+  strength: number;
+  description?: string | null;
+}
+
+export interface ContributingItem {
+  item_id: string;
+  relevance_score: number;
+  title: string | null;
+  item_type: string;
+  primary_signal: string | null;
+}
+
+export interface CandidateScoringWeights {
+  item_count_weight: number;
+  item_count_saturation: number;
+  relationship_strength_weight: number;
+  semantic_similarity_weight: number;
+  shared_session_weight: number;
+  temporal_proximity_weight: number;
+  common_domain_weight: number;
+  common_app_weight: number;
+  unassigned_items_weight: number;
+  user_history_weight: number;
+}
+
+export interface CandidateScore {
+  confidence: number;
+  confidence_percentage: string;
+  evidence: string[];
+  strongest_relationships: StrongestRelationship[];
+  contributing_items: ContributingItem[];
+  component_scores: Record<string, number>;
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -222,5 +260,13 @@ export const db = {
   /** Expire stale detected/suggested candidates older than maxAgeSecs (default 72h). */
   expireStateCandidates: (maxAgeSecs?: number) =>
     invoke<number>('expire_stale_candidates', { maxAgeSecs: maxAgeSecs ?? null }),
+
+  /** Score an existing context candidate by its candidate ID. */
+  scoreContextCandidate: (candidateId: string) =>
+    invoke<CandidateScore>('score_context_candidate', { candidateId }),
+
+  /** Score an arbitrary group of item IDs on the fly. */
+  scoreCandidateGroup: (itemIds: string[]) =>
+    invoke<CandidateScore>('score_candidate_group', { itemIds }),
 };
 
