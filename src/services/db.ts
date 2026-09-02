@@ -137,6 +137,16 @@ export interface CandidateScoringWeights {
   common_app_weight: number;
   unassigned_items_weight: number;
   user_history_weight: number;
+  workspace_suppression_threshold: number;
+}
+
+export interface WorkspaceSuppressionMatch {
+  workspace_id: string;
+  workspace_name: string;
+  match_score: number;
+  match_type: "strong_match" | "ambiguous_match" | "novel";
+  is_suppressed: boolean;
+  reasons: string[];
 }
 
 export interface CandidateScore {
@@ -146,6 +156,7 @@ export interface CandidateScore {
   strongest_relationships: StrongestRelationship[];
   contributing_items: ContributingItem[];
   component_scores: Record<string, number>;
+  workspace_match?: WorkspaceSuppressionMatch | null;
 }
 
 export const db = {

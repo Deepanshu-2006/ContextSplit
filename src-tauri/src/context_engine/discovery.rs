@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::db::models::{
     ContextCandidate, ContextCandidateItem, CandidateWithItems, CandidateMember,
     CandidateScore, StrongestRelationship, ContributingItem, CandidateScoringWeights,
+    WorkspaceSuppressionMatch,
 };
 
 // ---------------------------------------------------------------------------
@@ -361,6 +362,14 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
         // Score the candidate group with deterministic, explainable scoring
         let score = score_candidate_group(conn, &cm.items, None)?;
 
+        // ---- Existing-Context Suppression Check ----
+        // If the candidate group strongly matches an existing workspace, do not create a new candidate
+        if let Some(ref ws_match) = score.workspace_match {
+            if ws_match.is_suppressed {
+                continue;
+            }
+        }
+
         // Build metadata JSON with complete explainable score details
         let mut meta_val = serde_json::to_value(&score).unwrap_or(serde_json::json!({}));
         if let Some(obj) = meta_val.as_object_mut() {
@@ -401,6 +410,7 @@ pub fn score_candidate_group(
             strongest_relationships: vec![],
             contributing_items: vec![],
             component_scores: HashMap::new(),
+            workspace_match: None,
         });
     }
 
@@ -769,6 +779,28 @@ pub fn score_candidate_group(
 
     contributing_items.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
 
+    // --- Metric 10: Existing Workspace Comparison & Suppression ---
+    let workspace_match = evaluate_workspace_suppression(conn, item_ids, Some(weights.workspace_suppression_threshold))?;
+    if let Some(ref ws_match) = workspace_match {
+        if ws_match.is_suppressed {
+            evidence.push(format!(
+                "Strongly matches existing Workspace '{}' ({:.0}%) - handled by existing context",
+                ws_match.workspace_name,
+                ws_match.match_score * 100.0
+            ));
+        } else if ws_match.match_score >= 0.30 {
+            evidence.push(format!(
+                "Ambiguous match with Workspace '{}' ({:.0}%) - distinct context candidate retained",
+                ws_match.workspace_name,
+                ws_match.match_score * 100.0
+            ));
+        } else {
+            evidence.push("Novel context: distinct from existing Workspaces".to_string());
+        }
+    } else {
+        evidence.push("Novel context: no existing Workspaces match".to_string());
+    }
+
     Ok(CandidateScore {
         confidence,
         confidence_percentage,
@@ -776,7 +808,224 @@ pub fn score_candidate_group(
         strongest_relationships,
         contributing_items,
         component_scores,
+        workspace_match,
     })
+}
+
+/// Compares a group of candidate item IDs against all existing workspaces using
+/// semantic profiles, contextual relationships, sessions, apps, and domains.
+/// Returns the highest-matching workspace details if any workspaces exist.
+pub fn evaluate_workspace_suppression(
+    conn: &Connection,
+    item_ids: &[String],
+    threshold_opt: Option<f64>,
+) -> Result<Option<WorkspaceSuppressionMatch>> {
+    let suppression_threshold = threshold_opt.unwrap_or(0.60);
+    let ambiguous_threshold = 0.30;
+
+    let workspaces = crate::db::operations::list_workspaces(conn)?;
+    if workspaces.is_empty() || item_ids.is_empty() {
+        return Ok(None);
+    }
+
+    let total_items = item_ids.len();
+
+    // 1. Pre-fetch candidate item embeddings & context signals
+    let mut candidate_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut candidate_apps: HashSet<String> = HashSet::new();
+    let mut candidate_domains: HashSet<String> = HashSet::new();
+    let mut candidate_sessions: HashSet<String> = HashSet::new();
+
+    for it_id in item_ids {
+        if let Ok(Some(emb)) = crate::db::operations::get_item_embedding(conn, it_id) {
+            candidate_embeddings.insert(it_id.clone(), emb.embedding);
+        }
+        if let Ok(it) = crate::db::operations::get_item(conn, it_id) {
+            if let Some(ref sess) = it.session_id {
+                candidate_sessions.insert(sess.clone());
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&it.metadata) {
+                if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                    candidate_apps.insert(app.to_string());
+                }
+                if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                    candidate_domains.insert(dom.to_string());
+                }
+            }
+        }
+        let signals = crate::context_engine::operations::list_context_signals(conn, None, Some(it_id)).unwrap_or_default();
+        for sig in signals {
+            if sig.signal_type == "active_app" {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sig.payload) {
+                    if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                        candidate_apps.insert(app.to_string());
+                    }
+                }
+            } else if sig.signal_type == "url_metadata" || sig.signal_type == "domain" {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sig.payload) {
+                    if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                        candidate_domains.insert(dom.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut best_match: Option<WorkspaceSuppressionMatch> = None;
+    let mut highest_score: f64 = -1.0;
+
+    for ws in &workspaces {
+        let ws_items = crate::db::operations::list_items(conn, Some(&ws.id))?;
+        if ws_items.is_empty() {
+            continue;
+        }
+
+        let mut reasons = Vec::new();
+        let mut score = 0.0;
+        let mut total_weight = 0.0;
+
+        // --- Factor A: Graph Relationships to Workspace Items ---
+        let ws_item_ids: HashSet<String> = ws_items.iter().map(|i| i.id.clone()).collect();
+        let placeholders: String = item_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(", ");
+        let ws_offset = item_ids.len();
+        let ws_placeholders: String = ws_item_ids.iter().enumerate().map(|(i, _)| format!("?{}", ws_offset + i + 1)).collect::<Vec<_>>().join(", ");
+
+        let cross_rel_sql = format!(
+            "SELECT item_a_id, item_b_id, strength, relationship_type
+             FROM item_relationships
+             WHERE (item_a_id IN ({}) AND item_b_id IN ({}))
+                OR (item_b_id IN ({}) AND item_a_id IN ({}))",
+            placeholders, ws_placeholders, placeholders, ws_placeholders
+        );
+
+        let mut cross_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        for id in item_ids { cross_params.push(id); }
+        for id in &ws_item_ids { cross_params.push(id); }
+
+        let mut cross_stmt = conn.prepare(&cross_rel_sql)?;
+        let cross_rels: Vec<(String, String, f64, String)> = cross_stmt
+            .query_map(rusqlite::params_from_iter(cross_params.into_iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut connected_candidate_items = HashSet::new();
+        let mut rel_strength_sum = 0.0;
+        for (a, b, str_val, _) in &cross_rels {
+            if item_ids.contains(a) { connected_candidate_items.insert(a); }
+            if item_ids.contains(b) { connected_candidate_items.insert(b); }
+            rel_strength_sum += *str_val;
+        }
+
+        let rel_weight = 0.45;
+        total_weight += rel_weight;
+        if !cross_rels.is_empty() {
+            let avg_strength = rel_strength_sum / cross_rels.len() as f64;
+            let coverage = connected_candidate_items.len() as f64 / total_items as f64;
+            let rel_score = (avg_strength * (0.6 + 0.4 * coverage)).min(1.0);
+            score += rel_score * rel_weight;
+            if avg_strength >= 0.6 {
+                reasons.push(format!("Strong relationships to {} Items in '{}' (avg: {:.2})", connected_candidate_items.len(), ws.name, avg_strength));
+            }
+        }
+
+        // --- Factor B: Workspace Semantic Profile Match ---
+        if let Ok(Some(ws_emb)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
+            let sem_weight = 0.35;
+            total_weight += sem_weight;
+            let mut sims = Vec::new();
+            for cand_emb in candidate_embeddings.values() {
+                let s = crate::semantic::cosine_similarity(cand_emb, &ws_emb.embedding);
+                if s > 0.0 {
+                    sims.push(s as f64);
+                }
+            }
+            if !sims.is_empty() {
+                let avg_sim: f64 = sims.iter().sum::<f64>() / sims.len() as f64;
+                score += avg_sim * sem_weight;
+                if avg_sim >= 0.70 {
+                    reasons.push(format!("High semantic similarity with '{}' profile ({:.0}%)", ws.name, avg_sim * 100.0));
+                } else if avg_sim >= 0.45 {
+                    reasons.push(format!("Moderate semantic similarity with '{}' profile ({:.0}%)", ws.name, avg_sim * 100.0));
+                }
+            }
+        }
+
+        // --- Factor C: Shared Context Sessions ---
+        let sess_weight = 0.10;
+        total_weight += sess_weight;
+        let mut shared_sess_count = 0;
+        for wi in &ws_items {
+            if let Some(ref ws_sess) = wi.session_id {
+                if candidate_sessions.contains(ws_sess) {
+                    shared_sess_count += 1;
+                }
+            }
+        }
+        if shared_sess_count > 0 {
+            score += 1.0 * sess_weight;
+            reasons.push(format!("Shares session history with '{}'", ws.name));
+        }
+
+        // --- Factor D: Shared Applications & Domains ---
+        let app_dom_weight = 0.10;
+        total_weight += app_dom_weight;
+        let mut ws_apps = HashSet::new();
+        let mut ws_domains = HashSet::new();
+        for wi in &ws_items {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&wi.metadata) {
+                if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) { ws_apps.insert(app.to_string()); }
+                if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) { ws_domains.insert(dom.to_string()); }
+            }
+        }
+        let common_app_count = candidate_apps.intersection(&ws_apps).count();
+        let common_dom_count = candidate_domains.intersection(&ws_domains).count();
+        if common_app_count > 0 || common_dom_count > 0 {
+            let app_dom_score = ((common_app_count + common_dom_count) as f64 / 2.0).min(1.0);
+            score += app_dom_score * app_dom_weight;
+            if common_app_count > 0 {
+                reasons.push(format!("Shares active application with '{}'", ws.name));
+            }
+        }
+
+        let mut normalized_score = if total_weight > 0.0 {
+            (score / total_weight).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Boost score if cross relationships connect candidate items strongly to this workspace
+        if !cross_rels.is_empty() {
+            let avg_strength = rel_strength_sum / cross_rels.len() as f64;
+            let coverage = connected_candidate_items.len() as f64 / total_items as f64;
+            if avg_strength >= 0.75 && coverage >= 0.66 {
+                normalized_score = normalized_score.max(avg_strength);
+            }
+        }
+
+        if normalized_score > highest_score {
+            highest_score = normalized_score;
+            let (match_type, is_suppressed) = if normalized_score >= suppression_threshold {
+                ("strong_match".to_string(), true)
+            } else if normalized_score >= ambiguous_threshold {
+                ("ambiguous_match".to_string(), false)
+            } else {
+                ("novel".to_string(), false)
+            };
+
+            best_match = Some(WorkspaceSuppressionMatch {
+                workspace_id: ws.id.clone(),
+                workspace_name: ws.name.clone(),
+                match_score: normalized_score,
+                match_type,
+                is_suppressed,
+                reasons,
+            });
+        }
+    }
+
+    Ok(best_match)
 }
 
 /// Score an existing candidate by its candidate ID
@@ -1137,5 +1386,106 @@ mod tests {
             unassigned_score.confidence,
             assigned_score.confidence
         );
+    }
+
+    #[test]
+    fn test_candidate_matching_existing_workspace_suppressed() {
+        let conn = setup_db();
+
+        // 1. Create an existing workspace with an item
+        let ws = crate::db::operations::create_workspace(&conn, "Alpha Workspace").unwrap();
+        let ws_item = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "Workspace item", None, "{}").unwrap();
+
+        // 2. Create 3 unassigned items
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let i3 = make_item(&conn);
+
+        // Connect i1, i2, i3 mutually
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.9, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "temporal_proximity", 0.8, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "temporal_proximity", 0.7, None).unwrap();
+
+        // ALSO strongly connect i1, i2, i3 to ws_item (Existing Workspace)
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &ws_item.id, "semantic_similarity", 0.95, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &ws_item.id, "semantic_similarity", 0.90, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i3.id, &ws_item.id, "semantic_similarity", 0.88, None).unwrap();
+
+        // 3. Run discovery — candidate creation MUST be suppressed because it belongs to Alpha Workspace
+        let discovered = run_discovery(&conn).unwrap();
+        assert_eq!(
+            discovered.len(),
+            0,
+            "Discovered cluster should be suppressed because it strongly matches Alpha Workspace"
+        );
+
+        // Verify that score_candidate_group reports suppression
+        let score = score_candidate_group(&conn, &[i1.id, i2.id, i3.id], None).unwrap();
+        assert!(score.workspace_match.is_some());
+        let match_info = score.workspace_match.unwrap();
+        assert!(match_info.is_suppressed);
+        assert_eq!(match_info.match_type, "strong_match");
+        assert_eq!(match_info.workspace_id, ws.id);
+    }
+
+    #[test]
+    fn test_genuinely_new_candidate_created() {
+        let conn = setup_db();
+
+        // 1. Create an existing workspace with unrelated item
+        let ws = crate::db::operations::create_workspace(&conn, "Design System").unwrap();
+        let _ws_item = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "Design item", None, "{\"app_name\":\"Figma\"}").unwrap();
+
+        // 2. Create 3 unassigned items with their own strong relationships and NO link to Design System
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "Code 1", None, "{\"app_name\":\"VS Code\"}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "Code 2", None, "{\"app_name\":\"VS Code\"}").unwrap();
+        let i3 = crate::db::operations::create_item(&conn, None, None, "text", "Code 3", None, "{\"app_name\":\"VS Code\"}").unwrap();
+
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "same_source_app", 0.9, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "same_source_app", 0.85, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "same_source_app", 0.8, None).unwrap();
+
+        // 3. Run discovery — genuinely new candidate MUST be created
+        let discovered = run_discovery(&conn).unwrap();
+        assert_eq!(discovered.len(), 1, "Genuinely new cluster should be created as candidate");
+        assert_eq!(discovered[0].status, "detected");
+
+        // Verify score reports novel / unsuppressed
+        let score = score_candidate_group(&conn, &[i1.id, i2.id, i3.id], None).unwrap();
+        assert!(score.workspace_match.is_some());
+        let match_info = score.workspace_match.unwrap();
+        assert!(!match_info.is_suppressed);
+        assert_eq!(match_info.match_type, "novel");
+    }
+
+    #[test]
+    fn test_ambiguous_candidate_handled() {
+        let conn = setup_db();
+
+        // 1. Create existing workspace
+        let ws = crate::db::operations::create_workspace(&conn, "Backend API").unwrap();
+        let ws_item = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "API item", None, "{}").unwrap();
+
+        // 2. Create 3 unassigned items with strong internal cohesion
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let i3 = make_item(&conn);
+
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.9, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "temporal_proximity", 0.85, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "temporal_proximity", 0.8, None).unwrap();
+
+        // Only i1 has a weak/moderate relationship (0.35) to Backend API, i2 and i3 have none
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &ws_item.id, "temporal_proximity", 0.35, None).unwrap();
+
+        // 3. Run discovery — ambiguous candidate is NOT suppressed, representing a potential distinct context
+        let discovered = run_discovery(&conn).unwrap();
+        assert_eq!(discovered.len(), 1, "Ambiguous cluster should NOT be suppressed");
+        assert_eq!(discovered[0].status, "detected");
+
+        let score = score_candidate_group(&conn, &[i1.id, i2.id, i3.id], None).unwrap();
+        assert!(score.workspace_match.is_some());
+        let match_info = score.workspace_match.unwrap();
+        assert!(!match_info.is_suppressed, "Ambiguous match must not be suppressed");
     }
 }

@@ -163,6 +163,7 @@ pub struct CandidateScoringWeights {
     pub common_app_weight: f64,
     pub unassigned_items_weight: f64,
     pub user_history_weight: f64,
+    pub workspace_suppression_threshold: f64,
 }
 
 impl Default for CandidateScoringWeights {
@@ -178,8 +179,20 @@ impl Default for CandidateScoringWeights {
             common_app_weight: 0.05,
             unassigned_items_weight: 0.05,
             user_history_weight: 0.00,
+            workspace_suppression_threshold: 0.60,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSuppressionMatch {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub match_score: f64,
+    /// "strong_match" (suppressed) | "ambiguous_match" | "novel"
+    pub match_type: String,
+    pub is_suppressed: bool,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,4 +203,6 @@ pub struct CandidateScore {
     pub strongest_relationships: Vec<StrongestRelationship>,
     pub contributing_items: Vec<ContributingItem>,
     pub component_scores: std::collections::HashMap<String, f64>,
+    pub workspace_match: Option<WorkspaceSuppressionMatch>,
 }
+
