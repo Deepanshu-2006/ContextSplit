@@ -350,6 +350,91 @@ fn score_candidate_group(
 }
 
 // ---------------------------------------------------------------------------
+// Context Membership Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn create_context_membership(
+    item_id: &str,
+    workspace_id: &str,
+    membership_type: &str,
+    confidence: Option<f64>,
+    source: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextMembership, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::create_or_update_membership(
+        &conn,
+        item_id,
+        workspace_id,
+        membership_type,
+        confidence.unwrap_or(1.0),
+        source,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_context_membership(
+    id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextMembership, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::get_membership(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_item_workspace_context_membership(
+    item_id: &str,
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::db::models::ContextMembership>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::get_item_workspace_membership(&conn, item_id, workspace_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_item_context_memberships(
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ContextMembership>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::list_item_memberships(&conn, item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_workspace_context_memberships(
+    workspace_id: &str,
+    membership_type: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ContextMembership>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::list_workspace_memberships(&conn, workspace_id, membership_type.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn confirm_context_membership(
+    item_id: &str,
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextMembership, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::confirm_membership(&conn, item_id, workspace_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_context_membership(
+    id: &str,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::delete_membership(&conn, id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 
 #[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
@@ -463,7 +548,15 @@ pub fn run() {
             generate_candidate_name,
             expire_stale_candidates,
             score_context_candidate,
-            score_candidate_group
+            score_candidate_group,
+            // Context Membership
+            create_context_membership,
+            get_context_membership,
+            get_item_workspace_context_membership,
+            list_item_context_memberships,
+            list_workspace_context_memberships,
+            confirm_context_membership,
+            delete_context_membership
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

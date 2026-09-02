@@ -228,6 +228,53 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 11;
     }
 
+    if user_version < 12 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_memberships (
+                id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                membership_type TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(item_id, workspace_id)
+            )",
+            [],
+        )?;
+
+        // Indices for fast lookup
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memberships_item_id ON context_memberships(item_id)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memberships_workspace_type ON context_memberships(workspace_id, membership_type)",
+            [],
+        )?;
+
+        // Backfill existing confirmed item workspace assignments into context_memberships
+        conn.execute(
+            "INSERT OR IGNORE INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+             SELECT 
+                lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)),2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))),
+                id,
+                workspace_id,
+                'confirmed',
+                1.0,
+                'user',
+                created_at,
+                updated_at
+             FROM items
+             WHERE workspace_id IS NOT NULL AND workspace_id != 'inbox' AND workspace_id != ''",
+            [],
+        )?;
+
+        user_version = 12;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

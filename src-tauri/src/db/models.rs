@@ -231,3 +231,18 @@ pub struct CandidateScore {
     pub insufficient_evidence_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextMembership {
+    pub id: String,
+    pub item_id: String,
+    pub workspace_id: String,
+    /// "confirmed" | "suggested"
+    pub membership_type: String,
+    pub confidence: f64,
+    /// "user" | "context_engine" | "context_discovery"
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+

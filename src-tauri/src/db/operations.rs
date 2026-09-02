@@ -103,6 +103,12 @@ pub fn create_item(
         "INSERT INTO item_semantic_status (item_id, status, retries, updated_at) VALUES (?1, ?2, 0, ?3)",
         rusqlite::params![item.id, "pending", now],
     )?;
+
+    if let Some(ws_id) = workspace_id {
+        if ws_id != "inbox" && !ws_id.is_empty() {
+            let _ = create_or_update_membership(conn, &id, ws_id, "confirmed", 1.0, "user");
+        }
+    }
     
     Ok(item)
 }
@@ -225,6 +231,18 @@ pub fn move_item(
         "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![workspace_id, now, id],
     )?;
+    
+    // Maintain context memberships
+    if let Some(new_ws) = workspace_id {
+        if new_ws != "inbox" && !new_ws.is_empty() {
+            let _ = create_or_update_membership(conn, id, new_ws, "confirmed", 1.0, "user");
+        }
+    }
+    if let Some(old_ws) = &old_workspace_id {
+        if Some(old_ws.as_str()) != workspace_id {
+            let _ = delete_item_workspace_membership(conn, id, old_ws);
+        }
+    }
     
     // Recalculate old workspace profile if it existed and is different
     if let Some(old_ws) = &old_workspace_id {
@@ -711,6 +729,189 @@ pub fn rebuild_semantic_data(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Context Membership Operations
+// ---------------------------------------------------------------------------
+
+pub fn create_or_update_membership(
+    conn: &Connection,
+    item_id: &str,
+    workspace_id: &str,
+    membership_type: &str,
+    confidence: f64,
+    source: &str,
+) -> Result<super::models::ContextMembership> {
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+
+    conn.execute(
+        "INSERT INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(item_id, workspace_id) DO UPDATE SET
+            membership_type = excluded.membership_type,
+            confidence = excluded.confidence,
+            source = excluded.source,
+            updated_at = excluded.updated_at",
+        params![id, item_id, workspace_id, membership_type, confidence, source, now],
+    )?;
+
+    get_item_workspace_membership(conn, item_id, workspace_id)?
+        .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
+}
+
+pub fn get_membership(conn: &Connection, id: &str) -> Result<super::models::ContextMembership> {
+    conn.query_row(
+        "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+         FROM context_memberships WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(super::models::ContextMembership {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                membership_type: row.get(3)?,
+                confidence: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        },
+    )
+}
+
+pub fn get_item_workspace_membership(
+    conn: &Connection,
+    item_id: &str,
+    workspace_id: &str,
+) -> Result<Option<super::models::ContextMembership>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+         FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+    )?;
+
+    let mut rows = stmt.query(params![item_id, workspace_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(super::models::ContextMembership {
+            id: row.get(0)?,
+            item_id: row.get(1)?,
+            workspace_id: row.get(2)?,
+            membership_type: row.get(3)?,
+            confidence: row.get(4)?,
+            source: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn list_item_memberships(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Vec<super::models::ContextMembership>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+         FROM context_memberships WHERE item_id = ?1 ORDER BY created_at DESC",
+    )?;
+
+    let iter = stmt.query_map(params![item_id], |row| {
+        Ok(super::models::ContextMembership {
+            id: row.get(0)?,
+            item_id: row.get(1)?,
+            workspace_id: row.get(2)?,
+            membership_type: row.get(3)?,
+            confidence: row.get(4)?,
+            source: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+
+    let mut memberships = Vec::new();
+    for m in iter {
+        memberships.push(m?);
+    }
+    Ok(memberships)
+}
+
+pub fn list_workspace_memberships(
+    conn: &Connection,
+    workspace_id: &str,
+    membership_type: Option<&str>,
+) -> Result<Vec<super::models::ContextMembership>> {
+    let mut memberships = Vec::new();
+
+    if let Some(m_type) = membership_type {
+        let mut stmt = conn.prepare(
+            "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+             FROM context_memberships WHERE workspace_id = ?1 AND membership_type = ?2 ORDER BY created_at DESC",
+        )?;
+        let iter = stmt.query_map(params![workspace_id, m_type], |row| {
+            Ok(super::models::ContextMembership {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                membership_type: row.get(3)?,
+                confidence: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        for m in iter {
+            memberships.push(m?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+             FROM context_memberships WHERE workspace_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let iter = stmt.query_map(params![workspace_id], |row| {
+            Ok(super::models::ContextMembership {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                membership_type: row.get(3)?,
+                confidence: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        for m in iter {
+            memberships.push(m?);
+        }
+    }
+
+    Ok(memberships)
+}
+
+pub fn confirm_membership(
+    conn: &Connection,
+    item_id: &str,
+    workspace_id: &str,
+) -> Result<super::models::ContextMembership> {
+    create_or_update_membership(conn, item_id, workspace_id, "confirmed", 1.0, "user")
+}
+
+pub fn delete_membership(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM context_memberships WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn delete_item_workspace_membership(
+    conn: &Connection,
+    item_id: &str,
+    workspace_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+        params![item_id, workspace_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,5 +1090,125 @@ mod tests {
         delete_item_relationship(&conn, &rel.id).unwrap();
         let rels_after_delete = get_item_relationships(&conn, &item1.id).unwrap();
         assert_eq!(rels_after_delete.len(), 0);
+    }
+
+    #[test]
+    fn test_context_membership_crud() {
+        let conn = setup_db();
+        let ws = create_workspace(&conn, "Design System").unwrap();
+        let item = create_item(&conn, None, None, "text", "Button Component", None, "{}").unwrap();
+
+        // 1. Create a suggested membership from context_engine
+        let mem = create_or_update_membership(
+            &conn,
+            &item.id,
+            &ws.id,
+            "suggested",
+            0.85,
+            "context_engine",
+        ).unwrap();
+
+        assert_eq!(mem.item_id, item.id);
+        assert_eq!(mem.workspace_id, ws.id);
+        assert_eq!(mem.membership_type, "suggested");
+        assert_eq!(mem.confidence, 0.85);
+        assert_eq!(mem.source, "context_engine");
+
+        // 2. Fetch by ID
+        let fetched = get_membership(&conn, &mem.id).unwrap();
+        assert_eq!(fetched, mem);
+
+        // 3. Fetch by item & workspace
+        let item_ws_mem = get_item_workspace_membership(&conn, &item.id, &ws.id).unwrap();
+        assert_eq!(item_ws_mem.as_ref(), Some(&mem));
+
+        // 4. List by item
+        let item_mems = list_item_memberships(&conn, &item.id).unwrap();
+        assert_eq!(item_mems.len(), 1);
+        assert_eq!(item_mems[0].id, mem.id);
+
+        // 5. List by workspace with filter
+        let ws_suggested = list_workspace_memberships(&conn, &ws.id, Some("suggested")).unwrap();
+        assert_eq!(ws_suggested.len(), 1);
+        let ws_confirmed = list_workspace_memberships(&conn, &ws.id, Some("confirmed")).unwrap();
+        assert_eq!(ws_confirmed.len(), 0);
+
+        // 6. Delete membership
+        delete_membership(&conn, &mem.id).unwrap();
+        let after_delete = get_item_workspace_membership(&conn, &item.id, &ws.id).unwrap();
+        assert!(after_delete.is_none());
+    }
+
+    #[test]
+    fn test_suggested_vs_confirmed_membership_isolation() {
+        let conn = setup_db();
+        let ws = create_workspace(&conn, "Research").unwrap();
+        let item = create_item(&conn, None, None, "text", "Paper draft", None, "{}").unwrap();
+
+        // Adding a suggested membership must NOT move or alter the item's workspace_id
+        create_or_update_membership(
+            &conn,
+            &item.id,
+            &ws.id,
+            "suggested",
+            0.78,
+            "context_discovery",
+        ).unwrap();
+
+        let fetched_item = get_item(&conn, &item.id).unwrap();
+        assert_eq!(fetched_item.workspace_id, None, "Suggested membership must NEVER change item workspace_id");
+
+        // Standard workspace list_items query must still return empty
+        let ws_items = list_items(&conn, Some(&ws.id)).unwrap();
+        assert_eq!(ws_items.len(), 0, "Suggested items must not appear in standard workspace item list");
+    }
+
+    #[test]
+    fn test_membership_confirm_promotion() {
+        let conn = setup_db();
+        let ws = create_workspace(&conn, "Engineering").unwrap();
+        let item = create_item(&conn, None, None, "text", "API Spec", None, "{}").unwrap();
+
+        // 1. Initially suggested by context_discovery
+        create_or_update_membership(
+            &conn,
+            &item.id,
+            &ws.id,
+            "suggested",
+            0.82,
+            "context_discovery",
+        ).unwrap();
+
+        // 2. User confirms the membership
+        let confirmed = confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        assert_eq!(confirmed.membership_type, "confirmed");
+        assert_eq!(confirmed.confidence, 1.0);
+        assert_eq!(confirmed.source, "user");
+
+        let ws_confirmed = list_workspace_memberships(&conn, &ws.id, Some("confirmed")).unwrap();
+        assert_eq!(ws_confirmed.len(), 1);
+        let ws_suggested = list_workspace_memberships(&conn, &ws.id, Some("suggested")).unwrap();
+        assert_eq!(ws_suggested.len(), 0);
+    }
+
+    #[test]
+    fn test_membership_cascade_deletions() {
+        let conn = setup_db();
+        let ws = create_workspace(&conn, "Temp WS").unwrap();
+        let item = create_item(&conn, None, None, "text", "Temp note", None, "{}").unwrap();
+
+        create_or_update_membership(&conn, &item.id, &ws.id, "suggested", 0.9, "context_engine").unwrap();
+        assert_eq!(list_item_memberships(&conn, &item.id).unwrap().len(), 1);
+
+        // Delete item -> cascades to context_memberships
+        delete_item(&conn, &item.id).unwrap();
+        assert_eq!(list_workspace_memberships(&conn, &ws.id, None).unwrap().len(), 0);
+
+        // Recreate item and workspace to test workspace delete cascade
+        let item2 = create_item(&conn, None, None, "text", "Temp note 2", None, "{}").unwrap();
+        create_or_update_membership(&conn, &item2.id, &ws.id, "confirmed", 1.0, "user").unwrap();
+
+        delete_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(list_item_memberships(&conn, &item2.id).unwrap().len(), 0);
     }
 }

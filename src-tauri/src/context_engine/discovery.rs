@@ -271,6 +271,18 @@ pub fn accept_candidate_and_create_workspace(
             "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
             params![ws_id, now, item_id],
         )?;
+
+        let mem_id = uuid::Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'confirmed', 1.0, 'context_discovery', ?4, ?4)
+             ON CONFLICT(item_id, workspace_id) DO UPDATE SET
+                membership_type = 'confirmed',
+                confidence = 1.0,
+                source = 'context_discovery',
+                updated_at = excluded.updated_at",
+            params![mem_id, item_id, ws_id, now],
+        )?;
     }
 
     // 6. Mark candidate as accepted (preserving metadata evidence intact)

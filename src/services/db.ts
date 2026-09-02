@@ -170,6 +170,22 @@ export interface CandidateScore {
   insufficient_evidence_reasons: string[];
 }
 
+// --- Context Membership ---
+
+export type MembershipType = "confirmed" | "suggested";
+export type MembershipSource = "user" | "context_engine" | "context_discovery";
+
+export interface ContextMembership {
+  id: string;
+  item_id: string;
+  workspace_id: string;
+  membership_type: MembershipType;
+  confidence: number;
+  source: MembershipSource;
+  created_at: string;
+  updated_at: string;
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -306,5 +322,51 @@ export const db = {
   /** Score an arbitrary group of item IDs on the fly. */
   scoreCandidateGroup: (itemIds: string[]) =>
     invoke<CandidateScore>('score_candidate_group', { itemIds }),
+
+  // --- Context Membership ---
+  createContextMembership: (
+    itemId: string,
+    workspaceId: string,
+    membershipType: MembershipType,
+    confidence: number = 1.0,
+    source: MembershipSource = "user"
+  ) =>
+    invoke<ContextMembership>("create_context_membership", {
+      itemId,
+      workspaceId,
+      membershipType,
+      confidence,
+      source,
+    }),
+
+  getContextMembership: (id: string) =>
+    invoke<ContextMembership>("get_context_membership", { id }),
+
+  getItemWorkspaceMembership: (itemId: string, workspaceId: string) =>
+    invoke<ContextMembership | null>("get_item_workspace_context_membership", {
+      itemId,
+      workspaceId,
+    }),
+
+  listItemMemberships: (itemId: string) =>
+    invoke<ContextMembership[]>("list_item_context_memberships", { itemId }),
+
+  listWorkspaceMemberships: (
+    workspaceId: string,
+    membershipType?: MembershipType
+  ) =>
+    invoke<ContextMembership[]>("list_workspace_context_memberships", {
+      workspaceId,
+      membershipType: membershipType ?? null,
+    }),
+
+  confirmContextMembership: (itemId: string, workspaceId: string) =>
+    invoke<ContextMembership>("confirm_context_membership", {
+      itemId,
+      workspaceId,
+    }),
+
+  deleteContextMembership: (id: string) =>
+    invoke<void>("delete_context_membership", { id }),
 };
 
