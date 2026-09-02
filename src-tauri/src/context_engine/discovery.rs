@@ -71,21 +71,88 @@ pub fn list_candidates(conn: &Connection, status_filter: Option<&str>) -> Result
     Ok(candidates)
 }
 
+fn get_candidate_item_ids(conn: &Connection, candidate_id: &str) -> Vec<String> {
+    let mut stmt = match conn.prepare("SELECT item_id FROM context_candidate_items WHERE candidate_id = ?1") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(params![candidate_id], |row| row.get(0))
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
 pub fn update_candidate_status(conn: &Connection, id: &str, status: &str) -> Result<ContextCandidate> {
     let now = Utc::now().to_rfc3339();
+    let candidate = get_candidate(conn, id)?;
+    let item_ids = get_candidate_item_ids(conn, id);
+
     conn.execute(
         "UPDATE context_candidates SET status = ?1, updated_at = ?2 WHERE id = ?3",
         params![status, now, id],
     )?;
+
+    // Record user feedback signals for future learning system
+    let signal_type = match status {
+        "dismissed" => Some("candidate_dismissed"),
+        "accepted" => Some("candidate_accepted"),
+        "suggested" => Some("candidate_suggested"),
+        _ => None,
+    };
+
+    if let Some(sig_type) = signal_type {
+        let sig_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "candidate_id": id,
+            "status": status,
+            "confidence": candidate.confidence,
+            "label": candidate.label,
+            "item_ids": item_ids,
+            "action": format!("candidate_{}", status),
+            "timestamp": now,
+        })
+        .to_string();
+
+        let _ = conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, NULL, NULL, ?2, NULL, ?3, ?4, ?5)",
+            params![sig_id, sig_type, payload, now, now],
+        );
+    }
+
     get_candidate(conn, id)
 }
 
 pub fn update_candidate_label(conn: &Connection, id: &str, label: &str) -> Result<ContextCandidate> {
     let now = Utc::now().to_rfc3339();
+    let old_candidate = get_candidate(conn, id)?;
+    let old_label = old_candidate.label.clone();
+    let item_ids = get_candidate_item_ids(conn, id);
+
     conn.execute(
         "UPDATE context_candidates SET label = ?1, updated_at = ?2 WHERE id = ?3",
         params![label, now, id],
     )?;
+
+    // Record feedback signal for candidate renaming
+    if old_label.as_deref() != Some(label) {
+        let sig_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "candidate_id": id,
+            "old_name": old_label,
+            "new_name": label,
+            "item_ids": item_ids,
+            "action": "candidate_renamed",
+            "timestamp": now,
+        })
+        .to_string();
+
+        let _ = conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, NULL, NULL, 'candidate_renamed', NULL, ?2, ?3, ?4)",
+            params![sig_id, payload, now, now],
+        );
+    }
+
     get_candidate(conn, id)
 }
 
@@ -119,15 +186,44 @@ pub fn remove_item_from_candidate(
     candidate_id: &str,
     item_id: &str,
 ) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+
+    // Fetch relevance score before deletion if available
+    let rel_score: Option<f64> = conn
+        .query_row(
+            "SELECT relevance_score FROM context_candidate_items WHERE candidate_id = ?1 AND item_id = ?2",
+            params![candidate_id, item_id],
+            |row| row.get(0),
+        )
+        .ok();
+
     conn.execute(
         "DELETE FROM context_candidate_items WHERE candidate_id = ?1 AND item_id = ?2",
         params![candidate_id, item_id],
     )?;
+
+    // Record user feedback signal associated with the specific removed item
+    let sig_id = Uuid::new_v4().to_string();
+    let payload = serde_json::json!({
+        "candidate_id": candidate_id,
+        "item_id": item_id,
+        "relevance_score": rel_score,
+        "action": "candidate_item_removed",
+        "timestamp": now,
+    })
+    .to_string();
+
+    let _ = conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, NULL, ?2, 'candidate_item_removed', NULL, ?3, ?4, ?5)",
+        params![sig_id, item_id, payload, now, now],
+    );
+
     Ok(())
 }
 
 /// Atomically creates a new Workspace from a ContextCandidate, assigns all included items,
-/// marks the candidate as accepted, and records a user action context signal.
+/// marks the candidate as accepted, and records user action context signals.
 /// If any step fails, the entire transaction is rolled back.
 pub fn accept_candidate_and_create_workspace(
     conn: &mut Connection,
@@ -183,22 +279,30 @@ pub fn accept_candidate_and_create_workspace(
         params![now, candidate_id],
     )?;
 
-    // 7. Record a user action signal indicating the user created a workspace from this candidate
+    // 7. Record user action feedback signals for workspace creation from candidate
     let signal_id = uuid::Uuid::new_v4().to_string();
     let payload = serde_json::json!({
         "candidate_id": candidate_id,
         "workspace_id": ws_id,
         "workspace_name": ws_name,
+        "item_ids": item_ids,
         "item_count": item_ids.len(),
-        "action": "create_workspace_from_candidate",
+        "action": "workspace_created_from_candidate",
         "created_at": now
     })
     .to_string();
 
     tx.execute(
         "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
-         VALUES (?1, ?2, NULL, 'candidate_accepted', NULL, ?3, ?4, ?5)",
+         VALUES (?1, ?2, NULL, 'workspace_created_from_candidate', NULL, ?3, ?4, ?5)",
         params![signal_id, ws_id, payload, now, now],
+    )?;
+
+    let accept_sig_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, NULL, 'candidate_accepted', NULL, ?3, ?4, ?5)",
+        params![accept_sig_id, ws_id, payload, now, now],
     )?;
 
     // 8. Commit the transaction atomically
@@ -2248,5 +2352,77 @@ mod tests {
 
         let fetched_i1 = crate::db::operations::get_item(&conn, &i1.id).unwrap();
         assert_eq!(fetched_i1.workspace_id, None, "Item workspace_id must remain untouched");
+    }
+
+    #[test]
+    fn test_feedback_signal_candidate_dismissed() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let cand = create_candidate(&conn, 0.88, Some("Travel Itinerary"), "{}").unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.9).unwrap();
+
+        update_candidate_status(&conn, &cand.id, "dismissed").unwrap();
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, None).unwrap();
+        let dismiss_sig = signals.iter().find(|s| s.signal_type == "candidate_dismissed");
+        assert!(dismiss_sig.is_some(), "Should record candidate_dismissed signal");
+
+        let payload = dismiss_sig.unwrap().payload.clone();
+        assert!(payload.contains(&cand.id), "Payload must contain candidate_id");
+        assert!(payload.contains(&i1.id), "Payload must contain item_id");
+    }
+
+    #[test]
+    fn test_feedback_signal_candidate_renamed() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let cand = create_candidate(&conn, 0.85, Some("Old Context Name"), "{}").unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.9).unwrap();
+
+        update_candidate_label(&conn, &cand.id, "Renamed Context Name").unwrap();
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, None).unwrap();
+        let rename_sig = signals.iter().find(|s| s.signal_type == "candidate_renamed");
+        assert!(rename_sig.is_some(), "Should record candidate_renamed signal");
+
+        let payload = rename_sig.unwrap().payload.clone();
+        assert!(payload.contains("Old Context Name"), "Payload must contain old_name");
+        assert!(payload.contains("Renamed Context Name"), "Payload must contain new_name");
+        assert!(payload.contains(&i1.id), "Payload must contain item_id");
+    }
+
+    #[test]
+    fn test_feedback_signal_candidate_item_removed() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let cand = create_candidate(&conn, 0.85, Some("Project Context"), "{}").unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.75).unwrap();
+
+        remove_item_from_candidate(&conn, &cand.id, &i1.id).unwrap();
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&i1.id)).unwrap();
+        let remove_sig = signals.iter().find(|s| s.signal_type == "candidate_item_removed");
+        assert!(remove_sig.is_some(), "Should record candidate_item_removed signal");
+        assert_eq!(remove_sig.unwrap().item_id, Some(i1.id.clone()));
+    }
+
+    #[test]
+    fn test_feedback_signal_workspace_created_from_candidate() {
+        let mut conn = setup_db();
+        let i1 = make_item(&conn);
+        let cand = create_candidate(&conn, 0.90, Some("AI Engine"), "{}").unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.95).unwrap();
+
+        let ws = accept_candidate_and_create_workspace(&mut conn, &cand.id, Some("AI Core Engine")).unwrap();
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), None).unwrap();
+        assert!(
+            signals.iter().any(|s| s.signal_type == "workspace_created_from_candidate"),
+            "Should record workspace_created_from_candidate signal"
+        );
+        assert!(
+            signals.iter().any(|s| s.signal_type == "candidate_accepted"),
+            "Should record candidate_accepted signal"
+        );
     }
 }
