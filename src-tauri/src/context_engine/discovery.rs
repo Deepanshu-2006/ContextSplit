@@ -114,6 +114,18 @@ pub fn add_item_to_candidate(
     })
 }
 
+pub fn remove_item_from_candidate(
+    conn: &Connection,
+    candidate_id: &str,
+    item_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM context_candidate_items WHERE candidate_id = ?1 AND item_id = ?2",
+        params![candidate_id, item_id],
+    )?;
+    Ok(())
+}
+
 pub fn get_candidate_items(conn: &Connection, candidate_id: &str) -> Result<CandidateWithItems> {
     let candidate = get_candidate(conn, candidate_id)?;
 
@@ -2055,5 +2067,25 @@ mod tests {
         assert_eq!(fetched.label.as_deref(), Some("Custom Renamed Context"));
         assert!(fetched.metadata.contains("Test evidence"), "Metadata evidence must remain intact");
         assert_eq!(fetched.confidence, 0.85);
+    }
+
+    #[test]
+    fn test_remove_item_from_candidate() {
+        let conn = setup_db();
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let cand = create_candidate(&conn, 0.8, None, "{}").unwrap();
+
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.9).unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i2.id, 0.8).unwrap();
+
+        let with_items = get_candidate_items(&conn, &cand.id).unwrap();
+        assert_eq!(with_items.items.len(), 2);
+
+        remove_item_from_candidate(&conn, &cand.id, &i1.id).unwrap();
+
+        let after_removal = get_candidate_items(&conn, &cand.id).unwrap();
+        assert_eq!(after_removal.items.len(), 1);
+        assert_eq!(after_removal.items[0].item.id, i2.id);
     }
 }

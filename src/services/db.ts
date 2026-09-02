@@ -275,6 +275,10 @@ export const db = {
   getCandidateItems: (candidateId: string) =>
     invoke<CandidateWithItems>('get_candidate_items', { candidateId }),
 
+  /** Remove an individual item from a candidate group. */
+  removeCandidateItem: (candidateId: string, itemId: string) =>
+    invoke<void>('remove_candidate_item', { candidateId, itemId }),
+
   /** Advance the candidate status (e.g. detected → suggested → accepted). */
   updateCandidateStatus: (id: string, status: CandidateStatus) =>
     invoke<ContextCandidate>('update_candidate_status', { id, status }),

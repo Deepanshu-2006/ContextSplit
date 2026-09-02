@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { db, ContextCandidate, CandidateWithItems, CandidateScore } from '../services/db';
+import { useWorkspaceStore } from './workspaceStore';
 
 export const HIGH_CONFIDENCE_THRESHOLD = 0.70;
 
@@ -18,6 +19,8 @@ interface DiscoveryState {
   reviewCandidate: (id: string) => Promise<void>;
   dismissCandidate: (id: string) => Promise<void>;
   updateCandidateName: (id: string, newName: string) => Promise<void>;
+  removeItemFromCandidate: (candidateId: string, itemId: string) => Promise<void>;
+  createWorkspaceFromCandidate: (candidateId: string, workspaceName: string) => Promise<void>;
   closeReview: () => void;
 }
 
@@ -153,6 +156,88 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
     }
   },
 
+  removeItemFromCandidate: async (candidateId: string, itemId: string) => {
+    try {
+      await db.removeCandidateItem(candidateId, itemId);
+      
+      // Update local items state
+      const { selectedCandidateDetails } = get();
+      if (selectedCandidateDetails && selectedCandidateDetails.candidate.id === candidateId) {
+        const updatedMembers = selectedCandidateDetails.items.filter(
+          (m) => m.item.id !== itemId
+        );
+        set({
+          selectedCandidateDetails: {
+            ...selectedCandidateDetails,
+            items: updatedMembers,
+          },
+        });
+
+        // If candidate still has items, refresh score breakdown
+        if (updatedMembers.length > 0) {
+          const remainingIds = updatedMembers.map((m) => m.item.id);
+          const newScore = await db.scoreCandidateGroup(remainingIds);
+          set({ selectedCandidateScore: newScore });
+        }
+      }
+    } catch (err) {
+      console.error('Failed to remove item from candidate:', err);
+    }
+  },
+
+  createWorkspaceFromCandidate: async (candidateId: string, workspaceName: string) => {
+    try {
+      set({ isLoading: true });
+
+      // 1. Fetch current candidate member items
+      const details = await db.getCandidateItems(candidateId);
+      const itemIds = details.items.map((m) => m.item.id);
+
+      // 2. Create the new Workspace with the chosen name
+      const newWs = await db.createWorkspace(workspaceName.trim() || 'New Workspace');
+
+      // 3. Move items to the newly created workspace
+      if (itemIds.length > 0) {
+        await Promise.all(itemIds.map((id) => db.moveItem(id, newWs.id)));
+      }
+
+      // 4. Mark candidate as accepted
+      await db.updateCandidateStatus(candidateId, 'accepted');
+
+      // 5. Record user feedback signal
+      try {
+        await db.createContextSignal(
+          newWs.id,
+          null,
+          'suggestion_accepted',
+          null,
+          JSON.stringify({
+            candidate_id: candidateId,
+            workspace_id: newWs.id,
+            item_count: itemIds.length,
+            created_at: new Date().toISOString(),
+          })
+        );
+      } catch (sigErr) {
+        console.warn('Could not record suggestion_accepted signal:', sigErr);
+      }
+
+      // 6. Close review modal
+      get().closeReview();
+
+      // 7. Refresh workspaces in workspaceStore and navigate to the new workspace
+      await useWorkspaceStore.getState().loadWorkspaces();
+      useWorkspaceStore.getState().selectWorkspace(newWs.id);
+
+      // Refresh candidate list
+      await get().checkForCandidates();
+    } catch (err) {
+      console.error('Failed to create workspace from candidate:', err);
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
   closeReview: () => {
     set({
       isReviewOpen: false,
@@ -162,3 +247,4 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
     });
   },
 }));
+

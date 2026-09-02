@@ -261,6 +261,17 @@ fn get_candidate_items(
 }
 
 #[tauri::command]
+fn remove_candidate_item(
+    candidate_id: &str,
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::remove_item_from_candidate(&conn, candidate_id, item_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn update_candidate_status(
     id: &str,
     status: &str,
@@ -430,6 +441,7 @@ pub fn run() {
             list_context_candidates,
             get_context_candidate,
             get_candidate_items,
+            remove_candidate_item,
             update_candidate_status,
             update_candidate_label,
             generate_candidate_name,
