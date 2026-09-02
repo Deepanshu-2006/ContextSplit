@@ -305,6 +305,21 @@ fn update_candidate_label(
 }
 
 #[tauri::command]
+fn create_workspace_from_candidate(
+    candidate_id: &str,
+    custom_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::Workspace, String> {
+    let mut conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::accept_candidate_and_create_workspace(
+        &mut conn,
+        candidate_id,
+        custom_name.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn generate_candidate_name(
     item_ids: Vec<String>,
     state: State<'_, AppState>,
@@ -444,6 +459,7 @@ pub fn run() {
             remove_candidate_item,
             update_candidate_status,
             update_candidate_label,
+            create_workspace_from_candidate,
             generate_candidate_name,
             expire_stale_candidates,
             score_context_candidate,

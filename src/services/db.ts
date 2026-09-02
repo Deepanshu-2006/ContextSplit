@@ -287,6 +287,10 @@ export const db = {
   updateCandidateLabel: (id: string, label: string) =>
     invoke<ContextCandidate>('update_candidate_label', { id, label }),
 
+  /** Atomically create a workspace from a candidate and assign included items. */
+  createWorkspaceFromCandidate: (candidateId: string, customName?: string) =>
+    invoke<Workspace>('create_workspace_from_candidate', { candidateId, customName: customName ?? null }),
+
   /** Deterministically generate a candidate name from a group of item IDs. */
   generateCandidateName: (itemIds: string[]) =>
     invoke<string>('generate_candidate_name', { itemIds }),

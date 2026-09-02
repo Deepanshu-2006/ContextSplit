@@ -189,47 +189,17 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
     try {
       set({ isLoading: true });
 
-      // 1. Fetch current candidate member items
-      const details = await db.getCandidateItems(candidateId);
-      const itemIds = details.items.map((m) => m.item.id);
+      // 1. Atomically create workspace, assign items, update status to accepted, and record feedback signal
+      const newWs = await db.createWorkspaceFromCandidate(candidateId, workspaceName.trim());
 
-      // 2. Create the new Workspace with the chosen name
-      const newWs = await db.createWorkspace(workspaceName.trim() || 'New Workspace');
-
-      // 3. Move items to the newly created workspace
-      if (itemIds.length > 0) {
-        await Promise.all(itemIds.map((id) => db.moveItem(id, newWs.id)));
-      }
-
-      // 4. Mark candidate as accepted
-      await db.updateCandidateStatus(candidateId, 'accepted');
-
-      // 5. Record user feedback signal
-      try {
-        await db.createContextSignal(
-          newWs.id,
-          null,
-          'suggestion_accepted',
-          null,
-          JSON.stringify({
-            candidate_id: candidateId,
-            workspace_id: newWs.id,
-            item_count: itemIds.length,
-            created_at: new Date().toISOString(),
-          })
-        );
-      } catch (sigErr) {
-        console.warn('Could not record suggestion_accepted signal:', sigErr);
-      }
-
-      // 6. Close review modal
+      // 2. Close review modal
       get().closeReview();
 
-      // 7. Refresh workspaces in workspaceStore and navigate to the new workspace
+      // 3. Refresh workspaces in workspaceStore and navigate to the newly created workspace
       await useWorkspaceStore.getState().loadWorkspaces();
       useWorkspaceStore.getState().selectWorkspace(newWs.id);
 
-      // Refresh candidate list
+      // 4. Refresh candidate list
       await get().checkForCandidates();
     } catch (err) {
       console.error('Failed to create workspace from candidate:', err);

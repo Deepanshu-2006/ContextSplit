@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::db::models::{
     ContextCandidate, ContextCandidateItem, CandidateWithItems, CandidateMember,
     CandidateScore, StrongestRelationship, ContributingItem, CandidateScoringWeights,
-    WorkspaceSuppressionMatch, EvidenceRequirements,
+    WorkspaceSuppressionMatch, EvidenceRequirements, Workspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -124,6 +124,92 @@ pub fn remove_item_from_candidate(
         params![candidate_id, item_id],
     )?;
     Ok(())
+}
+
+/// Atomically creates a new Workspace from a ContextCandidate, assigns all included items,
+/// marks the candidate as accepted, and records a user action context signal.
+/// If any step fails, the entire transaction is rolled back.
+pub fn accept_candidate_and_create_workspace(
+    conn: &mut Connection,
+    candidate_id: &str,
+    custom_name: Option<&str>,
+) -> Result<Workspace> {
+    let tx = conn.transaction()?;
+
+    // 1. Fetch the candidate
+    let candidate = get_candidate(&tx, candidate_id)?;
+
+    // 2. Resolve Workspace Name
+    let ws_name = match custom_name {
+        Some(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => candidate
+            .label
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "New Workspace".to_string()),
+    };
+
+    let ws_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    // 3. Insert new Workspace
+    tx.execute(
+        "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        params![ws_id, ws_name, now, now],
+    )?;
+
+    // 4. Fetch all member items associated with this candidate
+    let item_ids: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT item_id FROM context_candidate_items WHERE candidate_id = ?1",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![candidate_id], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        ids
+    };
+
+    // 5. Assign candidate items to the newly created workspace (preserving original created_at timestamps)
+    for item_id in &item_ids {
+        tx.execute(
+            "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![ws_id, now, item_id],
+        )?;
+    }
+
+    // 6. Mark candidate as accepted (preserving metadata evidence intact)
+    tx.execute(
+        "UPDATE context_candidates SET status = 'accepted', updated_at = ?1 WHERE id = ?2",
+        params![now, candidate_id],
+    )?;
+
+    // 7. Record a user action signal indicating the user created a workspace from this candidate
+    let signal_id = uuid::Uuid::new_v4().to_string();
+    let payload = serde_json::json!({
+        "candidate_id": candidate_id,
+        "workspace_id": ws_id,
+        "workspace_name": ws_name,
+        "item_count": item_ids.len(),
+        "action": "create_workspace_from_candidate",
+        "created_at": now
+    })
+    .to_string();
+
+    tx.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, NULL, 'candidate_accepted', NULL, ?3, ?4, ?5)",
+        params![signal_id, ws_id, payload, now, now],
+    )?;
+
+    // 8. Commit the transaction atomically
+    tx.commit()?;
+
+    Ok(Workspace {
+        id: ws_id,
+        name: ws_name,
+        created_at: now.clone(),
+        updated_at: now,
+    })
 }
 
 pub fn get_candidate_items(conn: &Connection, candidate_id: &str) -> Result<CandidateWithItems> {
@@ -2087,5 +2173,80 @@ mod tests {
         let after_removal = get_candidate_items(&conn, &cand.id).unwrap();
         assert_eq!(after_removal.items.len(), 1);
         assert_eq!(after_removal.items[0].item.id, i2.id);
+    }
+
+    #[test]
+    fn test_create_workspace_from_candidate_success() {
+        let mut conn = setup_db();
+
+        // 1. Create items with original creation timestamps in the past
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "React Component", Some("React 1"), "{}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "React Hook", Some("React 2"), "{}").unwrap();
+        let original_i1_created_at = i1.created_at.clone();
+        let original_i2_created_at = i2.created_at.clone();
+
+        // 2. Attach ContextSignals and ItemRelationships
+        let sig1 = crate::context_engine::operations::create_context_signal(
+            &conn, None, Some(&i1.id), "active_app", None, "{\"app_name\":\"VS Code\"}"
+        ).unwrap();
+        let rel1 = crate::db::operations::create_item_relationship(
+            &conn, &i1.id, &i2.id, "semantic_similarity", 0.92, None
+        ).unwrap();
+
+        // 3. Create Candidate
+        let metadata_evidence = "{\"confidence\":0.91,\"evidence\":[\"2 related items\",\"Same session\"]}";
+        let cand = create_candidate(&conn, 0.91, Some("React Frontend"), metadata_evidence).unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i1.id, 0.95).unwrap();
+        add_item_to_candidate(&conn, &cand.id, &i2.id, 0.90).unwrap();
+
+        // 4. Accept candidate and create workspace atomically
+        let ws = accept_candidate_and_create_workspace(&mut conn, &cand.id, Some("React Development")).unwrap();
+        assert_eq!(ws.name, "React Development");
+
+        // 5. Verify items were moved to the new workspace
+        let fetched_i1 = crate::db::operations::get_item(&conn, &i1.id).unwrap();
+        let fetched_i2 = crate::db::operations::get_item(&conn, &i2.id).unwrap();
+        assert_eq!(fetched_i1.workspace_id, Some(ws.id.clone()));
+        assert_eq!(fetched_i2.workspace_id, Some(ws.id.clone()));
+
+        // 6. Verify original capture timestamps (created_at) were preserved
+        assert_eq!(fetched_i1.created_at, original_i1_created_at);
+        assert_eq!(fetched_i2.created_at, original_i2_created_at);
+
+        // 7. Verify ContextSignals and ItemRelationships were preserved intact
+        let fetched_sig = crate::context_engine::operations::get_context_signal(&conn, &sig1.id).unwrap();
+        assert_eq!(fetched_sig.item_id, Some(i1.id.clone()));
+
+        let fetched_rels = crate::db::operations::get_item_relationships(&conn, &i1.id).unwrap();
+        assert!(fetched_rels.iter().any(|r| r.id == rel1.id));
+
+        // 8. Verify candidate was marked as accepted while preserving metadata evidence
+        let fetched_cand = get_candidate(&conn, &cand.id).unwrap();
+        assert_eq!(fetched_cand.status, "accepted");
+        assert_eq!(fetched_cand.metadata, metadata_evidence);
+
+        // 9. Verify user action signal was recorded
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), None).unwrap();
+        assert!(
+            signals.iter().any(|s| s.signal_type == "candidate_accepted"),
+            "Should have recorded candidate_accepted signal for workspace"
+        );
+    }
+
+    #[test]
+    fn test_create_workspace_from_candidate_rollback() {
+        let mut conn = setup_db();
+        let i1 = make_item(&conn);
+
+        // Attempting to create workspace from a non-existent candidate ID
+        let result = accept_candidate_and_create_workspace(&mut conn, "non_existent_id", None);
+        assert!(result.is_err(), "Must error on non-existent candidate");
+
+        // Verify no orphaned workspaces or modified items
+        let workspaces = crate::db::operations::list_workspaces(&conn).unwrap();
+        assert_eq!(workspaces.len(), 0, "No workspace should have been created");
+
+        let fetched_i1 = crate::db::operations::get_item(&conn, &i1.id).unwrap();
+        assert_eq!(fetched_i1.workspace_id, None, "Item workspace_id must remain untouched");
     }
 }
