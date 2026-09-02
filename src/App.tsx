@@ -3,6 +3,9 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { Canvas } from "./components/workspace/Canvas";
 import { useWorkspaceStore } from "./store/workspaceStore";
+import { useDiscoveryStore } from "./store/discoveryStore";
+import { DiscoveryNotificationCard } from "./components/discovery/DiscoveryNotificationCard";
+import { CandidateReviewModal } from "./components/discovery/CandidateReviewModal";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
@@ -12,6 +15,7 @@ import "./App.css";
 
 function App() {
   const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
+  const { checkForCandidates } = useDiscoveryStore();
   const [isNotchTarget, setIsNotchTarget] = useState(false);
   const [isOrbTarget, setIsOrbTarget] = useState(false);
   
@@ -31,6 +35,8 @@ function App() {
     }
 
     loadWorkspaces();
+    checkForCandidates();
+
     let isMounted = true;
     let unlisten: (() => void) | undefined;
     
@@ -48,7 +54,7 @@ function App() {
         unlisten();
       }
     };
-  }, [loadWorkspaces, listenForClipboard]);
+  }, [loadWorkspaces, listenForClipboard, checkForCandidates]);
 
   if (isNotchTarget) {
     return (
@@ -78,9 +84,12 @@ function App() {
         <TopBar />
         <Canvas />
       </div>
+      <DiscoveryNotificationCard />
+      <CandidateReviewModal />
       <Toaster position="bottom-right" />
     </div>
   );
 }
 
 export default App;
+

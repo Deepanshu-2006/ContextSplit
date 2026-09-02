@@ -1,9 +1,13 @@
 import { useState } from "react";
-import { Search, Bell, Settings } from "lucide-react";
+import { Search, Sparkles, Settings } from "lucide-react";
 import { SettingsModal } from "../settings/SettingsModal";
+import { useDiscoveryStore } from "../../store/discoveryStore";
 
 export function TopBar() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const { candidates, runDiscoveryScan, isLoading } = useDiscoveryStore();
+
+  const detectedCount = candidates.filter((c) => c.status === "detected").length;
 
   return (
     <header 
@@ -24,13 +28,24 @@ export function TopBar() {
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
-        <button className="text-gray-400 hover:text-gray-900 transition-colors">
-          <Bell size={16} />
+      <div className="flex items-center gap-2.5">
+        <button
+          onClick={runDiscoveryScan}
+          disabled={isLoading}
+          title="Run Context Discovery scan"
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100/80 rounded-lg border border-gray-200/60 transition-colors cursor-pointer"
+        >
+          <Sparkles size={13} className={`text-amber-500 ${isLoading ? "animate-spin" : ""}`} />
+          <span>Discover</span>
+          {detectedCount > 0 && (
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+          )}
         </button>
+
         <button 
-          className="text-gray-400 hover:text-gray-900 transition-colors"
+          className="p-1.5 text-gray-400 hover:text-gray-900 transition-colors rounded-lg hover:bg-gray-100/80 cursor-pointer"
           onClick={() => setIsSettingsOpen(true)}
+          title="Settings"
         >
           <Settings size={16} />
         </button>
@@ -42,3 +57,4 @@ export function TopBar() {
     </header>
   );
 }
+
