@@ -280,6 +280,20 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 13;
     }
 
+    if user_version < 14 {
+        conn.execute("ALTER TABLE workspaces ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'", [])?;
+        conn.execute("ALTER TABLE workspaces ADD COLUMN last_activity_at TEXT", [])?;
+        conn.execute("ALTER TABLE workspaces ADD COLUMN archived_at TEXT", [])?;
+
+        // Initialize last_activity_at with updated_at for existing workspaces
+        conn.execute("UPDATE workspaces SET last_activity_at = updated_at WHERE last_activity_at IS NULL", [])?;
+
+        // Create index on lifecycle_state
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_workspaces_lifecycle ON workspaces(lifecycle_state)", [])?;
+
+        user_version = 14;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

@@ -287,6 +287,15 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
             }
         }
         
+        // --- Context Lifecycle State Influence ---
+        if ws.lifecycle_state == "archived" {
+            score = 0.0;
+            reasons.push(format!("{} is archived by user; suggestions suppressed", ws.name));
+        } else if ws.lifecycle_state == "dormant" {
+            score *= 0.50;
+            reasons.push(format!("{} is dormant (no recent meaningful activity)", ws.name));
+        }
+
         // Cap at 1.0
         score = score.min(1.0);
         
@@ -522,6 +531,15 @@ pub fn evaluate_item_context(
             }
         }
 
+        // --- Context Lifecycle State Influence ---
+        if ws.lifecycle_state == "archived" {
+            score = 0.0;
+            reasons.push(format!("{} is archived by user; suggestions suppressed", ws.name));
+        } else if ws.lifecycle_state == "dormant" {
+            score *= 0.50;
+            reasons.push(format!("{} is dormant (no recent meaningful activity)", ws.name));
+        }
+
         let clamped_score = (score as f64).clamp(0.0, 1.0);
         let confidence_band = if clamped_score >= 0.60 {
             "High"
@@ -722,6 +740,11 @@ pub fn recalculate_workspace_suggested_memberships(
 ) -> Result<Vec<crate::db::models::ContextMembership>, String> {
     let ws = crate::db::operations::get_workspace(conn, workspace_id)
         .map_err(|e| format!("Workspace '{}' not found: {}", workspace_id, e))?;
+
+    // Archived workspaces are suppressed from automatic suggestion recalculation
+    if ws.lifecycle_state == "archived" {
+        return Ok(Vec::new());
+    }
 
     // 1. Identify candidate items to recalculate without scanning the entire database:
     let mut target_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1401,5 +1424,67 @@ mod tests {
             (r_no_decay.score - o_no_decay.score).abs() < 0.001,
             "With decay disabled, both workspaces should score identically"
         );
+    }
+
+    #[test]
+    fn test_lifecycle_states_influence_contextual_suggestions() {
+        let conn = setup_in_memory_db();
+
+        // 1. Create three workspaces with identical items
+        let ws_active = create_workspace(&conn, "Active WS").unwrap();
+        let ws_dormant = create_workspace(&conn, "Dormant WS").unwrap();
+        let ws_archived = create_workspace(&conn, "Archived WS").unwrap();
+
+        // 2. Create identical items in each workspace
+        let item_act = create_item(&conn, Some(&ws_active.id), None, "text", "React Hooks", Some("React 1"), "{}").unwrap();
+        let item_dor = create_item(&conn, Some(&ws_dormant.id), None, "text", "React Hooks", Some("React 2"), "{}").unwrap();
+        let item_arc = create_item(&conn, Some(&ws_archived.id), None, "text", "React Hooks", Some("React 3"), "{}").unwrap();
+
+        // 3. Transition dormant and archived states
+        let _ = crate::db::operations::update_workspace_lifecycle_state(&conn, &ws_dormant.id, "dormant").unwrap();
+        let _ = crate::db::operations::archive_workspace(&conn, &ws_archived.id).unwrap();
+
+        // 3. Target Item in Inbox
+        let target = create_item(&conn, None, None, "text", "React Hooks Tutorial", Some("Target React"), "{}").unwrap();
+
+        // 4. Equal relationship to all three items
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_act.id, "same_topic", 0.90, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_dor.id, "same_topic", 0.90, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_arc.id, "same_topic", 0.90, None).unwrap();
+
+        // 5. Evaluate unified context interpretation
+        let interp = evaluate_item_context(&conn, &target.id).unwrap();
+
+        let eval_active = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_active.id).unwrap();
+        let eval_dormant = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_dormant.id).unwrap();
+        let eval_archived = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_archived.id).unwrap();
+
+        // Rule verification:
+        // a) Active context receives full suggestion score
+        assert!(eval_active.score > 0.0);
+
+        // b) Dormant context receives discounted suggestion score (~50%)
+        assert!(
+            eval_active.score > eval_dormant.score,
+            "Active ({}) should score higher than dormant ({})",
+            eval_active.score,
+            eval_dormant.score
+        );
+        assert!(
+            eval_dormant.score > 0.0,
+            "Dormant context remains available with non-zero score"
+        );
+
+        // c) Archived context is suppressed from suggestions (score == 0.0)
+        assert_eq!(eval_archived.score, 0.0, "Archived context must be suppressed from suggestions");
+        assert!(eval_archived.reasons.iter().any(|r| r.contains("archived by user")));
+
+        // d) Rule: Lifecycle must never override explicit user organization
+        // User moves target item directly to archived workspace: succeeds authoritatively
+        let moved = crate::db::operations::move_item(&conn, &target.id, Some(&ws_archived.id)).unwrap();
+        assert_eq!(moved.workspace_id.as_deref(), Some(ws_archived.id.as_str()));
+        let mem = crate::db::operations::get_item_workspace_membership(&conn, &target.id, &ws_archived.id).unwrap().unwrap();
+        assert_eq!(mem.membership_type, "confirmed");
+        assert_eq!(mem.confidence, 1.0);
     }
 }

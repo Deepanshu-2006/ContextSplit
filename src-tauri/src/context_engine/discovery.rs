@@ -249,8 +249,9 @@ pub fn accept_candidate_and_create_workspace(
 
     // 3. Insert new Workspace
     tx.execute(
-        "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        params![ws_id, ws_name, now, now],
+        "INSERT INTO workspaces (id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at) 
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL)",
+        params![ws_id, ws_name, now, now, now],
     )?;
 
     // 4. Fetch all member items associated with this candidate
@@ -324,7 +325,10 @@ pub fn accept_candidate_and_create_workspace(
         id: ws_id,
         name: ws_name,
         created_at: now.clone(),
-        updated_at: now,
+        updated_at: now.clone(),
+        lifecycle_state: "active".to_string(),
+        last_activity_at: Some(now),
+        archived_at: None,
     })
 }
 

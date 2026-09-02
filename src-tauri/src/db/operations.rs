@@ -8,26 +8,36 @@ pub fn create_workspace(conn: &Connection, name: &str) -> Result<Workspace> {
     let now = Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        params![id, name, now, now],
+        "INSERT INTO workspaces (id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at) 
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL)",
+        params![id, name, now, now, now],
     )?;
 
     Ok(Workspace {
         id,
         name: name.to_string(),
         created_at: now.clone(),
-        updated_at: now,
+        updated_at: now.clone(),
+        lifecycle_state: "active".to_string(),
+        last_activity_at: Some(now),
+        archived_at: None,
     })
 }
 
 pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
-    let mut stmt = conn.prepare("SELECT id, name, created_at, updated_at FROM workspaces WHERE id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at 
+         FROM workspaces WHERE id = ?1"
+    )?;
     let workspace = stmt.query_row(params![id], |row| {
         Ok(Workspace {
             id: row.get(0)?,
             name: row.get(1)?,
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
+            lifecycle_state: row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "active".to_string()),
+            last_activity_at: row.get(5)?,
+            archived_at: row.get(6)?,
         })
     })?;
     
@@ -35,13 +45,19 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
 }
 
 pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>> {
-    let mut stmt = conn.prepare("SELECT id, name, created_at, updated_at FROM workspaces ORDER BY created_at DESC")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at 
+         FROM workspaces ORDER BY created_at DESC"
+    )?;
     let workspace_iter = stmt.query_map([], |row| {
         Ok(Workspace {
             id: row.get(0)?,
             name: row.get(1)?,
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
+            lifecycle_state: row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "active".to_string()),
+            last_activity_at: row.get(5)?,
+            archived_at: row.get(6)?,
         })
     })?;
 
@@ -68,6 +84,121 @@ pub fn delete_workspace(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+pub fn update_workspace_lifecycle_state(
+    conn: &Connection,
+    id: &str,
+    new_state: &str,
+) -> Result<Workspace, String> {
+    let state_str = match new_state {
+        "active" | "dormant" | "archived" => new_state,
+        _ => return Err(format!("Invalid lifecycle state '{}'. Must be 'active', 'dormant', or 'archived'", new_state)),
+    };
+
+    let now = Utc::now().to_rfc3339();
+    let current = get_workspace(conn, id).map_err(|e| e.to_string())?;
+
+    let archived_at = if state_str == "archived" {
+        Some(now.clone())
+    } else {
+        None
+    };
+
+    conn.execute(
+        "UPDATE workspaces SET lifecycle_state = ?1, archived_at = ?2, updated_at = ?3 WHERE id = ?4",
+        params![state_str, archived_at, now, id],
+    ).map_err(|e| e.to_string())?;
+
+    // Record signal for lifecycle state change
+    let payload = serde_json::json!({
+        "action": "workspace_lifecycle_changed",
+        "previous_state": current.lifecycle_state,
+        "new_state": state_str,
+        "workspace_id": id,
+        "workspace_name": current.name,
+    }).to_string();
+
+    let _ = crate::context_engine::operations::create_context_signal(
+        conn,
+        Some(id),
+        None,
+        "user_action",
+        None,
+        &payload,
+    );
+
+    get_workspace(conn, id).map_err(|e| e.to_string())
+}
+
+pub fn archive_workspace(conn: &Connection, id: &str) -> Result<Workspace, String> {
+    update_workspace_lifecycle_state(conn, id, "archived")
+}
+
+pub fn unarchive_workspace(conn: &Connection, id: &str) -> Result<Workspace, String> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE workspaces SET lifecycle_state = 'active', archived_at = NULL, last_activity_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    ).map_err(|e| e.to_string())?;
+    get_workspace(conn, id).map_err(|e| e.to_string())
+}
+
+pub fn touch_workspace_activity(conn: &Connection, id: &str) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    let ws = get_workspace(conn, id).map_err(|e| e.to_string())?;
+    
+    // If dormant, wake up to active upon meaningful activity!
+    // Note: Never automatically unarchive an archived workspace.
+    let new_state = if ws.lifecycle_state == "dormant" {
+        "active"
+    } else {
+        &ws.lifecycle_state
+    };
+
+    conn.execute(
+        "UPDATE workspaces SET last_activity_at = ?1, updated_at = ?1, lifecycle_state = ?2 WHERE id = ?3",
+        params![now, new_state, id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub fn evaluate_workspace_lifecycle(
+    conn: &Connection,
+    id: &str,
+    inactivity_days_threshold: Option<f64>,
+) -> Result<String, String> {
+    let ws = get_workspace(conn, id).map_err(|e| e.to_string())?;
+    // Rule: "Do not automatically archive user contexts."
+    if ws.lifecycle_state == "archived" {
+        return Ok("archived".to_string());
+    }
+
+    let threshold_days = inactivity_days_threshold.unwrap_or(30.0);
+    let now = Utc::now();
+    let last_activity_str = ws.last_activity_at.as_deref().unwrap_or(&ws.updated_at);
+    
+    let is_dormant = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(last_activity_str) {
+        let elapsed = now.signed_duration_since(dt.with_timezone(&Utc));
+        let days = elapsed.num_seconds().max(0) as f64 / 86400.0;
+        days > threshold_days
+    } else {
+        false
+    };
+
+    let target_state = if is_dormant { "dormant" } else { "active" };
+
+    if target_state != ws.lifecycle_state {
+        let now_str = now.to_rfc3339();
+        conn.execute(
+            "UPDATE workspaces SET lifecycle_state = ?1, updated_at = ?2 WHERE id = ?3",
+            params![target_state, now_str, id],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    Ok(target_state.to_string())
+}
+
 
 pub fn create_item(
     conn: &Connection,
@@ -106,6 +237,7 @@ pub fn create_item(
 
     if let Some(ws_id) = workspace_id {
         if ws_id != "inbox" && !ws_id.is_empty() {
+            let _ = touch_workspace_activity(conn, ws_id);
             let _ = create_or_update_membership(conn, &id, ws_id, "confirmed", 1.0, "user");
             let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(conn, ws_id, Some(&id));
         }
@@ -236,6 +368,7 @@ pub fn move_item(
     // Maintain context memberships
     if let Some(new_ws) = workspace_id {
         if new_ws != "inbox" && !new_ws.is_empty() {
+            let _ = touch_workspace_activity(conn, new_ws);
             let _ = create_or_update_membership(conn, id, new_ws, "confirmed", 1.0, "user");
         }
     }
@@ -1329,5 +1462,60 @@ mod tests {
         // Feedback signal recorded for future engine learning
         let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws_paris.id), Some(&item_restaurant.id)).unwrap();
         assert_eq!(signals.iter().filter(|s| s.signal_type == "membership_dismissed").count(), 1);
+    }
+
+    #[test]
+    fn test_context_workspace_lifecycle_states() {
+        let conn = setup_db();
+        
+        // 1. Initial creation: workspace is Active
+        let ws = create_workspace(&conn, "Paris Research").unwrap();
+        assert_eq!(ws.lifecycle_state, "active");
+        assert!(ws.last_activity_at.is_some());
+        assert!(ws.archived_at.is_none());
+
+        // 2. Add an item: confirmed in workspace
+        let item = create_item(&conn, Some(&ws.id), None, "text", "Eiffel Tower tickets", Some("Tickets"), "{}").unwrap();
+        assert_eq!(item.workspace_id.as_deref(), Some(ws.id.as_str()));
+
+        // 3. Simulating inactivity: update last_activity_at to 45 days ago
+        let old_time = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        conn.execute("UPDATE workspaces SET last_activity_at = ?1 WHERE id = ?2", rusqlite::params![old_time, ws.id]).unwrap();
+
+        // 4. Lifecycle evaluation identifies workspace as Dormant (no recent activity, but remains available)
+        let state = evaluate_workspace_lifecycle(&conn, &ws.id, Some(30.0)).unwrap();
+        assert_eq!(state, "dormant");
+
+        let ws_dormant = get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_dormant.lifecycle_state, "dormant");
+
+        // Rule: Do not delete data
+        let item_still_exists = get_item(&conn, &item.id).unwrap();
+        assert_eq!(item_still_exists.workspace_id.as_deref(), Some(ws.id.as_str()));
+
+        // 5. Meaningful user activity wakes dormant workspace back to Active
+        let new_item = create_item(&conn, Some(&ws.id), None, "text", "Louvre itinerary", Some("Louvre"), "{}").unwrap();
+        let ws_active_again = get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_active_again.lifecycle_state, "active");
+        assert_eq!(new_item.workspace_id.as_deref(), Some(ws.id.as_str()));
+
+        // 6. User explicitly archives workspace
+        let ws_archived = archive_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_archived.lifecycle_state, "archived");
+        assert!(ws_archived.archived_at.is_some());
+
+        // Rule: Do not automatically archive or unarchive user contexts
+        // Even if evaluation runs, archived remains archived
+        let eval_archived = evaluate_workspace_lifecycle(&conn, &ws.id, Some(30.0)).unwrap();
+        assert_eq!(eval_archived, "archived");
+
+        // Rule: User-confirmed workspace assignment continues working authoritatively
+        let item_in_archived = create_item(&conn, Some(&ws.id), None, "text", "Post-archive note", Some("Note"), "{}").unwrap();
+        assert_eq!(item_in_archived.workspace_id.as_deref(), Some(ws.id.as_str()));
+
+        // 7. Explicit unarchive restores active state
+        let ws_unarchived = unarchive_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_unarchived.lifecycle_state, "active");
+        assert!(ws_unarchived.archived_at.is_none());
     }
 }

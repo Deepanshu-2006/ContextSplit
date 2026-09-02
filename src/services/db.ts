@@ -5,6 +5,9 @@ export interface Workspace {
   name: string;
   created_at: string;
   updated_at: string;
+  lifecycle_state?: "active" | "dormant" | "archived";
+  last_activity_at?: string | null;
+  archived_at?: string | null;
 }
 
 export interface Item {
@@ -513,5 +516,21 @@ export const db = {
 
   updateTemporalDecayConfig: (config: TemporalDecayConfig) =>
     invoke<void>("update_temporal_decay_config", { config }),
+
+  // Workspace Lifecycle
+  updateWorkspaceLifecycleState: (id: string, state: "active" | "dormant" | "archived") =>
+    invoke<Workspace>("update_workspace_lifecycle_state", { id, state }),
+
+  archiveWorkspace: (id: string) =>
+    invoke<Workspace>("archive_workspace", { id }),
+
+  unarchiveWorkspace: (id: string) =>
+    invoke<Workspace>("unarchive_workspace", { id }),
+
+  evaluateWorkspaceLifecycle: (id: string, inactivityDaysThreshold?: number) =>
+    invoke<string>("evaluate_workspace_lifecycle", {
+      id,
+      inactivityDaysThreshold: inactivityDaysThreshold ?? null,
+    }),
 };
 

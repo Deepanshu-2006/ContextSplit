@@ -46,6 +46,38 @@ fn delete_workspace(id: &str, state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
+fn update_workspace_lifecycle_state(
+    id: &str,
+    state: &str,
+    app_state: State<'_, AppState>,
+) -> Result<Workspace, String> {
+    let conn = app_state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::update_workspace_lifecycle_state(&conn, id, state)
+}
+
+#[tauri::command]
+fn archive_workspace(id: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::archive_workspace(&conn, id)
+}
+
+#[tauri::command]
+fn unarchive_workspace(id: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::unarchive_workspace(&conn, id)
+}
+
+#[tauri::command]
+fn evaluate_workspace_lifecycle(
+    id: &str,
+    inactivity_days_threshold: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::evaluate_workspace_lifecycle(&conn, id, inactivity_days_threshold)
+}
+
+#[tauri::command]
 fn create_item(
     workspace_id: Option<&str>,
     item_type: &str,
@@ -650,7 +682,12 @@ pub fn run() {
             explain_context_association,
             // Temporal Context Weighting
             get_temporal_decay_config,
-            update_temporal_decay_config
+            update_temporal_decay_config,
+            // Workspace Lifecycle
+            update_workspace_lifecycle_state,
+            archive_workspace,
+            unarchive_workspace,
+            evaluate_workspace_lifecycle
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

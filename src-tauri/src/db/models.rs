@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
     pub created_at: String,
     pub updated_at: String,
+    pub lifecycle_state: String,
+    pub last_activity_at: Option<String>,
+    pub archived_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
