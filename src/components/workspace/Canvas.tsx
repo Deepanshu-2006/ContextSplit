@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { BoxSelect, LayoutTemplate, Inbox } from "lucide-react";
+import { BoxSelect, LayoutTemplate, Inbox, Clock } from "lucide-react";
 import { ReactFlow, Background, BackgroundVariant, Node, applyNodeChanges, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useWorkspaceStore } from "../../store/workspaceStore";
@@ -13,7 +13,8 @@ export function Canvas() {
   const { 
     workspaces, activeWorkspaceId, activeItems, 
     updateItemPositions, moveItemsToWorkspace,
-    setIsDraggingCard, setHoveredWorkspaceId 
+    setIsDraggingCard, setHoveredWorkspaceId,
+    openTimeline,
   } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
@@ -190,9 +191,9 @@ export function Canvas() {
           className="opacity-50"
         />
         
-        {/* Floating Workspace Title */}
-        <div className="absolute top-8 left-8 z-10 pointer-events-none">
-          <div className="flex items-center gap-3 opacity-40">
+        {/* Floating Workspace Title & Actions */}
+        <div className="absolute top-8 left-8 z-10 flex items-center gap-4">
+          <div className="flex items-center gap-3 opacity-40 pointer-events-none">
             {isInbox ? (
               <Inbox size={20} strokeWidth={2} />
             ) : (
@@ -202,6 +203,17 @@ export function Canvas() {
               {title}
             </h1>
           </div>
+
+          {!isInbox && activeWorkspace && (
+            <button
+              onClick={() => openTimeline(activeWorkspace.id)}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-white/80 hover:bg-white border border-black/5 hover:border-black/10 rounded-lg text-xs font-medium text-slate-600 hover:text-indigo-600 shadow-2xs backdrop-blur-xs transition-all cursor-pointer pointer-events-auto"
+              title="View Context Timeline"
+            >
+              <Clock size={12} className="text-indigo-600" />
+              <span>Timeline</span>
+            </button>
+          )}
         </div>
 
         {/* Empty State Overlay */}

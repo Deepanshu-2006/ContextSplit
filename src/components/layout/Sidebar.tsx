@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Plus, LayoutTemplate, Trash2, Pencil, Inbox } from "lucide-react";
+import { Plus, LayoutTemplate, Trash2, Pencil, Inbox, Clock } from "lucide-react";
 import { Workspace } from "../../services/db";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 import { DiscoverySection } from "../discovery/DiscoverySection";
@@ -15,6 +15,7 @@ export function Sidebar() {
     createWorkspace,
     renameWorkspace,
     deleteWorkspace,
+    openTimeline,
   } = useWorkspaceStore();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -131,6 +132,16 @@ export function Sidebar() {
 
                 {!isEditing && (
                   <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openTimeline(workspace.id);
+                      }}
+                      className="p-1 text-gray-400 hover:text-indigo-600 rounded"
+                      title="Context Timeline"
+                    >
+                      <Clock size={12} />
+                    </button>
                     <button
                       onClick={(e) => startEditing(workspace, e)}
                       className="p-1 text-gray-400 hover:text-gray-900 rounded"

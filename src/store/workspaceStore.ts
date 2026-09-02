@@ -28,6 +28,10 @@ interface WorkspaceState {
   moveItemsToWorkspace: (itemIds: string[], targetWorkspaceId: string | "inbox") => Promise<void>;
   setIsDraggingCard: (isDragging: boolean) => void;
   setHoveredWorkspaceId: (id: string | null) => void;
+  isTimelineOpen: boolean;
+  timelineWorkspaceId: string | null;
+  openTimeline: (workspaceId?: string) => void;
+  closeTimeline: () => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -39,6 +43,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   captureState: 'hidden',
   isDraggingCard: false,
   hoveredWorkspaceId: null,
+  isTimelineOpen: false,
+  timelineWorkspaceId: null,
+
+  openTimeline: (workspaceId?: string) => {
+    const targetId = workspaceId || (get().activeWorkspaceId !== 'inbox' ? (get().activeWorkspaceId as string) : null);
+    if (targetId) {
+      set({ isTimelineOpen: true, timelineWorkspaceId: targetId });
+    }
+  },
+  closeTimeline: () => set({ isTimelineOpen: false, timelineWorkspaceId: null }),
 
   setCaptureState: (state) => set({ captureState: state }),
   setIsDraggingCard: (isDragging) => set({ isDraggingCard: isDragging }),
