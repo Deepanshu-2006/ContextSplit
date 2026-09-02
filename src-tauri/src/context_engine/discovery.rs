@@ -205,8 +205,12 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
     let mut stmt = conn.prepare(
         "SELECT r.item_a_id, r.item_b_id, r.strength, r.relationship_type
          FROM item_relationships r
+         JOIN items a ON a.id = r.item_a_id
+         JOIN items b ON b.id = r.item_b_id
          WHERE r.strength >= ?1
            AND r.created_at >= ?2
+           AND (a.workspace_id IS NULL OR a.workspace_id = 'inbox')
+           AND (b.workspace_id IS NULL OR b.workspace_id = 'inbox')
          ORDER BY r.strength DESC",
     )?;
 
@@ -597,5 +601,40 @@ mod tests {
 
         let result = run_discovery(&conn).unwrap();
         assert_eq!(result.len(), 0, "Clusters smaller than 3 should be ignored");
+    }
+
+    #[test]
+    fn test_unrelated_items_remain_separate() {
+        let conn = setup_db();
+
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let i3 = make_item(&conn);
+        let i4 = make_item(&conn);
+
+        // Weak relationships (below MIN_STRENGTH = 0.5)
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.4, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i3.id, &i4.id, "temporal_proximity", 0.3, None).unwrap();
+
+        let result = run_discovery(&conn).unwrap();
+        assert_eq!(result.len(), 0, "Should not cluster weakly related items");
+    }
+
+    #[test]
+    fn test_items_in_workspace_are_deprioritized() {
+        let conn = setup_db();
+
+        // 3 items, but one is already in a workspace
+        let ws = crate::db::operations::create_workspace(&conn, "Existing WS").unwrap();
+        let i1 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "c1", None, "{}").unwrap();
+        let i2 = make_item(&conn); // Inbox
+        let i3 = make_item(&conn); // Inbox
+
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.9, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "temporal_proximity", 0.8, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "temporal_proximity", 0.7, None).unwrap();
+
+        let result = run_discovery(&conn).unwrap();
+        assert_eq!(result.len(), 0, "Should not cluster if key items are already in a workspace");
     }
 }
