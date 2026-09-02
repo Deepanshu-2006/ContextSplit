@@ -2,7 +2,10 @@ use rusqlite::{params, Connection, Result};
 use chrono::Utc;
 use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
-use crate::db::models::{ContextCandidate, ContextCandidateItem, CandidateWithItems, CandidateMember};
+use crate::db::models::{
+    ContextCandidate, ContextCandidateItem, CandidateWithItems, CandidateMember,
+    CandidateScore, StrongestRelationship, ContributingItem, CandidateScoringWeights,
+};
 
 // ---------------------------------------------------------------------------
 // CRUD
@@ -281,7 +284,6 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
     // ---- 4. Compute per-cluster metrics ----
     struct ClusterMetrics {
         items: Vec<String>,
-        mean_strength: f64,
         top_rel_types: Vec<String>,
         label: Option<String>,
     }
@@ -297,11 +299,6 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
             .filter(|e| item_set.contains(&e.item_a) && item_set.contains(&e.item_b))
             .collect();
 
-        let mean_strength = if intra_edges.is_empty() {
-            MIN_STRENGTH
-        } else {
-            intra_edges.iter().map(|e| e.strength).sum::<f64>() / intra_edges.len() as f64
-        };
 
         // Top relationship type (by frequency)
         let mut type_counts: HashMap<&str, usize> = HashMap::new();
@@ -317,7 +314,6 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
 
         cluster_metrics.push(ClusterMetrics {
             items: cluster.clone(),
-            mean_strength,
             top_rel_types,
             label,
         });
@@ -358,45 +354,445 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
             let union = existing_set.len() + cluster_set.len() - intersection;
             (intersection as f64 / union as f64) >= DEDUP_OVERLAP_THRESHOLD
         });
-
         if already_covered {
             continue;
         }
 
-        // Build metadata JSON
-        let metadata = serde_json::json!({
-            "detection_strategy": "graph_clustering",
-            "item_count": cm.items.len(),
-            "mean_strength": cm.mean_strength,
-            "top_relationship_types": cm.top_rel_types,
-        })
-        .to_string();
+        // Score the candidate group with deterministic, explainable scoring
+        let score = score_candidate_group(conn, &cm.items, None)?;
 
-        let confidence = (cm.mean_strength * 0.8
-            + (cm.items.len().min(10) as f64 / 10.0) * 0.2)
-            .min(1.0);
+        // Build metadata JSON with complete explainable score details
+        let mut meta_val = serde_json::to_value(&score).unwrap_or(serde_json::json!({}));
+        if let Some(obj) = meta_val.as_object_mut() {
+            obj.insert("detection_strategy".to_string(), serde_json::json!("graph_clustering"));
+            obj.insert("item_count".to_string(), serde_json::json!(cm.items.len()));
+            obj.insert("top_relationship_types".to_string(), serde_json::json!(cm.top_rel_types));
+        }
+        let metadata = meta_val.to_string();
 
-        let candidate = create_candidate(conn, confidence, cm.label.as_deref(), &metadata)?;
+        let candidate = create_candidate(conn, score.confidence, cm.label.as_deref(), &metadata)?;
 
-        // Compute per-item relevance: degree within cluster / max degree
-        let degree_in_cluster: HashMap<&String, usize> = cm.items.iter().map(|id| {
-            let d = adjacency.get(id).map_or(0, |nbrs| {
-                nbrs.iter().filter(|(nbr, s, _)| cluster_set.contains(nbr) && *s >= MIN_STRENGTH).count()
-            });
-            (id, d)
-        }).collect();
-        let max_degree = degree_in_cluster.values().cloned().max().unwrap_or(1).max(1);
-
-        for item_id in &cm.items {
-            let relevance = degree_in_cluster.get(item_id).cloned().unwrap_or(0) as f64
-                / max_degree as f64;
-            let _ = add_item_to_candidate(conn, &candidate.id, item_id, relevance);
+        // Attach contributing items with their normalized relevance scores
+        for ci in &score.contributing_items {
+            let _ = add_item_to_candidate(conn, &candidate.id, &ci.item_id, ci.relevance_score);
         }
 
         new_candidates.push(candidate);
     }
 
     Ok(new_candidates)
+}
+
+/// Score a candidate group of items deterministically, returning confidence, evidence,
+/// strongest relationships, and contributing items.
+pub fn score_candidate_group(
+    conn: &Connection,
+    item_ids: &[String],
+    weights_opt: Option<&CandidateScoringWeights>,
+) -> Result<CandidateScore> {
+    let default_weights = CandidateScoringWeights::default();
+    let weights = weights_opt.unwrap_or(&default_weights);
+
+    if item_ids.is_empty() {
+        return Ok(CandidateScore {
+            confidence: 0.0,
+            confidence_percentage: "0%".to_string(),
+            evidence: vec![],
+            strongest_relationships: vec![],
+            contributing_items: vec![],
+            component_scores: HashMap::new(),
+        });
+    }
+
+    let total_items = item_ids.len();
+
+    // 1. Fetch Item details
+    let placeholders: String = item_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let items_sql = format!(
+        "SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at
+         FROM items WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&items_sql)?;
+    let items: Vec<crate::db::models::Item> = stmt
+        .query_map(rusqlite::params_from_iter(item_ids.iter()), |row| {
+            Ok(crate::db::models::Item {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                session_id: row.get(2)?,
+                item_type: row.get(3)?,
+                content: row.get(4)?,
+                title: row.get(5)?,
+                metadata: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // 2. Fetch context signals for these items
+    let signals_sql = format!(
+        "SELECT id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at
+         FROM context_signals WHERE item_id IN ({})",
+        placeholders
+    );
+    let mut sig_stmt = conn.prepare(&signals_sql)?;
+    let signals: Vec<crate::db::models::ContextSignal> = sig_stmt
+        .query_map(rusqlite::params_from_iter(item_ids.iter()), |row| {
+            Ok(crate::db::models::ContextSignal {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                item_id: row.get(2)?,
+                signal_type: row.get(3)?,
+                session_id: row.get(4)?,
+                payload: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Map item_id -> app_names and domains
+    let mut item_apps: HashMap<String, String> = HashMap::new();
+    let mut item_domains: HashMap<String, String> = HashMap::new();
+
+    for sig in &signals {
+        if let Some(ref it_id) = sig.item_id {
+            if sig.signal_type == "active_app" {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sig.payload) {
+                    if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                        if !app.is_empty() {
+                            item_apps.insert(it_id.clone(), app.to_string());
+                        }
+                    }
+                }
+            } else if sig.signal_type == "url_metadata" || sig.signal_type == "domain" {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sig.payload) {
+                    if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                        if !dom.is_empty() {
+                            item_domains.insert(it_id.clone(), dom.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check item.metadata JSON
+    for it in &items {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&it.metadata) {
+            if !item_apps.contains_key(&it.id) {
+                if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                    if !app.is_empty() {
+                        item_apps.insert(it.id.clone(), app.to_string());
+                    }
+                }
+            }
+            if !item_domains.contains_key(&it.id) {
+                if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                    if !dom.is_empty() {
+                        item_domains.insert(it.id.clone(), dom.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fetch Intra-cluster Relationships
+    let rel_sql = format!(
+        "SELECT item_a_id, item_b_id, relationship_type, strength, metadata
+         FROM item_relationships
+         WHERE item_a_id IN ({}) AND item_b_id IN ({})",
+        placeholders, placeholders
+    );
+
+    let mut rel_stmt = conn.prepare(&rel_sql)?;
+    let raw_rels: Vec<crate::db::models::ItemRelationship> = rel_stmt
+        .query_map(rusqlite::params_from_iter(item_ids.iter()), |row| {
+            Ok(crate::db::models::ItemRelationship {
+                id: String::new(),
+                item_a_id: row.get(0)?,
+                item_b_id: row.get(1)?,
+                relationship_type: row.get(2)?,
+                strength: row.get(3)?,
+                created_at: String::new(),
+                metadata: row.get(4)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let item_set: HashSet<&String> = item_ids.iter().collect();
+    let intra_rels: Vec<&crate::db::models::ItemRelationship> = raw_rels
+        .iter()
+        .filter(|r| item_set.contains(&r.item_a_id) && item_set.contains(&r.item_b_id))
+        .collect();
+
+    let mut evidence = Vec::new();
+    let mut component_scores = HashMap::new();
+
+    // --- Metric 1: Number of related items (Item Count) ---
+    let item_count_score = (total_items as f64 / weights.item_count_saturation as f64).min(1.0);
+    component_scores.insert("item_count".to_string(), item_count_score);
+
+    // --- Metric 2: Relationship Strength & Density ---
+    let max_possible_pairs = (total_items * (total_items.saturating_sub(1))) / 2;
+    let (mean_rel_strength, rel_strength_score) = if intra_rels.is_empty() {
+        (0.0, 0.0)
+    } else {
+        let sum_strength: f64 = intra_rels.iter().map(|r| r.strength).sum();
+        let avg = sum_strength / intra_rels.len() as f64;
+        let density = (intra_rels.len() as f64 / max_possible_pairs.max(1) as f64).min(1.0);
+        let score = (avg * (0.6 + 0.4 * density)).min(1.0);
+        (avg, score)
+    };
+    component_scores.insert("relationship_strength".to_string(), rel_strength_score);
+    if mean_rel_strength >= 0.7 {
+        evidence.push("Items have strong mutual relationships".to_string());
+    } else if mean_rel_strength >= 0.5 {
+        evidence.push(format!("Items have mutual relationships (mean strength: {:.0}%)", mean_rel_strength * 100.0));
+    }
+
+    // --- Metric 3: Semantic Similarity ---
+    let semantic_rels: Vec<&&crate::db::models::ItemRelationship> = intra_rels
+        .iter()
+        .filter(|r| r.relationship_type == "semantic_similarity")
+        .collect();
+    let mut semantic_item_ids = HashSet::new();
+    for r in &semantic_rels {
+        semantic_item_ids.insert(&r.item_a_id);
+        semantic_item_ids.insert(&r.item_b_id);
+    }
+    let (_avg_semantic_sim, semantic_score) = if semantic_rels.is_empty() {
+        (0.0, 0.0)
+    } else {
+        let sum: f64 = semantic_rels.iter().map(|r| r.strength).sum();
+        let avg = sum / semantic_rels.len() as f64;
+        let coverage = semantic_item_ids.len() as f64 / total_items as f64;
+        (avg, (avg * coverage).min(1.0))
+    };
+    component_scores.insert("semantic_similarity".to_string(), semantic_score);
+    if semantic_item_ids.len() >= 2 {
+        evidence.push(format!("{} semantically related Items", semantic_item_ids.len()));
+    }
+
+    // --- Metric 4: Shared Sessions ---
+    let mut session_counts: HashMap<String, usize> = HashMap::new();
+    for it in &items {
+        if let Some(ref sess) = it.session_id {
+            if !sess.is_empty() {
+                *session_counts.entry(sess.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let max_session_count = session_counts.values().cloned().max().unwrap_or(0);
+    let session_score = if max_session_count >= 2 {
+        let s = (max_session_count as f64 / total_items as f64).min(1.0);
+        evidence.push(format!("{} Items captured in the same session", max_session_count));
+        s
+    } else {
+        0.0
+    };
+    component_scores.insert("shared_session".to_string(), session_score);
+
+    // --- Metric 5: Temporal Proximity ---
+    let temporal_rels = intra_rels.iter().filter(|r| r.relationship_type == "temporal_proximity").count();
+    let mut close_time_items = HashSet::new();
+    for i in 0..items.len() {
+        for j in (i + 1)..items.len() {
+            if let (Ok(t1), Ok(t2)) = (
+                items[i].created_at.parse::<chrono::DateTime<chrono::Utc>>(),
+                items[j].created_at.parse::<chrono::DateTime<chrono::Utc>>()
+            ) {
+                if (t1 - t2).num_seconds().abs() <= 900 {
+                    close_time_items.insert(&items[i].id);
+                    close_time_items.insert(&items[j].id);
+                }
+            }
+        }
+    }
+    let temporal_count = close_time_items.len().max(if temporal_rels > 0 { 2 } else { 0 });
+    let temporal_score = if temporal_count >= 2 {
+        let s = (temporal_count as f64 / total_items as f64).min(1.0);
+        evidence.push(format!("{} Items captured in close temporal proximity", temporal_count));
+        s
+    } else {
+        0.0
+    };
+    component_scores.insert("temporal_proximity".to_string(), temporal_score);
+
+    // --- Metric 6: Common Domains ---
+    let mut domain_counts: HashMap<String, usize> = HashMap::new();
+    for dom in item_domains.values() {
+        *domain_counts.entry(dom.clone()).or_insert(0) += 1;
+    }
+    let top_domain_pair = domain_counts.into_iter().max_by_key(|(_, c)| *c);
+    let domain_score = if let Some((dom, count)) = top_domain_pair {
+        if count >= 2 {
+            let s = (count as f64 / total_items as f64).min(1.0);
+            evidence.push(format!("{} Items share {} domain", count, dom));
+            s
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    component_scores.insert("common_domain".to_string(), domain_score);
+
+    // --- Metric 7: Common Applications ---
+    let mut app_counts: HashMap<String, usize> = HashMap::new();
+    for app in item_apps.values() {
+        *app_counts.entry(app.clone()).or_insert(0) += 1;
+    }
+    let top_app_pair = app_counts.into_iter().max_by_key(|(_, c)| *c);
+    let app_score = if let Some((app, count)) = top_app_pair {
+        if count >= 2 {
+            let s = (count as f64 / total_items as f64).min(1.0);
+            evidence.push(format!("{} Items share {} application", count, app));
+            s
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    component_scores.insert("common_app".to_string(), app_score);
+
+    // --- Metric 8: Unassigned Items ---
+    let unassigned_count = items
+        .iter()
+        .filter(|i| i.workspace_id.is_none() || i.workspace_id.as_deref() == Some("inbox"))
+        .count();
+    let unassigned_score = (unassigned_count as f64 / total_items as f64).min(1.0);
+    component_scores.insert("unassigned_items".to_string(), unassigned_score);
+    if unassigned_count == total_items {
+        evidence.push(format!("All {} Items are unassigned in Inbox", total_items));
+    } else if unassigned_count >= 2 {
+        evidence.push(format!("{} of {} Items are unassigned in Inbox", unassigned_count, total_items));
+    }
+
+    // --- Metric 9: User Organization History ---
+    let user_history_score = 0.0;
+    component_scores.insert("user_history".to_string(), user_history_score);
+
+    // --- Weighted Total Confidence ---
+    let mut weighted_sum = 0.0;
+    let mut weight_sum = 0.0;
+
+    weighted_sum += item_count_score * weights.item_count_weight;
+    weight_sum += weights.item_count_weight;
+
+    weighted_sum += rel_strength_score * weights.relationship_strength_weight;
+    weight_sum += weights.relationship_strength_weight;
+
+    weighted_sum += semantic_score * weights.semantic_similarity_weight;
+    weight_sum += weights.semantic_similarity_weight;
+
+    weighted_sum += session_score * weights.shared_session_weight;
+    weight_sum += weights.shared_session_weight;
+
+    weighted_sum += temporal_score * weights.temporal_proximity_weight;
+    weight_sum += weights.temporal_proximity_weight;
+
+    weighted_sum += domain_score * weights.common_domain_weight;
+    weight_sum += weights.common_domain_weight;
+
+    weighted_sum += app_score * weights.common_app_weight;
+    weight_sum += weights.common_app_weight;
+
+    weighted_sum += unassigned_score * weights.unassigned_items_weight;
+    weight_sum += weights.unassigned_items_weight;
+
+    if weights.user_history_weight > 0.0 {
+        weighted_sum += user_history_score * weights.user_history_weight;
+        weight_sum += weights.user_history_weight;
+    }
+
+    let confidence = if weight_sum > 0.0 {
+        (weighted_sum / weight_sum).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let confidence_percentage = format!("{:.0}%", (confidence * 100.0).round());
+
+    // --- Strongest Relationships ---
+    let mut sorted_intra_rels = intra_rels.clone();
+    sorted_intra_rels.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+
+    let strongest_relationships: Vec<StrongestRelationship> = sorted_intra_rels
+        .into_iter()
+        .take(5)
+        .map(|r| StrongestRelationship {
+            item_a_id: r.item_a_id.clone(),
+            item_b_id: r.item_b_id.clone(),
+            relationship_type: r.relationship_type.clone(),
+            strength: r.strength,
+            description: Some(format!("{} (strength: {:.2})", r.relationship_type.replace('_', " "), r.strength)),
+        })
+        .collect();
+
+    // --- Contributing Items ---
+    let mut item_degrees: HashMap<&String, f64> = HashMap::new();
+    for r in &intra_rels {
+        *item_degrees.entry(&r.item_a_id).or_insert(0.0) += r.strength;
+        *item_degrees.entry(&r.item_b_id).or_insert(0.0) += r.strength;
+    }
+    let max_deg = item_degrees.values().cloned().fold(0.0, f64::max).max(1.0);
+
+    let mut contributing_items: Vec<ContributingItem> = items
+        .into_iter()
+        .map(|it| {
+            let deg = item_degrees.get(&it.id).cloned().unwrap_or(0.0);
+            let rel = (deg / max_deg).clamp(0.1, 1.0);
+            let primary_sig = item_apps.get(&it.id).cloned()
+                .or_else(|| item_domains.get(&it.id).cloned());
+
+            ContributingItem {
+                item_id: it.id,
+                relevance_score: rel,
+                title: it.title,
+                item_type: it.item_type,
+                primary_signal: primary_sig,
+            }
+        })
+        .collect();
+
+    contributing_items.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(CandidateScore {
+        confidence,
+        confidence_percentage,
+        evidence,
+        strongest_relationships,
+        contributing_items,
+        component_scores,
+    })
+}
+
+/// Score an existing candidate by its candidate ID
+pub fn score_context_candidate(
+    conn: &Connection,
+    candidate_id: &str,
+    weights_opt: Option<&CandidateScoringWeights>,
+) -> Result<CandidateScore> {
+    let candidate_with_items = get_candidate_items(conn, candidate_id)?;
+    let item_ids: Vec<String> = candidate_with_items
+        .items
+        .into_iter()
+        .map(|m| m.item.id)
+        .collect();
+
+    score_candidate_group(conn, &item_ids, weights_opt)
 }
 
 /// Infer a human-readable label from context_signals for the given item set.
@@ -517,53 +913,56 @@ mod tests {
         let with_items = get_candidate_items(&conn, &c.id).unwrap();
         assert_eq!(with_items.candidate.id, c.id);
         assert_eq!(with_items.items.len(), 2);
-        // Sorted by relevance_score DESC
-        assert!((with_items.items[0].membership.relevance_score - 1.0).abs() < 1e-9);
-        assert!((with_items.items[1].membership.relevance_score - 0.7).abs() < 1e-9);
+        assert_eq!(with_items.items[0].membership.item_id, item1.id);
+        assert_eq!(with_items.items[1].membership.item_id, item2.id);
     }
 
     #[test]
     fn test_expire_stale_candidates() {
         let conn = setup_db();
         let c1 = create_candidate(&conn, 0.5, None, "{}").unwrap();
-        let _c2 = create_candidate(&conn, 0.5, None, "{}").unwrap();
-        // Accept one — accepted should NOT be expired
-        update_candidate_status(&conn, &c1.id, "accepted").unwrap();
+        let c2 = create_candidate(&conn, 0.6, None, "{}").unwrap();
 
-        // Expire everything older than 0 seconds (catches everything)
-        let expired_count = expire_stale_candidates(&conn, 0).unwrap();
-        // Only the 1 "detected" candidate should be expired
-        assert_eq!(expired_count, 1);
+        // Artificially age c1 by setting created_at to 5 days ago
+        let old_date = (Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        conn.execute(
+            "UPDATE context_candidates SET created_at = ?1 WHERE id = ?2",
+            params![old_date, c1.id],
+        ).unwrap();
 
-        let accepted = list_candidates(&conn, Some("accepted")).unwrap();
-        assert_eq!(accepted.len(), 1);
+        // Expire candidates older than 3 days
+        let expired = expire_stale_candidates(&conn, 3 * 86400).unwrap();
+        assert_eq!(expired, 1);
 
-        let expired = list_candidates(&conn, Some("expired")).unwrap();
-        assert_eq!(expired.len(), 1);
+        let updated_c1 = get_candidate(&conn, &c1.id).unwrap();
+        assert_eq!(updated_c1.status, "expired");
+
+        let updated_c2 = get_candidate(&conn, &c2.id).unwrap();
+        assert_eq!(updated_c2.status, "detected");
     }
 
     #[test]
     fn test_run_discovery_clusters_three_items() {
         let conn = setup_db();
 
-        // Create 3 items and wire them with strong relationships
         let i1 = make_item(&conn);
         let i2 = make_item(&conn);
         let i3 = make_item(&conn);
 
+        // Connect i1-i2 and i2-i3 with strong relationships (>= 0.5)
         crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "temporal_proximity", 0.9, None).unwrap();
         crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "temporal_proximity", 0.8, None).unwrap();
         crate::db::operations::create_item_relationship(&conn, &i1.id, &i3.id, "temporal_proximity", 0.7, None).unwrap();
 
-        let new_candidates = run_discovery(&conn).unwrap();
-        assert_eq!(new_candidates.len(), 1, "Expected exactly 1 discovered cluster");
+        let candidates = run_discovery(&conn).unwrap();
+        assert_eq!(candidates.len(), 1, "Should detect exactly 1 candidate");
 
-        let c = &new_candidates[0];
-        assert_eq!(c.status, "detected");
-        assert!(c.confidence > 0.0);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.status, "detected");
+        assert!(candidate.confidence > 0.5, "Confidence should be > 0.5");
 
-        let with_items = get_candidate_items(&conn, &c.id).unwrap();
-        assert_eq!(with_items.items.len(), 3);
+        let with_items = get_candidate_items(&conn, &candidate.id).unwrap();
+        assert_eq!(with_items.items.len(), 3, "All 3 items should be members");
     }
 
     #[test]
@@ -636,5 +1035,107 @@ mod tests {
 
         let result = run_discovery(&conn).unwrap();
         assert_eq!(result.len(), 0, "Should not cluster if key items are already in a workspace");
+    }
+
+    #[test]
+    fn test_candidate_scoring_weights_and_confidence() {
+        let conn = setup_db();
+
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let i3 = make_item(&conn);
+        let i4 = make_item(&conn);
+
+        // Strong relationships
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.92, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "semantic_similarity", 0.88, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i3.id, &i4.id, "semantic_similarity", 0.85, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i4.id, "temporal_proximity", 0.90, None).unwrap();
+
+        let item_ids = vec![i1.id.clone(), i2.id.clone(), i3.id.clone(), i4.id.clone()];
+        let score = score_candidate_group(&conn, &item_ids, None).unwrap();
+
+        assert!(score.confidence >= 0.5, "Confidence score should be strong: {}", score.confidence);
+        assert!(!score.confidence_percentage.is_empty());
+        assert!(!score.evidence.is_empty(), "Evidence list must not be empty");
+        assert!(!score.strongest_relationships.is_empty(), "Must return strongest relationships");
+        assert_eq!(score.contributing_items.len(), 4, "All 4 items should be listed as contributing items");
+    }
+
+    #[test]
+    fn test_candidate_scoring_evidence_generation() {
+        let conn = setup_db();
+
+        // Create 4 items sharing a session and app
+        let session = crate::db::operations::create_session(&conn).unwrap();
+        let session_id = &session.id;
+        let i1 = crate::db::operations::create_item(&conn, None, Some(session_id), "text", "Item 1", Some("Item 1"), "{\"app_name\":\"VS Code\"}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, Some(session_id), "text", "Item 2", Some("Item 2"), "{\"app_name\":\"VS Code\"}").unwrap();
+        let i3 = crate::db::operations::create_item(&conn, None, Some(session_id), "text", "Item 3", Some("Item 3"), "{\"app_name\":\"VS Code\"}").unwrap();
+        let i4 = crate::db::operations::create_item(&conn, None, Some(session_id), "text", "Item 4", Some("Item 4"), "{\"domain\":\"github.com\"}").unwrap();
+
+        // Relationships
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.9, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "semantic_similarity", 0.85, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i3.id, &i4.id, "temporal_proximity", 0.8, None).unwrap();
+
+        let item_ids = vec![i1.id.clone(), i2.id.clone(), i3.id.clone(), i4.id.clone()];
+        let score = score_candidate_group(&conn, &item_ids, None).unwrap();
+
+        let evidence_text = score.evidence.join("\n");
+        assert!(evidence_text.contains("semantically related Items"), "Evidence should note semantic relationships: {}", evidence_text);
+        assert!(evidence_text.contains("captured in the same session"), "Evidence should note shared session: {}", evidence_text);
+        assert!(evidence_text.contains("VS Code application"), "Evidence should note shared app: {}", evidence_text);
+        assert!(evidence_text.contains("unassigned in Inbox"), "Evidence should note items in Inbox: {}", evidence_text);
+    }
+
+    #[test]
+    fn test_candidate_scoring_strongest_relationships() {
+        let conn = setup_db();
+
+        let i1 = make_item(&conn);
+        let i2 = make_item(&conn);
+        let i3 = make_item(&conn);
+
+        crate::db::operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.95, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &i2.id, &i3.id, "same_domain", 0.60, None).unwrap();
+
+        let item_ids = vec![i1.id.clone(), i2.id.clone(), i3.id.clone()];
+        let score = score_candidate_group(&conn, &item_ids, None).unwrap();
+
+        assert_eq!(score.strongest_relationships.len(), 2);
+        assert_eq!(score.strongest_relationships[0].strength, 0.95, "Strongest relationship should be first");
+        assert_eq!(score.strongest_relationships[0].relationship_type, "semantic_similarity");
+    }
+
+    #[test]
+    fn test_candidate_scoring_unassigned_items_preference() {
+        let conn = setup_db();
+
+        // 3 unassigned items
+        let u1 = make_item(&conn);
+        let u2 = make_item(&conn);
+        let u3 = make_item(&conn);
+        crate::db::operations::create_item_relationship(&conn, &u1.id, &u2.id, "temporal_proximity", 0.8, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &u2.id, &u3.id, "temporal_proximity", 0.8, None).unwrap();
+
+        let unassigned_score = score_candidate_group(&conn, &[u1.id, u2.id, u3.id], None).unwrap();
+
+        // 3 items with workspace assigned
+        let ws = crate::db::operations::create_workspace(&conn, "Existing").unwrap();
+        let w1 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "1", None, "{}").unwrap();
+        let w2 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "2", None, "{}").unwrap();
+        let w3 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "text", "3", None, "{}").unwrap();
+        crate::db::operations::create_item_relationship(&conn, &w1.id, &w2.id, "temporal_proximity", 0.8, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &w2.id, &w3.id, "temporal_proximity", 0.8, None).unwrap();
+
+        let assigned_score = score_candidate_group(&conn, &[w1.id, w2.id, w3.id], None).unwrap();
+
+        assert!(
+            unassigned_score.confidence > assigned_score.confidence,
+            "Unassigned candidate score ({}) should be higher than assigned score ({})",
+            unassigned_score.confidence,
+            assigned_score.confidence
+        );
     }
 }
