@@ -275,6 +275,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 12;
     }
 
+    if user_version < 13 {
+        conn.execute("ALTER TABLE settings ADD COLUMN temporal_decay_config TEXT DEFAULT '{\"strategy\":\"exponential\",\"half_life_days\":14.0,\"min_weight_floor\":0.20,\"grace_period_hours\":24.0}'", [])?;
+        user_version = 13;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

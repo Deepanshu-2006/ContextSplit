@@ -290,6 +290,14 @@ export interface ContextExplanation {
   evidence: ContextEvidenceItem[];
 }
 
+export interface TemporalDecayConfig {
+  strategy: string;
+  half_life_days: number;
+  min_weight_floor: number;
+  grace_period_hours: number;
+}
+
+
 
 
 export const db = {
@@ -498,5 +506,12 @@ export const db = {
   // Context Explanation
   explainContextAssociation: (itemId: string, workspaceId: string) =>
     invoke<ContextExplanation>("explain_context_association", { itemId, workspaceId }),
+
+  // Temporal Context Weighting
+  getTemporalDecayConfig: () =>
+    invoke<TemporalDecayConfig>("get_temporal_decay_config"),
+
+  updateTemporalDecayConfig: (config: TemporalDecayConfig) =>
+    invoke<void>("update_temporal_decay_config", { config }),
 };
 

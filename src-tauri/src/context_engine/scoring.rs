@@ -30,6 +30,7 @@ pub struct ScoringWeights {
     pub threshold_high: f32,
     pub threshold_medium: f32,
     pub threshold_low: f32,
+    pub temporal_decay: crate::context_engine::temporal::TemporalDecayConfig,
 }
 
 impl Default for ScoringWeights {
@@ -51,12 +52,15 @@ impl Default for ScoringWeights {
             threshold_high: 0.6,
             threshold_medium: 0.4,
             threshold_low: 0.2,
+            temporal_decay: crate::context_engine::temporal::TemporalDecayConfig::default(),
         }
     }
 }
 
 pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore>, String> {
-    let weights = ScoringWeights::default();
+    let mut weights = ScoringWeights::default();
+    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
+    let now = chrono::Utc::now();
     
     let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
         settings.enable_semantic_suggestions
@@ -89,13 +93,16 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
         if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
             if let Some(ws_id) = other_item.workspace_id {
+                let t_weight = weights.temporal_decay.compute_weight(&other_item.created_at, now) as f32;
                 if rel.relationship_type == "semantic_similarity" {
                     let current_max = ws_semantic_max.entry(ws_id.clone()).or_insert(0.0);
-                    if rel.strength as f32 > *current_max {
-                        *current_max = rel.strength as f32;
+                    let decayed = (rel.strength as f32) * t_weight;
+                    if decayed > *current_max {
+                        *current_max = decayed;
                     }
                 } else {
-                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += rel.strength as f32;
+                    let decayed_strength = (rel.strength as f32) * t_weight;
+                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += decayed_strength;
                     *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
                 }
             }
@@ -108,6 +115,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         
         // --- 1. Workspace History ---
         let mut has_history = false;
+        let mut history_t_weight = 1.0_f32;
         for sig in &target_signals {
             if sig.signal_type == "user_action" {
                 if let Ok(payload) = serde_json::from_str::<Value>(&sig.payload) {
@@ -116,6 +124,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
                             if let Some(dest) = payload.get("destination_workspace").and_then(|v| v.as_str()) {
                                 if dest == ws.id {
                                     has_history = true;
+                                    history_t_weight = weights.temporal_decay.compute_weight(&sig.created_at, now) as f32;
                                     break;
                                 }
                             }
@@ -126,7 +135,7 @@ pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore
         }
         
         if has_history {
-            score += weights.workspace_history;
+            score += weights.workspace_history * history_t_weight;
             reasons.push(format!("User previously organized similar Items into {}", ws.name));
         }
         
@@ -317,7 +326,9 @@ pub fn evaluate_item_context(
     conn: &Connection,
     item_id: &str,
 ) -> Result<crate::db::models::UnifiedContextInterpretation, String> {
-    let weights = ScoringWeights::default();
+    let mut weights = ScoringWeights::default();
+    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
+    let now = chrono::Utc::now();
     
     let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
         settings.enable_semantic_suggestions
@@ -339,13 +350,16 @@ pub fn evaluate_item_context(
         let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
         if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
             if let Some(ws_id) = other_item.workspace_id {
+                let t_weight = weights.temporal_decay.compute_weight(&other_item.created_at, now) as f32;
                 if rel.relationship_type == "semantic_similarity" {
                     let current_max = ws_semantic_max.entry(ws_id.clone()).or_insert(0.0);
-                    if rel.strength as f32 > *current_max {
-                        *current_max = rel.strength as f32;
+                    let decayed = (rel.strength as f32) * t_weight;
+                    if decayed > *current_max {
+                        *current_max = decayed;
                     }
                 } else {
-                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += rel.strength as f32;
+                    let decayed_strength = (rel.strength as f32) * t_weight;
+                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += decayed_strength;
                     *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
                 }
             }
@@ -367,8 +381,13 @@ pub fn evaluate_item_context(
                         if action == "moved_to_workspace" {
                             if let Some(dest) = payload.get("destination_workspace").and_then(|v| v.as_str()) {
                                 if dest == ws.id {
-                                    score += weights.workspace_history;
-                                    reasons.push(format!("Prior user actions associated similar items with {}", ws.name));
+                                    let t_weight = weights.temporal_decay.compute_weight(&sig.created_at, now) as f32;
+                                    score += weights.workspace_history * t_weight;
+                                    if t_weight >= 0.90 {
+                                        reasons.push(format!("Recent user actions associated similar items with {}", ws.name));
+                                    } else {
+                                        reasons.push(format!("Prior user actions associated similar items with {}", ws.name));
+                                    }
                                     break;
                                 }
                             }
@@ -1285,5 +1304,102 @@ mod tests {
         assert!(latest_payload["new_confidence"].as_f64().unwrap() >= 0.80);
         assert!(latest_payload["delta"].as_f64().unwrap() != 0.0);
         assert_eq!(latest_payload["workspace_id"].as_str().unwrap(), ws_paris.id);
+    }
+
+    #[test]
+    fn test_temporal_context_weighting_recent_vs_old() {
+        let conn = setup_in_memory_db();
+        let now = chrono::Utc::now();
+        let time_1h_ago = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let time_90d_ago = (now - chrono::Duration::days(90)).to_rfc3339();
+
+        // 1. Create two workspaces
+        let ws_recent = create_workspace(&conn, "Recent Project").unwrap();
+        let ws_old = create_workspace(&conn, "Archived Project").unwrap();
+
+        // 2. Create item in Recent Project (1 hour ago)
+        let recent_item = create_item(
+            &conn,
+            Some(&ws_recent.id),
+            None,
+            "text",
+            "Project architecture notes",
+            Some("Recent Architecture"),
+            "{}",
+        ).unwrap();
+        // Update its timestamp to 1h ago
+        conn.execute("UPDATE items SET created_at = ?1 WHERE id = ?2", rusqlite::params![time_1h_ago, recent_item.id]).unwrap();
+
+        // 3. Create identical item in Archived Project (90 days ago)
+        let old_item = create_item(
+            &conn,
+            Some(&ws_old.id),
+            None,
+            "text",
+            "Project architecture notes",
+            Some("Old Architecture"),
+            "{}",
+        ).unwrap();
+        // Update its timestamp to 90 days ago
+        conn.execute("UPDATE items SET created_at = ?1 WHERE id = ?2", rusqlite::params![time_90d_ago, old_item.id]).unwrap();
+
+        // 4. Target Item in Inbox (current)
+        let target = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Target architecture query",
+            Some("Target Query"),
+            "{}",
+        ).unwrap();
+
+        // 5. Connect target with both items with equal relationship strength (0.90)
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &recent_item.id, "same_topic", 0.90, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &old_item.id, "same_topic", 0.90, None).unwrap();
+
+        // 6. Evaluate contextual interpretation
+        let interpretation = evaluate_item_context(&conn, &target.id).unwrap();
+        let eval_recent = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_recent.id).unwrap();
+        let eval_old = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_old.id).unwrap();
+
+        // Requirements verification:
+        // a) Recent activity provides stronger evidence than old activity
+        assert!(
+            eval_recent.score > eval_old.score,
+            "Recent activity ({}) should score higher than old activity ({})",
+            eval_recent.score,
+            eval_old.score
+        );
+
+        // b) Historical context remains accessible (decayed to floor, not zeroed out)
+        assert!(
+            eval_old.score > 0.0,
+            "Old activity should not be completely zeroed out (actual: {})",
+            eval_old.score
+        );
+
+        // c) Old Items are NOT deleted
+        let old_item_check = crate::db::operations::get_item(&conn, &old_item.id);
+        assert!(old_item_check.is_ok(), "Old item must not be deleted");
+
+        // d) User-confirmed membership remains stable and authoritative
+        let confirmed_old_membership = crate::db::operations::get_item_workspace_membership(&conn, &old_item.id, &ws_old.id).unwrap().unwrap();
+        assert_eq!(confirmed_old_membership.membership_type, "confirmed");
+        assert_eq!(confirmed_old_membership.confidence, 1.0);
+
+        // e) Decay function is configurable: disable decay and verify scores become equal
+        let mut no_decay_config = crate::context_engine::temporal::TemporalDecayConfig::default();
+        no_decay_config.strategy = "none".to_string();
+        crate::context_engine::temporal::update_temporal_decay_config(&conn, &no_decay_config).unwrap();
+
+        let interp_no_decay = evaluate_item_context(&conn, &target.id).unwrap();
+        let r_no_decay = interp_no_decay.existing_workspaces.iter().find(|w| w.workspace_id == ws_recent.id).unwrap();
+        let o_no_decay = interp_no_decay.existing_workspaces.iter().find(|w| w.workspace_id == ws_old.id).unwrap();
+
+        assert!(
+            (r_no_decay.score - o_no_decay.score).abs() < 0.001,
+            "With decay disabled, both workspaces should score identically"
+        );
     }
 }

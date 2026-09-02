@@ -495,6 +495,27 @@ fn explain_context_association(
     crate::context_engine::explanation::explain_context_association(&conn, item_id, workspace_id)
 }
 
+// ---------------------------------------------------------------------------
+// Temporal Context Weighting commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_temporal_decay_config(
+    state: State<'_, AppState>,
+) -> Result<crate::context_engine::temporal::TemporalDecayConfig, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    Ok(crate::context_engine::temporal::get_temporal_decay_config(&conn))
+}
+
+#[tauri::command]
+fn update_temporal_decay_config(
+    config: crate::context_engine::temporal::TemporalDecayConfig,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::temporal::update_temporal_decay_config(&conn, &config)
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -626,7 +647,10 @@ pub fn run() {
             // Context Timeline
             get_context_timeline,
             // Context Explanation
-            explain_context_association
+            explain_context_association,
+            // Temporal Context Weighting
+            get_temporal_decay_config,
+            update_temporal_decay_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -7,6 +7,7 @@ pub mod graph;
 pub mod discovery;
 pub mod timeline;
 pub mod explanation;
+pub mod temporal;
 
 #[cfg(test)]
 pub mod workflow_tests;
