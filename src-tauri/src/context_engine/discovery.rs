@@ -80,6 +80,15 @@ pub fn update_candidate_status(conn: &Connection, id: &str, status: &str) -> Res
     get_candidate(conn, id)
 }
 
+pub fn update_candidate_label(conn: &Connection, id: &str, label: &str) -> Result<ContextCandidate> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE context_candidates SET label = ?1, updated_at = ?2 WHERE id = ?3",
+        params![label, now, id],
+    )?;
+    get_candidate(conn, id)
+}
+
 pub fn delete_candidate(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM context_candidates WHERE id = ?1", params![id])?;
     Ok(())
@@ -286,7 +295,6 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
     struct ClusterMetrics {
         items: Vec<String>,
         top_rel_types: Vec<String>,
-        label: Option<String>,
     }
 
     let mut cluster_metrics: Vec<ClusterMetrics> = Vec::new();
@@ -310,13 +318,9 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
         sorted_types.sort_by(|a, b| b.1.cmp(&a.1));
         let top_rel_types: Vec<String> = sorted_types.into_iter().take(3).map(|(t, _)| t.to_string()).collect();
 
-        // Infer a label from context_signals (most common source app for these items)
-        let label = infer_label(conn, cluster);
-
         cluster_metrics.push(ClusterMetrics {
             items: cluster.clone(),
             top_rel_types,
-            label,
         });
     }
 
@@ -385,7 +389,10 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
         }
         let metadata = meta_val.to_string();
 
-        let candidate = create_candidate(conn, score.confidence, cm.label.as_deref(), &metadata)?;
+        // Generate deterministic candidate name
+        let generated_name = generate_candidate_name(conn, &cm.items)?;
+
+        let candidate = create_candidate(conn, score.confidence, Some(&generated_name), &metadata)?;
 
         // Attach contributing items with their normalized relevance scores
         for ci in &score.contributing_items {
@@ -1158,14 +1165,122 @@ pub fn score_context_candidate(
     score_candidate_group(conn, &item_ids, weights_opt)
 }
 
-/// Infer a human-readable label from context_signals for the given item set.
-/// Uses the most frequent `app_name` from `active_app` signals.
-fn infer_label(conn: &Connection, item_ids: &[String]) -> Option<String> {
-    if item_ids.is_empty() {
+/// Stop words filter for deterministic keyword extraction
+const STOP_WORDS: &[&str] = &[
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+    "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+    "but", "by", "can", "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does",
+    "doesn't", "doing", "don't", "down", "during", "each", "few", "for", "from", "further", "had",
+    "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her",
+    "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd",
+    "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself",
+    "let's", "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off",
+    "on", "once", "only", "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own",
+    "same", "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some",
+    "such", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then",
+    "there", "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this",
+    "those", "through", "to", "too", "under", "until", "up", "very", "was", "wasn't", "we", "we'd",
+    "we'll", "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where",
+    "where's", "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself",
+    "yourselves", "http", "https", "www", "com", "org", "net", "html", "json", "null", "true",
+    "false", "undefined", "item", "items", "file", "files", "page", "text", "content", "untitled",
+    "test", "tests",
+];
+
+fn format_domain_name(domain: &str) -> String {
+    let clean = domain
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_start_matches("www.");
+    let host = clean.split('/').next().unwrap_or(clean);
+    let parts: Vec<&str> = host.split('.').collect();
+    let root = if parts.len() >= 2 {
+        parts[parts.len() - 2]
+    } else {
+        parts.first().unwrap_or(&host)
+    };
+
+    match root.to_lowercase().as_str() {
+        "github" => "GitHub".to_string(),
+        "google" => "Google".to_string(),
+        "figma" => "Figma".to_string(),
+        "stackoverflow" => "Stack Overflow".to_string(),
+        "notion" => "Notion".to_string(),
+        "linear" => "Linear".to_string(),
+        "slack" => "Slack".to_string(),
+        "jira" => "Jira".to_string(),
+        "atlassian" => "Atlassian".to_string(),
+        "stripe" => "Stripe".to_string(),
+        "amazon" | "aws" => "AWS".to_string(),
+        "reddit" => "Reddit".to_string(),
+        "youtube" => "YouTube".to_string(),
+        "twitter" | "x" => "X".to_string(),
+        "wikipedia" => "Wikipedia".to_string(),
+        other => {
+            if other.len() <= 1 {
+                "Web".to_string()
+            } else {
+                let mut c = other.chars();
+                match c.next() {
+                    None => "Web".to_string(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            }
+        }
+    }
+}
+
+fn extract_filename_stem(title_or_path: &str) -> Option<String> {
+    let clean = title_or_path.trim();
+    if clean.is_empty() {
         return None;
     }
+    let p = std::path::Path::new(clean);
+    let stem = p.file_stem()?.to_str()?;
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.is_empty() && stem.len() >= 2 {
+        let words: Vec<String> = stem
+            .replace('_', " ")
+            .replace('-', " ")
+            .split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect();
+        if !words.is_empty() {
+            return Some(words.join(" "));
+        }
+    }
+    None
+}
 
-    // Build a parameterised IN clause
+fn extract_meaningful_words(text: &str, stop_set: &HashSet<&str>) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter_map(|w| {
+            let lower = w.to_lowercase();
+            let trimmed = lower.trim_matches(|c: char| !c.is_alphanumeric());
+            if trimmed.len() >= 3 && !stop_set.contains(trimmed) && !trimmed.chars().all(|c| c.is_numeric()) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Deterministically generates a human-readable Context Candidate name based on
+/// common URL domains, recurring meaningful keywords, filenames, and applications.
+/// If evidence is weak, falls back to the neutral label "New Context".
+pub fn generate_candidate_name(conn: &Connection, item_ids: &[String]) -> Result<String> {
+    if item_ids.is_empty() {
+        return Ok("New Context".to_string());
+    }
+
     let placeholders: String = item_ids
         .iter()
         .enumerate()
@@ -1173,42 +1288,192 @@ fn infer_label(conn: &Connection, item_ids: &[String]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let sql = format!(
-        "SELECT payload FROM context_signals
-         WHERE item_id IN ({}) AND signal_type = 'active_app'",
+    let items_sql = format!(
+        "SELECT id, item_type, content, title, metadata FROM items WHERE id IN ({})",
         placeholders
     );
 
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
+    let mut stmt = conn.prepare(&items_sql)?;
+    let items_data: Vec<(String, String, String, Option<String>, String)> = stmt
+        .query_map(rusqlite::params_from_iter(item_ids.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
-    // Build params dynamically via rusqlite's params_from_iter
-    let payloads: Vec<String> = match stmt.query_map(
-        rusqlite::params_from_iter(item_ids.iter()),
-        |row| row.get::<_, String>(0),
-    ) {
-        Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-        Err(_) => return None,
-    };
+    if items_data.is_empty() {
+        return Ok("New Context".to_string());
+    }
 
-    // Parse app_name from each payload JSON and find the most frequent
+    let total_items = items_data.len();
+    let stop_set: HashSet<&'static str> = STOP_WORDS.iter().cloned().collect();
+
+    let mut domain_counts: HashMap<String, usize> = HashMap::new();
     let mut app_counts: HashMap<String, usize> = HashMap::new();
-    for payload in &payloads {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
-            if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
-                if !app.is_empty() {
-                    *app_counts.entry(app.to_string()).or_insert(0) += 1;
+    let mut word_item_doc_freq: HashMap<String, usize> = HashMap::new();
+    let mut filename_stems: Vec<String> = Vec::new();
+
+    // Fetch context signals for these items
+    let sig_sql = format!(
+        "SELECT item_id, signal_type, payload FROM context_signals WHERE item_id IN ({})",
+        placeholders
+    );
+    if let Ok(mut sig_stmt) = conn.prepare(&sig_sql) {
+        if let Ok(sig_iter) = sig_stmt.query_map(rusqlite::params_from_iter(item_ids.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }) {
+            for res in sig_iter.flatten() {
+                let (_, sig_type, payload) = res;
+                if sig_type == "active_app" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                            if !app.is_empty() {
+                                *app_counts.entry(app.to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                } else if sig_type == "url_metadata" || sig_type == "domain" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                            if !dom.is_empty() {
+                                *domain_counts.entry(format_domain_name(dom)).or_insert(0) += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    app_counts
+    // Process each item
+    for (_, _item_type, content, title_opt, metadata_str) in &items_data {
+        let mut item_words = HashSet::new();
+
+        // 1. Check title
+        if let Some(ref t) = title_opt {
+            if let Some(stem) = extract_filename_stem(t) {
+                filename_stems.push(stem);
+            }
+            for w in extract_meaningful_words(t, &stop_set) {
+                item_words.insert(w);
+            }
+        }
+
+        // 2. Check metadata
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(metadata_str) {
+            if let Some(dom) = val.get("domain").and_then(|v| v.as_str()) {
+                if !dom.is_empty() {
+                    *domain_counts.entry(format_domain_name(dom)).or_insert(0) += 1;
+                }
+            }
+            if let Some(app) = val.get("app_name").and_then(|v| v.as_str()) {
+                if !app.is_empty() {
+                    *app_counts.entry(app.to_string()).or_insert(0) += 1;
+                }
+            }
+            if let Some(fn_val) = val.get("file_name").and_then(|v| v.as_str()) {
+                if let Some(stem) = extract_filename_stem(fn_val) {
+                    filename_stems.push(stem);
+                }
+            }
+        }
+
+        // 3. Check content words
+        for w in extract_meaningful_words(content, &stop_set) {
+            item_words.insert(w);
+        }
+
+        // Update document frequency
+        for w in item_words {
+            *word_item_doc_freq.entry(w).or_insert(0) += 1;
+        }
+    }
+
+    // Find top recurring words across distinct items
+    let min_word_freq = if total_items <= 2 { 2 } else { 2 };
+    let mut frequent_words: Vec<(String, usize)> = word_item_doc_freq
         .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(app, _)| app)
+        .filter(|(_, count)| *count >= min_word_freq)
+        .collect();
+    frequent_words.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let top_domain = domain_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= (total_items / 2).max(1))
+        .max_by_key(|(_, c)| *c)
+        .map(|(d, _)| d);
+
+    let top_app = app_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= (total_items / 2).max(1))
+        .max_by_key(|(_, c)| *c)
+        .map(|(a, _)| a);
+
+    let capitalize = |w: &str| -> String {
+        let mut chars = w.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        }
+    };
+
+    // Strategy 1: Shared Filename Stems
+    if !filename_stems.is_empty() {
+        let mut stem_counts: HashMap<String, usize> = HashMap::new();
+        for s in &filename_stems {
+            *stem_counts.entry(s.clone()).or_insert(0) += 1;
+        }
+        if let Some((top_stem, count)) = stem_counts.into_iter().max_by_key(|(_, c)| *c) {
+            if count >= (total_items / 2).max(1) && top_stem != "New" && top_stem != "Untitled" {
+                return Ok(top_stem);
+            }
+        }
+    }
+
+    // Strategy 2: Top Domain (+ optional distinct recurring word)
+    if let Some(ref dom) = top_domain {
+        let dom_lower = dom.to_lowercase();
+        let non_dom_words: Vec<&(String, usize)> = frequent_words
+            .iter()
+            .filter(|(w, _)| !dom_lower.contains(&w.to_lowercase()) && !w.to_lowercase().contains(&dom_lower))
+            .collect();
+        if let Some((ref word, _)) = non_dom_words.first() {
+            return Ok(format!("{} - {}", dom, capitalize(word)));
+        } else {
+            return Ok(dom.clone());
+        }
+    }
+
+    // Strategy 3: Top App (+ optional distinct recurring word)
+    if let Some(ref app) = top_app {
+        let app_lower = app.to_lowercase();
+        let non_app_words: Vec<&(String, usize)> = frequent_words
+            .iter()
+            .filter(|(w, _)| !app_lower.contains(&w.to_lowercase()) && !w.to_lowercase().contains(&app_lower))
+            .collect();
+        if let Some((ref word, _)) = non_app_words.first() {
+            return Ok(format!("{} - {}", app, capitalize(word)));
+        } else {
+            return Ok(app.clone());
+        }
+    }
+
+    // Strategy 4: Top 2 Recurring Meaningful Words (e.g. "React State")
+    if frequent_words.len() >= 2 {
+        let w1 = capitalize(&frequent_words[0].0);
+        let w2 = capitalize(&frequent_words[1].0);
+        return Ok(format!("{} {}", w1, w2));
+    }
+
+    // Strategy 5: Single Prominent Recurring Word
+    if let Some((ref word, count)) = frequent_words.first() {
+        if *count >= (total_items * 2 / 3).max(2) {
+            return Ok(format!("{} Context", capitalize(word)));
+        }
+    }
+
+    // Neutral Fallback: Evidence is weak or uninformative
+    Ok("New Context".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,5 +1975,85 @@ mod tests {
         let score = score_candidate_group(&conn, &[i1.id, i2.id, i3.id], None).unwrap();
         assert!(score.is_evidence_sufficient, "Score should report evidence is sufficient");
         assert!(score.insufficient_evidence_reasons.is_empty());
+    }
+
+    #[test]
+    fn test_candidate_naming_common_domain() {
+        let conn = setup_db();
+
+        let i1 = crate::db::operations::create_item(&conn, None, None, "link", "https://github.com/rust-lang/rust", Some("Rust Repo"), "{\"domain\":\"github.com\"}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "link", "https://github.com/tauri-apps/tauri", Some("Tauri Repo"), "{\"domain\":\"github.com\"}").unwrap();
+
+        let name = generate_candidate_name(&conn, &[i1.id, i2.id]).unwrap();
+        assert!(name.contains("GitHub"), "Generated name should reflect GitHub domain: {}", name);
+    }
+
+    #[test]
+    fn test_candidate_naming_repeated_meaningful_words() {
+        let conn = setup_db();
+
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "User authentication token expiration", Some("Auth Token"), "{}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "User authentication password reset flow", Some("Auth Reset"), "{}").unwrap();
+
+        let name = generate_candidate_name(&conn, &[i1.id, i2.id]).unwrap();
+        assert!(
+            name.to_lowercase().contains("authentication") || name.to_lowercase().contains("user"),
+            "Generated name should extract repeated words: {}",
+            name
+        );
+    }
+
+    #[test]
+    fn test_candidate_naming_filenames() {
+        let conn = setup_db();
+
+        let i1 = crate::db::operations::create_item(&conn, None, None, "file", "/src/discovery_engine.rs", Some("discovery_engine.rs"), "{}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "file", "/src/discovery_scoring.rs", Some("discovery_scoring.rs"), "{}").unwrap();
+
+        let name = generate_candidate_name(&conn, &[i1.id, i2.id]).unwrap();
+        assert!(
+            name.to_lowercase().contains("discovery"),
+            "Generated name should extract filename stem: {}",
+            name
+        );
+    }
+
+    #[test]
+    fn test_candidate_naming_application_names() {
+        let conn = setup_db();
+
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "Editing components", None, "{\"app_name\":\"Figma\"}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "Exporting assets", None, "{\"app_name\":\"Figma\"}").unwrap();
+
+        let name = generate_candidate_name(&conn, &[i1.id, i2.id]).unwrap();
+        assert!(name.contains("Figma"), "Generated name should reflect Figma app: {}", name);
+    }
+
+    #[test]
+    fn test_candidate_naming_neutral_fallback_when_weak() {
+        let conn = setup_db();
+
+        let i1 = crate::db::operations::create_item(&conn, None, None, "text", "123", None, "{}").unwrap();
+        let i2 = crate::db::operations::create_item(&conn, None, None, "text", "456", None, "{}").unwrap();
+
+        let name = generate_candidate_name(&conn, &[i1.id, i2.id]).unwrap();
+        assert_eq!(name, "New Context", "Should fallback to New Context when evidence is weak: {}", name);
+    }
+
+    #[test]
+    fn test_candidate_naming_user_editable_without_modifying_evidence() {
+        let conn = setup_db();
+
+        let cand = create_candidate(&conn, 0.85, Some("Auto Generated Name"), "{\"confidence\":0.85,\"evidence\":[\"Test evidence\"]}").unwrap();
+        assert_eq!(cand.label.as_deref(), Some("Auto Generated Name"));
+
+        let updated = update_candidate_label(&conn, &cand.id, "Custom Renamed Context").unwrap();
+        assert_eq!(updated.label.as_deref(), Some("Custom Renamed Context"));
+
+        // Verify metadata / underlying evidence is completely unchanged
+        let fetched = get_candidate(&conn, &cand.id).unwrap();
+        assert_eq!(fetched.label.as_deref(), Some("Custom Renamed Context"));
+        assert!(fetched.metadata.contains("Test evidence"), "Metadata evidence must remain intact");
+        assert_eq!(fetched.confidence, 0.85);
     }
 }

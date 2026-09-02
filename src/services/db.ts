@@ -279,6 +279,14 @@ export const db = {
   updateCandidateStatus: (id: string, status: CandidateStatus) =>
     invoke<ContextCandidate>('update_candidate_status', { id, status }),
 
+  /** Update/edit the candidate label (name). */
+  updateCandidateLabel: (id: string, label: string) =>
+    invoke<ContextCandidate>('update_candidate_label', { id, label }),
+
+  /** Deterministically generate a candidate name from a group of item IDs. */
+  generateCandidateName: (itemIds: string[]) =>
+    invoke<string>('generate_candidate_name', { itemIds }),
+
   /** Expire stale detected/suggested candidates older than maxAgeSecs (default 72h). */
   expireStateCandidates: (maxAgeSecs?: number) =>
     invoke<number>('expire_stale_candidates', { maxAgeSecs: maxAgeSecs ?? null }),

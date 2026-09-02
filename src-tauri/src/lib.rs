@@ -283,6 +283,27 @@ fn expire_stale_candidates(
 }
 
 #[tauri::command]
+fn update_candidate_label(
+    id: &str,
+    label: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextCandidate, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::update_candidate_label(&conn, id, label)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn generate_candidate_name(
+    item_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::generate_candidate_name(&conn, &item_ids)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn score_context_candidate(
     candidate_id: &str,
     state: State<'_, AppState>,
@@ -410,6 +431,8 @@ pub fn run() {
             get_context_candidate,
             get_candidate_items,
             update_candidate_status,
+            update_candidate_label,
+            generate_candidate_name,
             expire_stale_candidates,
             score_context_candidate,
             score_candidate_group
