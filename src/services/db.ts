@@ -186,6 +186,34 @@ export interface ContextMembership {
   updated_at: string;
 }
 
+export interface ExistingWorkspaceEvaluation {
+  workspace_id: string;
+  workspace_name: string;
+  score: number;
+  confidence: number;
+  confidence_percentage: string;
+  confidence_band: string;
+  reasons: string[];
+}
+
+export interface PotentialNewContextEvaluation {
+  candidate_id?: string | null;
+  label: string;
+  confidence: number;
+  confidence_percentage: string;
+  confidence_band: string;
+  item_count: number;
+  reasons: string[];
+}
+
+export interface UnifiedContextInterpretation {
+  item_id: string;
+  existing_workspaces: ExistingWorkspaceEvaluation[];
+  potential_new_contexts: PotentialNewContextEvaluation[];
+  primary_interpretation: "existing_workspace" | "new_context" | "unassigned";
+  summary: string;
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -254,6 +282,10 @@ export const db = {
   // Context Engine
   async scoreItem(itemId: string): Promise<WorkspaceScore[]> {
     return await invoke("score_item", { itemId });
+  },
+
+  async evaluateItemContext(itemId: string): Promise<UnifiedContextInterpretation> {
+    return await invoke("evaluate_item_context", { itemId });
   },
 
   async getStrongestRelationships(itemId: string, limit: number = 5): Promise<ItemRelationship[]> {

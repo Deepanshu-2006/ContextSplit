@@ -163,6 +163,15 @@ fn score_item(
 }
 
 #[tauri::command]
+fn evaluate_item_context(
+    state: State<'_, AppState>,
+    item_id: &str,
+) -> Result<crate::db::models::UnifiedContextInterpretation, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::scoring::evaluate_item_context(&conn, item_id)
+}
+
+#[tauri::command]
 fn get_strongest_relationships(
     item_id: &str,
     limit: usize,
@@ -540,6 +549,7 @@ pub fn run() {
             get_context_signal,
             list_context_signals,
             score_item,
+            evaluate_item_context,
             get_strongest_relationships,
             get_item_semantic_status,
             get_item_embedding_metadata,

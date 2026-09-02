@@ -236,7 +236,7 @@ pub struct ContextMembership {
     pub id: String,
     pub item_id: String,
     pub workspace_id: String,
-    /// "confirmed" | "suggested"
+    /// "confirmed" | "suggested" | "dismissed"
     pub membership_type: String,
     pub confidence: f64,
     /// "user" | "context_engine" | "context_discovery"
@@ -244,5 +244,38 @@ pub struct ContextMembership {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingWorkspaceEvaluation {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub score: f64,
+    pub confidence: f64,
+    pub confidence_percentage: String,
+    pub confidence_band: String,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialNewContextEvaluation {
+    pub candidate_id: Option<String>,
+    pub label: String,
+    pub confidence: f64,
+    pub confidence_percentage: String,
+    pub confidence_band: String,
+    pub item_count: usize,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedContextInterpretation {
+    pub item_id: String,
+    pub existing_workspaces: Vec<ExistingWorkspaceEvaluation>,
+    pub potential_new_contexts: Vec<PotentialNewContextEvaluation>,
+    /// "existing_workspace" | "new_context" | "unassigned"
+    pub primary_interpretation: String,
+    pub summary: String,
+}
+
 
 
