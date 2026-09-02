@@ -851,7 +851,7 @@ pub fn recalculate_workspace_suggested_memberships(
                 conn,
                 Some(workspace_id),
                 Some(&target_item_id),
-                "context_signal",
+                "membership_confidence_recalculated",
                 None,
                 &payload,
             );

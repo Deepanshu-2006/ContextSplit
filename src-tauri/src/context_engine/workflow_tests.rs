@@ -591,4 +591,318 @@ mod tests {
         // Clean up
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
+
+    #[test]
+    fn test_day9_contextsplit_end_to_end() {
+        let (conn, db_path) = setup_test_db();
+        let _engine = create_engine();
+
+        // -------------------------------------------------------------------
+        // 1. Create a "Paris Trip" Workspace
+        // -------------------------------------------------------------------
+        let ws_paris = operations::create_workspace(&conn, "Paris Trip").unwrap();
+        assert_eq!(ws_paris.name, "Paris Trip");
+        assert_eq!(ws_paris.lifecycle_state, "active");
+        assert!(ws_paris.last_activity_at.is_some());
+
+        // -------------------------------------------------------------------
+        // 2. Add several Items manually to Paris Trip
+        // -------------------------------------------------------------------
+        let item_hotel = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://booking.com/hotel-paris-centre",
+            Some("Paris Hotel"),
+            r#"{"domain":"booking.com","app_name":"Safari"}"#,
+        ).unwrap();
+
+        let _item_flight = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://airfrance.com/paris-flight",
+            Some("Flight to CDG"),
+            r#"{"domain":"airfrance.com","app_name":"Safari"}"#,
+        ).unwrap();
+
+        let item_museums = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "text",
+            "Louvre and Musée d'Orsay itinerary for Paris visit",
+            Some("Paris Museums"),
+            r#"{"app_name":"Notes"}"#,
+        ).unwrap();
+
+        // Verify confirmed memberships exist for manually assigned items
+        let mem_hotel = operations::get_item_workspace_membership(&conn, &item_hotel.id, &ws_paris.id).unwrap().unwrap();
+        assert_eq!(mem_hotel.membership_type, "confirmed");
+        assert_eq!(mem_hotel.confidence, 1.0);
+
+        // -------------------------------------------------------------------
+        // 3 & 4. Capture a new related Item and leave it in Inbox
+        // -------------------------------------------------------------------
+        let item_bistro = operations::create_item(
+            &conn,
+            None, // In Inbox
+            None,
+            "url",
+            "https://booking.com/paris-restaurant-guide",
+            Some("Paris Bistro Guide"),
+            r#"{"domain":"booking.com","app_name":"Safari"}"#,
+        ).unwrap();
+
+        assert_eq!(item_bistro.workspace_id, None, "Item must remain in Inbox");
+
+        // -------------------------------------------------------------------
+        // 5. Verify ContextSplit creates a suggested ContextMembership
+        // -------------------------------------------------------------------
+        // Create relationship between bistro and hotel (common domain + topic)
+        let _ = operations::create_item_relationship(&conn, &item_bistro.id, &item_hotel.id, "same_domain", 0.75, None).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_bistro.id, &item_museums.id, "same_topic", 0.70, None).unwrap();
+
+        let interpretation = scoring::evaluate_item_context(&conn, &item_bistro.id).unwrap();
+        let paris_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_paris.id).unwrap();
+        assert!(paris_eval.score >= 0.20, "Paris Trip must be suggested with non-trivial score");
+
+        // Engine records suggested membership
+        let sug_mem = operations::create_or_update_membership(
+            &conn,
+            &item_bistro.id,
+            &ws_paris.id,
+            "suggested",
+            paris_eval.score,
+            "context_engine",
+        ).unwrap();
+
+        assert_eq!(sug_mem.membership_type, "suggested");
+        assert_eq!(sug_mem.confidence, paris_eval.score);
+        // Physical location remains Inbox
+        assert_eq!(operations::get_item(&conn, &item_bistro.id).unwrap().workspace_id, None);
+
+        // -------------------------------------------------------------------
+        // 6. Verify the confidence and explanation
+        // -------------------------------------------------------------------
+        let explanation = crate::context_engine::explanation::explain_context_association(&conn, &item_bistro.id, &ws_paris.id).unwrap();
+        assert_eq!(explanation.membership_type, "suggested");
+        assert!(!explanation.summary.is_empty());
+        assert!(!explanation.explanations.is_empty());
+        assert!(!explanation.evidence.is_empty());
+        assert!(explanation.evidence.iter().any(|e| e.category == "domain_relationship" || e.category == "strongest_relationships"));
+
+        // -------------------------------------------------------------------
+        // 7 & 8. Add more related Items to Paris Trip & verify dynamic confidence changes
+        // -------------------------------------------------------------------
+        let initial_conf = sug_mem.confidence;
+
+        let item_cafe = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "text",
+            "Café de Flore French bistro in Saint-Germain Paris",
+            Some("Paris Café"),
+            r#"{"domain":"booking.com","app_name":"Notes"}"#,
+        ).unwrap();
+
+        // Connect new café to bistro
+        let _ = operations::create_item_relationship(&conn, &item_bistro.id, &item_cafe.id, "same_domain", 0.80, None).unwrap();
+
+        // Recalculate memberships
+        let _ = scoring::recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, Some(&item_cafe.id)).unwrap();
+
+        let updated_mem = operations::get_item_workspace_membership(&conn, &item_bistro.id, &ws_paris.id).unwrap().unwrap();
+        assert_eq!(updated_mem.membership_type, "suggested", "Must not silently convert to confirmed");
+        assert!(
+            updated_mem.confidence >= initial_conf,
+            "Confidence should increase or remain strong with additional evidence (initial: {}, updated: {})",
+            initial_conf,
+            updated_mem.confidence
+        );
+
+        // Verify confidence change signal was recorded
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws_paris.id), Some(&item_bistro.id)).unwrap();
+        assert!(signals.iter().any(|s| s.signal_type == "membership_confidence_recalculated"));
+
+        // -------------------------------------------------------------------
+        // 9 & 10. Accept the suggestion & verify confirmed membership
+        // -------------------------------------------------------------------
+        operations::confirm_membership(&conn, &item_bistro.id, &ws_paris.id).unwrap();
+        operations::move_item(&conn, &item_bistro.id, Some(&ws_paris.id)).unwrap();
+
+        let confirmed_mem = operations::get_item_workspace_membership(&conn, &item_bistro.id, &ws_paris.id).unwrap().unwrap();
+        assert_eq!(confirmed_mem.membership_type, "confirmed");
+        assert_eq!(confirmed_mem.confidence, 1.0);
+        assert_eq!(operations::get_item(&conn, &item_bistro.id).unwrap().workspace_id.as_deref(), Some(ws_paris.id.as_str()));
+
+        // -------------------------------------------------------------------
+        // 11 & 12. Capture an unrelated Item & verify Paris Trip is not suggested
+        // -------------------------------------------------------------------
+        let item_tax = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Quarterly corporate tax deduction spreadsheet analysis",
+            Some("Tax Audit"),
+            r#"{"app_name":"Excel"}"#,
+        ).unwrap();
+
+        let tax_interp = scoring::evaluate_item_context(&conn, &item_tax.id).unwrap();
+        let paris_tax_score = tax_interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_paris.id).map(|w| w.score).unwrap_or(0.0);
+        assert!(paris_tax_score < 0.20, "Unrelated item should not meet suggestion threshold for Paris Trip");
+
+        // -------------------------------------------------------------------
+        // 13, 14, 15. Simulate old contextual activity & verify temporal weighting
+        // -------------------------------------------------------------------
+        let old_time = (chrono::Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        let ws_historical = operations::create_workspace(&conn, "Historical 2024").unwrap();
+        let old_item = operations::create_item(&conn, Some(&ws_historical.id), None, "text", "Old documentation archive", Some("Old Doc"), "{}").unwrap();
+        conn.execute("UPDATE items SET created_at = ?1 WHERE id = ?2", rusqlite::params![old_time, old_item.id]).unwrap();
+
+        let target_query = operations::create_item(&conn, None, None, "text", "Documentation archive", Some("Target Query"), "{}").unwrap();
+        let _ = operations::create_item_relationship(&conn, &target_query.id, &old_item.id, "same_topic", 0.90, None).unwrap();
+
+        let interp_temporal = scoring::evaluate_item_context(&conn, &target_query.id).unwrap();
+        let old_eval = interp_temporal.existing_workspaces.iter().find(|w| w.workspace_id == ws_historical.id).unwrap();
+
+        // Decay affects inferred relevance but floor keeps it accessible
+        assert!(old_eval.score < 0.25, "Old contextual activity should be decayed");
+        assert!(old_eval.score > 0.0, "Decayed relevance must remain non-zero and accessible");
+
+        // Confirmed membership of the old item remains authoritative
+        let confirmed_old = operations::get_item_workspace_membership(&conn, &old_item.id, &ws_historical.id).unwrap().unwrap();
+        assert_eq!(confirmed_old.membership_type, "confirmed");
+        assert_eq!(confirmed_old.confidence, 1.0);
+
+        // -------------------------------------------------------------------
+        // 16. Verify Context Timeline
+        // -------------------------------------------------------------------
+        let timeline = crate::context_engine::timeline::get_context_timeline(&conn, &ws_paris.id).unwrap();
+        assert_eq!(timeline.workspace_name, "Paris Trip");
+        assert!(timeline.total_items >= 4);
+        assert!(!timeline.chronological_activity.is_empty());
+        assert!(timeline.chronological_activity.iter().any(|e| e.title.contains("Paris") || e.title.contains("Flight")));
+
+        // -------------------------------------------------------------------
+        // 17. Verify Context Overview
+        // -------------------------------------------------------------------
+        let overview = crate::context_engine::overview::get_context_overview(&conn, &ws_paris.id).unwrap();
+        assert_eq!(overview.name, "Paris Trip");
+        assert_eq!(overview.lifecycle_state, "active");
+        assert!(overview.item_count >= 4);
+        assert!(overview.recent_activity.is_some());
+        assert!(overview.related_applications.iter().any(|a| a.name == "Safari" || a.name == "Notes"));
+        assert!(overview.important_domains.iter().any(|d| d.domain == "booking.com" || d.domain == "airfrance.com"));
+        assert!(!overview.recent_items.is_empty());
+        assert_eq!(overview.timeline.workspace_id, ws_paris.id);
+
+        // -------------------------------------------------------------------
+        // 18 & 19. Restart ContextSplit & verify state persistence
+        // -------------------------------------------------------------------
+        drop(conn);
+        let conn_restarted = Connection::open(&db_path).unwrap();
+
+        let re_ws = operations::get_workspace(&conn_restarted, &ws_paris.id).unwrap();
+        assert_eq!(re_ws.name, "Paris Trip");
+        assert_eq!(re_ws.lifecycle_state, "active");
+
+        let re_item = operations::get_item(&conn_restarted, &item_bistro.id).unwrap();
+        assert_eq!(re_item.workspace_id.as_deref(), Some(ws_paris.id.as_str()));
+
+        let re_overview = crate::context_engine::overview::get_context_overview(&conn_restarted, &ws_paris.id).unwrap();
+        assert_eq!(re_overview.item_count, overview.item_count);
+        assert_eq!(re_overview.name, "Paris Trip");
+
+        // -------------------------------------------------------------------
+        // Additional Tests:
+        // A) Dismissed suggestions
+        // -------------------------------------------------------------------
+        let item_dismiss_test = operations::create_item(&conn_restarted, None, None, "text", "Optional Paris metro map", Some("Metro"), "{}").unwrap();
+        let _ = operations::create_or_update_membership(&conn_restarted, &item_dismiss_test.id, &ws_paris.id, "suggested", 0.65, "context_engine").unwrap();
+        
+        let dismissed = operations::dismiss_membership(&conn_restarted, &item_dismiss_test.id, &ws_paris.id).unwrap();
+        assert_eq!(dismissed.membership_type, "dismissed");
+        assert_eq!(dismissed.confidence, 0.0);
+        // Item remains in Inbox
+        assert_eq!(operations::get_item(&conn_restarted, &item_dismiss_test.id).unwrap().workspace_id, None);
+        // Feedback recorded
+        let dismiss_sigs = crate::context_engine::operations::list_context_signals(&conn_restarted, Some(&ws_paris.id), Some(&item_dismiss_test.id)).unwrap();
+        assert!(dismiss_sigs.iter().any(|s| s.signal_type == "membership_dismissed"));
+
+        // -------------------------------------------------------------------
+        // B) Archived Contexts
+        // -------------------------------------------------------------------
+        let ws_to_archive = operations::create_workspace(&conn_restarted, "To Archive").unwrap();
+        let item_in_arch = operations::create_item(&conn_restarted, Some(&ws_to_archive.id), None, "text", "Archive item", None, "{}").unwrap();
+        let _ = operations::archive_workspace(&conn_restarted, &ws_to_archive.id).unwrap();
+
+        let archived_ws = operations::get_workspace(&conn_restarted, &ws_to_archive.id).unwrap();
+        assert_eq!(archived_ws.lifecycle_state, "archived");
+        assert!(archived_ws.archived_at.is_some());
+
+        // Suggestions suppressed for archived workspaces
+        let target_for_arch = operations::create_item(&conn_restarted, None, None, "text", "Archive item query", None, "{}").unwrap();
+        let _ = operations::create_item_relationship(&conn_restarted, &target_for_arch.id, &item_in_arch.id, "same_topic", 0.90, None).unwrap();
+        let interp_arch = scoring::evaluate_item_context(&conn_restarted, &target_for_arch.id).unwrap();
+        let arch_eval = interp_arch.existing_workspaces.iter().find(|w| w.workspace_id == ws_to_archive.id).unwrap();
+        assert_eq!(arch_eval.score, 0.0, "Archived workspaces must be suppressed from suggestions");
+
+        // Explicit user organization into archived workspace succeeds
+        let moved_to_arch = operations::move_item(&conn_restarted, &target_for_arch.id, Some(&ws_to_archive.id)).unwrap();
+        assert_eq!(moved_to_arch.workspace_id.as_deref(), Some(ws_to_archive.id.as_str()));
+
+        // -------------------------------------------------------------------
+        // C) Dormant Contexts
+        // -------------------------------------------------------------------
+        let ws_dormant = operations::create_workspace(&conn_restarted, "Dormant Project").unwrap();
+        let dor_item = operations::create_item(&conn_restarted, Some(&ws_dormant.id), None, "text", "Dormant code notes", None, "{}").unwrap();
+        // Simulate 45 days inactivity
+        let dor_time = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        conn_restarted.execute("UPDATE workspaces SET last_activity_at = ?1 WHERE id = ?2", rusqlite::params![dor_time, ws_dormant.id]).unwrap();
+
+        let state = operations::evaluate_workspace_lifecycle(&conn_restarted, &ws_dormant.id, Some(30.0)).unwrap();
+        assert_eq!(state, "dormant");
+
+        // Dormant context is discounted (50%) in suggestions
+        let dor_target = operations::create_item(&conn_restarted, None, None, "text", "Dormant code query", None, "{}").unwrap();
+        let _ = operations::create_item_relationship(&conn_restarted, &dor_target.id, &dor_item.id, "same_topic", 0.90, None).unwrap();
+        let interp_dor = scoring::evaluate_item_context(&conn_restarted, &dor_target.id).unwrap();
+        let dor_eval = interp_dor.existing_workspaces.iter().find(|w| w.workspace_id == ws_dormant.id).unwrap();
+        assert!(dor_eval.score > 0.0, "Dormant workspace remains available");
+        assert!(dor_eval.reasons.iter().any(|r| r.contains("dormant")));
+
+        // Meaningful user activity wakes dormant context back to active
+        let _ = operations::create_item(&conn_restarted, Some(&ws_dormant.id), None, "text", "New activity", None, "{}").unwrap();
+        let woken_ws = operations::get_workspace(&conn_restarted, &ws_dormant.id).unwrap();
+        assert_eq!(woken_ws.lifecycle_state, "active");
+
+        // -------------------------------------------------------------------
+        // D) Duplicate Suggestions (Idempotency)
+        // -------------------------------------------------------------------
+        let idemp_item = operations::create_item(&conn_restarted, None, None, "text", "Idempotency test", None, "{}").unwrap();
+        let m1 = operations::create_or_update_membership(&conn_restarted, &idemp_item.id, &ws_paris.id, "suggested", 0.70, "context_engine").unwrap();
+        let m2 = operations::create_or_update_membership(&conn_restarted, &idemp_item.id, &ws_paris.id, "suggested", 0.85, "context_engine").unwrap();
+        assert_eq!(m1.id, m2.id, "Repeated membership calls for the same item/workspace must update the same record");
+        let all_mems = operations::list_item_memberships(&conn_restarted, &idemp_item.id).unwrap();
+        assert_eq!(all_mems.iter().filter(|m| m.workspace_id == ws_paris.id).count(), 1);
+
+        // -------------------------------------------------------------------
+        // E) Privacy Settings
+        // -------------------------------------------------------------------
+        let mut priv_settings = crate::db::settings::get_settings(&conn_restarted).unwrap();
+        priv_settings.enable_semantic_suggestions = false;
+        crate::db::settings::update_settings(&conn_restarted, priv_settings).unwrap();
+
+        // Evaluation runs cleanly without error when semantic suggestions are disabled
+        let priv_interp = scoring::evaluate_item_context(&conn_restarted, &idemp_item.id).unwrap();
+        assert_eq!(priv_interp.item_id, idemp_item.id);
+
+        // Clean up temp database
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
 }
