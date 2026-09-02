@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { X, Shield, LayoutTemplate, Type, Globe, Clock, Info } from "lucide-react";
 import { db, PrivacySettings } from "../../services/db";
 
@@ -45,10 +46,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div 
-        className="w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+        className="w-full max-w-lg max-h-[90vh] flex flex-col bg-white rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -64,7 +65,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </button>
         </div>
 
-        <div className="p-6">
+        <div className="p-6 overflow-y-auto">
           <div className="mb-6 flex items-start gap-3 p-3 bg-blue-50/50 text-blue-800 rounded-lg text-sm border border-blue-100/50">
             <Info size={18} className="shrink-0 mt-0.5 text-blue-500" />
             <p className="leading-relaxed">
@@ -215,7 +216,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

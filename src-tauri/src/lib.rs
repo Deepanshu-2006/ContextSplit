@@ -219,6 +219,71 @@ fn rebuild_semantic_data(app_handle: tauri::AppHandle, state: State<'_, AppState
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Context Discovery commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn run_context_discovery(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ContextCandidate>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::run_discovery(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_context_candidates(
+    status_filter: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::ContextCandidate>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::list_candidates(&conn, status_filter.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_context_candidate(
+    id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextCandidate, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::get_candidate(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_candidate_items(
+    candidate_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::CandidateWithItems, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::get_candidate_items(&conn, candidate_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_candidate_status(
+    id: &str,
+    status: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::db::models::ContextCandidate, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::discovery::update_candidate_status(&conn, id, status)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn expire_stale_candidates(
+    max_age_secs: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let secs = max_age_secs.unwrap_or(72 * 3600);
+    crate::context_engine::discovery::expire_stale_candidates(&conn, secs)
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+
 #[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
@@ -318,7 +383,14 @@ pub fn run() {
             get_settings,
             update_settings,
             delete_semantic_data,
-            rebuild_semantic_data
+            rebuild_semantic_data,
+            // Context Discovery
+            run_context_discovery,
+            list_context_candidates,
+            get_context_candidate,
+            get_candidate_items,
+            update_candidate_status,
+            expire_stale_candidates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

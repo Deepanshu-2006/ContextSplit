@@ -188,6 +188,46 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 10;
     }
 
+    if user_version < 11 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_candidates (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'detected',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                label TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_candidate_items (
+                candidate_id TEXT NOT NULL REFERENCES context_candidates(id) ON DELETE CASCADE,
+                item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                relevance_score REAL NOT NULL DEFAULT 1.0,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (candidate_id, item_id)
+            )",
+            [],
+        )?;
+
+        // Index for fast lookup by status
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_candidates_status ON context_candidates(status)",
+            [],
+        )?;
+
+        // Index for fast lookup of candidates containing a given item
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidate_items_item_id ON context_candidate_items(item_id)",
+            [],
+        )?;
+
+        user_version = 11;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

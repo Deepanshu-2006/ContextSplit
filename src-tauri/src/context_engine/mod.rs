@@ -4,6 +4,7 @@ pub mod providers;
 pub mod scoring;
 pub mod relationships;
 pub mod graph;
+pub mod discovery;
 
 #[cfg(test)]
 pub mod workflow_tests;

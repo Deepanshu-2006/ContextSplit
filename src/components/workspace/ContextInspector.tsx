@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit } from "lucide-react";
 import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata } from "../../services/db";
 
@@ -68,19 +69,20 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   };
 
   if (loading) {
-    return (
+    return createPortal(
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
         <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl p-10 text-center text-gray-500">
           Loading Context Inspector...
         </div>
-      </div>
+      </div>,
+      document.body
     );
   }
 
   const feedbackSignals = signals.filter(s => s.signal_type.startsWith('suggestion_'));
   const captureSignals = signals.filter(s => !s.signal_type.startsWith('suggestion_'));
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden border border-gray-200" onClick={(e) => e.stopPropagation()}>
         
@@ -321,6 +323,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

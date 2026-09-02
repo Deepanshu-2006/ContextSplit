@@ -74,6 +74,42 @@ export interface ItemRelationship {
   metadata: string | null;
 }
 
+// --- Context Discovery ---
+
+export type CandidateStatus = "detected" | "suggested" | "accepted" | "dismissed" | "expired";
+
+export interface ContextCandidate {
+  id: string;
+  /** "detected" | "suggested" | "accepted" | "dismissed" | "expired" */
+  status: CandidateStatus;
+  /** 0.0 – 1.0 */
+  confidence: number;
+  /** Human-readable inferred label, e.g. "KitKat project" */
+  label: string | null;
+  /** JSON string with detection metadata */
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContextCandidateItem {
+  candidate_id: string;
+  item_id: string;
+  /** How central this item is to the candidate (0.0 – 1.0) */
+  relevance_score: number;
+  added_at: string;
+}
+
+export interface CandidateMember {
+  membership: ContextCandidateItem;
+  item: Item;
+}
+
+export interface CandidateWithItems {
+  candidate: ContextCandidate;
+  items: CandidateMember[];
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -162,4 +198,29 @@ export const db = {
   
   deleteSemanticData: () => invoke<void>('delete_semantic_data'),
   rebuildSemanticData: () => invoke<void>('rebuild_semantic_data'),
+
+  // --- Context Discovery ---
+  /** Trigger the discovery algorithm. Returns newly created candidates only. */
+  runContextDiscovery: () => invoke<ContextCandidate[]>('run_context_discovery'),
+
+  /** List all candidates, optionally filtered by status. */
+  listContextCandidates: (statusFilter?: CandidateStatus) =>
+    invoke<ContextCandidate[]>('list_context_candidates', { statusFilter: statusFilter ?? null }),
+
+  /** Get a single candidate by ID. */
+  getContextCandidate: (id: string) =>
+    invoke<ContextCandidate>('get_context_candidate', { id }),
+
+  /** Get a candidate together with its member items. */
+  getCandidateItems: (candidateId: string) =>
+    invoke<CandidateWithItems>('get_candidate_items', { candidateId }),
+
+  /** Advance the candidate status (e.g. detected → suggested → accepted). */
+  updateCandidateStatus: (id: string, status: CandidateStatus) =>
+    invoke<ContextCandidate>('update_candidate_status', { id, status }),
+
+  /** Expire stale detected/suggested candidates older than maxAgeSecs (default 72h). */
+  expireStateCandidates: (maxAgeSecs?: number) =>
+    invoke<number>('expire_stale_candidates', { maxAgeSecs: maxAgeSecs ?? null }),
 };
+
