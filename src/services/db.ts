@@ -349,6 +349,16 @@ export interface CandidateContextEvidence {
   temporal_recency_score: number;
 }
 
+export interface RelatedItemEvidence {
+  item_id: string;
+  title?: string | null;
+  item_type: string;
+  snippet: string;
+  workspace_id?: string | null;
+  workspace_name?: string | null;
+  relevance_score: number;
+}
+
 export interface ItemRelationshipEvidence {
   other_item_id: string;
   other_item_title?: string | null;
@@ -358,10 +368,34 @@ export interface ItemRelationshipEvidence {
   explanation: string;
 }
 
+export interface SemanticSimilaritySummary {
+  other_item_id: string;
+  other_item_title?: string | null;
+  workspace_name?: string | null;
+  similarity_score: number;
+  similarity_band: string;
+  summary: string;
+}
+
 export interface SessionEvidence {
   session_id: string;
   item_count: number;
+  is_target_session: boolean;
   associated_workspaces: string[];
+}
+
+export interface WorkspaceProfileSummary {
+  workspace_id: string;
+  workspace_name: string;
+  has_profile: boolean;
+  alignment_score?: number | null;
+  alignment_band?: string | null;
+  theme_summary: string;
+}
+
+export interface CuratedContextSignal {
+  signal_type: string;
+  summary: string;
 }
 
 export interface TemporalEvidence {
@@ -373,14 +407,20 @@ export interface TemporalEvidence {
 export interface EvidenceMetadata {
   generated_at: string;
   engine_version: string;
+  total_db_items_excluded: number;
   privacy_boundary: string;
 }
 
 export interface EvidencePackage {
   target_item: TargetItemEvidence;
   candidate_contexts: CandidateContextEvidence[];
+  relevant_related_items: RelatedItemEvidence[];
   relationships: ItemRelationshipEvidence[];
+  semantic_similarity_summaries: SemanticSimilaritySummary[];
+  relevant_sessions: SessionEvidence[];
   session_context?: SessionEvidence | null;
+  workspace_semantic_profiles: WorkspaceProfileSummary[];
+  contextual_signals: CuratedContextSignal[];
   temporal_context: TemporalEvidence;
   system_metadata: EvidenceMetadata;
 }
