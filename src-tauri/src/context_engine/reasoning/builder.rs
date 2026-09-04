@@ -907,8 +907,8 @@ pub fn analyze_item_context_ai_graceful(
     };
 
     // Step 4: Caching - Check if this exact package has been reasoned about recently
-    let package_hash = crate::context_engine::reasoning::cache::hash_evidence_package(&package);
-    if let Ok(Some(cached_result)) = crate::context_engine::reasoning::cache::get_cached_reasoning(conn, &package_hash) {
+    let package_hash = crate::context_engine::reasoning::cache::hash_evidence_package(&package, None);
+    if let Ok(Some(cached_result)) = crate::context_engine::reasoning::cache::get_cached_reasoning(conn, &package_hash, None) {
         return AIContextReasoningResponse {
             ai_result: Some(cached_result),
             ai_unavailable: false,
@@ -933,7 +933,7 @@ pub fn analyze_item_context_ai_graceful(
     let reasoning_result = match reasoner.analyze_context(&package) {
         Ok(r) => {
             // Cache successful results
-            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, item_id, &r);
+            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, item_id, None, &r, None);
             r
         },
         Err(ai_err) => {

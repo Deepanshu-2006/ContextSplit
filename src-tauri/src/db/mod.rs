@@ -307,13 +307,39 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
             "CREATE TABLE IF NOT EXISTS ai_reasoning_cache (
                 package_hash TEXT PRIMARY KEY,
                 item_id TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'local_user',
                 result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
             )",
             [],
         )?;
         
         user_version = 16;
+    }
+
+    if user_version < 17 {
+        // Handle migration for tables created in v16 without user_id / expires_at
+        let _ = conn.execute("ALTER TABLE ai_reasoning_cache ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local_user'", []);
+        let _ = conn.execute("ALTER TABLE ai_reasoning_cache ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''", []);
+        
+        // Update any empty expires_at with 7 days from now
+        let _ = conn.execute("UPDATE ai_reasoning_cache SET expires_at = datetime('now', '+7 days') WHERE expires_at = ''", []);
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_item ON ai_reasoning_cache(item_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_user ON ai_reasoning_cache(user_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_reasoning_cache(expires_at)",
+            [],
+        )?;
+
+        user_version = 17;
     }
 
     conn.pragma_update(None, "user_version", user_version)?;

@@ -631,6 +631,15 @@ fn get_ai_provider_status(
     Ok(context_engine::reasoning::get_reasoner_status(reasoner.as_ref()))
 }
 
+#[tauri::command]
+fn clear_ai_reasoning_cache(
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::reasoning::cache::clear_reasoning_cache(&conn, None)
+        .map_err(|e| e.to_string())
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -779,7 +788,8 @@ pub fn run() {
             get_candidate_evidence_package,
             suggest_candidate_name_ai,
             suggest_item_group_name_ai,
-            get_ai_provider_status
+            get_ai_provider_status,
+            clear_ai_reasoning_cache
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

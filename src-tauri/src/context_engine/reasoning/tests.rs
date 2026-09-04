@@ -3052,4 +3052,149 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         assert!(!response2.ai_unavailable);
         assert_eq!(response2.ai_result.unwrap().suggested_name, Some("Test Cache".to_string()));
     }
+
+    #[test]
+    fn test_ai_reasoning_cache_invalidation_on_evidence_change() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        
+        let reasoner1 = DummyReasoner {
+            result: ContextReasoningResult {
+                decision: ContextReasoningDecision::NewContext,
+                suggested_context_reference: None,
+                suggested_name: Some("Initial Reasoning".to_string()),
+                confidence: 0.7,
+                explanation: "initial".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            }
+        };
+
+        let mut item = operations::create_item(&conn, None, None, "text", "initial content", None, "{}").unwrap();
+        let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.5, None, "{}").unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item.id, 0.5).unwrap();
+
+        // 1. Initial execution caches the result
+        let res1 = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner1, false);
+        assert_eq!(res1.ai_result.unwrap().suggested_name, Some("Initial Reasoning".to_string()));
+
+        // 2. Reasoner now outputs something new
+        let reasoner2 = DummyReasoner {
+            result: ContextReasoningResult {
+                decision: ContextReasoningDecision::NewContext,
+                suggested_context_reference: None,
+                suggested_name: Some("Updated Reasoning".to_string()),
+                confidence: 0.75,
+                explanation: "updated".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            }
+        };
+
+        // 3. Mutate the item's evidence (content updated)
+        operations::update_item(&conn, &item.id, Some("completely new content with different context"), None, None).unwrap();
+
+        // 4. Because evidence changed, the cache must miss and return the new result
+        let res2 = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner2, false);
+        assert_eq!(res2.ai_result.unwrap().suggested_name, Some("Updated Reasoning".to_string()));
+    }
+
+    #[test]
+    fn test_ai_reasoning_cache_expiration_policy() {
+        use crate::context_engine::reasoning::cache::*;
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let result = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: None,
+            suggested_name: Some("Expiring Item".to_string()),
+            confidence: 0.8,
+            explanation: "expiring".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            alternative_interpretations: vec![],
+            provider_info: None,
+        };
+
+        // Cache with 0 seconds TTL (immediately expired)
+        cache_reasoning_result(&conn, "hash_123", "item_1", None, &result, Some(-1)).unwrap();
+
+        // Querying should return None because it's expired
+        let cached = get_cached_reasoning(&conn, "hash_123", None).unwrap();
+        assert!(cached.is_none(), "Expired cache item should return None");
+
+        // Now cache with 3600 seconds TTL (fresh)
+        cache_reasoning_result(&conn, "hash_456", "item_2", None, &result, Some(3600)).unwrap();
+        let cached_valid = get_cached_reasoning(&conn, "hash_456", None).unwrap();
+        assert!(cached_valid.is_some(), "Valid unexpired item should be returned");
+        assert_eq!(cached_valid.unwrap().suggested_name, Some("Expiring Item".to_string()));
+    }
+
+    #[test]
+    fn test_ai_reasoning_cache_clearing_and_invalidation() {
+        use crate::context_engine::reasoning::cache::*;
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let result = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: None,
+            suggested_name: Some("Clear Test".to_string()),
+            confidence: 0.8,
+            explanation: "clear".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            alternative_interpretations: vec![],
+            provider_info: None,
+        };
+
+        cache_reasoning_result(&conn, "hash_a", "item_a", None, &result, Some(3600)).unwrap();
+        cache_reasoning_result(&conn, "hash_b", "item_b", None, &result, Some(3600)).unwrap();
+
+        // Invalidate specific item
+        let deleted = invalidate_item_cache(&conn, "item_a").unwrap();
+        assert_eq!(deleted, 1);
+        assert!(get_cached_reasoning(&conn, "hash_a", None).unwrap().is_none());
+        assert!(get_cached_reasoning(&conn, "hash_b", None).unwrap().is_some());
+
+        // Clear all cache
+        let cleared = clear_reasoning_cache(&conn, None).unwrap();
+        assert_eq!(cleared, 1);
+        assert!(get_cached_reasoning(&conn, "hash_b", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_ai_reasoning_cache_user_isolation() {
+        use crate::context_engine::reasoning::cache::*;
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let result = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: None,
+            suggested_name: Some("User Isolated".to_string()),
+            confidence: 0.8,
+            explanation: "user".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            alternative_interpretations: vec![],
+            provider_info: None,
+        };
+
+        // Cache for user "alice"
+        cache_reasoning_result(&conn, "hash_user", "item_u", Some("alice"), &result, Some(3600)).unwrap();
+
+        // User "bob" should NOT hit alice's cache
+        let bob_cached = get_cached_reasoning(&conn, "hash_user", Some("bob")).unwrap();
+        assert!(bob_cached.is_none(), "User B should not hit User A cache");
+
+        // Alice should hit her cache
+        let alice_cached = get_cached_reasoning(&conn, "hash_user", Some("alice")).unwrap();
+        assert!(alice_cached.is_some(), "User A should hit own cache");
+    }
 }

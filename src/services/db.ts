@@ -742,6 +742,9 @@ export const db = {
 
   suggestItemGroupNameAI: (itemIds: string[]) =>
     invoke<string>("suggest_item_group_name_ai", { itemIds }),
+
+  clearAiReasoningCache: () =>
+    invoke<number>("clear_ai_reasoning_cache"),
 };
 
 
