@@ -28,8 +28,8 @@ pub use models::{
 };
 pub use normalizer::CaptureNormalizer;
 pub use platform::{
-    get_platform_adapter, MacOSCaptureAdapter, MockCaptureAdapter, PlatformCaptureAdapter,
-    WindowsCaptureAdapter,
+    get_platform_adapter, ClipboardCaptureAdapter, MacOSCaptureAdapter, MacOSClipboardAdapter,
+    MockCaptureAdapter, PlatformCaptureAdapter, WindowsCaptureAdapter, WindowsClipboardAdapter,
 };
 pub use target::{CaptureRequest, CaptureTarget};
 pub use validator::CaptureValidator;

@@ -1,7 +1,9 @@
+pub mod clipboard;
 pub mod macos;
 pub mod mock;
 pub mod windows;
 
+pub use clipboard::{ClipboardCaptureAdapter, MacOSClipboardAdapter, WindowsClipboardAdapter};
 pub use macos::MacOSCaptureAdapter;
 pub use mock::MockCaptureAdapter;
 pub use windows::WindowsCaptureAdapter;

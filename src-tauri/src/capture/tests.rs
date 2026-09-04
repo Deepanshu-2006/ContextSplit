@@ -9,7 +9,8 @@ mod tests {
     use crate::capture::models::*;
     use crate::capture::normalizer::CaptureNormalizer;
     use crate::capture::platform::{
-        MacOSCaptureAdapter, MockCaptureAdapter, PlatformCaptureAdapter, WindowsCaptureAdapter,
+        MacOSCaptureAdapter, MacOSClipboardAdapter, MockCaptureAdapter, PlatformCaptureAdapter,
+        WindowsCaptureAdapter, WindowsClipboardAdapter,
     };
     use crate::capture::validator::CaptureValidator;
     use crate::context_engine::engine::ContextEngine;
@@ -890,5 +891,156 @@ mod tests {
         // Now a subsequent job CAN be enqueued
         let job3 = crate::capture::BackgroundJob::new(item_id, crate::capture::BackgroundJobType::FullContextualPipeline);
         assert!(queue.enqueue(job3), "New job after completion should be accepted");
+    }
+
+    // =======================================================================
+    // 8. MacOSClipboardAdapter & WindowsClipboardAdapter Tests
+    // =======================================================================
+
+    #[test]
+    fn test_macos_clipboard_adapter_emits_normalized_capture_event() {
+        let mut settings = PrivacySettings::default();
+        settings.enable_active_app = true;
+        settings.enable_window_title = true;
+        settings.enable_browser_domain = true;
+
+        let mut adapter = MacOSClipboardAdapter::new().with_privacy_settings(settings);
+
+        // 1. Capture text
+        let res = adapter.on_clipboard_change(
+            Some("Meeting discussion regarding Paris architecture".to_string()),
+            Some("Notes".to_string()),
+            Some("Sprint Notes - Notes".to_string()),
+        ).unwrap();
+
+        assert!(res.is_some());
+        let event = res.unwrap();
+        assert_eq!(event.platform, PlatformType::MacOS);
+        assert_eq!(event.capture_type, CaptureType::Clipboard);
+        assert_eq!(event.content_type, ContentType::PlainText);
+        assert_eq!(event.content, "Meeting discussion regarding Paris architecture");
+        assert_eq!(event.source_application.as_deref(), Some("Notes"));
+        assert_eq!(event.source_metadata.window_title.as_deref(), Some("Sprint Notes - Notes"));
+        assert!(event.validate().is_ok());
+
+        // 2. Immediate duplicate must be skipped (avoid repeatedly capturing same content)
+        let dup_res = adapter.on_clipboard_change(
+            Some("Meeting discussion regarding Paris architecture".to_string()),
+            Some("Notes".to_string()),
+            Some("Sprint Notes - Notes".to_string()),
+        ).unwrap();
+        assert!(dup_res.is_none(), "Duplicate content must return None");
+
+        // 3. Capture URL
+        let url_res = adapter.on_clipboard_change(
+            Some("https://developer.apple.com/documentation/appkit".to_string()),
+            Some("Safari".to_string()),
+            Some("AppKit Documentation".to_string()),
+        ).unwrap();
+
+        assert!(url_res.is_some());
+        let url_event = url_res.unwrap();
+        assert_eq!(url_event.content_type, ContentType::Url);
+        assert_eq!(url_event.content, "https://developer.apple.com/documentation/appkit");
+        assert_eq!(url_event.domain().as_deref(), Some("developer.apple.com"));
+        assert!(url_event.validate().is_ok());
+    }
+
+    #[test]
+    fn test_windows_clipboard_adapter_emits_normalized_capture_event() {
+        let mut settings = PrivacySettings::default();
+        settings.enable_active_app = true;
+        settings.enable_window_title = true;
+        settings.enable_browser_domain = true;
+
+        let mut adapter = WindowsClipboardAdapter::new().with_privacy_settings(settings);
+
+        // 1. Capture Windows text with CRLF
+        let res = adapter.on_clipboard_change(
+            Some("Windows line 1\r\nWindows line 2".to_string()),
+            Some("notepad.exe".to_string()),
+            Some("Document.txt - Notepad".to_string()),
+        ).unwrap();
+
+        assert!(res.is_some());
+        let event = res.unwrap();
+        assert_eq!(event.platform, PlatformType::Windows);
+        assert_eq!(event.capture_type, CaptureType::Clipboard);
+        assert_eq!(event.content_type, ContentType::PlainText);
+        assert_eq!(event.content, "Windows line 1\nWindows line 2", "CRLF must be normalized to LF");
+        assert_eq!(event.source_application.as_deref(), Some("notepad.exe"));
+        assert_eq!(event.source_metadata.window_title.as_deref(), Some("Document.txt - Notepad"));
+        assert!(event.validate().is_ok());
+
+        // 2. Duplicate must return None
+        let dup_res = adapter.on_clipboard_change(
+            Some("Windows line 1\r\nWindows line 2".to_string()),
+            Some("notepad.exe".to_string()),
+            Some("Document.txt - Notepad".to_string()),
+        ).unwrap();
+        assert!(dup_res.is_none());
+
+        // 3. Capture URL
+        let url_res = adapter.on_clipboard_change(
+            Some("https://learn.microsoft.com/en-us/windows/win32/".to_string()),
+            Some("msedge.exe".to_string()),
+            Some("Win32 API - Microsoft Edge".to_string()),
+        ).unwrap();
+
+        assert!(url_res.is_some());
+        let url_event = url_res.unwrap();
+        assert_eq!(url_event.content_type, ContentType::Url);
+        assert_eq!(url_event.platform, PlatformType::Windows);
+        assert_eq!(url_event.domain().as_deref(), Some("learn.microsoft.com"));
+        assert!(url_event.validate().is_ok());
+    }
+
+    #[test]
+    fn test_clipboard_adapters_respect_disabled_state() {
+        let mut mac_adapter = MacOSClipboardAdapter::new().with_enabled(false);
+        let mut win_adapter = WindowsClipboardAdapter::new().with_enabled(false);
+
+        // When disabled, on_clipboard_change must immediately return Ok(None)
+        assert!(mac_adapter.on_clipboard_change(Some("Text".to_string()), None, None).unwrap().is_none());
+        assert!(win_adapter.on_clipboard_change(Some("Text".to_string()), None, None).unwrap().is_none());
+
+        // Re-enabling allows capture
+        mac_adapter.set_enabled(true);
+        win_adapter.set_enabled(true);
+
+        assert!(mac_adapter.on_clipboard_change(Some("Text 1".to_string()), None, None).unwrap().is_some());
+        assert!(win_adapter.on_clipboard_change(Some("Text 2".to_string()), None, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_clipboard_adapters_respect_privacy_settings() {
+        let mut privacy = PrivacySettings::default();
+        privacy.enable_active_app = false; // Scrub app
+        privacy.enable_window_title = false; // Scrub window
+        privacy.enable_browser_domain = false; // Scrub domain
+
+        let mut mac_adapter = MacOSClipboardAdapter::new().with_privacy_settings(privacy.clone());
+        let mut win_adapter = WindowsClipboardAdapter::new().with_privacy_settings(privacy);
+
+        let mac_event = mac_adapter.on_clipboard_change(
+            Some("https://github.com/org/repo".to_string()),
+            Some("Safari".to_string()),
+            Some("Secret Project - Safari".to_string()),
+        ).unwrap().unwrap();
+
+        let win_event = win_adapter.on_clipboard_change(
+            Some("https://github.com/org/repo".to_string()),
+            Some("chrome.exe".to_string()),
+            Some("Secret Project - Chrome".to_string()),
+        ).unwrap().unwrap();
+
+        // App and Window title MUST be stripped per privacy settings
+        assert!(mac_event.source_application.is_none());
+        assert!(mac_event.source_metadata.window_title.is_none());
+        assert!(mac_event.domain().is_none());
+
+        assert!(win_event.source_application.is_none());
+        assert!(win_event.source_metadata.window_title.is_none());
+        assert!(win_event.domain().is_none());
     }
 }
