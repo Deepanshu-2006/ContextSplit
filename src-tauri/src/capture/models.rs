@@ -440,6 +440,8 @@ pub enum CaptureError {
     ContextEngineError(String),
     /// Platform-specific conversion failure
     PlatformError(String),
+    /// Capture was rejected by privacy filter (sensitive content, excluded app, paused monitoring)
+    PrivacyRejected(String),
     /// General capture processing failure
     ProcessingError(String),
 }
@@ -448,16 +450,17 @@ impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyContent => write!(f, "Capture content cannot be empty or whitespace-only"),
-            Self::InvalidUrl(msg) => write!(f, "Invalid URL in capture: {}", msg),
-            Self::InvalidFile(msg) => write!(f, "Invalid file in capture: {}", msg),
-            Self::InvalidImage(msg) => write!(f, "Invalid image data in capture: {}", msg),
+            Self::InvalidUrl(msg) => write!(f, "Invalid URL: {}", msg),
+            Self::InvalidFile(msg) => write!(f, "Invalid file: {}", msg),
+            Self::InvalidImage(msg) => write!(f, "Invalid image: {}", msg),
             Self::PayloadTooLarge { size, limit } => {
-                write!(f, "Capture payload size ({} bytes) exceeds limit ({} bytes)", size, limit)
+                write!(f, "Payload size ({} bytes) exceeds limit ({} bytes)", size, limit)
             }
-            Self::DatabaseError(msg) => write!(f, "Database error during capture: {}", msg),
-            Self::ContextEngineError(msg) => write!(f, "Context engine error during capture: {}", msg),
-            Self::PlatformError(msg) => write!(f, "Platform capture adapter error: {}", msg),
-            Self::ProcessingError(msg) => write!(f, "Capture processing error: {}", msg),
+            Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
+            Self::ContextEngineError(msg) => write!(f, "Context Engine error: {}", msg),
+            Self::PlatformError(msg) => write!(f, "Platform capture error: {}", msg),
+            Self::PrivacyRejected(reason) => write!(f, "Capture rejected by privacy filter: {}", reason),
+            Self::ProcessingError(msg) => write!(f, "Processing error: {}", msg),
         }
     }
 }

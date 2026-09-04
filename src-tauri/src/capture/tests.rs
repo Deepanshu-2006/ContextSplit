@@ -12,6 +12,9 @@ mod tests {
         MacOSCaptureAdapter, MacOSClipboardAdapter, MockCaptureAdapter, PlatformCaptureAdapter,
         WindowsCaptureAdapter, WindowsClipboardAdapter,
     };
+    use crate::capture::privacy::{
+        ClipboardPrivacyFilter, PrivacyFilterResult, PrivacyRejectionReason, SensitiveContentType,
+    };
     use crate::capture::validator::CaptureValidator;
     use crate::context_engine::engine::ContextEngine;
     use crate::context_engine::providers::{
@@ -1042,5 +1045,227 @@ mod tests {
         assert!(win_event.source_application.is_none());
         assert!(win_event.source_metadata.window_title.is_none());
         assert!(win_event.domain().is_none());
+    }
+
+    #[test]
+    fn test_privacy_filter_normal_text_allowed() {
+        let filter = ClipboardPrivacyFilter::new();
+
+        let res = filter.filter_clipboard(
+            "Here is the project proposal for the Paris trip itinerary and flight details.",
+            Some("Notes"),
+            Some("Paris Trip - Notes"),
+        );
+
+        assert!(res.is_allowed());
+        assert_eq!(res, PrivacyFilterResult::Allowed);
+    }
+
+    #[test]
+    fn test_privacy_filter_password_rejection() {
+        let filter = ClipboardPrivacyFilter::new();
+
+        // 1. Key-value style password assignment
+        let res1 = filter.filter_clipboard("password = SuperSecretPass123!", None, None);
+        assert!(res1.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res1 {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::SensitiveContent {
+                    content_type: SensitiveContentType::Password,
+                }
+            );
+            assert!(rej.explanation.contains("Password-like credential detected"));
+            assert!(!rej.explanation.contains("SuperSecretPass123!"), "Secret must never appear in explanation");
+        }
+
+        // 2. High complexity token without spaces
+        let res2 = filter.filter_clipboard("K9#vL2$pQ8@zM1!", None, None);
+        assert!(res2.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res2 {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::SensitiveContent {
+                    content_type: SensitiveContentType::Password,
+                }
+            );
+            assert!(!rej.explanation.contains("K9#vL2$pQ8@zM1!"), "Secret must never appear in explanation");
+        }
+    }
+
+    #[test]
+    fn test_privacy_filter_otp_rejection() {
+        let filter = ClipboardPrivacyFilter::new();
+
+        // 1. Exact 6-digit numeric code
+        let res1 = filter.filter_clipboard("482910", None, None);
+        assert!(res1.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res1 {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::SensitiveContent {
+                    content_type: SensitiveContentType::OneTimePassword,
+                }
+            );
+            assert!(rej.explanation.contains("One-Time Password (OTP)"));
+            assert!(!rej.explanation.contains("482910"), "OTP code must never appear in explanation");
+        }
+
+        // 2. Formatted 6-digit code with dash (e.g. 123-456)
+        let res2 = filter.filter_clipboard("123-456", None, None);
+        assert!(res2.is_rejected());
+
+        // 3. SMS / Email verification message
+        let res3 = filter.filter_clipboard("Your verification code is: 839201", None, None);
+        assert!(res3.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res3 {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::SensitiveContent {
+                    content_type: SensitiveContentType::OneTimePassword,
+                }
+            );
+            assert!(!rej.explanation.contains("839201"));
+        }
+    }
+
+    #[test]
+    fn test_privacy_filter_excluded_applications() {
+        let mut filter = ClipboardPrivacyFilter::new();
+
+        // 1. Default password managers (1Password, Bitwarden, KeePassXC)
+        let res_1p = filter.filter_clipboard("My non-sensitive text", Some("1Password 8"), None);
+        assert!(res_1p.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res_1p {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::ExcludedApplication {
+                    application_name: "1Password 8".to_string(),
+                }
+            );
+            assert!(rej.explanation.contains("1Password 8"));
+        }
+
+        let res_bw = filter.filter_clipboard("My other text", Some("bitwarden.exe"), None);
+        assert!(res_bw.is_rejected());
+
+        // 2. Custom excluded application
+        filter.add_excluded_application("Slack");
+        let res_slack = filter.filter_clipboard("Confidential chat", Some("Slack"), None);
+        assert!(res_slack.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res_slack {
+            assert_eq!(
+                rej.reason,
+                PrivacyRejectionReason::ExcludedApplication {
+                    application_name: "Slack".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_privacy_filter_monitoring_disabled() {
+        let mut filter = ClipboardPrivacyFilter::new();
+        filter.set_enabled(false);
+
+        let res = filter.filter_clipboard("Ordinary document note", Some("Notes"), None);
+        assert!(res.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res {
+            assert_eq!(rej.reason, PrivacyRejectionReason::MonitoringDisabled);
+            assert!(rej.explanation.contains("disabled"));
+        }
+    }
+
+    #[test]
+    fn test_privacy_filter_temporary_pause_and_resume() {
+        let mut filter = ClipboardPrivacyFilter::new();
+
+        // 1. Pause for 10 minutes
+        filter.pause_for(std::time::Duration::from_secs(600));
+        assert!(filter.is_paused());
+
+        let res_paused = filter.filter_clipboard("Important architecture note", Some("Notes"), None);
+        assert!(res_paused.is_rejected());
+        if let PrivacyFilterResult::Rejected(rej) = res_paused {
+            assert!(matches!(rej.reason, PrivacyRejectionReason::MonitoringPaused { .. }));
+            assert!(rej.explanation.contains("paused"));
+        }
+
+        // 2. Resume
+        filter.resume();
+        assert!(!filter.is_paused());
+
+        let res_resumed = filter.filter_clipboard("Important architecture note", Some("Notes"), None);
+        assert!(res_resumed.is_allowed());
+
+        // 3. Pause indefinitely
+        filter.pause_indefinitely();
+        assert!(filter.is_paused());
+        assert!(filter.filter_clipboard("Some text", None, None).is_rejected());
+
+        filter.resume();
+        assert!(!filter.is_paused());
+    }
+
+    #[test]
+    fn test_privacy_filter_api_keys_and_private_keys() {
+        let filter = ClipboardPrivacyFilter::new();
+
+        // 1. AWS Key
+        let res_aws = filter.filter_clipboard("AKIAIOSFODNN7EXAMPLE", None, None);
+        assert!(res_aws.is_rejected());
+
+        // 2. OpenAI Key
+        let res_openai = filter.filter_clipboard("sk-live1234567890abcdef1234567890", None, None);
+        assert!(res_openai.is_rejected());
+
+        // 3. Cryptographic Private Key
+        let res_pk = filter.filter_clipboard(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0...\n-----END RSA PRIVATE KEY-----",
+            None,
+            None,
+        );
+        assert!(res_pk.is_rejected());
+
+        // 4. Database connection string with password
+        let res_db = filter.filter_clipboard("postgres://admin:SecretPass@db.internal.net:5432/prod", None, None);
+        assert!(res_db.is_rejected());
+    }
+
+    #[test]
+    fn test_privacy_filter_pipeline_blocks_persistence_and_ai() {
+        let (conn, _temp_dir) = setup_test_db();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        // Attempt capturing a password through the pipeline
+        let password_event = CaptureEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            capture_type: CaptureType::Clipboard,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content_type: ContentType::PlainText,
+            content: "SuperSecretTokenPassword123!".to_string(),
+            source_application: Some("Terminal".to_string()),
+            source_metadata: SourceMetadata::default(),
+            platform: PlatformType::current(),
+            metadata: json!({}),
+        };
+
+        let result = pipeline.process_event_headless(&conn, None, password_event);
+        assert!(result.is_err(), "Sensitive clipboard content must be rejected");
+
+        if let Err(CaptureError::PrivacyRejected(explanation)) = result {
+            assert!(explanation.contains("Password-like credential detected"));
+            assert!(!explanation.contains("SuperSecretTokenPassword123!"), "Secret must not leak into error");
+        } else {
+            panic!("Expected PrivacyRejected error, got {:?}", result);
+        }
+
+        // Verify that NO item was written to database
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "Zero items must be written to DB on privacy rejection");
+
+        // Verify that NO context signals were recorded
+        let sig_count: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |row| row.get(0)).unwrap();
+        assert_eq!(sig_count, 0, "Zero context signals must be recorded on privacy rejection");
     }
 }

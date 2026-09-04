@@ -6,6 +6,7 @@ use super::models::{
     CaptureError, CaptureEvent, CaptureResult, RawCapturePayload,
 };
 use super::normalizer::CaptureNormalizer;
+use super::privacy::ClipboardPrivacyFilter;
 use super::queue::{BackgroundJob, BackgroundJobType, BackgroundProcessingQueue};
 use super::validator::CaptureValidator;
 use crate::context_engine::engine::ContextEngine;
@@ -19,18 +20,19 @@ pub const DEFAULT_DEDUP_WINDOW_SECS: u64 = 3;
 ///
 /// Execution Stages:
 /// 1. Receive CaptureEvent
-/// 2. Validate it
-/// 3. Normalize its content
-/// 4. Deduplicate when appropriate
-/// 5. Create the Item
-/// 6. Create ContextSignals
-/// 7. Associate the Item with the appropriate ContextSession
-/// 8. Trigger contextual analysis asynchronously (non-blocking)
-/// 9. Update the Inbox
+/// 2. Validate it (schema, null bytes, limits)
+/// 3. Audit privacy (reject sensitive passwords, OTPs, API keys, excluded apps/domains before persistence)
+/// 4. Normalize its content
+/// 5. Deduplicate when appropriate
+/// 6. Create the Item (Minimum required persistence)
+/// 7. Create ContextSignals
+/// 8. Associate the Item with the appropriate ContextSession
+/// 9. Trigger contextual analysis asynchronously (non-blocking)
 #[derive(Debug, Clone)]
 pub struct CapturePipeline {
     pub validator: CaptureValidator,
     pub normalizer: CaptureNormalizer,
+    pub privacy_filter: ClipboardPrivacyFilter,
     pub queue: BackgroundProcessingQueue,
     pub dedup_window_secs: u64,
 }
@@ -42,11 +44,12 @@ impl Default for CapturePipeline {
 }
 
 impl CapturePipeline {
-    /// Creates a new CapturePipeline with standard limits, background queue, and deduplication.
+    /// Creates a new CapturePipeline with standard limits, background queue, deduplication, and privacy filter.
     pub fn new() -> Self {
         Self {
             validator: CaptureValidator::new(),
             normalizer: CaptureNormalizer::new(),
+            privacy_filter: ClipboardPrivacyFilter::new(),
             queue: BackgroundProcessingQueue::new(),
             dedup_window_secs: DEFAULT_DEDUP_WINDOW_SECS,
         }
@@ -61,6 +64,12 @@ impl CapturePipeline {
     /// Sets custom normalizer.
     pub fn with_normalizer(mut self, normalizer: CaptureNormalizer) -> Self {
         self.normalizer = normalizer;
+        self
+    }
+
+    /// Sets custom privacy filter.
+    pub fn with_privacy_filter(mut self, privacy_filter: ClipboardPrivacyFilter) -> Self {
+        self.privacy_filter = privacy_filter;
         self
     }
 
@@ -307,6 +316,9 @@ impl CapturePipeline {
         // Step 3: Normalize content and metadata
         let mut normalized_event = self.normalize(event)?;
 
+        // Privacy Audit: Reject sensitive passwords, OTPs, API keys, excluded apps/domains BEFORE persistence
+        self.privacy_filter.audit_event(&normalized_event)?;
+
         // Step 4: Deduplicate when appropriate
         if let Some(existing_item) = self.check_duplicate(conn, &normalized_event)? {
             return Ok(CaptureResult {
@@ -406,6 +418,9 @@ impl CapturePipeline {
 
         // Step 3: Normalize content
         let mut normalized_event = self.normalize(event)?;
+
+        // Privacy Audit: Reject sensitive passwords, OTPs, API keys, excluded apps/domains BEFORE persistence
+        self.privacy_filter.audit_event(&normalized_event)?;
 
         let state = app_handle.state::<AppState>();
 

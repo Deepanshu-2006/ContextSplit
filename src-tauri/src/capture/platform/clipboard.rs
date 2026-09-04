@@ -5,6 +5,7 @@ use crate::capture::models::{
     CaptureError, CaptureEvent, CaptureType, ContentType, PlatformType, SourceMetadata,
 };
 use crate::capture::normalizer::CaptureNormalizer;
+use crate::capture::privacy::ClipboardPrivacyFilter;
 use crate::db::settings::PrivacySettings;
 
 /// Common interface for OS-specific clipboard capture adapters.
@@ -41,6 +42,7 @@ pub struct MacOSClipboardAdapter {
     last_hash: Option<String>,
     enabled: bool,
     privacy_settings: PrivacySettings,
+    pub privacy_filter: ClipboardPrivacyFilter,
     normalizer: CaptureNormalizer,
 }
 
@@ -56,12 +58,18 @@ impl MacOSClipboardAdapter {
             last_hash: None,
             enabled: true,
             privacy_settings: PrivacySettings::default(),
+            privacy_filter: ClipboardPrivacyFilter::new(),
             normalizer: CaptureNormalizer::new(),
         }
     }
 
     pub fn with_privacy_settings(mut self, settings: PrivacySettings) -> Self {
         self.privacy_settings = settings;
+        self
+    }
+
+    pub fn with_privacy_filter(mut self, filter: ClipboardPrivacyFilter) -> Self {
+        self.privacy_filter = filter;
         self
     }
 
@@ -81,11 +89,28 @@ impl MacOSClipboardAdapter {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled && self.privacy_filter.is_enabled()
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        self.privacy_filter.set_enabled(enabled);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.privacy_filter.is_paused()
+    }
+
+    pub fn pause_for(&mut self, duration: std::time::Duration) {
+        self.privacy_filter.pause_for(duration);
+    }
+
+    pub fn pause_indefinitely(&mut self) {
+        self.privacy_filter.pause_indefinitely();
+    }
+
+    pub fn resume(&mut self) {
+        self.privacy_filter.resume();
     }
 
     pub fn set_privacy_settings(&mut self, settings: PrivacySettings) {
@@ -112,11 +137,12 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
     }
 
     fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled && self.privacy_filter.is_enabled()
     }
 
     fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        self.privacy_filter.set_enabled(enabled);
     }
 
     fn set_privacy_settings(&mut self, settings: PrivacySettings) {
@@ -133,7 +159,7 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
         active_app: Option<String>,
         window_title: Option<String>,
     ) -> Result<Option<CaptureEvent>, CaptureError> {
-        if !self.enabled {
+        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() {
             return Ok(None);
         }
 
@@ -144,6 +170,11 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
 
         let trimmed = raw_text.trim();
         if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        // Privacy Filter Check: reject sensitive content or excluded apps/domains before capturing
+        if self.privacy_filter.filter_clipboard(trimmed, active_app.as_deref(), window_title.as_deref()).is_rejected() {
             return Ok(None);
         }
 
@@ -242,6 +273,7 @@ pub struct WindowsClipboardAdapter {
     last_hash: Option<String>,
     enabled: bool,
     privacy_settings: PrivacySettings,
+    pub privacy_filter: ClipboardPrivacyFilter,
     normalizer: CaptureNormalizer,
 }
 
@@ -257,12 +289,18 @@ impl WindowsClipboardAdapter {
             last_hash: None,
             enabled: true,
             privacy_settings: PrivacySettings::default(),
+            privacy_filter: ClipboardPrivacyFilter::new(),
             normalizer: CaptureNormalizer::new(),
         }
     }
 
     pub fn with_privacy_settings(mut self, settings: PrivacySettings) -> Self {
         self.privacy_settings = settings;
+        self
+    }
+
+    pub fn with_privacy_filter(mut self, filter: ClipboardPrivacyFilter) -> Self {
+        self.privacy_filter = filter;
         self
     }
 
@@ -282,11 +320,28 @@ impl WindowsClipboardAdapter {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled && self.privacy_filter.is_enabled()
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        self.privacy_filter.set_enabled(enabled);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.privacy_filter.is_paused()
+    }
+
+    pub fn pause_for(&mut self, duration: std::time::Duration) {
+        self.privacy_filter.pause_for(duration);
+    }
+
+    pub fn pause_indefinitely(&mut self) {
+        self.privacy_filter.pause_indefinitely();
+    }
+
+    pub fn resume(&mut self) {
+        self.privacy_filter.resume();
     }
 
     pub fn set_privacy_settings(&mut self, settings: PrivacySettings) {
@@ -313,11 +368,12 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
     }
 
     fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled && self.privacy_filter.is_enabled()
     }
 
     fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+        self.privacy_filter.set_enabled(enabled);
     }
 
     fn set_privacy_settings(&mut self, settings: PrivacySettings) {
@@ -334,7 +390,7 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
         active_app: Option<String>,
         window_title: Option<String>,
     ) -> Result<Option<CaptureEvent>, CaptureError> {
-        if !self.enabled {
+        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() {
             return Ok(None);
         }
 
@@ -347,6 +403,11 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
         let normalized = raw_text.replace("\r\n", "\n");
         let trimmed = normalized.trim();
         if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        // Privacy Filter Check: reject sensitive content or excluded apps/domains before capturing
+        if self.privacy_filter.filter_clipboard(trimmed, active_app.as_deref(), window_title.as_deref()).is_rejected() {
             return Ok(None);
         }
 
