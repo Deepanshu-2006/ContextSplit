@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { db, ContextCandidate, CandidateWithItems, CandidateScore } from '../services/db';
+import { db, ContextCandidate, CandidateWithItems, CandidateScore, ContextReasoningResult } from '../services/db';
 import { useWorkspaceStore } from './workspaceStore';
 
 export const HIGH_CONFIDENCE_THRESHOLD = 0.70;
@@ -10,6 +10,8 @@ interface DiscoveryState {
   selectedCandidateId: string | null;
   selectedCandidateDetails: CandidateWithItems | null;
   selectedCandidateScore: CandidateScore | null;
+  aiReasoningResult: ContextReasoningResult | null;
+  isAiReasoningLoading: boolean;
   isReviewOpen: boolean;
   isLoading: boolean;
   
@@ -31,6 +33,8 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
   selectedCandidateId: null,
   selectedCandidateDetails: null,
   selectedCandidateScore: null,
+  aiReasoningResult: null,
+  isAiReasoningLoading: false,
   isReviewOpen: false,
   isLoading: false,
 
@@ -72,7 +76,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
 
   reviewCandidate: async (id: string) => {
     try {
-      set({ isLoading: true, selectedCandidateId: id, isReviewOpen: true });
+      set({ isLoading: true, selectedCandidateId: id, isReviewOpen: true, aiReasoningResult: null });
       
       // Advance candidate status to 'suggested'
       await db.updateCandidateStatus(id, 'suggested');
@@ -92,6 +96,23 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
 
       // Refresh candidate list
       await get().checkForCandidates();
+
+      // Asynchronously run AI reasoning on the first item for context explanation
+      // This runs in background so it doesn't block the modal opening
+      if (details.items.length > 0) {
+        set({ isAiReasoningLoading: true });
+        const firstItemId = details.items[0].item.id;
+        try {
+          const aiResult = await db.analyzeItemContextAI(firstItemId);
+          set({ aiReasoningResult: aiResult });
+        } catch (aiErr) {
+          // AI reasoning failure is non-fatal — modal still works deterministically
+          console.warn('AI reasoning unavailable for candidate review:', aiErr);
+          set({ aiReasoningResult: null });
+        } finally {
+          set({ isAiReasoningLoading: false });
+        }
+      }
     } catch (err) {
       console.error('Failed to load candidate review details:', err);
     } finally {
@@ -133,6 +154,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
         selectedCandidateId: null,
         selectedCandidateDetails: null,
         selectedCandidateScore: null,
+        aiReasoningResult: null,
       });
 
       // Refresh list
@@ -233,7 +255,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
       selectedCandidateId: null,
       selectedCandidateDetails: null,
       selectedCandidateScore: null,
+      aiReasoningResult: null,
     });
   },
 }));
-
