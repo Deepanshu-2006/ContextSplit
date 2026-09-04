@@ -911,4 +911,361 @@ mod tests {
         // Clean up temp database
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
+
+    // Helper reasoners for failure case testing
+    struct TimeoutMockReasoner;
+    impl crate::context_engine::reasoning::AIReasoner for TimeoutMockReasoner {
+        fn provider_name(&self) -> &str { "Timeout Mock" }
+        fn provider_id(&self) -> &str { "timeout_mock" }
+        fn is_available(&self) -> bool { true }
+        fn analyze_context(&self, _evidence: &crate::context_engine::reasoning::models::EvidencePackage) -> Result<crate::context_engine::reasoning::models::ContextReasoningResult, crate::context_engine::reasoning::models::AIReasoningError> {
+            Err(crate::context_engine::reasoning::models::AIReasoningError::ProviderUnavailable("Request timed out after 10000ms".to_string()))
+        }
+        fn suggest_candidate_name(&self, _evidence: &crate::context_engine::reasoning::models::EvidencePackage) -> Result<String, crate::context_engine::reasoning::models::AIReasoningError> {
+            Err(crate::context_engine::reasoning::models::AIReasoningError::ProviderUnavailable("Request timed out".to_string()))
+        }
+    }
+
+    struct MalformedMockReasoner;
+    impl crate::context_engine::reasoning::AIReasoner for MalformedMockReasoner {
+        fn provider_name(&self) -> &str { "Malformed Mock" }
+        fn provider_id(&self) -> &str { "malformed_mock" }
+        fn is_available(&self) -> bool { true }
+        fn analyze_context(&self, _evidence: &crate::context_engine::reasoning::models::EvidencePackage) -> Result<crate::context_engine::reasoning::models::ContextReasoningResult, crate::context_engine::reasoning::models::AIReasoningError> {
+            // Returns invalid confidence > 1.0 which fails schema validation
+            Ok(crate::context_engine::reasoning::models::ContextReasoningResult {
+                decision: crate::context_engine::reasoning::models::ContextReasoningDecision::ExistingContext,
+                suggested_context_reference: Some("some_ref".to_string()),
+                suggested_name: None,
+                confidence: 2.5, // INVALID
+                explanation: "invalid confidence score".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            })
+        }
+        fn suggest_candidate_name(&self, _evidence: &crate::context_engine::reasoning::models::EvidencePackage) -> Result<String, crate::context_engine::reasoning::models::AIReasoningError> {
+            Err(crate::context_engine::reasoning::models::AIReasoningError::InvalidResponse("Malformed name".to_string()))
+        }
+    }
+
+    #[test]
+    fn test_day10_context_reasoning_integration() {
+        use crate::context_engine::reasoning::{
+            build_evidence_package, analyze_item_context_ai_graceful,
+            mock::MockAIReasoner,
+            models::{AIFailureReason, ContextReasoningDecision},
+        };
+
+        let (conn, db_path) = setup_test_db();
+        let engine = create_engine();
+        let reasoner = MockAIReasoner::new();
+
+        // -------------------------------------------------------------------
+        // Scenario Setup: Existing Workspaces
+        // - Portfolio
+        // - College
+        // - Paris Trip
+        // -------------------------------------------------------------------
+        let ws_portfolio = operations::create_workspace(&conn, "Portfolio").unwrap();
+        let ws_college = operations::create_workspace(&conn, "College").unwrap();
+        let ws_paris = operations::create_workspace(&conn, "Paris Trip").unwrap();
+
+        // Seed items into Portfolio
+        let item_p1 = operations::create_item(
+            &conn,
+            Some(&ws_portfolio.id),
+            None,
+            "url",
+            "https://www.figma.com/portfolio-design-v2",
+            Some("Portfolio Figma Design"),
+            r#"{"app_name":"Figma","domain":"figma.com"}"#,
+        ).unwrap();
+
+        // Seed items into College
+        let item_c1 = operations::create_item(
+            &conn,
+            Some(&ws_college.id),
+            None,
+            "text",
+            "CS101 Algorithms Assignment 3 Syllabus and Lecture Notes",
+            Some("CS101 Algorithms"),
+            r#"{"app_name":"Notion"}"#,
+        ).unwrap();
+
+        // Seed items into Paris Trip
+        let item_paris_hotel = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://booking.com/hotel-le-marais-paris",
+            Some("Le Marais Paris Hotel Booking"),
+            r#"{"app_name":"Safari","domain":"booking.com"}"#,
+        ).unwrap();
+
+        let item_paris_flight = operations::create_item(
+            &conn,
+            Some(&ws_paris.id),
+            None,
+            "url",
+            "https://airfrance.com/cdg-paris-flights",
+            Some("Flight to Paris CDG"),
+            r#"{"app_name":"Safari","domain":"airfrance.com"}"#,
+        ).unwrap();
+
+        // -------------------------------------------------------------------
+        // Step 1: Capture a new Item clearly related to Paris Trip
+        // -------------------------------------------------------------------
+        let item_louvre = operations::create_item(
+            &conn,
+            None, // In Inbox
+            None,
+            "url",
+            "https://booking.com/paris-louvre-museum-tickets-and-eiffel-tower",
+            Some("Louvre Museum Tickets Paris"),
+            r#"{"app_name":"Safari","domain":"booking.com"}"#,
+        ).unwrap();
+
+        assert_eq!(item_louvre.workspace_id, None, "1. Item must be captured in Inbox");
+
+        // Record context signals for the captured item
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_louvre.id),
+            "active_app",
+            None,
+            r#"{"app_name":"Safari"}"#,
+        ).unwrap();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_louvre.id),
+            "url_metadata",
+            None,
+            r#"{"domain":"booking.com"}"#,
+        ).unwrap();
+
+        // Connect relationships to Paris Trip items
+        let _ = operations::create_item_relationship(&conn, &item_louvre.id, &item_paris_hotel.id, "same_domain", 0.85, None).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_louvre.id, &item_paris_flight.id, "same_topic", 0.80, None).unwrap();
+
+        // -------------------------------------------------------------------
+        // Step 2: Deterministic Context Engine analyzes it
+        // -------------------------------------------------------------------
+        let interpretation = scoring::evaluate_item_context(&conn, &item_louvre.id).unwrap();
+        let paris_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_paris.id).unwrap();
+        assert!(paris_eval.score >= 0.25, "2. Deterministic Context Engine should assign affinity to Paris Trip: {}", paris_eval.score);
+
+        // -------------------------------------------------------------------
+        // Step 3 & 4: EvidencePackage is generated and contains ONLY relevant evidence
+        // -------------------------------------------------------------------
+        let package = build_evidence_package(&conn, &item_louvre.id).unwrap();
+        assert_eq!(package.target_item.id, item_louvre.id, "3. EvidencePackage target item must match");
+        assert_eq!(package.target_item.app_name.as_deref(), Some("Safari"));
+        assert_eq!(package.target_item.domain.as_deref(), Some("booking.com"));
+
+        // 4. Verify only relevant evidence is present
+        assert!(package.candidate_contexts.iter().any(|c| c.context_id == ws_paris.id));
+        // Related items should contain Paris items, not unrelated College items
+        assert!(package.relevant_related_items.iter().any(|r| r.item_id == item_paris_hotel.id));
+        assert!(!package.relevant_related_items.iter().any(|r| r.workspace_id.as_deref() == Some(ws_college.id.as_str())));
+        assert_eq!(package.system_metadata.privacy_boundary, "ai_privacy_boundary:strict_curated_evidence_only:v1");
+
+        // -------------------------------------------------------------------
+        // Step 5, 6, 7 & 8: AI Reasoner receives EvidencePackage and returns valid result
+        // -------------------------------------------------------------------
+        let ai_response = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &reasoner, true);
+        assert!(!ai_response.ai_unavailable, "5. AI Reasoner should succeed");
+        assert!(ai_response.ai_result.is_some());
+
+        let result = ai_response.ai_result.unwrap();
+        // 6. Valid ContextReasoningResult
+        assert_eq!(result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(result.suggested_context_reference.as_deref(), Some(ws_paris.id.as_str()));
+        assert_eq!(result.suggested_name.as_deref(), Some("Paris Trip"));
+        assert!(result.confidence >= 0.25, "Confidence must reflect strong grounded evidence: {}", result.confidence);
+
+        // 7. Schema validation succeeds
+        assert!(result.validate().is_ok());
+
+        // 8. Human-readable explanation produced
+        assert!(!result.explanation.is_empty());
+        assert!(!result.explanation.contains("0."), "Explanation must not expose internal float scores");
+        assert!(!result.explanation.contains("vector"), "Explanation must not expose embeddings");
+        assert!(!result.explanation.contains("embedding"), "Explanation must not expose embeddings");
+
+        // -------------------------------------------------------------------
+        // Step 9 & 10: Existing Workspace suggestion remains user-controlled & no mutation
+        // -------------------------------------------------------------------
+        // 9. Item is STILL in Inbox!
+        let item_check = operations::get_item(&conn, &item_louvre.id).unwrap();
+        assert_eq!(item_check.workspace_id, None, "9. Item must remain in Inbox until user acts");
+
+        // 10. No database mutation performed by AI
+        let all_ws = operations::list_workspaces(&conn).unwrap();
+        assert_eq!(all_ws.len(), 3, "10. AI layer must not mutate workspace count");
+
+        // -------------------------------------------------------------------
+        // Edge Case A: Ambiguous Item
+        // -------------------------------------------------------------------
+        let item_ambiguous = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "College project portfolio website submission",
+            Some("Ambiguous College Portfolio"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws_portfolio.id),
+            Some(&item_p1.id),
+            "active_app",
+            None,
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws_college.id),
+            Some(&item_c1.id),
+            "active_app",
+            None,
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_ambiguous.id),
+            "active_app",
+            None,
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_ambiguous.id, &item_p1.id, "same_topic", 0.90, None).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_ambiguous.id, &item_c1.id, "same_topic", 0.90, None).unwrap();
+
+        let hist_p = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_portfolio.id}).to_string();
+        let hist_c = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_college.id}).to_string();
+        let _ = crate::context_engine::operations::create_context_signal(&conn, None, Some(&item_ambiguous.id), "user_action", None, &hist_p).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(&conn, None, Some(&item_ambiguous.id), "user_action", None, &hist_c).unwrap();
+
+        let amb_package = build_evidence_package(&conn, &item_ambiguous.id).unwrap();
+        assert!(amb_package.deterministic_assessment.is_ambiguous, "A. Deterministic engine must detect ambiguity");
+        let amb_ai = analyze_item_context_ai_graceful(&conn, &item_ambiguous.id, &reasoner, true);
+        assert!(!amb_ai.ai_unavailable);
+        let amb_result = amb_ai.ai_result.unwrap();
+        // Reasoner should evaluate alternative interpretations and not forcefully auto-assign
+        assert!(amb_result.decision == ContextReasoningDecision::Uncertain || amb_result.decision == ContextReasoningDecision::ExistingContext);
+        assert_eq!(operations::get_item(&conn, &item_ambiguous.id).unwrap().workspace_id, None);
+
+        // -------------------------------------------------------------------
+        // Edge Case B: Unrelated Item
+        // -------------------------------------------------------------------
+        let item_unrelated = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Authentic homemade Italian lasagna recipe with bechamel sauce",
+            Some("Lasagna Recipe"),
+            r#"{"app_name":"Safari"}"#,
+        ).unwrap();
+
+        let unrel_ai = analyze_item_context_ai_graceful(&conn, &item_unrelated.id, &reasoner, true);
+        assert!(!unrel_ai.ai_unavailable);
+        let unrel_result = unrel_ai.ai_result.unwrap();
+        assert!(unrel_result.decision == ContextReasoningDecision::NoContext || unrel_result.decision == ContextReasoningDecision::Uncertain);
+        assert!(unrel_result.explanation.to_lowercase().contains("inbox") || unrel_result.uncertainty_reason.is_some());
+
+        // -------------------------------------------------------------------
+        // Edge Case C: New ContextCandidate
+        // -------------------------------------------------------------------
+        let item_tokyo1 = operations::create_item(&conn, None, None, "text", "Tokyo trip hotel", Some("Tokyo Hotel"), "{}").unwrap();
+        let item_tokyo2 = operations::create_item(&conn, None, None, "text", "Tokyo flight booking", Some("Tokyo Flight"), "{}").unwrap();
+        let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.85, Some("Tokyo Trip"), "{}").unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item_tokyo1.id, 0.85).unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item_tokyo2.id, 0.85).unwrap();
+
+        let cand_name = engine.suggest_candidate_name_ai(&conn, &candidate.id).unwrap();
+        assert!(!cand_name.is_empty(), "C. AI-assisted candidate naming succeeds");
+
+        // -------------------------------------------------------------------
+        // Edge Case D: AI Timeout
+        // -------------------------------------------------------------------
+        let timeout_reasoner = TimeoutMockReasoner;
+        let timeout_resp = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &timeout_reasoner, true);
+        assert!(timeout_resp.ai_unavailable, "D. AI Timeout must set ai_unavailable = true");
+        assert_eq!(timeout_resp.failure_reason, Some(AIFailureReason::Timeout));
+        // Deterministic engine is unaffected
+        let det_after_timeout = scoring::evaluate_item_context(&conn, &item_louvre.id).unwrap();
+        assert!(!det_after_timeout.existing_workspaces.is_empty());
+
+        // -------------------------------------------------------------------
+        // Edge Case E: AI Malformed Response
+        // -------------------------------------------------------------------
+        let malformed_reasoner = MalformedMockReasoner;
+        let malformed_resp = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &malformed_reasoner, true);
+        assert!(malformed_resp.ai_unavailable, "E. Malformed AI response must be caught safely");
+        assert_eq!(malformed_resp.failure_reason, Some(AIFailureReason::MalformedResponse));
+
+        // -------------------------------------------------------------------
+        // Edge Case F: AI Disabled
+        // -------------------------------------------------------------------
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_ai_reasoning = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        let disabled_resp = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &reasoner, true);
+        assert!(disabled_resp.ai_unavailable, "F. AI Disabled must be handled gracefully");
+        assert_eq!(disabled_resp.failure_reason, Some(AIFailureReason::Disabled));
+
+        // Deterministic discovery and scoring still work 100%
+        let disc = crate::context_engine::discovery::run_discovery(&conn);
+        assert!(disc.is_ok(), "Context discovery must continue operating when AI is disabled");
+
+        // Restore settings
+        let mut settings_restore = crate::db::settings::get_settings(&conn).unwrap();
+        settings_restore.enable_ai_reasoning = true;
+        crate::db::settings::update_settings(&conn, settings_restore).unwrap();
+
+        // -------------------------------------------------------------------
+        // Edge Case G: Repeated Identical Reasoning (Cache Hit)
+        // -------------------------------------------------------------------
+        // First call caches
+        let resp_g1 = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &reasoner, true);
+        // Second call should hit the cache seamlessly
+        let resp_g2 = analyze_item_context_ai_graceful(&conn, &item_louvre.id, &reasoner, true);
+        assert_eq!(resp_g1.ai_result, resp_g2.ai_result, "G. Cache hit returns identical result");
+
+        // -------------------------------------------------------------------
+        // Edge Case H: Privacy Filtering
+        // -------------------------------------------------------------------
+        let item_secret = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Secret credentials api_key=sk-1234567890abcdef1234567890abcdef and password=SuperSecretPassword123! in note",
+            Some("Credentials"),
+            r#"{"app_name":"Notes"}"#,
+        ).unwrap();
+        let secret_package = build_evidence_package(&conn, &item_secret.id).unwrap();
+        assert!(!secret_package.target_item.content_snippet.contains("sk-1234567890abcdef"), "H. API key must be scrubbed");
+        assert!(!secret_package.target_item.content_snippet.contains("SuperSecretPassword123!"), "H. Password must be scrubbed");
+        assert!(secret_package.target_item.content_snippet.contains("[API_KEY_REDACTED]") || secret_package.target_item.content_snippet.contains("[REDACTED]"));
+
+        // -------------------------------------------------------------------
+        // Edge Case I: Insufficient Evidence
+        // -------------------------------------------------------------------
+        let item_insufficient = operations::create_item(&conn, None, None, "text", "hi", None, "{}").unwrap();
+        let weak_package = build_evidence_package(&conn, &item_insufficient.id).unwrap();
+        assert!(weak_package.deterministic_assessment.is_weak_evidence, "I. Evidence assessment must mark weak evidence");
+        assert_eq!(operations::get_item(&conn, &item_insufficient.id).unwrap().workspace_id, None);
+
+        // Clean up temp database
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
 }

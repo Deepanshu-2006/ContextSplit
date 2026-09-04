@@ -3072,7 +3072,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
             }
         };
 
-        let mut item = operations::create_item(&conn, None, None, "text", "initial content", None, "{}").unwrap();
+        let item = operations::create_item(&conn, None, None, "text", "initial content", None, "{}").unwrap();
         let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.5, None, "{}").unwrap();
         crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item.id, 0.5).unwrap();
 
