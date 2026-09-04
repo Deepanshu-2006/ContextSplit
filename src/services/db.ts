@@ -323,8 +323,95 @@ export interface TemporalDecayConfig {
   grace_period_hours: number;
 }
 
+// --- AI Context Reasoning Models ---
 
+export interface TargetItemEvidence {
+  id: string;
+  item_type: string;
+  title?: string | null;
+  content_snippet: string;
+  app_name?: string | null;
+  domain?: string | null;
+  session_id?: string | null;
+  captured_at: string;
+}
 
+export interface CandidateContextEvidence {
+  context_id: string;
+  name: string;
+  context_type: "workspace" | "candidate";
+  lifecycle_state: "active" | "dormant" | "archived";
+  deterministic_score: number;
+  deterministic_confidence: number;
+  confidence_band: string;
+  evidence_factors: string[];
+  item_count: number;
+  temporal_recency_score: number;
+}
+
+export interface ItemRelationshipEvidence {
+  other_item_id: string;
+  other_item_title?: string | null;
+  relationship_type: string;
+  strength: number;
+  target_context_id?: string | null;
+  explanation: string;
+}
+
+export interface SessionEvidence {
+  session_id: string;
+  item_count: number;
+  associated_workspaces: string[];
+}
+
+export interface TemporalEvidence {
+  age_days: number;
+  recency_decay_weight: number;
+  is_recent: boolean;
+}
+
+export interface EvidenceMetadata {
+  generated_at: string;
+  engine_version: string;
+  privacy_boundary: string;
+}
+
+export interface EvidencePackage {
+  target_item: TargetItemEvidence;
+  candidate_contexts: CandidateContextEvidence[];
+  relationships: ItemRelationshipEvidence[];
+  session_context?: SessionEvidence | null;
+  temporal_context: TemporalEvidence;
+  system_metadata: EvidenceMetadata;
+}
+
+export interface AlternativeContextReasoning {
+  context_id: string;
+  context_name: string;
+  confidence: number;
+  rationale: string;
+}
+
+export interface ReasoningProviderInfo {
+  provider_id: string;
+  provider_type: string;
+  model_version: string;
+  timestamp: string;
+}
+
+export interface ContextReasoningResult {
+  recommended_context_id?: string | null;
+  recommended_context_name?: string | null;
+  confidence: number;
+  confidence_band: string;
+  reasoning_summary: string;
+  key_factors: string[];
+  alternative_interpretations: AlternativeContextReasoning[];
+  is_ambiguous: boolean;
+  suggested_action: "suggest_workspace" | "keep_inbox" | "suggest_new_context" | "review_conflict";
+  suggested_label?: string | null;
+  provider_info: ReasoningProviderInfo;
+}
 
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
@@ -559,5 +646,12 @@ export const db = {
   // Context Overview
   getContextOverview: (workspaceId: string) =>
     invoke<ContextOverview>("get_context_overview", { workspaceId }),
+
+  // AI Context Reasoning
+  analyzeItemContextAI: (itemId: string) =>
+    invoke<ContextReasoningResult>("analyze_item_context_ai", { itemId }),
+
+  getEvidencePackage: (itemId: string) =>
+    invoke<EvidencePackage>("get_evidence_package", { itemId }),
 };
 

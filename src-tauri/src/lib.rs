@@ -561,6 +561,29 @@ fn update_temporal_decay_config(
     crate::context_engine::temporal::update_temporal_decay_config(&conn, &config)
 }
 
+// ---------------------------------------------------------------------------
+// AI Context Reasoning commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn analyze_item_context_ai(
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::reasoning::ContextReasoningResult, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let reasoner = context_engine::reasoning::MockAIReasoner::new();
+    context_engine::reasoning::analyze_item_context_ai(&conn, item_id, &reasoner)
+}
+
+#[tauri::command]
+fn get_evidence_package(
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::reasoning::EvidencePackage, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::reasoning::build_evidence_package(&conn, item_id)
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -702,7 +725,10 @@ pub fn run() {
             unarchive_workspace,
             evaluate_workspace_lifecycle,
             // Context Overview
-            get_context_overview
+            get_context_overview,
+            // AI Context Reasoning
+            analyze_item_context_ai,
+            get_evidence_package
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

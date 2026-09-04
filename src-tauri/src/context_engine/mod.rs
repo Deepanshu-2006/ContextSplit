@@ -9,6 +9,7 @@ pub mod timeline;
 pub mod explanation;
 pub mod temporal;
 pub mod overview;
+pub mod reasoning;
 
 #[cfg(test)]
 pub mod workflow_tests;
