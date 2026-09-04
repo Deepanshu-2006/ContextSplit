@@ -1,6 +1,6 @@
 use super::models::{
-    AIReasoningError, AlternativeContextReasoning, ContextReasoningResult, EvidencePackage,
-    ReasoningProviderInfo,
+    AIReasoningError, AlternativeContextReasoning, ContextReasoningDecision,
+    ContextReasoningResult, EvidencePackage, ReasoningProviderInfo,
 };
 use super::traits::AIReasoner;
 
@@ -13,6 +13,7 @@ use super::traits::AIReasoner;
 /// 2. Has NO access to database connections or file I/O.
 /// 3. Does NOT invent evidence; all facts and context IDs are derived from the package.
 /// 4. Cannot mutate state, move items, create workspaces, or alter memberships.
+/// 5. Strictly validates output against the ContextReasoningResult schema before returning.
 #[derive(Debug, Default, Clone)]
 pub struct MockAIReasoner {
     pub model_name: String,
@@ -46,31 +47,31 @@ impl AIReasoner for MockAIReasoner {
         package: &EvidencePackage,
     ) -> Result<ContextReasoningResult, AIReasoningError> {
         let now = chrono::Utc::now().to_rfc3339();
-        let provider_info = ReasoningProviderInfo {
+        let provider_info = Some(ReasoningProviderInfo {
             provider_id: self.provider_id().to_string(),
             provider_type: "mock_simulation".to_string(),
             model_version: self.model_name.clone(),
             timestamp: now,
-        };
+        });
 
         // 1. Check if candidate contexts exist
         if package.candidate_contexts.is_empty() {
-            return Ok(ContextReasoningResult {
-                recommended_context_id: None,
-                recommended_context_name: None,
+            let result = ContextReasoningResult {
+                decision: ContextReasoningDecision::NoContext,
+                suggested_context_reference: None,
+                suggested_name: None,
                 confidence: 0.0,
-                confidence_band: "Low".to_string(),
-                reasoning_summary: "No candidate workspaces or context candidates match this item. Item remains in Inbox awaiting further activity signals or explicit user placement.".to_string(),
-                key_factors: vec![
+                explanation: "No candidate workspaces or context candidates match this item. Item remains in Inbox awaiting further activity signals or explicit user placement.".to_string(),
+                evidence_references: vec![
                     "Zero candidate contexts provided in the evidence package.".to_string(),
                     "No shared session, domain, or semantic associations detected.".to_string(),
                 ],
+                uncertainty_reason: Some("No candidate contexts or matching signals available in evidence package.".to_string()),
                 alternative_interpretations: Vec::new(),
-                is_ambiguous: false,
-                suggested_action: "keep_inbox".to_string(),
-                suggested_label: None,
                 provider_info,
-            });
+            };
+            result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            return Ok(result);
         }
 
         // 2. Separate active/dormant candidates from explicitly archived ones
@@ -95,25 +96,25 @@ impl AIReasoner for MockAIReasoner {
                 .iter()
                 .map(|c| format!("'{}' (archived)", c.name))
                 .collect();
-            return Ok(ContextReasoningResult {
-                recommended_context_id: None,
-                recommended_context_name: None,
+            let result = ContextReasoningResult {
+                decision: ContextReasoningDecision::NoContext,
+                suggested_context_reference: None,
+                suggested_name: None,
                 confidence: 0.0,
-                confidence_band: "Low".to_string(),
-                reasoning_summary: format!(
+                explanation: format!(
                     "Item matches candidate contexts ({}), but all matching contexts are archived by user preference. Active suggestions are suppressed.",
                     archived_names.join(", ")
                 ),
-                key_factors: vec![
+                evidence_references: vec![
                     "User lifecycle settings have archived matching contexts.".to_string(),
                     "Suppression applied to avoid surfacing inactive workspaces.".to_string(),
                 ],
+                uncertainty_reason: Some("All matching contexts are explicitly archived by user.".to_string()),
                 alternative_interpretations: Vec::new(),
-                is_ambiguous: false,
-                suggested_action: "keep_inbox".to_string(),
-                suggested_label: None,
                 provider_info,
-            });
+            };
+            result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            return Ok(result);
         }
 
         let top = &active_candidates[0];
@@ -125,23 +126,26 @@ impl AIReasoner for MockAIReasoner {
                 factors.push(format!("Top candidate '{}' scored only {:.0}%.", top.name, top.deterministic_score * 100.0));
             }
 
-            return Ok(ContextReasoningResult {
-                recommended_context_id: None,
-                recommended_context_name: None,
+            let result = ContextReasoningResult {
+                decision: ContextReasoningDecision::NoContext,
+                suggested_context_reference: None,
+                suggested_name: None,
                 confidence: top.deterministic_score,
-                confidence_band: "Low".to_string(),
-                reasoning_summary: format!(
+                explanation: format!(
                     "Weak contextual evidence observed. While '{}' showed marginal affinity ({:.0}%), the signals are insufficient to warrant a confident context suggestion.",
                     top.name,
                     top.deterministic_score * 100.0
                 ),
-                key_factors: factors,
+                evidence_references: factors,
+                uncertainty_reason: Some(format!(
+                    "Highest confidence score ({:.0}%) is below the actionable threshold of 25%.",
+                    top.deterministic_score * 100.0
+                )),
                 alternative_interpretations: Vec::new(),
-                is_ambiguous: false,
-                suggested_action: "keep_inbox".to_string(),
-                suggested_label: None,
                 provider_info,
-            });
+            };
+            result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            return Ok(result);
         }
 
         // 4. Case: Ambiguous conflict between top candidates (difference <= 0.12 and second >= 0.35)
@@ -183,25 +187,28 @@ impl AIReasoner for MockAIReasoner {
                 })
                 .collect();
 
-            return Ok(ContextReasoningResult {
-                recommended_context_id: Some(top.context_id.clone()),
-                recommended_context_name: Some(top.name.clone()),
+            let result = ContextReasoningResult {
+                decision: ContextReasoningDecision::Uncertain,
+                suggested_context_reference: Some(top.context_id.clone()),
+                suggested_name: Some(top.name.clone()),
                 confidence: avg_conf,
-                confidence_band: "Medium".to_string(),
-                reasoning_summary: format!(
+                explanation: format!(
                     "Contextual ambiguity detected: Item exhibits balanced signals between '{}' ({:.0}%) and '{}' ({:.0}%). User review recommended before confirming membership.",
                     top.name,
                     top.deterministic_score * 100.0,
                     second.name,
                     second.deterministic_score * 100.0
                 ),
-                key_factors,
+                evidence_references: key_factors,
+                uncertainty_reason: Some(format!(
+                    "Competing signals between '{}' and '{}' with score difference under 12%.",
+                    top.name, second.name
+                )),
                 alternative_interpretations: alternatives,
-                is_ambiguous: true,
-                suggested_action: "review_conflict".to_string(),
-                suggested_label: None,
                 provider_info,
-            });
+            };
+            result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            return Ok(result);
         }
 
         // 5. Case: Clear, single leading context recommendation
@@ -210,7 +217,6 @@ impl AIReasoner for MockAIReasoner {
             key_factors.push(format!("Deterministic context score is {:.0}%.", top.deterministic_score * 100.0));
         }
 
-        // Enrich with temporal context if recent
         if package.temporal_context.is_recent {
             key_factors.push(format!(
                 "Activity captured recently ({:.1} days ago), retaining high temporal relevance.",
@@ -218,9 +224,8 @@ impl AIReasoner for MockAIReasoner {
             ));
         }
 
-        // Enrich with session facts if applicable
         if let Some(sess) = &package.session_context {
-            if sess.associated_workspaces.contains(&top.context_id) {
+            if sess.associated_workspaces.contains(&top.name) || sess.associated_workspaces.contains(&top.context_id) {
                 key_factors.push(format!(
                     "Item belongs to an active session shared with {} other items in '{}'.",
                     sess.item_count, top.name
@@ -243,10 +248,10 @@ impl AIReasoner for MockAIReasoner {
             })
             .collect();
 
-        let suggested_action = if top.context_type == "workspace" {
-            "suggest_workspace".to_string()
+        let decision = if top.context_type == "workspace" {
+            ContextReasoningDecision::ExistingContext
         } else {
-            "suggest_new_context".to_string()
+            ContextReasoningDecision::NewContext
         };
 
         let summary = format!(
@@ -261,22 +266,18 @@ impl AIReasoner for MockAIReasoner {
             }
         );
 
-        Ok(ContextReasoningResult {
-            recommended_context_id: Some(top.context_id.clone()),
-            recommended_context_name: Some(top.name.clone()),
+        let result = ContextReasoningResult {
+            decision,
+            suggested_context_reference: Some(top.context_id.clone()),
+            suggested_name: Some(top.name.clone()),
             confidence: top.deterministic_score,
-            confidence_band: top.confidence_band.clone(),
-            reasoning_summary: summary,
-            key_factors,
+            explanation: summary,
+            evidence_references: key_factors,
+            uncertainty_reason: None,
             alternative_interpretations: alternatives,
-            is_ambiguous: false,
-            suggested_action,
-            suggested_label: if top.context_type == "candidate" {
-                Some(top.name.clone())
-            } else {
-                None
-            },
             provider_info,
-        })
+        };
+        result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+        Ok(result)
     }
 }

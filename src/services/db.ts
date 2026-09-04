@@ -439,18 +439,22 @@ export interface ReasoningProviderInfo {
   timestamp: string;
 }
 
+export type ContextReasoningDecision =
+  | "existing_context"
+  | "new_context"
+  | "uncertain"
+  | "no_context";
+
 export interface ContextReasoningResult {
-  recommended_context_id?: string | null;
-  recommended_context_name?: string | null;
+  decision: ContextReasoningDecision;
+  suggested_context_reference?: string | null;
+  suggested_name?: string | null;
   confidence: number;
-  confidence_band: string;
-  reasoning_summary: string;
-  key_factors: string[];
-  alternative_interpretations: AlternativeContextReasoning[];
-  is_ambiguous: boolean;
-  suggested_action: "suggest_workspace" | "keep_inbox" | "suggest_new_context" | "review_conflict";
-  suggested_label?: string | null;
-  provider_info: ReasoningProviderInfo;
+  explanation: string;
+  evidence_references: string[];
+  uncertainty_reason?: string | null;
+  provider_info?: ReasoningProviderInfo | null;
+  alternative_interpretations?: AlternativeContextReasoning[];
 }
 
 export const db = {

@@ -11,6 +11,9 @@ mod tests {
     use crate::context_engine::reasoning::mock::MockAIReasoner;
     use crate::context_engine::reasoning::models::*;
     use crate::context_engine::reasoning::traits::AIReasoner;
+    use crate::context_engine::reasoning::validator::{
+        parse_and_validate_response, validate_reasoning_result, ReasoningValidationError,
+    };
     use crate::db::{self, operations, settings::PrivacySettings};
 
     fn setup_test_db() -> (Connection, PathBuf) {
@@ -122,13 +125,12 @@ mod tests {
         let reasoner = MockAIReasoner::new();
         let result = reasoner.analyze_context(&package).unwrap();
 
-        assert_eq!(result.recommended_context_id, Some("ws_paris".to_string()));
-        assert_eq!(result.recommended_context_name, Some("Paris Trip".to_string()));
-        assert_eq!(result.suggested_action, "suggest_workspace");
-        assert!(!result.is_ambiguous);
+        assert_eq!(result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(result.suggested_context_reference, Some("ws_paris".to_string()));
+        assert_eq!(result.suggested_name, Some("Paris Trip".to_string()));
         assert!(result.confidence >= 0.85);
-        assert_eq!(result.confidence_band, "High");
-        assert!(result.reasoning_summary.contains("Paris Trip"));
+        assert!(result.explanation.contains("Paris Trip"));
+        assert_eq!(result.uncertainty_reason, None);
         assert_eq!(result.alternative_interpretations.len(), 1);
         assert_eq!(result.alternative_interpretations[0].context_name, "Work Projects");
     }
@@ -165,9 +167,10 @@ mod tests {
         let reasoner = MockAIReasoner::new();
         let result = reasoner.analyze_context(&package).unwrap();
 
-        assert!(result.is_ambiguous);
-        assert_eq!(result.suggested_action, "review_conflict");
-        assert!(result.reasoning_summary.contains("Contextual ambiguity detected"));
+        assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
+        assert!(result.suggested_context_reference.is_some());
+        assert!(result.uncertainty_reason.is_some());
+        assert!(result.explanation.contains("Contextual ambiguity detected"));
         assert_eq!(result.alternative_interpretations.len(), 1);
         assert_eq!(result.alternative_interpretations[0].context_name, "France Research");
     }
@@ -190,10 +193,10 @@ mod tests {
         let reasoner = MockAIReasoner::new();
         let result = reasoner.analyze_context(&package).unwrap();
 
-        assert_eq!(result.recommended_context_id, None);
-        assert_eq!(result.suggested_action, "keep_inbox");
-        assert!(!result.is_ambiguous);
-        assert!(result.reasoning_summary.contains("Weak contextual evidence"));
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(result.suggested_context_reference, None);
+        assert!(result.uncertainty_reason.is_some());
+        assert!(result.explanation.contains("Weak contextual evidence"));
     }
 
     #[test]
@@ -203,9 +206,10 @@ mod tests {
         let reasoner = MockAIReasoner::new();
         let result = reasoner.analyze_context(&package).unwrap();
 
-        assert_eq!(result.recommended_context_id, None);
-        assert_eq!(result.suggested_action, "keep_inbox");
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(result.suggested_context_reference, None);
         assert_eq!(result.confidence, 0.0);
+        assert!(result.uncertainty_reason.is_some());
     }
 
     #[test]
@@ -226,9 +230,10 @@ mod tests {
         let reasoner = MockAIReasoner::new();
         let result = reasoner.analyze_context(&package).unwrap();
 
-        assert_eq!(result.recommended_context_id, None);
-        assert_eq!(result.suggested_action, "keep_inbox");
-        assert!(result.reasoning_summary.contains("archived"));
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(result.suggested_context_reference, None);
+        assert!(result.explanation.contains("archived"));
+        assert!(result.uncertainty_reason.is_some());
     }
 
     #[test]
@@ -245,24 +250,24 @@ mod tests {
                 &self,
                 package: &EvidencePackage,
             ) -> Result<ContextReasoningResult, AIReasoningError> {
-                Ok(ContextReasoningResult {
-                    recommended_context_id: package.candidate_contexts.first().map(|c| c.context_id.clone()),
-                    recommended_context_name: package.candidate_contexts.first().map(|c| c.name.clone()),
+                let res = ContextReasoningResult {
+                    decision: ContextReasoningDecision::ExistingContext,
+                    suggested_context_reference: package.candidate_contexts.first().map(|c| c.context_id.clone()),
+                    suggested_name: package.candidate_contexts.first().map(|c| c.name.clone()),
                     confidence: 0.99,
-                    confidence_band: "High".to_string(),
-                    reasoning_summary: "Custom engine verified rules".to_string(),
-                    key_factors: vec!["Custom factor 1".to_string()],
+                    explanation: "Custom engine verified rules".to_string(),
+                    evidence_references: vec!["Custom factor 1".to_string()],
+                    uncertainty_reason: None,
                     alternative_interpretations: vec![],
-                    is_ambiguous: false,
-                    suggested_action: "suggest_workspace".to_string(),
-                    suggested_label: None,
-                    provider_info: ReasoningProviderInfo {
+                    provider_info: Some(ReasoningProviderInfo {
                         provider_id: self.provider_id().to_string(),
                         provider_type: "custom".to_string(),
                         model_version: "v1".to_string(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
-                    },
-                })
+                    }),
+                };
+                res.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+                Ok(res)
             }
         }
 
@@ -282,8 +287,9 @@ mod tests {
         let custom_reasoner: Box<dyn AIReasoner> = Box::new(CustomRuleReasoner);
         let result = custom_reasoner.analyze_context(&package).unwrap();
 
-        assert_eq!(result.recommended_context_id, Some("c1".to_string()));
-        assert_eq!(result.provider_info.provider_id, "custom-rule");
+        assert_eq!(result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(result.suggested_context_reference, Some("c1".to_string()));
+        assert_eq!(result.provider_info.as_ref().unwrap().provider_id, "custom-rule");
     }
 
     #[test]
@@ -362,10 +368,10 @@ mod tests {
 
         // 8. Analyze with AI reasoner
         let reasoning_result = analyze_item_context_ai(&conn, &inbox_item.id, &reasoner).unwrap();
-        assert_eq!(reasoning_result.recommended_context_id, Some(ws.id.clone()));
-        assert_eq!(reasoning_result.recommended_context_name, Some("Paris Trip".to_string()));
-        assert!(!reasoning_result.reasoning_summary.is_empty());
-        assert_eq!(reasoning_result.suggested_action, "suggest_workspace");
+        assert_eq!(reasoning_result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(reasoning_result.suggested_context_reference, Some(ws.id.clone()));
+        assert_eq!(reasoning_result.suggested_name, Some("Paris Trip".to_string()));
+        assert!(!reasoning_result.explanation.is_empty());
     }
 
     #[test]
@@ -403,7 +409,7 @@ mod tests {
 
         // Execute AI Context Reasoning
         let result = analyze_item_context_ai(&conn, &inbox_item.id, &reasoner).unwrap();
-        assert!(result.recommended_context_id.is_some());
+        assert!(result.suggested_context_reference.is_some());
 
         // Query state counts AFTER AI reasoning
         let items_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
@@ -426,10 +432,6 @@ mod tests {
         assert_eq!(inbox_item_before.content, inbox_item_after.content);
         assert_eq!(inbox_item_before.updated_at, inbox_item_after.updated_at);
     }
-
-    // =======================================================================
-    // DAY 10 PRIVACY & EXCLUSION TESTS
-    // =======================================================================
 
     #[test]
     fn test_builder_excludes_raw_embeddings() {
@@ -473,7 +475,6 @@ mod tests {
                     }
                 }
                 serde_json::Value::Array(arr) => {
-                    // No array should contain 384 numbers!
                     if arr.len() > 20 && arr.iter().all(|x| x.is_number()) {
                         panic!("Found unexpected raw vector numeric array in EvidencePackage JSON!");
                     }
@@ -514,7 +515,6 @@ mod tests {
 
         let package = EvidencePackageBuilder::default().build(&conn, &item.id).unwrap();
 
-        // Verify secrets are scrubbed from snippet
         let snippet = &package.target_item.content_snippet;
         assert!(!snippet.contains("MySuperSecretPass!"), "Passwords must be scrubbed");
         assert!(!snippet.contains("AKIAIOSFODNN7EXAMPLE"), "AWS keys must be scrubbed");
@@ -530,7 +530,6 @@ mod tests {
         let ws_relevant = operations::create_workspace(&conn, "Relevant WS").unwrap();
         let ws_unrelated = operations::create_workspace(&conn, "Unrelated WS").unwrap();
 
-        // Create 1 relevant related item
         let item_rel = operations::create_item(
             &conn,
             Some(&ws_relevant.id),
@@ -541,7 +540,6 @@ mod tests {
             "{}",
         ).unwrap();
 
-        // Create 15 completely unrelated items in Unrelated WS and Inbox
         for i in 1..=15 {
             let ws_target = if i % 2 == 0 { Some(ws_unrelated.id.as_str()) } else { None };
             operations::create_item(
@@ -555,7 +553,6 @@ mod tests {
             ).unwrap();
         }
 
-        // Create target item in Inbox
         let target_item = operations::create_item(
             &conn,
             None,
@@ -566,7 +563,6 @@ mod tests {
             "{}",
         ).unwrap();
 
-        // Link ONLY item_rel to target_item
         operations::create_item_relationship(
             &conn,
             &target_item.id,
@@ -576,17 +572,11 @@ mod tests {
             None,
         ).unwrap();
 
-        // Build EvidencePackage with max 5 items
         let builder = EvidencePackageBuilder::default().with_max_related_items(5);
         let package = builder.build(&conn, &target_item.id).unwrap();
 
-        // Assert only the single relevant item is included
         assert_eq!(package.relevant_related_items.len(), 1);
         assert_eq!(package.relevant_related_items[0].item_id, item_rel.id);
-
-        // Assert database item exclusion metric accurately tracked
-        // Total items in DB = 1 (target) + 1 (item_rel) + 15 (unrelated) = 17 items.
-        // Included = 1 + 1 = 2 items. Excluded = 15 items!
         assert_eq!(package.system_metadata.total_db_items_excluded, 15);
     }
 
@@ -605,7 +595,6 @@ mod tests {
             "{}",
         ).unwrap();
 
-        // Add context signals with internal payloads, process IDs, window IDs
         crate::context_engine::operations::create_context_signal(
             &conn,
             Some(&ws.id),
@@ -634,18 +623,14 @@ mod tests {
         ).unwrap();
 
         let package = EvidencePackageBuilder::default().build(&conn, &item.id).unwrap();
-
-        // Serialize contextual_signals to JSON
         let signals_json = serde_json::to_string(&package.contextual_signals).unwrap();
 
-        // Assert internal primary keys, process IDs, and full token URLs were stripped!
         assert!(!signals_json.contains("process_id"), "Internal process_id must be stripped");
         assert!(!signals_json.contains("99999"), "Process ID value must be stripped");
         assert!(!signals_json.contains("raw_window_id"), "Raw window handle must be stripped");
         assert!(!signals_json.contains("token=secret12345"), "Query parameter tokens in URLs must be stripped");
         assert!(!signals_json.contains("internal_tracker"), "Internal trackers must be stripped");
 
-        // Assert clean curated signals exist
         assert!(signals_json.contains("Application: Terminal"));
         assert!(signals_json.contains("Domain: github.com"));
     }
@@ -669,7 +654,6 @@ mod tests {
         let pkg1 = builder.build(&conn, &item.id).unwrap();
         let pkg2 = builder.build(&conn, &item.id).unwrap();
 
-        // Check structural equality of facts
         assert_eq!(pkg1.target_item, pkg2.target_item);
         assert_eq!(pkg1.candidate_contexts, pkg2.candidate_contexts);
         assert_eq!(pkg1.relevant_related_items, pkg2.relevant_related_items);
@@ -700,5 +684,283 @@ mod tests {
             scrub_private_data("password: myPassword123"),
             "password: [REDACTED]"
         );
+    }
+
+    // =======================================================================
+    // STRICT SCHEMA VALIDATION TESTS
+    // =======================================================================
+
+    #[test]
+    fn test_validation_valid_decisions() {
+        // 1. Valid existing_context
+        let valid_existing = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_paris".to_string()),
+            suggested_name: Some("Paris Trip".to_string()),
+            confidence: 0.85,
+            explanation: "Item has high semantic overlap with Paris Trip.".to_string(),
+            evidence_references: vec!["3 semantic matches".to_string()],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(validate_reasoning_result(&valid_existing).is_ok());
+
+        // 2. Valid new_context
+        let valid_new = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: Some("cand_fitness".to_string()),
+            suggested_name: Some("Fitness Training".to_string()),
+            confidence: 0.75,
+            explanation: "Items form an independent workout activity cluster.".to_string(),
+            evidence_references: vec!["Shared workout session".to_string()],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(validate_reasoning_result(&valid_new).is_ok());
+
+        // 3. Valid uncertain
+        let valid_uncertain = ContextReasoningResult {
+            decision: ContextReasoningDecision::Uncertain,
+            suggested_context_reference: Some("ws_work".to_string()),
+            suggested_name: Some("Work".to_string()),
+            confidence: 0.50,
+            explanation: "Competing signals between Work and Personal.".to_string(),
+            evidence_references: vec!["Work email domain".to_string(), "Personal note content".to_string()],
+            uncertainty_reason: Some("Signals conflict between two distinct workspaces.".to_string()),
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(validate_reasoning_result(&valid_uncertain).is_ok());
+
+        // 4. Valid no_context
+        let valid_no_context = ContextReasoningResult {
+            decision: ContextReasoningDecision::NoContext,
+            suggested_context_reference: None,
+            suggested_name: None,
+            confidence: 0.10,
+            explanation: "Zero contextual signals detected; item remains in Inbox.".to_string(),
+            evidence_references: vec!["No candidate contexts".to_string()],
+            uncertainty_reason: Some("Insufficient evidence for association.".to_string()),
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(validate_reasoning_result(&valid_no_context).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_invalid_confidence() {
+        let mut res = ContextReasoningResult {
+            decision: ContextReasoningDecision::NoContext,
+            suggested_context_reference: None,
+            suggested_name: None,
+            confidence: 1.5, // > 1.0 invalid!
+            explanation: "Explanation".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::InvalidConfidence(_))
+        ));
+
+        res.confidence = -0.1; // < 0.0 invalid!
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::InvalidConfidence(_))
+        ));
+
+        res.confidence = f64::NAN; // NaN invalid!
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::InvalidConfidence(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_missing_context_reference_for_existing_context() {
+        let res = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: None, // Missing!
+            suggested_name: Some("Workspace".to_string()),
+            confidence: 0.8,
+            explanation: "Valid explanation".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::MissingContextReference(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_missing_suggested_name_for_new_context() {
+        let res = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: Some("cand_1".to_string()),
+            suggested_name: None, // Missing!
+            confidence: 0.8,
+            explanation: "Valid explanation".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::MissingSuggestedName(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_missing_uncertainty_reason_for_uncertain() {
+        let res = ContextReasoningResult {
+            decision: ContextReasoningDecision::Uncertain,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Workspace".to_string()),
+            confidence: 0.5,
+            explanation: "Valid explanation".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None, // Missing for uncertain!
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::MissingUncertaintyReason(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_empty_explanation() {
+        let res = ContextReasoningResult {
+            decision: ContextReasoningDecision::NoContext,
+            suggested_context_reference: None,
+            suggested_name: None,
+            confidence: 0.1,
+            explanation: "   ".to_string(), // Empty whitespace!
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::EmptyExplanation(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_executable_instructions() {
+        // 1. SQL Injection in explanation
+        let res_sql = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Workspace".to_string()),
+            confidence: 0.9,
+            explanation: "I recommend DROP TABLE items; to clean up state.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res_sql),
+            Err(ReasoningValidationError::ExecutableInstructionsDetected(_))
+        ));
+
+        // 2. Destructive shell command in suggested_name
+        let res_shell = ContextReasoningResult {
+            decision: ContextReasoningDecision::NewContext,
+            suggested_context_reference: Some("cand_1".to_string()),
+            suggested_name: Some("Project rm -rf /".to_string()),
+            confidence: 0.8,
+            explanation: "New project discovered.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res_shell),
+            Err(ReasoningValidationError::ExecutableInstructionsDetected(_))
+        ));
+
+        // 3. HTML/Script tag in evidence reference
+        let res_script = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Workspace".to_string()),
+            confidence: 0.8,
+            explanation: "Valid explanation".to_string(),
+            evidence_references: vec!["<script>alert('pwn')</script>".to_string()],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res_script),
+            Err(ReasoningValidationError::ExecutableInstructionsDetected(_))
+        ));
+
+        // 4. Programmatic execution call (eval)
+        let res_eval = ContextReasoningResult {
+            decision: ContextReasoningDecision::Uncertain,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Workspace".to_string()),
+            confidence: 0.5,
+            explanation: "Run eval(payload) to decide".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: Some("Conflicting".to_string()),
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+        assert!(matches!(
+            validate_reasoning_result(&res_eval),
+            Err(ReasoningValidationError::ExecutableInstructionsDetected(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_and_validate_response_json() {
+        // Valid JSON string
+        let valid_json = r#"{
+            "decision": "existing_context",
+            "suggested_context_reference": "ws_123",
+            "suggested_name": "Project Apollo",
+            "confidence": 0.88,
+            "explanation": "High correlation with Apollo project documents.",
+            "evidence_references": ["Shared session", "Common domain"],
+            "uncertainty_reason": null
+        }"#;
+        let parsed = parse_and_validate_response(valid_json).unwrap();
+        assert_eq!(parsed.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(parsed.suggested_context_reference, Some("ws_123".to_string()));
+
+        // Malformed JSON string
+        let malformed_json = r#"{ "decision": "existing_context", "#;
+        assert!(matches!(
+            parse_and_validate_response(malformed_json),
+            Err(ReasoningValidationError::MalformedJson(_))
+        ));
+
+        // Unknown decision variant
+        let unknown_decision = r#"{
+            "decision": "destroy_all",
+            "suggested_context_reference": "ws_1",
+            "confidence": 0.5,
+            "explanation": "Unknown variant",
+            "evidence_references": []
+        }"#;
+        assert!(matches!(
+            parse_and_validate_response(unknown_decision),
+            Err(ReasoningValidationError::MalformedJson(_))
+        ));
     }
 }

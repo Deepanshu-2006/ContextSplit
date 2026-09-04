@@ -144,23 +144,70 @@ pub struct EvidenceMetadata {
     pub privacy_boundary: String,
 }
 
-/// Structured interpretation returned by the AI reasoning layer.
-/// The AI layer provides an interpretation and advice, but cannot directly
-/// modify items, memberships, or workspaces.
+/// Explicit decision categories for ContextReasoningResult.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextReasoningDecision {
+    ExistingContext,
+    NewContext,
+    Uncertain,
+    NoContext,
+}
+
+impl std::fmt::Display for ContextReasoningDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextReasoningDecision::ExistingContext => write!(f, "existing_context"),
+            ContextReasoningDecision::NewContext => write!(f, "new_context"),
+            ContextReasoningDecision::Uncertain => write!(f, "uncertain"),
+            ContextReasoningDecision::NoContext => write!(f, "no_context"),
+        }
+    }
+}
+
+/// Strict interpretation returned by the AI reasoning layer.
+///
+/// CRITICAL ARCHITECTURAL RULES:
+/// 1. Schema must be validated before use.
+/// 2. Must never contain executable code, SQL commands, or script tags.
+/// 3. Must not directly mutate database records or application state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextReasoningResult {
-    pub recommended_context_id: Option<String>,
-    pub recommended_context_name: Option<String>,
+    /// Categorical decision: "existing_context" | "new_context" | "uncertain" | "no_context"
+    pub decision: ContextReasoningDecision,
+
+    /// Reference to an existing workspace ID or candidate ID (required if decision == existing_context).
+    pub suggested_context_reference: Option<String>,
+
+    /// Suggested human-readable name (required if decision == new_context; optional if existing_context).
+    pub suggested_name: Option<String>,
+
+    /// Normalized confidence score strictly in range [0.0, 1.0].
     pub confidence: f64,
-    pub confidence_band: String,
-    pub reasoning_summary: String,
-    pub key_factors: Vec<String>,
+
+    /// Human-readable explanation of why this decision was made.
+    pub explanation: String,
+
+    /// Specific evidence items or factors grounded in the EvidencePackage.
+    pub evidence_references: Vec<String>,
+
+    /// Explicit rationale when the decision is uncertain or no_context.
+    pub uncertainty_reason: Option<String>,
+
+    /// Optional provider information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_info: Option<ReasoningProviderInfo>,
+
+    /// Optional alternative context evaluations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternative_interpretations: Vec<AlternativeContextReasoning>,
-    pub is_ambiguous: bool,
-    /// "suggest_workspace" | "keep_inbox" | "suggest_new_context" | "review_conflict"
-    pub suggested_action: String,
-    pub suggested_label: Option<String>,
-    pub provider_info: ReasoningProviderInfo,
+}
+
+impl ContextReasoningResult {
+    /// Validates this result against the strict schema.
+    pub fn validate(&self) -> Result<(), super::validator::ReasoningValidationError> {
+        super::validator::validate_reasoning_result(self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +231,7 @@ pub enum AIReasoningError {
     ProviderUnavailable(String),
     InvalidEvidence(String),
     InferenceFailed(String),
+    InvalidResponse(String),
 }
 
 impl std::fmt::Display for AIReasoningError {
@@ -192,6 +240,7 @@ impl std::fmt::Display for AIReasoningError {
             AIReasoningError::ProviderUnavailable(msg) => write!(f, "AI provider unavailable: {}", msg),
             AIReasoningError::InvalidEvidence(msg) => write!(f, "Invalid evidence package: {}", msg),
             AIReasoningError::InferenceFailed(msg) => write!(f, "AI reasoning inference failed: {}", msg),
+            AIReasoningError::InvalidResponse(msg) => write!(f, "AI response failed schema validation: {}", msg),
         }
     }
 }
