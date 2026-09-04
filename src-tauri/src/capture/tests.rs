@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
 
@@ -55,17 +56,184 @@ mod tests {
     }
 
     // =======================================================================
-    // 1. Validation Tests (CaptureValidator)
+    // 1. Normalized CaptureEvent Model & Enums Tests
+    // =======================================================================
+
+    #[test]
+    fn test_capture_event_model_fields_and_serialization() {
+        let event_id = "evt_test_123456".to_string();
+        let timestamp = "2026-09-04T12:00:00Z".to_string();
+
+        let source_metadata = SourceMetadata {
+            window_title: Some("Paris Hotel Booking - Safari".to_string()),
+            process_name: Some("Safari".to_string()),
+            bundle_identifier: Some("com.apple.Safari".to_string()),
+            url_origin: Some("https://booking.com/paris-hotel".to_string()),
+            extra: json!({ "tab_index": 2 }),
+        };
+
+        let event = CaptureEvent {
+            event_id: event_id.clone(),
+            capture_type: CaptureType::Clipboard,
+            timestamp: timestamp.clone(),
+            content_type: ContentType::Url,
+            content: "https://booking.com/paris-hotel".to_string(),
+            source_application: Some("Safari".to_string()),
+            source_metadata: source_metadata.clone(),
+            platform: PlatformType::MacOS,
+            metadata: json!({
+                "domain": "booking.com",
+                "title": "Paris Hotel Booking",
+                "size": 31
+            }),
+        };
+
+        // Check fields
+        assert_eq!(event.event_id, event_id);
+        assert_eq!(event.capture_type, CaptureType::Clipboard);
+        assert_eq!(event.timestamp, timestamp);
+        assert_eq!(event.content_type, ContentType::Url);
+        assert_eq!(event.content, "https://booking.com/paris-hotel");
+        assert_eq!(event.source_application.as_deref(), Some("Safari"));
+        assert_eq!(event.source_metadata.window_title.as_deref(), Some("Paris Hotel Booking - Safari"));
+        assert_eq!(event.platform, PlatformType::MacOS);
+        assert_eq!(event.item_type_str(), "url");
+        assert_eq!(event.domain().as_deref(), Some("booking.com"));
+
+        // Serialization roundtrip
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(serialized.contains("event_id"));
+        assert!(serialized.contains("clipboard"));
+        assert!(serialized.contains("url"));
+        assert!(serialized.contains("source_metadata"));
+
+        let deserialized: CaptureEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, event);
+    }
+
+    #[test]
+    fn test_capture_types_and_extensibility() {
+        // Core standard types
+        assert_eq!(CaptureType::from("clipboard"), CaptureType::Clipboard);
+        assert_eq!(CaptureType::from("drag_drop"), CaptureType::DragDrop);
+        assert_eq!(CaptureType::from("drag_and_drop"), CaptureType::DragDrop);
+        assert_eq!(CaptureType::from("manual"), CaptureType::Manual);
+
+        // Future extensibility
+        let future_ext = CaptureType::from("future_browser_extension_v2");
+        assert_eq!(future_ext, CaptureType::Custom("future_browser_extension_v2".to_string()));
+        assert_eq!(future_ext.to_string(), "future_browser_extension_v2");
+
+        // Serde serialization of custom capture types
+        let json_val = serde_json::to_string(&future_ext).unwrap();
+        assert_eq!(json_val, "\"future_browser_extension_v2\"");
+    }
+
+    #[test]
+    fn test_content_types_and_extensibility() {
+        // Standard content types
+        assert_eq!(ContentType::from("plain_text"), ContentType::PlainText);
+        assert_eq!(ContentType::from("text"), ContentType::PlainText);
+        assert_eq!(ContentType::from("url"), ContentType::Url);
+        assert_eq!(ContentType::from("uri"), ContentType::Url);
+        assert_eq!(ContentType::from("image"), ContentType::Image);
+        assert_eq!(ContentType::from("file"), ContentType::File);
+        assert_eq!(ContentType::from("rich_text"), ContentType::RichText);
+        assert_eq!(ContentType::from("rtf"), ContentType::RichText);
+        assert_eq!(ContentType::from("html"), ContentType::RichText);
+        assert_eq!(ContentType::from("unknown"), ContentType::Unknown);
+
+        // Custom future content types
+        let custom_type = ContentType::from("code_snippet_rust");
+        assert_eq!(custom_type, ContentType::Custom("code_snippet_rust".to_string()));
+        assert_eq!(custom_type.to_string(), "code_snippet_rust");
+    }
+
+    #[test]
+    fn test_capture_event_validation() {
+        // Valid Event
+        let valid_event = CaptureEvent::new(
+            CaptureType::Manual,
+            ContentType::PlainText,
+            "Valid note content for ContextSplit",
+            PlatformType::MacOS,
+        );
+        assert!(valid_event.validate().is_ok());
+
+        // Empty content fails validation
+        let mut empty_event = valid_event.clone();
+        empty_event.content = "   ".to_string();
+        assert_eq!(empty_event.validate(), Err(CaptureError::EmptyContent));
+
+        // Invalid timestamp fails validation
+        let mut bad_timestamp_event = valid_event.clone();
+        bad_timestamp_event.timestamp = "invalid-date-format".to_string();
+        assert!(matches!(
+            bad_timestamp_event.validate(),
+            Err(CaptureError::ProcessingError(_))
+        ));
+
+        // Null bytes in event_id fail validation
+        let mut null_id_event = valid_event.clone();
+        null_id_event.event_id = "evt_\0bad".to_string();
+        assert!(matches!(
+            null_id_event.validate(),
+            Err(CaptureError::ProcessingError(_))
+        ));
+
+        // Invalid URL content type validation
+        let mut bad_url_event = valid_event.clone();
+        bad_url_event.content_type = ContentType::Url;
+        bad_url_event.content = "ftp://invalid-url.com".to_string();
+        assert!(matches!(
+            bad_url_event.validate(),
+            Err(CaptureError::InvalidUrl(_))
+        ));
+    }
+
+    #[test]
+    fn test_platform_decoupling() {
+        let mac_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "macOS text",
+            PlatformType::MacOS,
+        );
+        let win_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Windows text",
+            PlatformType::Windows,
+        );
+        let generic_event = CaptureEvent::new(
+            CaptureType::Manual,
+            ContentType::PlainText,
+            "Generic text",
+            PlatformType::Generic,
+        );
+
+        assert_eq!(mac_event.platform, PlatformType::MacOS);
+        assert_eq!(win_event.platform, PlatformType::Windows);
+        assert_eq!(generic_event.platform, PlatformType::Generic);
+
+        // All platforms share identical validation and processing schema
+        assert!(mac_event.validate().is_ok());
+        assert!(win_event.validate().is_ok());
+        assert!(generic_event.validate().is_ok());
+    }
+
+    // =======================================================================
+    // 2. Validation Tests (CaptureValidator)
     // =======================================================================
 
     #[test]
     fn test_validator_rejects_empty_content() {
         let validator = CaptureValidator::new();
 
-        let empty_payload = RawCapturePayload::new("", CaptureMethod::Manual);
+        let empty_payload = RawCapturePayload::new("", CaptureType::Manual);
         assert_eq!(validator.validate(&empty_payload), Err(CaptureError::EmptyContent));
 
-        let whitespace_payload = RawCapturePayload::new("   \n\t  ", CaptureMethod::Clipboard);
+        let whitespace_payload = RawCapturePayload::new("   \n\t  ", CaptureType::Clipboard);
         assert_eq!(validator.validate(&whitespace_payload), Err(CaptureError::EmptyContent));
     }
 
@@ -73,11 +241,11 @@ mod tests {
     fn test_validator_enforces_payload_size_limits() {
         let validator = CaptureValidator::with_limits(50, 100);
 
-        let valid_payload = RawCapturePayload::new("Hello World", CaptureMethod::Manual);
+        let valid_payload = RawCapturePayload::new("Hello World", CaptureType::Manual);
         assert!(validator.validate(&valid_payload).is_ok());
 
         let oversized_text = "A".repeat(100);
-        let invalid_payload = RawCapturePayload::new(oversized_text, CaptureMethod::Manual);
+        let invalid_payload = RawCapturePayload::new(oversized_text, CaptureType::Manual);
         assert!(matches!(
             validator.validate(&invalid_payload),
             Err(CaptureError::PayloadTooLarge { .. })
@@ -88,13 +256,13 @@ mod tests {
     fn test_validator_rejects_null_bytes() {
         let validator = CaptureValidator::new();
 
-        let null_content = RawCapturePayload::new("hello\0world", CaptureMethod::Manual);
+        let null_content = RawCapturePayload::new("hello\0world", CaptureType::Manual);
         assert!(matches!(
             validator.validate(&null_content),
             Err(CaptureError::ProcessingError(_))
         ));
 
-        let mut null_title = RawCapturePayload::new("valid content", CaptureMethod::Manual);
+        let mut null_title = RawCapturePayload::new("valid content", CaptureType::Manual);
         null_title.title = Some("invalid\0title".to_string());
         assert!(matches!(
             validator.validate(&null_title),
@@ -125,7 +293,7 @@ mod tests {
     }
 
     // =======================================================================
-    // 2. Normalization Tests (CaptureNormalizer)
+    // 3. Normalization Tests (CaptureNormalizer)
     // =======================================================================
 
     #[test]
@@ -133,15 +301,15 @@ mod tests {
         let normalizer = CaptureNormalizer::new();
         let payload = RawCapturePayload::new(
             "   First Line Title\r\nSecond line with content.   \r\n\r\n",
-            CaptureMethod::Manual,
+            CaptureType::Manual,
         );
 
         let event = normalizer.normalize(&payload).unwrap();
-        assert_eq!(event.item_type, "text");
-        assert_eq!(event.title.as_deref(), Some("First Line Title"));
+        assert_eq!(event.content_type, ContentType::PlainText);
+        assert_eq!(event.title().as_deref(), Some("First Line Title"));
         assert!(!event.content.contains("\r\n"));
         assert!(event.content.contains('\n'));
-        assert_eq!(event.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(event.mime_type().as_deref(), Some("text/plain"));
     }
 
     #[test]
@@ -149,15 +317,15 @@ mod tests {
         let normalizer = CaptureNormalizer::new();
         let payload = RawCapturePayload::new(
             "https://www.booking.com/hotel/fr/le-marais.html?ref=123",
-            CaptureMethod::Clipboard,
+            CaptureType::Clipboard,
         );
 
         let event = normalizer.normalize(&payload).unwrap();
-        assert_eq!(event.item_type, "url");
-        assert_eq!(event.domain.as_deref(), Some("booking.com"));
-        assert_eq!(event.title.as_deref(), Some("Link from Booking.com"));
-        assert_eq!(event.mime_type.as_deref(), Some("text/uri-list"));
-        assert!(event.original_url.is_some());
+        assert_eq!(event.content_type, ContentType::Url);
+        assert_eq!(event.domain().as_deref(), Some("booking.com"));
+        assert_eq!(event.title().as_deref(), Some("Link from Booking.com"));
+        assert_eq!(event.mime_type().as_deref(), Some("text/uri-list"));
+        assert!(event.source_metadata.url_origin.is_some());
     }
 
     #[test]
@@ -165,15 +333,15 @@ mod tests {
         let normalizer = CaptureNormalizer::new();
         let mut payload = RawCapturePayload::new(
             "/Users/deepanshukhatri/Documents/Trip_Itinerary.pdf",
-            CaptureMethod::DragAndDrop,
+            CaptureType::DragDrop,
         );
         payload.file_paths = vec!["/Users/deepanshukhatri/Documents/Trip_Itinerary.pdf".to_string()];
 
         let event = normalizer.normalize(&payload).unwrap();
-        assert_eq!(event.item_type, "file");
-        assert_eq!(event.filename.as_deref(), Some("Trip_Itinerary.pdf"));
-        assert_eq!(event.title.as_deref(), Some("Trip_Itinerary.pdf"));
-        assert_eq!(event.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(event.content_type, ContentType::File);
+        assert_eq!(event.filename().as_deref(), Some("Trip_Itinerary.pdf"));
+        assert_eq!(event.title().as_deref(), Some("Trip_Itinerary.pdf"));
+        assert_eq!(event.mime_type().as_deref(), Some("application/pdf"));
     }
 
     #[test]
@@ -181,17 +349,17 @@ mod tests {
         let normalizer = CaptureNormalizer::new();
         let payload = RawCapturePayload::new(
             "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-            CaptureMethod::Clipboard,
+            CaptureType::Clipboard,
         );
 
         let event = normalizer.normalize(&payload).unwrap();
-        assert_eq!(event.item_type, "image");
-        assert_eq!(event.mime_type.as_deref(), Some("image/png"));
-        assert_eq!(event.title.as_deref(), Some("Captured Image"));
+        assert_eq!(event.content_type, ContentType::Image);
+        assert_eq!(event.mime_type().as_deref(), Some("image/png"));
+        assert_eq!(event.title().as_deref(), Some("Captured Image"));
     }
 
     // =======================================================================
-    // 3. Platform Adapter Tests (macOS & Windows)
+    // 4. Platform Adapter Tests (macOS & Windows)
     // =======================================================================
 
     #[test]
@@ -212,7 +380,7 @@ mod tests {
 
         let raw = adapter.convert_clipboard_input(input).unwrap();
         assert_eq!(raw.platform, PlatformType::MacOS);
-        assert_eq!(raw.source_method, CaptureMethod::Clipboard);
+        assert_eq!(raw.source_method, CaptureType::Clipboard);
         assert_eq!(raw.data_type.as_deref(), Some("file"));
         assert_eq!(raw.content, "/Users/john/Documents/Project Report.pdf");
         assert_eq!(raw.app_name.as_deref(), Some("Finder"));
@@ -234,7 +402,7 @@ mod tests {
 
         let raw = adapter.convert_drag_drop_input(input).unwrap();
         assert_eq!(raw.platform, PlatformType::Windows);
-        assert_eq!(raw.source_method, CaptureMethod::DragAndDrop);
+        assert_eq!(raw.source_method, CaptureType::DragDrop);
         assert_eq!(raw.data_type.as_deref(), Some("file"));
         assert_eq!(raw.content, "C:\\Users\\John\\Documents\\Spreadsheet.xlsx");
         assert_eq!(raw.workspace_id.as_deref(), Some("ws_finance_123"));
@@ -265,11 +433,11 @@ mod tests {
         let raw = mock_adapter.convert_manual_input(manual_input).unwrap();
         assert_eq!(raw.app_name.as_deref(), Some("Safari"));
         assert_eq!(raw.window_title.as_deref(), Some("Paris Flights - AirFrance"));
-        assert_eq!(raw.source_method, CaptureMethod::Manual);
+        assert_eq!(raw.source_method, CaptureType::Manual);
     }
 
     // =======================================================================
-    // 4. CaptureCore 5-Step Pipeline Integration Tests
+    // 5. CaptureCore 5-Step Pipeline Integration Tests
     // =======================================================================
 
     #[test]
@@ -315,7 +483,7 @@ mod tests {
         // -------------------------------------------------------------------
         let raw_payload = RawCapturePayload::new(
             "https://booking.com/eiffel-tower-tour-tickets",
-            CaptureMethod::Clipboard,
+            CaptureType::Clipboard,
         )
         .with_platform(PlatformType::MacOS)
         .with_app_info(
@@ -375,7 +543,7 @@ mod tests {
 
         let raw = RawCapturePayload::new(
             "https://booking.com/paris-restaurant",
-            CaptureMethod::Manual,
+            CaptureType::Manual,
         )
         .with_app_info(
             Some("Safari".to_string()),
@@ -400,7 +568,7 @@ mod tests {
         let core = CaptureCore::new();
 
         // Invalid empty input
-        let empty_payload = RawCapturePayload::new("   ", CaptureMethod::Clipboard);
+        let empty_payload = RawCapturePayload::new("   ", CaptureType::Clipboard);
         let err = core.process_headless(&conn, Some(&engine), empty_payload).unwrap_err();
         assert_eq!(err, CaptureError::EmptyContent);
 
