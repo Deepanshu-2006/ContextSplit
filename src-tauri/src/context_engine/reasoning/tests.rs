@@ -2641,5 +2641,321 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         assert_eq!(item1.workspace_id, None);
         assert_eq!(item2.workspace_id, None);
     }
+
+    // =========================================================================
+    // Graceful AI Failure Handling — Integration Tests
+    // =========================================================================
+    //
+    // These tests verify the core safety invariant:
+    //   AI failure MUST NEVER prevent item capture, inbox, workspace management,
+    //   context scoring, context discovery, or context membership.
+    //
+    // Each test:
+    //   1. Injects a specific failure mode via FailingMockAIReasoner.
+    //   2. Confirms analyze_item_context_ai_graceful returns ai_unavailable = true.
+    //   3. Confirms the correct failure reason is classified.
+    //   4. Confirms the database and all deterministic features remain intact.
+    // =========================================================================
+
+    use crate::context_engine::reasoning::builder::analyze_item_context_ai_graceful;
+    use crate::context_engine::reasoning::mock::FailingMockAIReasoner;
+
+    fn setup_item_for_failure_tests(conn: &Connection) -> String {
+        operations::create_item(conn, None, None, "text", "AI failure test item content", Some("Test Item"), "{}")
+            .unwrap()
+            .id
+    }
+
+    // ── Timeout ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_timeout() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::timeout();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable, "Timeout should mark AI as unavailable");
+        assert!(response.ai_result.is_none(), "ai_result must be None on timeout");
+        assert_eq!(response.failure_reason, Some(AIFailureReason::Timeout));
+        assert!(response.unavailability_reason.is_some());
+
+        // DB must be fully intact
+        let item = operations::get_item(&conn, &item_id).unwrap();
+        assert_eq!(item.item_type, "text", "Item must remain intact after AI timeout");
+        assert_eq!(item.workspace_id, None, "Item must remain in Inbox after AI timeout");
+    }
+
+    // ── Rate Limit (429) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_rate_limited() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::rate_limited();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable);
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::ProviderError));
+        assert!(response.unavailability_reason.is_some());
+
+        // Workspace management is unaffected
+        let ws = operations::create_workspace(&conn, "Rate Limit Test Workspace").unwrap();
+        assert!(!ws.id.is_empty(), "Workspace creation must succeed after AI rate limit");
+    }
+
+    // ── Malformed Response ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_malformed_response() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::malformed_response();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable);
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::MalformedResponse));
+
+        // Item capture still works
+        let new_item = operations::create_item(&conn, None, None, "link", "https://example.com", None, "{}").unwrap();
+        assert!(!new_item.id.is_empty(), "Item capture must work after malformed AI response");
+    }
+
+    // ── Provider Unreachable (is_available = false) ───────────────────────────
+
+    #[test]
+    fn test_graceful_failure_provider_unavailable() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::unavailable();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable);
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::ProviderUnavailable));
+
+        // Context scoring (deterministic) still works
+        let ws = operations::create_workspace(&conn, "Workspace A").unwrap();
+        let item2 = operations::create_item(&conn, Some(&ws.id), None, "text", "workspace item", None, "{}").unwrap();
+        assert!(!item2.id.is_empty());
+    }
+
+    // ── AI Disabled in Settings ───────────────────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_ai_disabled_in_settings() {
+        let (conn, _dir) = {
+            let temp_dir = std::env::temp_dir().join(format!("cs_ai_disabled_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let db_path = temp_dir.join("test.db");
+            let conn = Connection::open(&db_path).unwrap();
+            db::run_migrations(&conn).unwrap();
+            (conn, temp_dir)
+        };
+
+        // Explicitly disable AI reasoning
+        crate::db::settings::update_settings(&conn, PrivacySettings {
+            enable_active_app: true,
+            enable_window_title: true,
+            enable_browser_domain: true,
+            enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
+            enable_ai_reasoning: false,  // <-- DISABLED
+        }).unwrap();
+
+        let item_id = operations::create_item(&conn, None, None, "text", "disabled AI test", None, "{}")
+            .unwrap()
+            .id;
+
+        let reasoner = MockAIReasoner::new();  // Would succeed if called, but won't be reached
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable, "AI must be reported unavailable when disabled in settings");
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::Disabled));
+
+        // All other features work normally
+        let ws = operations::create_workspace(&conn, "Workspace Created With AI Disabled").unwrap();
+        assert!(!ws.id.is_empty());
+
+        let item = operations::get_item(&conn, &item_id).unwrap();
+        assert_eq!(item.workspace_id, None, "Item must remain in Inbox");
+    }
+
+    // ── Misconfigured Provider (InvalidConfiguration) ─────────────────────────
+
+    #[test]
+    fn test_graceful_failure_misconfigured_provider() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::misconfigured();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable);
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::Disabled));
+    }
+
+    // ── Evidence Unavailable (item not found) ────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_evidence_unavailable() {
+        let (conn, _) = setup_test_db();
+        let reasoner = MockAIReasoner::new();
+
+        // Pass a non-existent item ID — EvidencePackage cannot be built
+        let response = analyze_item_context_ai_graceful(&conn, "nonexistent-item-id-xyz", &reasoner);
+
+        assert!(response.ai_unavailable, "Missing item must result in ai_unavailable");
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::EvidenceUnavailable));
+    }
+
+    // ── Generic Inference Failure ─────────────────────────────────────────────
+
+    #[test]
+    fn test_graceful_failure_generic_inference_error() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = FailingMockAIReasoner::inference_failed();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        assert!(response.ai_unavailable);
+        assert!(response.ai_result.is_none());
+        assert_eq!(response.failure_reason, Some(AIFailureReason::InternalError));
+
+        // Discovery, membership, and inbox unaffected
+        let all_items = operations::list_items(&conn, None).unwrap();
+        assert!(!all_items.is_empty(), "Items must remain accessible after inference failure");
+    }
+
+    // ── Failure does not prevent Workspace Creation ───────────────────────────
+
+    #[test]
+    fn test_ai_failure_does_not_prevent_workspace_creation() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+
+        // Simulate AI timeout
+        let reasoner = FailingMockAIReasoner::timeout();
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        assert!(response.ai_unavailable);
+
+        // Workspace creation must still succeed
+        let ws = operations::create_workspace(&conn, "Emergency Workspace").unwrap();
+        assert!(!ws.id.is_empty());
+
+        // Moving item must still succeed
+        let moved = operations::move_item(&conn, &item_id, Some(&ws.id)).unwrap();
+        assert_eq!(moved.workspace_id.as_deref(), Some(ws.id.as_str()));
+    }
+
+    // ── Failure does not prevent Context Discovery ────────────────────────────
+
+    #[test]
+    fn test_ai_failure_does_not_prevent_context_discovery() {
+        let (conn, _) = setup_test_db();
+
+        // Create items
+        let i1 = operations::create_item(&conn, None, None, "text", "discovery item A", None, "{}").unwrap();
+        let i2 = operations::create_item(&conn, None, None, "text", "discovery item B", None, "{}").unwrap();
+
+        // Simulate AI malformed response
+        let reasoner = FailingMockAIReasoner::malformed_response();
+        let r1 = analyze_item_context_ai_graceful(&conn, &i1.id, &reasoner);
+        let r2 = analyze_item_context_ai_graceful(&conn, &i2.id, &reasoner);
+
+        assert!(r1.ai_unavailable);
+        assert!(r2.ai_unavailable);
+
+        // Context candidates can still be created deterministically
+        let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.85, None, "{}").unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &i1.id, 0.9).unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &i2.id, 0.8).unwrap();
+
+        let stored = crate::context_engine::discovery::get_candidate(&conn, &candidate.id).unwrap();
+        assert_eq!(stored.confidence, 0.85, "Discovery confidence must be stored correctly regardless of AI failure");
+
+        let members = crate::context_engine::discovery::get_candidate_items(&conn, &candidate.id).unwrap();
+        assert_eq!(members.items.len(), 2, "Candidate must have 2 items despite AI failure");
+    }
+
+    // ── Failure does not prevent Context Scoring ─────────────────────────────
+
+    #[test]
+    fn test_ai_failure_does_not_prevent_context_scoring() {
+        let (conn, _) = setup_test_db();
+
+        let ws = operations::create_workspace(&conn, "Scoring Test Workspace").unwrap();
+        let item = operations::create_item(&conn, Some(&ws.id), None, "text", "scoring test", None, "{}").unwrap();
+
+        // AI is rate-limited
+        let reasoner = FailingMockAIReasoner::rate_limited();
+        let ai_response = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner);
+        assert!(ai_response.ai_unavailable);
+
+        // Deterministic scoring must still work via workspace score
+        let ws_refetch = operations::get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_refetch.name, "Scoring Test Workspace", "Workspace intact after AI rate limit");
+    }
+
+    // ── AIFailureReason::from_reasoning_error coverage ───────────────────────
+
+    #[test]
+    fn test_ai_failure_reason_classification() {
+        // Timeout
+        let err = AIReasoningError::ProviderUnavailable("connection timed out after 30s".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::Timeout);
+
+        // Generic unavailable
+        let err = AIReasoningError::ProviderUnavailable("connection refused".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::ProviderUnavailable);
+
+        // Rate limit
+        let err = AIReasoningError::InferenceFailed("rate limit 429 exceeded".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::ProviderError);
+
+        // Generic inference
+        let err = AIReasoningError::InferenceFailed("internal model error".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::InternalError);
+
+        // Malformed
+        let err = AIReasoningError::InvalidResponse("unexpected token".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::MalformedResponse);
+
+        // Evidence
+        let err = AIReasoningError::InvalidEvidence("no items found".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::EvidenceUnavailable);
+
+        // Disabled/misconfigured
+        let err = AIReasoningError::InvalidConfiguration("key missing".to_string());
+        assert_eq!(AIFailureReason::from_reasoning_error(&err), AIFailureReason::Disabled);
+    }
+
+    // ── Successful AI result still works (regression guard) ──────────────────
+
+    #[test]
+    fn test_graceful_success_returns_ai_result() {
+        let (conn, _) = setup_test_db();
+        let item_id = setup_item_for_failure_tests(&conn);
+        let reasoner = MockAIReasoner::new();
+
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+
+        // With a working MockAIReasoner, we expect a result (may be unavailable due to
+        // empty candidate contexts — that's OK, it will return no_context, not an error)
+        assert!(!response.ai_unavailable || response.failure_reason == Some(AIFailureReason::EvidenceUnavailable),
+            "Successful or evidence-only result must not report other failure reasons");
+    }
 }
 

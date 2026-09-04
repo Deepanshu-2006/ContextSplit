@@ -463,3 +463,106 @@ impl AIReasoner for MockAIReasoner {
         Ok(name)
     }
 }
+
+// ---------------------------------------------------------------------------
+// FailingMockAIReasoner — injects every failure mode for integration tests
+// ---------------------------------------------------------------------------
+
+/// Configurable mock that always fails with a specific `AIReasoningError`.
+/// Used exclusively in tests to verify graceful AI failure handling.
+///
+/// Every failure mode of the AI layer can be simulated without a live provider:
+/// - Timeout            → `ProviderUnavailable("timed out")`
+/// - Rate limit (429)   → `InferenceFailed("rate limit 429")`
+/// - Malformed output   → `InvalidResponse("malformed JSON")`
+/// - Unavailable        → `ProviderUnavailable("connection refused")`
+/// - Disabled           → `InvalidConfiguration("AI reasoning disabled")`
+#[derive(Debug, Clone)]
+pub struct FailingMockAIReasoner {
+    pub error: AIReasoningError,
+    /// When true, `is_available()` returns false (simulates pre-call availability check failure).
+    pub report_unavailable: bool,
+}
+
+impl FailingMockAIReasoner {
+    /// Creates a reasoner that returns `ProviderUnavailable("timed out")`.
+    pub fn timeout() -> Self {
+        Self {
+            error: AIReasoningError::ProviderUnavailable("connection timed out after 30s".to_string()),
+            report_unavailable: false,
+        }
+    }
+
+    /// Creates a reasoner that returns a rate-limit inference failure.
+    pub fn rate_limited() -> Self {
+        Self {
+            error: AIReasoningError::InferenceFailed("rate limit 429 — too many requests".to_string()),
+            report_unavailable: false,
+        }
+    }
+
+    /// Creates a reasoner that returns a malformed/unparseable response.
+    pub fn malformed_response() -> Self {
+        Self {
+            error: AIReasoningError::InvalidResponse("malformed JSON: unexpected token".to_string()),
+            report_unavailable: false,
+        }
+    }
+
+    /// Creates a reasoner whose `is_available()` returns false (provider unreachable before call).
+    pub fn unavailable() -> Self {
+        Self {
+            error: AIReasoningError::ProviderUnavailable("connection refused".to_string()),
+            report_unavailable: true,
+        }
+    }
+
+    /// Creates a reasoner that reports invalid/missing configuration.
+    pub fn misconfigured() -> Self {
+        Self {
+            error: AIReasoningError::InvalidConfiguration("AI reasoning disabled or API key missing".to_string()),
+            report_unavailable: false,
+        }
+    }
+
+    /// Creates a reasoner with a generic inference failure.
+    pub fn inference_failed() -> Self {
+        Self {
+            error: AIReasoningError::InferenceFailed("internal model error".to_string()),
+            report_unavailable: false,
+        }
+    }
+}
+
+impl AIReasoner for FailingMockAIReasoner {
+    fn provider_name(&self) -> &str {
+        "Failing Mock AI Reasoner (Test Only)"
+    }
+
+    fn provider_id(&self) -> &str {
+        "failing_mock"
+    }
+
+    fn provider_type(&self) -> &str {
+        "test_mock"
+    }
+
+    fn is_available(&self) -> bool {
+        !self.report_unavailable
+    }
+
+    fn analyze_context(
+        &self,
+        _package: &super::models::EvidencePackage,
+    ) -> Result<ContextReasoningResult, AIReasoningError> {
+        Err(self.error.clone())
+    }
+
+    fn suggest_candidate_name(
+        &self,
+        _package: &super::models::EvidencePackage,
+    ) -> Result<String, AIReasoningError> {
+        Err(self.error.clone())
+    }
+}
+

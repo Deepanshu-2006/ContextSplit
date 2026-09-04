@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::models::{
+    AIContextReasoningResponse, AIFailureReason, AIReasoningError,
     CandidateContextEvidence, CuratedContextSignal, DeterministicEvidenceAssessment, EvidenceMetadata,
     EvidencePackage, ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary,
     SessionEvidence, TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary, ContextReasoningResult,
@@ -849,3 +850,91 @@ pub fn suggest_item_group_name_ai(
     reasoner.suggest_candidate_name(&package).map_err(|e| e.to_string())
 }
 
+/// Graceful AI analysis that **never propagates a hard error**.
+///
+/// When AI reasoning is unavailable for any reason (disabled, network failure,
+/// timeout, malformed response, rate limit, missing evidence), this function
+/// returns a structured `AIContextReasoningResponse` with `ai_unavailable = true`
+/// and a human-readable reason.
+///
+/// Deterministic Context Engine features are unaffected in all failure cases.
+pub fn analyze_item_context_ai_graceful(
+    conn: &Connection,
+    item_id: &str,
+    reasoner: &dyn AIReasoner,
+) -> AIContextReasoningResponse {
+    // Step 1: Check if AI reasoning is disabled in user settings.
+    let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
+    if !settings.enable_ai_reasoning {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::Disabled.to_string()),
+            failure_reason: Some(AIFailureReason::Disabled),
+        };
+    }
+
+    // Step 2: Check if provider is available.
+    if !reasoner.is_available() {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::ProviderUnavailable.to_string()),
+            failure_reason: Some(AIFailureReason::ProviderUnavailable),
+        };
+    }
+
+    // Step 3: Build EvidencePackage — treat build failure as EvidenceUnavailable.
+    let package = match build_evidence_package(conn, item_id) {
+        Ok(p) => p,
+        Err(build_err) => {
+            // If the error message says AI is disabled via privacy boundary, classify correctly.
+            let reason = if build_err.to_lowercase().contains("ai reasoning is disabled")
+                || build_err.to_lowercase().contains("disabled")
+            {
+                AIFailureReason::Disabled
+            } else {
+                AIFailureReason::EvidenceUnavailable
+            };
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}: {}", reason, build_err)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    // Step 4: Run AI inference — map every error variant to AIFailureReason.
+    let reasoning_result = match reasoner.analyze_context(&package) {
+        Ok(r) => r,
+        Err(ai_err) => {
+            let reason = AIFailureReason::from_reasoning_error(&ai_err);
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}", reason)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    // Step 5: Post-inference validation (grounding check).
+    if let Err(validation_err) = super::validator::validate_explanation_grounding(&reasoning_result, &package) {
+        let reason = AIFailureReason::MalformedResponse;
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(format!("{}: {}", reason, validation_err)),
+            failure_reason: Some(reason),
+        };
+    }
+
+    // All checks passed — return the successful AI result.
+    AIContextReasoningResponse {
+        ai_result: Some(reasoning_result),
+        ai_unavailable: false,
+        unavailability_reason: None,
+        failure_reason: None,
+    }
+}

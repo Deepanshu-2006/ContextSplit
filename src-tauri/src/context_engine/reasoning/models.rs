@@ -268,3 +268,86 @@ impl std::fmt::Display for AIReasoningError {
 }
 
 impl std::error::Error for AIReasoningError {}
+
+/// Categorises every way AI reasoning can fail gracefully.
+/// Used in `AIContextReasoningResponse` so the UI can show a
+/// meaningful, non-scary indicator without blocking deterministic features.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AIFailureReason {
+    /// The user has disabled remote AI reasoning in Settings.
+    Disabled,
+    /// The provider could not be reached (network down, wrong endpoint, etc.).
+    ProviderUnavailable,
+    /// The HTTP request to the provider exceeded the timeout.
+    Timeout,
+    /// The provider returned an HTTP or API-level error (e.g. 429 rate-limit, 500).
+    ProviderError,
+    /// The provider returned a response that failed JSON or schema validation.
+    MalformedResponse,
+    /// The EvidencePackage itself could not be constructed (e.g. item not found).
+    EvidenceUnavailable,
+    /// An unexpected internal error occurred inside the reasoning layer.
+    InternalError,
+}
+
+impl std::fmt::Display for AIFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AIFailureReason::Disabled          => write!(f, "AI reasoning is disabled in Settings"),
+            AIFailureReason::ProviderUnavailable => write!(f, "AI provider is currently unreachable"),
+            AIFailureReason::Timeout           => write!(f, "AI provider request timed out"),
+            AIFailureReason::ProviderError     => write!(f, "AI provider returned an error"),
+            AIFailureReason::MalformedResponse => write!(f, "AI provider returned an unreadable response"),
+            AIFailureReason::EvidenceUnavailable => write!(f, "Not enough evidence to build AI context"),
+            AIFailureReason::InternalError     => write!(f, "An unexpected error occurred in AI reasoning"),
+        }
+    }
+}
+
+impl AIFailureReason {
+    /// Maps an `AIReasoningError` to the appropriate `AIFailureReason`.
+    pub fn from_reasoning_error(err: &AIReasoningError) -> Self {
+        match err {
+            AIReasoningError::ProviderUnavailable(msg) => {
+                if msg.to_lowercase().contains("timeout") || msg.to_lowercase().contains("timed out") {
+                    AIFailureReason::Timeout
+                } else {
+                    AIFailureReason::ProviderUnavailable
+                }
+            }
+            AIReasoningError::InvalidResponse(_)      => AIFailureReason::MalformedResponse,
+            AIReasoningError::InvalidEvidence(_)       => AIFailureReason::EvidenceUnavailable,
+            AIReasoningError::InferenceFailed(msg)    => {
+                if msg.to_lowercase().contains("rate") || msg.to_lowercase().contains("429") {
+                    AIFailureReason::ProviderError
+                } else {
+                    AIFailureReason::InternalError
+                }
+            }
+            AIReasoningError::InvalidConfiguration(_) => AIFailureReason::Disabled,
+        }
+    }
+}
+
+/// The top-level response returned by the `analyze_item_context_ai` Tauri command.
+///
+/// This wrapper **always succeeds** (never propagates an Err to the frontend).
+/// When AI reasoning is unavailable for any reason the deterministic Context Engine
+/// continues to function and `ai_result` is `None`, with `ai_unavailable = true`
+/// and a human-readable `unavailability_reason`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AIContextReasoningResponse {
+    /// The AI reasoning result. `None` when AI was unavailable.
+    pub ai_result: Option<ContextReasoningResult>,
+
+    /// True when AI reasoning could not be completed for any reason.
+    pub ai_unavailable: bool,
+
+    /// Human-readable reason why AI was unavailable (suitable for UI display).
+    /// `None` when `ai_unavailable == false`.
+    pub unavailability_reason: Option<String>,
+
+    /// Structured failure category, present when `ai_unavailable == true`.
+    pub failure_reason: Option<AIFailureReason>,
+}

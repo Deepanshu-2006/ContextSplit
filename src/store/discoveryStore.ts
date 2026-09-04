@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { db, ContextCandidate, CandidateWithItems, CandidateScore, ContextReasoningResult } from '../services/db';
+import { db, ContextCandidate, CandidateWithItems, CandidateScore, ContextReasoningResult, AIFailureReason } from '../services/db';
 import { useWorkspaceStore } from './workspaceStore';
 
 export const HIGH_CONFIDENCE_THRESHOLD = 0.70;
@@ -11,6 +11,9 @@ interface DiscoveryState {
   selectedCandidateDetails: CandidateWithItems | null;
   selectedCandidateScore: CandidateScore | null;
   aiReasoningResult: ContextReasoningResult | null;
+  aiUnavailable: boolean;
+  aiUnavailabilityReason: string | null;
+  aiUnavailabilityCategory: AIFailureReason | null;
   isAiReasoningLoading: boolean;
   isReviewOpen: boolean;
   isLoading: boolean;
@@ -34,6 +37,9 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
   selectedCandidateDetails: null,
   selectedCandidateScore: null,
   aiReasoningResult: null,
+  aiUnavailable: false,
+  aiUnavailabilityReason: null,
+  aiUnavailabilityCategory: null,
   isAiReasoningLoading: false,
   isReviewOpen: false,
   isLoading: false,
@@ -103,12 +109,32 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
         set({ isAiReasoningLoading: true });
         const firstItemId = details.items[0].item.id;
         try {
-          const aiResult = await db.analyzeItemContextAI(firstItemId);
-          set({ aiReasoningResult: aiResult });
+          const aiResponse = await db.analyzeItemContextAI(firstItemId);
+          if (aiResponse.ai_unavailable) {
+            // AI failed gracefully — deterministic modal still shows fully
+            set({
+              aiReasoningResult: null,
+              aiUnavailable: true,
+              aiUnavailabilityReason: aiResponse.unavailability_reason,
+              aiUnavailabilityCategory: aiResponse.failure_reason,
+            });
+          } else {
+            set({
+              aiReasoningResult: aiResponse.ai_result,
+              aiUnavailable: false,
+              aiUnavailabilityReason: null,
+              aiUnavailabilityCategory: null,
+            });
+          }
         } catch (aiErr) {
-          // AI reasoning failure is non-fatal — modal still works deterministically
-          console.warn('AI reasoning unavailable for candidate review:', aiErr);
-          set({ aiReasoningResult: null });
+          // Unexpected JS-side error (e.g. IPC failure) — treat as unavailable
+          console.warn('AI reasoning IPC error:', aiErr);
+          set({
+            aiReasoningResult: null,
+            aiUnavailable: true,
+            aiUnavailabilityReason: 'AI analysis could not be loaded',
+            aiUnavailabilityCategory: 'internal_error',
+          });
         } finally {
           set({ isAiReasoningLoading: false });
         }
@@ -155,6 +181,9 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
         selectedCandidateDetails: null,
         selectedCandidateScore: null,
         aiReasoningResult: null,
+        aiUnavailable: false,
+        aiUnavailabilityReason: null,
+        aiUnavailabilityCategory: null,
       });
 
       // Refresh list
@@ -256,6 +285,9 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
       selectedCandidateDetails: null,
       selectedCandidateScore: null,
       aiReasoningResult: null,
+      aiUnavailable: false,
+      aiUnavailabilityReason: null,
+      aiUnavailabilityCategory: null,
     });
   },
 }));

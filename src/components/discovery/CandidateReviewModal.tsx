@@ -22,9 +22,12 @@ import {
   AlertTriangle,
   Loader2,
   Info,
+  WifiOff,
+  Ban,
+  Clock,
 } from 'lucide-react';
 import { useDiscoveryStore } from '../../store/discoveryStore';
-import { ContextReasoningResult } from '../../services/db';
+import { ContextReasoningResult, AIFailureReason } from '../../services/db';
 
 // ─── Confidence helpers ────────────────────────────────────────────────────────
 
@@ -202,6 +205,38 @@ function AIReasoningLoadingSection() {
   );
 }
 
+// Subtle banner shown when AI is unavailable — never blocks deterministic UI
+function AIUnavailableBanner({ reason, category }: { reason: string | null; category: AIFailureReason | null }) {
+  const getIcon = () => {
+    switch (category) {
+      case 'disabled':           return <Ban size={13} className="text-gray-400 shrink-0" />;
+      case 'timeout':            return <Clock size={13} className="text-amber-500 shrink-0" />;
+      case 'provider_unavailable':
+      case 'provider_error':     return <WifiOff size={13} className="text-amber-500 shrink-0" />;
+      case 'malformed_response': return <AlertTriangle size={13} className="text-orange-500 shrink-0" />;
+      default:                   return <Info size={13} className="text-gray-400 shrink-0" />;
+    }
+  };
+
+  const isDisabled = category === 'disabled';
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-[11.5px] ${
+      isDisabled
+        ? 'bg-gray-50 border-gray-200 text-gray-500'
+        : 'bg-amber-50/60 border-amber-200/70 text-amber-800'
+    }`}>
+      {getIcon()}
+      <span>
+        {isDisabled
+          ? 'AI analysis is disabled. Showing deterministic context evidence only.'
+          : `AI analysis unavailable${reason ? ` — ${reason}` : ''}. Context discovery continues normally.`
+        }
+      </span>
+    </div>
+  );
+}
+
 function DeterministicEvidenceSection({ evidence }: { evidence: string[] }) {
   const formatFriendlyEvidence = (rawEvidence: string): string => {
     const lower = rawEvidence.toLowerCase();
@@ -250,6 +285,9 @@ export function CandidateReviewModal() {
     selectedCandidateDetails,
     selectedCandidateScore,
     aiReasoningResult,
+    aiUnavailable,
+    aiUnavailabilityReason,
+    aiUnavailabilityCategory,
     isAiReasoningLoading,
     isLoading,
     closeReview,
@@ -455,6 +493,13 @@ export function CandidateReviewModal() {
               {isAiReasoningLoading && <AIReasoningLoadingSection />}
               {!isAiReasoningLoading && aiReasoningResult && (
                 <AIExplanationSection result={aiReasoningResult} />
+              )}
+              {/* Subtle banner when AI was unavailable — never hides deterministic sections */}
+              {!isAiReasoningLoading && aiUnavailable && (
+                <AIUnavailableBanner
+                  reason={aiUnavailabilityReason}
+                  category={aiUnavailabilityCategory}
+                />
               )}
 
               {/* ── Included Items ─────────────────────────────────── */}

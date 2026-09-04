@@ -467,6 +467,31 @@ export interface ContextReasoningResult {
   alternative_interpretations?: AlternativeContextReasoning[];
 }
 
+/** All structured reasons the AI layer can fail. Maps 1-to-1 with Rust AIFailureReason. */
+export type AIFailureReason =
+  | 'disabled'
+  | 'provider_unavailable'
+  | 'timeout'
+  | 'provider_error'
+  | 'malformed_response'
+  | 'evidence_unavailable'
+  | 'internal_error';
+
+/**
+ * Top-level response from the `analyze_item_context_ai` command.
+ * Always succeeds — ai_result is null when AI was unavailable.
+ */
+export interface AIContextReasoningResponse {
+  /** The AI reasoning result. null when AI was unavailable. */
+  ai_result: ContextReasoningResult | null;
+  /** True when AI reasoning could not be completed for any reason. */
+  ai_unavailable: boolean;
+  /** Human-readable reason suitable for UI display. */
+  unavailability_reason: string | null;
+  /** Structured failure category. */
+  failure_reason: AIFailureReason | null;
+}
+
 export const db = {
   async createWorkspace(name: string): Promise<Workspace> {
     return invoke("create_workspace", { name });
@@ -703,7 +728,7 @@ export const db = {
 
   // AI Context Reasoning
   analyzeItemContextAI: (itemId: string) =>
-    invoke<ContextReasoningResult>("analyze_item_context_ai", { itemId }),
+    invoke<AIContextReasoningResponse>("analyze_item_context_ai", { itemId }),
 
   getEvidencePackage: (itemId: string) =>
     invoke<EvidencePackage>("get_evidence_package", { itemId }),

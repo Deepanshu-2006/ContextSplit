@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit, AlertTriangle, Sparkles, HelpCircle } from "lucide-react";
+import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit, AlertTriangle, Sparkles, HelpCircle, WifiOff } from "lucide-react";
 import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata, UnifiedContextInterpretation, ContextReasoningResult } from "../../services/db";
 
 interface ContextInspectorProps {
@@ -17,6 +17,8 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   const [embeddingMeta, setEmbeddingMeta] = useState<ItemEmbeddingMetadata | null>(null);
   const [interpretation, setInterpretation] = useState<UnifiedContextInterpretation | null>(null);
   const [aiResult, setAiResult] = useState<ContextReasoningResult | null>(null);
+  const [aiUnavailable, setAiUnavailable] = useState(false);
+  const [aiUnavailableReason, setAiUnavailableReason] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -51,11 +53,22 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
 
   const handleRunAiReasoning = async () => {
     setAiLoading(true);
+    setAiUnavailable(false);
+    setAiUnavailableReason(null);
     try {
-      const result = await db.analyzeItemContextAI(itemId);
-      setAiResult(result);
+      const response = await db.analyzeItemContextAI(itemId);
+      if (response.ai_unavailable) {
+        setAiResult(null);
+        setAiUnavailable(true);
+        setAiUnavailableReason(response.unavailability_reason);
+      } else {
+        setAiResult(response.ai_result);
+        setAiUnavailable(false);
+      }
     } catch (err) {
       console.error("Failed to run AI reasoning", err);
+      setAiUnavailable(true);
+      setAiUnavailableReason('AI analysis could not be loaded');
     } finally {
       setAiLoading(false);
     }
@@ -392,7 +405,25 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                 </span>
               </div>
               <div className="p-4 space-y-3">
-                {!aiResult ? (
+                {aiUnavailable ? (
+                  <div className="text-center py-4 space-y-2">
+                    <div className="flex items-center justify-center gap-2 text-amber-600 mb-1">
+                      <WifiOff size={16} />
+                      <span className="text-sm font-medium">AI Reasoning Unavailable</span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      {aiUnavailableReason || "The AI provider could not be reached."}
+                    </p>
+                    <button
+                      onClick={handleRunAiReasoning}
+                      disabled={aiLoading}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 mt-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium transition disabled:opacity-50"
+                    >
+                      <Sparkles size={12} />
+                      {aiLoading ? "Retrying..." : "Retry Analysis"}
+                    </button>
+                  </div>
+                ) : !aiResult ? (
                   <div className="text-center py-4 space-y-2">
                     <p className="text-xs text-gray-500">
                       Query the isolated AI Reasoner with minimal EvidencePackage to analyze context and explanations.

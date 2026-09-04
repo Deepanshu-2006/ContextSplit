@@ -569,10 +569,17 @@ fn update_temporal_decay_config(
 fn analyze_item_context_ai(
     item_id: &str,
     state: State<'_, AppState>,
-) -> Result<context_engine::reasoning::ContextReasoningResult, String> {
+) -> Result<context_engine::reasoning::AIContextReasoningResponse, String> {
     let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-    ce.analyze_item_context_ai(&conn, item_id)
+    // Use the graceful variant — AI failures are handled internally and never propagate
+    // as hard errors. Deterministic context features are unaffected.
+    let response = context_engine::reasoning::analyze_item_context_ai_graceful(
+        &conn,
+        item_id,
+        ce.ai_reasoner().as_ref(),
+    );
+    Ok(response)
 }
 
 #[tauri::command]
