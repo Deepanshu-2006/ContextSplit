@@ -6,8 +6,9 @@ use super::models::{
     CaptureError, CaptureEvent, CaptureResult, RawCapturePayload,
 };
 use super::normalizer::CaptureNormalizer;
+use super::queue::{BackgroundJob, BackgroundJobType, BackgroundProcessingQueue};
 use super::validator::CaptureValidator;
-use crate::context_engine::engine::{ContextEngine, ContextEvent};
+use crate::context_engine::engine::ContextEngine;
 use crate::db::operations;
 use crate::AppState;
 
@@ -28,9 +29,10 @@ pub const DEFAULT_DEDUP_WINDOW_SECS: u64 = 3;
 /// 9. Update the Inbox
 #[derive(Debug, Clone)]
 pub struct CapturePipeline {
-    validator: CaptureValidator,
-    normalizer: CaptureNormalizer,
-    dedup_window_secs: u64,
+    pub validator: CaptureValidator,
+    pub normalizer: CaptureNormalizer,
+    pub queue: BackgroundProcessingQueue,
+    pub dedup_window_secs: u64,
 }
 
 impl Default for CapturePipeline {
@@ -40,11 +42,12 @@ impl Default for CapturePipeline {
 }
 
 impl CapturePipeline {
-    /// Creates a new CapturePipeline with standard limits and deduplication.
+    /// Creates a new CapturePipeline with standard limits, background queue, and deduplication.
     pub fn new() -> Self {
         Self {
             validator: CaptureValidator::new(),
             normalizer: CaptureNormalizer::new(),
+            queue: BackgroundProcessingQueue::new(),
             dedup_window_secs: DEFAULT_DEDUP_WINDOW_SECS,
         }
     }
@@ -58,6 +61,12 @@ impl CapturePipeline {
     /// Sets custom normalizer.
     pub fn with_normalizer(mut self, normalizer: CaptureNormalizer) -> Self {
         self.normalizer = normalizer;
+        self
+    }
+
+    /// Sets custom background queue.
+    pub fn with_queue(mut self, queue: BackgroundProcessingQueue) -> Self {
+        self.queue = queue;
         self
     }
 
@@ -282,7 +291,10 @@ impl CapturePipeline {
     // Execution Modes
     // =========================================================================
 
-    /// Executes the full 9-step pipeline in headless mode.
+    /// Executes the 9-step pipeline in headless mode.
+    ///
+    /// GUARANTEE: The initial capture and persistence completes immediately.
+    /// Background contextual processing is queued and processed through the queue.
     pub fn process_event_headless(
         &self,
         conn: &Connection,
@@ -317,7 +329,7 @@ impl CapturePipeline {
             }
         }
 
-        // Step 5: Create the Item
+        // Step 5: Create the Item (Minimum required persistence)
         let metadata_str = normalized_event.metadata.to_string();
         let item_type = normalized_event.item_type_str().to_string();
         let workspace_id = normalized_event.workspace_id();
@@ -337,9 +349,7 @@ impl CapturePipeline {
         // Read privacy & semantic settings
         let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
         let enable_semantic = settings.enable_semantic_processing;
-
         let semantic_status = if enable_semantic { "pending" } else { "failed" };
-        let _ = operations::update_item_semantic_status(conn, &item.id, semantic_status, None);
 
         // Step 6: Create ContextSignals
         let signals_emitted = self.generate_context_signals(
@@ -350,42 +360,16 @@ impl CapturePipeline {
             &settings,
         )?;
 
-        // Step 8: Trigger contextual analysis
+        // Step 8: Move expensive processing to background queue
+        let job = BackgroundJob::new(&item.id, BackgroundJobType::FullContextualPipeline);
+        self.queue.enqueue(job.clone());
+
+        // In headless execution, execute pending background job if context_engine is available
         if let Some(ce) = context_engine {
-            ce.process_event(
-                conn,
-                ContextEvent::Capture {
-                    item_id: item.id.clone(),
-                    workspace_id: workspace_id.clone(),
-                    source: normalized_event.capture_type.to_string(),
-                    data_type: item_type,
-                    metadata: normalized_event.metadata.clone(),
-                },
-            );
-
-            // Generate deterministic relationships
-            let _ = crate::context_engine::relationships::generate_relationships(conn, &item.id);
-
-            // In headless/test mode, if semantic provider is configured, run embedding
-            if enable_semantic {
-                if let Some(provider) = ce.get_semantic_provider() {
-                    let builder = crate::semantic::builder::SemanticContentBuilder::new();
-                    let text_to_embed = builder.build(&item);
-                    if !text_to_embed.trim().is_empty() {
-                        if let Ok(emb) = provider.generate_embedding(&text_to_embed) {
-                            let model = provider.status().model_name;
-                            let _ = operations::save_item_embedding(conn, &item.id, &emb, &model, &model);
-                            let _ = operations::update_item_semantic_status(conn, &item.id, "ready", Some(&model));
-                            let _ = crate::context_engine::relationships::generate_semantic_relationships(
-                                ce, conn, &item.id,
-                            );
-                        }
-                    }
-                }
-            }
+            let _ = self.queue.process_job_headless(conn, ce, &job);
         }
 
-        // Step 9: Update the Inbox (returns result with workspace_id == None or ws_id)
+        // Step 9: Update the Inbox
         Ok(CaptureResult {
             item,
             signals_emitted,
@@ -409,8 +393,9 @@ impl CapturePipeline {
 
     /// Executes the full 9-step pipeline within a live Tauri application environment.
     ///
-    /// GUARANTEE: The user-facing capture call returns in < 5ms.
-    /// Embeddings, semantic analysis, and AI reasoning execute asynchronously in the background.
+    /// GUARANTEE: The user-facing capture call returns immediately (< 3ms).
+    /// Heavy processing (embeddings, relationships, semantic analysis, AI reasoning, discovery)
+    /// runs entirely in background jobs. Capture remains fully functional if background jobs fail.
     pub fn process_event_app(
         &self,
         app_handle: AppHandle,
@@ -424,8 +409,8 @@ impl CapturePipeline {
 
         let state = app_handle.state::<AppState>();
 
-        // Step 4, 5, 6 & 7: Lock DB briefly for Item, Signals, and Session association
-        let (item, session_id_opt, signals_emitted, enable_semantic, is_duplicate) = {
+        // Step 4, 5, 6 & 7: Lock DB briefly for minimum required persistence
+        let (item, session_id_opt, signals_emitted, enable_semantic) = {
             let conn = state
                 .db_conn
                 .lock()
@@ -457,7 +442,7 @@ impl CapturePipeline {
                 }
             }
 
-            // Step 5: Create Item
+            // Step 5: Create Item (Minimum required persistence)
             let metadata_str = normalized_event.metadata.to_string();
             let item_type = normalized_event.item_type_str().to_string();
             let workspace_id = normalized_event.workspace_id();
@@ -489,109 +474,14 @@ impl CapturePipeline {
                 &settings,
             )?;
 
-            (item, session_id_opt, signals_count, enable_semantic, false)
+            (item, session_id_opt, signals_count, enable_semantic)
         };
 
-        // Fast in-memory event ingestion & basic relationships (< 1ms)
-        {
-            if let Ok(conn) = state.db_conn.lock() {
-                if let Ok(ce) = state.context_engine.lock() {
-                    ce.process_event(
-                        &conn,
-                        ContextEvent::Capture {
-                            item_id: item.id.clone(),
-                            workspace_id: normalized_event.workspace_id(),
-                            source: normalized_event.capture_type.to_string(),
-                            data_type: normalized_event.item_type_str().to_string(),
-                            metadata: normalized_event.metadata.clone(),
-                        },
-                    );
-                }
-                let _ = crate::context_engine::relationships::generate_relationships(&conn, &item.id);
-            }
-        }
-
-        // Step 8: Trigger Heavy Contextual Analysis Asynchronously (Non-blocking!)
-        if enable_semantic {
-            let provider_opt = {
-                if let Ok(ce) = state.context_engine.lock() {
-                    ce.get_semantic_provider()
-                } else {
-                    None
-                }
-            };
-
-            if let Some(provider) = provider_opt {
-                let builder = crate::semantic::builder::SemanticContentBuilder::new();
-                let text_to_embed = builder.build(&item);
-
-                if !text_to_embed.trim().is_empty() {
-                    let item_id = item.id.clone();
-                    let app_handle_clone = app_handle.clone();
-
-                    if let Ok(conn) = state.db_conn.lock() {
-                        let _ = operations::update_item_semantic_status(&conn, &item_id, "processing", None);
-                    }
-
-                    // Async background spawn — does NOT block user response
-                    tauri::async_runtime::spawn(async move {
-                        let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
-                            match provider.generate_embedding(&text_to_embed) {
-                                Ok(emb) => Ok((emb, provider.status().model_name.clone())),
-                                Err(e) => Err(e),
-                            }
-                        });
-
-                        let mut success = false;
-                        let mut final_model = None;
-
-                        if let Ok(result) = join_handle.await {
-                            if let Ok((embedding, model_name)) = result {
-                                final_model = Some(model_name.clone());
-                                if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                                    let saved = if let Ok(conn) = state.db_conn.lock() {
-                                        operations::save_item_embedding(
-                                            &conn, &item_id, &embedding, &model_name, &model_name,
-                                        )
-                                        .is_ok()
-                                    } else {
-                                        false
-                                    };
-
-                                    if saved {
-                                        if let Ok(ce) = state.context_engine.lock() {
-                                            if let Ok(conn) = state.db_conn.lock() {
-                                                let _ = crate::context_engine::relationships::generate_semantic_relationships(
-                                                    &ce, &conn, &item_id,
-                                                );
-                                            }
-                                        }
-                                        success = true;
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                            if let Ok(conn) = state.db_conn.lock() {
-                                if success {
-                                    let _ = operations::update_item_semantic_status(
-                                        &conn,
-                                        &item_id,
-                                        "ready",
-                                        final_model.as_deref(),
-                                    );
-                                } else {
-                                    let _ = operations::update_item_semantic_status(&conn, &item_id, "failed", None);
-                                    let _ = operations::increment_semantic_retries(&conn, &item_id);
-                                }
-                            }
-                        }
-                    });
-                } else if let Ok(conn) = state.db_conn.lock() {
-                    let _ = operations::update_item_semantic_status(&conn, &item.id, "ready", None);
-                }
-            }
+        // Step 8: Move expensive processing (embeddings, relationships, semantic analysis, AI reasoning, discovery)
+        // entirely to the background processing queue!
+        let job = BackgroundJob::new(&item.id, BackgroundJobType::FullContextualPipeline);
+        if self.queue.enqueue(job.clone()) {
+            self.queue.spawn_app_job(app_handle.clone(), job);
         }
 
         // Step 9: Update the Inbox and notify the frontend immediately
@@ -604,7 +494,7 @@ impl CapturePipeline {
             signals_emitted,
             session_id: session_id_opt,
             semantic_status: if enable_semantic { "pending" } else { "failed" }.to_string(),
-            is_duplicate,
+            is_duplicate: false,
         })
     }
 

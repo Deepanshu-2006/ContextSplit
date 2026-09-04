@@ -744,4 +744,151 @@ mod tests {
 
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
+
+    // =======================================================================
+    // 7. Background Processing Queue & Latency Optimization Tests
+    // =======================================================================
+
+    #[test]
+    fn test_capture_succeeds_when_ai_is_unavailable() {
+        let (conn, db_path) = setup_test_db();
+        // Create engine with NO AI reasoner
+        let mut engine = ContextEngine::new();
+        engine.register(Box::new(CaptureContextProvider));
+        engine.register(Box::new(UserActionContextProvider));
+        engine.register(Box::new(WorkspaceContextProvider));
+        engine.register(Box::new(UrlContextProvider));
+        engine.set_semantic_provider(Box::new(crate::semantic::MockSemanticProvider::new()));
+        // Note: engine.set_ai_reasoner is NOT called, so AI is completely unavailable
+
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Capture note while AI provider service is offline",
+            PlatformType::MacOS,
+        );
+
+        // Capture MUST succeed even if AI is unavailable
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event);
+        assert!(result.is_ok(), "Capture must succeed when AI is unavailable");
+
+        let capture_res = result.unwrap();
+        assert_eq!(capture_res.item.content, "Capture note while AI provider service is offline");
+        assert!(capture_res.item.workspace_id.is_none());
+
+        // Verify item is stored in DB
+        let item = operations::get_item(&conn, &capture_res.item.id).unwrap();
+        assert_eq!(item.id, capture_res.item.id);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_succeeds_when_embedding_generation_fails() {
+        let (conn, db_path) = setup_test_db();
+        // Create engine with NO semantic provider (simulating embedding generation failure/absence)
+        let mut engine = ContextEngine::new();
+        engine.register(Box::new(CaptureContextProvider));
+        engine.register(Box::new(UserActionContextProvider));
+        engine.register(Box::new(WorkspaceContextProvider));
+
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Text captured when embedding model fails or is downloading",
+            PlatformType::MacOS,
+        );
+
+        // Capture MUST succeed immediately
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event);
+        assert!(result.is_ok(), "Capture must succeed when embedding generation fails");
+
+        let capture_res = result.unwrap();
+        assert_eq!(capture_res.item.content, "Text captured when embedding model fails or is downloading");
+
+        // Verify status is recorded as failed and retry count is incremented safely
+        let status = operations::get_item_semantic_status(&conn, &capture_res.item.id).unwrap().unwrap();
+        assert_eq!(status.status, "failed");
+        assert!(status.retries >= 1);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_background_processing_retries_safely() {
+        let (conn, db_path) = setup_test_db();
+        let queue = crate::capture::BackgroundProcessingQueue::new();
+
+        // 1. Create an item in the DB with failed semantic status and 1 retry
+        let item = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Paris travel guide for background retry test",
+            Some("Paris Guide"),
+            "{}",
+        )
+        .unwrap();
+
+        operations::update_item_semantic_status(&conn, &item.id, "failed", None).unwrap();
+        operations::increment_semantic_retries(&conn, &item.id).unwrap();
+
+        let initial_status = operations::get_item_semantic_status(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(initial_status.status, "failed");
+        assert_eq!(initial_status.retries, 1);
+
+        // 2. Configure engine with a working provider now available
+        let mut engine = ContextEngine::new();
+        engine.set_semantic_provider(Box::new(crate::semantic::MockSemanticProvider::new()));
+
+        // 3. Process retry job through the queue
+        let job = crate::capture::BackgroundJob::new(&item.id, crate::capture::BackgroundJobType::FullContextualPipeline)
+            .with_max_retries(3);
+
+        let job_res = queue.process_job_headless(&conn, &engine, &job);
+        assert!(job_res.success, "Background retry must succeed when provider is restored");
+
+        // 4. Verify item semantic status transitioned to "ready"
+        let updated_status = operations::get_item_semantic_status(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(updated_status.status, "ready");
+
+        // 5. Verify embedding was persisted
+        let emb_meta = operations::get_item_embedding_metadata(&conn, &item.id).unwrap();
+        assert!(emb_meta.is_some());
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_duplicate_processing_is_avoided() {
+        let queue = crate::capture::BackgroundProcessingQueue::new();
+        let item_id = "item_test_duplicate_job_999";
+
+        let job1 = crate::capture::BackgroundJob::new(item_id, crate::capture::BackgroundJobType::FullContextualPipeline);
+        let job2 = crate::capture::BackgroundJob::new(item_id, crate::capture::BackgroundJobType::FullContextualPipeline);
+
+        // First enqueue must succeed
+        assert!(queue.enqueue(job1.clone()), "First job must be enqueued");
+        assert!(queue.is_in_flight(item_id, &crate::capture::BackgroundJobType::FullContextualPipeline));
+
+        // Concurrent duplicate enqueue for identical item and job type MUST be rejected
+        assert!(!queue.enqueue(job2), "Duplicate in-flight job must be rejected to prevent duplicate processing");
+        assert_eq!(queue.len(), 1, "Queue length should remain 1");
+
+        // Dequeue and complete
+        let dequeued = queue.dequeue().unwrap();
+        assert_eq!(dequeued.item_id, item_id);
+
+        queue.mark_completed(item_id, &crate::capture::BackgroundJobType::FullContextualPipeline);
+        assert!(!queue.is_in_flight(item_id, &crate::capture::BackgroundJobType::FullContextualPipeline));
+
+        // Now a subsequent job CAN be enqueued
+        let job3 = crate::capture::BackgroundJob::new(item_id, crate::capture::BackgroundJobType::FullContextualPipeline);
+        assert!(queue.enqueue(job3), "New job after completion should be accepted");
+    }
 }
