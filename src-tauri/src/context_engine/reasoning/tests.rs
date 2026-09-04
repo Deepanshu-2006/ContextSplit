@@ -8,6 +8,7 @@ mod tests {
     use crate::context_engine::reasoning::builder::{
         analyze_item_context_ai, build_evidence_package, scrub_private_data, EvidencePackageBuilder,
     };
+    use crate::context_engine::reasoning::fixtures::*;
     use crate::context_engine::reasoning::mock::MockAIReasoner;
     use crate::context_engine::reasoning::models::*;
     use crate::context_engine::reasoning::traits::AIReasoner;
@@ -962,5 +963,126 @@ mod tests {
             parse_and_validate_response(unknown_decision),
             Err(ReasoningValidationError::MalformedJson(_))
         ));
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_fixture_strong_existing_context() {
+        let fixture = strong_existing_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(result.suggested_context_reference.as_deref(), Some("ws_paris_trip"));
+        assert_eq!(result.suggested_name.as_deref(), Some("Paris Trip"));
+        assert!((result.confidence - 0.89).abs() < 1e-4);
+        assert!(result.uncertainty_reason.is_none());
+        assert!(!result.explanation.is_empty());
+        assert!(result.explanation.contains("Paris Trip"));
+        assert!(!result.evidence_references.is_empty());
+
+        let provider = result.provider_info.as_ref().expect("Provider info should be set");
+        assert_eq!(provider.provider_id, "mock");
+        assert_eq!(provider.provider_type, "mock_simulation");
+
+        validate_reasoning_result(&result).expect("Result must pass strict schema validation");
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_fixture_strong_new_context() {
+        let fixture = strong_new_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::NewContext);
+        assert_eq!(result.suggested_context_reference.as_deref(), Some("cand_fitness_training"));
+        assert_eq!(result.suggested_name.as_deref(), Some("Fitness Training"));
+        assert!((result.confidence - 0.82).abs() < 1e-4);
+        assert!(result.uncertainty_reason.is_none());
+        assert!(!result.explanation.is_empty());
+        assert!(result.explanation.contains("Fitness Training"));
+        assert!(!result.evidence_references.is_empty());
+
+        validate_reasoning_result(&result).expect("Result must pass strict schema validation");
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_fixture_ambiguous_context() {
+        let fixture = ambiguous_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
+        assert_eq!(result.suggested_context_reference.as_deref(), Some("ws_paris_trip"));
+        assert_eq!(result.suggested_name.as_deref(), Some("Paris Trip"));
+        assert!((result.confidence - 0.61).abs() < 1e-4);
+        assert!(result.uncertainty_reason.is_some());
+        let uncertainty = result.uncertainty_reason.as_ref().unwrap();
+        assert!(uncertainty.contains("Paris Trip") && uncertainty.contains("London Client Meetings"));
+        assert!(!result.alternative_interpretations.is_empty());
+        assert_eq!(result.alternative_interpretations[0].context_id, "ws_london_meetings");
+
+        validate_reasoning_result(&result).expect("Result must pass strict schema validation");
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_fixture_no_context() {
+        let fixture = no_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert!(result.suggested_context_reference.is_none());
+        assert!(result.suggested_name.is_none());
+        assert_eq!(result.confidence, 0.0);
+        assert!(result.uncertainty_reason.is_some());
+        assert!(result.explanation.contains("Inbox"));
+
+        validate_reasoning_result(&result).expect("Result must pass strict schema validation");
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_fixture_insufficient_evidence() {
+        let fixture = insufficient_evidence_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert!(result.suggested_context_reference.is_none());
+        assert!(result.suggested_name.is_none());
+        assert!((result.confidence - 0.14).abs() < 1e-4);
+        assert!(result.uncertainty_reason.is_some());
+        assert!(result.uncertainty_reason.as_ref().unwrap().contains("25%"));
+
+        validate_reasoning_result(&result).expect("Result must pass strict schema validation");
+    }
+
+    #[test]
+    fn test_mock_ai_reasoner_deterministic_reproducibility() {
+        let fixtures = vec![
+            strong_existing_context_fixture(),
+            strong_new_context_fixture(),
+            ambiguous_context_fixture(),
+            no_context_fixture(),
+            insufficient_evidence_fixture(),
+        ];
+
+        let reasoner = MockAIReasoner::new();
+        for (idx, fixture) in fixtures.iter().enumerate() {
+            let res1 = reasoner.analyze_context(fixture).expect("Run 1 failed");
+            let res2 = reasoner.analyze_context(fixture).expect("Run 2 failed");
+
+            assert_eq!(res1.decision, res2.decision, "Decision mismatch on fixture {}", idx);
+            assert_eq!(
+                res1.suggested_context_reference, res2.suggested_context_reference,
+                "Reference mismatch on fixture {}", idx
+            );
+            assert_eq!(res1.suggested_name, res2.suggested_name, "Name mismatch on fixture {}", idx);
+            assert_eq!(res1.confidence, res2.confidence, "Confidence mismatch on fixture {}", idx);
+            assert_eq!(res1.explanation, res2.explanation, "Explanation mismatch on fixture {}", idx);
+            assert_eq!(
+                res1.uncertainty_reason, res2.uncertainty_reason,
+                "Uncertainty reason mismatch on fixture {}", idx
+            );
+        }
     }
 }
