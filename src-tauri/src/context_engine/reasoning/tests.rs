@@ -11,6 +11,9 @@ mod tests {
     use crate::context_engine::reasoning::fixtures::*;
     use crate::context_engine::reasoning::mock::MockAIReasoner;
     use crate::context_engine::reasoning::models::*;
+    use crate::context_engine::reasoning::privacy::{
+        AIPrivacyBoundary, AIPrivacyPolicy, AIPrivacyViolation,
+    };
     use crate::context_engine::reasoning::provider::*;
     use crate::context_engine::reasoning::remote::RemoteLLMReasoner;
     use crate::context_engine::reasoning::traits::AIReasoner;
@@ -35,6 +38,7 @@ mod tests {
             enable_semantic_processing: true,
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
+            enable_ai_reasoning: true,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -1372,4 +1376,552 @@ mod tests {
         assert_eq!(custom_res.decision, ContextReasoningDecision::NoContext);
         assert_eq!(custom_res.explanation, "Custom dynamic reasoner forced no_context.");
     }
+
+    // =========================================================================
+    // AI Privacy Boundary & Policy Layer Unit Tests
+    // =========================================================================
+
+    #[test]
+    fn test_privacy_boundary_blocks_when_ai_reasoning_disabled() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let _ws = operations::create_workspace(&conn, "Kyoto Trip").unwrap();
+        let inbox_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Shinkansen tickets to Kyoto",
+            Some("Train Tickets"),
+            "{}",
+        ).unwrap();
+
+        // 1. Disable remote AI reasoning in settings
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_ai_reasoning = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        // 2. Invoking analyze_item_context_ai directly must return an error
+        let reasoner = MockAIReasoner::new();
+        let result = analyze_item_context_ai(&conn, &inbox_item.id, &reasoner);
+        assert!(result.is_err(), "analyze_item_context_ai should fail when AI reasoning is disabled");
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("AI reasoning is disabled in Privacy Settings"),
+            "Error message should explain that AI reasoning is disabled: {}",
+            err_msg
+        );
+
+        // 3. build_evidence_package must also fail with the privacy boundary violation
+        let pkg_res = build_evidence_package(&conn, &inbox_item.id);
+        assert!(pkg_res.is_err(), "build_evidence_package should fail when AI reasoning is disabled");
+
+        // 4. Direct audit_and_sanitize check
+        let boundary = AIPrivacyBoundary::from_settings(&crate::db::settings::get_settings(&conn).unwrap());
+        assert_eq!(boundary.check_permission(), Err(AIPrivacyViolation::AIReasoningDisabled));
+    }
+
+    #[test]
+    fn test_deterministic_engine_continues_functioning_when_ai_disabled() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let ws = operations::create_workspace(&conn, "Kyoto Trip").unwrap();
+
+        let _item1 = operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Hotel Granvia Kyoto booking",
+            Some("Hotel"),
+            "{}",
+        ).unwrap();
+
+        let inbox_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Shinkansen bullet train reservation to Kyoto station",
+            Some("Train"),
+            "{}",
+        ).unwrap();
+
+        // Disable AI reasoning in user settings
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_ai_reasoning = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        // Deterministic Context Engine logic must continue functioning without issue
+        let eval = crate::context_engine::scoring::evaluate_item_context(&conn, &inbox_item.id)
+            .expect("Deterministic scoring must succeed even when AI reasoning is disabled");
+        
+        assert!(!eval.existing_workspaces.is_empty(), "Deterministic engine should score existing workspaces");
+        let top_ws = &eval.existing_workspaces[0];
+        assert_eq!(top_ws.workspace_id, ws.id);
+        assert!(top_ws.score > 0.0, "Deterministic score should be non-zero");
+
+        // Candidate discovery must also continue functioning deterministically
+        let candidates = crate::context_engine::discovery::run_discovery(&conn)
+            .expect("Deterministic context candidate search should succeed");
+        let _ = candidates.len();
+    }
+
+    #[test]
+    fn test_privacy_boundary_never_sends_full_clipboard_history() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let ws = operations::create_workspace(&conn, "Research").unwrap();
+
+        // 1. Create target item
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Target item: compiling Rust to WebAssembly with wasm-pack",
+            Some("Wasm Compiler"),
+            "{}",
+        ).unwrap();
+
+        // 2. Create 2 related items
+        let rel1 = operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Related 1: wasm-bindgen guide and memory buffers",
+            Some("Wasm Bindgen"),
+            "{}",
+        ).unwrap();
+        let rel2 = operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Related 2: web-sys and js-sys bindings for Rust",
+            Some("Web Sys"),
+            "{}",
+        ).unwrap();
+
+        operations::create_item_relationship(&conn, &target_item.id, &rel1.id, "semantic_similarity", 0.88, None).unwrap();
+        operations::create_item_relationship(&conn, &target_item.id, &rel2.id, "content_overlap", 0.72, None).unwrap();
+
+        // 3. Flood the database with 25 unrelated clipboard items
+        for i in 0..25 {
+            operations::create_item(
+                &conn,
+                None,
+                Some(&session.id),
+                "text",
+                &format!("Unrelated clipboard dump item #{} random text", i),
+                Some(&format!("Clipboard #{}", i)),
+                "{}",
+            ).unwrap();
+        }
+
+        // Total items in database: 1 + 2 + 25 = 28 items
+        let total_items: usize = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(total_items, 28);
+
+        // 4. Build EvidencePackage
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        // 5. Verify data minimization:
+        // Only target + related items are allowed (max 3 related items)
+        assert!(package.relevant_related_items.len() <= 3, "Never send more than max_related_items");
+        assert_eq!(package.relevant_related_items.len(), 2, "Only the 2 related items should be packaged");
+        
+        // Excluded count should reflect the other 25 items not included
+        assert_eq!(package.system_metadata.total_db_items_excluded, 25, "All 25 unrelated clipboard items must be excluded");
+
+        // Verify none of the unrelated clipboard items are present
+        for rel in &package.relevant_related_items {
+            assert!(rel.item_id == rel1.id || rel.item_id == rel2.id);
+            assert!(!rel.snippet.contains("Unrelated clipboard dump"));
+        }
+    }
+
+    #[test]
+    fn test_privacy_boundary_never_sends_unrelated_items() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Debugging memory leak in async worker thread pool",
+            Some("Backend Issue"),
+            "{}",
+        ).unwrap();
+
+        let unrelated_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Grandma's secret chocolate chip cookie recipe with melted butter",
+            Some("Cookie Recipe"),
+            "{}",
+        ).unwrap();
+
+        // Weak relationship (strength 0.15, below threshold 0.40)
+        operations::create_item_relationship(
+            &conn,
+            &target_item.id,
+            &unrelated_item.id,
+            "temporal_proximity",
+            0.15,
+            None,
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        // The unrelated item must be completely excluded from relevant_related_items
+        assert!(package.relevant_related_items.is_empty(), "Unrelated item below threshold must be excluded");
+        assert_eq!(package.system_metadata.total_db_items_excluded, 1);
+    }
+
+    #[test]
+    fn test_privacy_boundary_never_sends_raw_embeddings() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let ws = operations::create_workspace(&conn, "AI Safety").unwrap();
+
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Alignment and interpretability research in transformer neural networks",
+            Some("AI Research"),
+            "{}",
+        ).unwrap();
+
+        // Store raw byte float vectors in the database
+        let fake_emb = vec![0.1234_f32, -0.5678_f32, 0.9101_f32, 0.4321_f32];
+        let bytes: Vec<u8> = fake_emb.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO item_embeddings (item_id, embedding, provider, model, created_at) VALUES (?1, ?2, 'test', 'mini', '2026-09-04T12:00:00Z')",
+            rusqlite::params![target_item.id, bytes],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO workspace_embeddings (workspace_id, embedding, provider, model, updated_at) VALUES (?1, ?2, 'test', 'mini', '2026-09-04T12:00:00Z')",
+            rusqlite::params![ws.id, bytes],
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        // Verify serializing the EvidencePackage produces NO raw float vectors or byte arrays
+        let pkg_json = serde_json::to_string(&package).unwrap();
+        assert!(!pkg_json.contains("0.1234"), "Raw embedding float numbers must never enter EvidencePackage");
+        assert!(!pkg_json.contains("-0.5678"), "Raw embedding float numbers must never enter EvidencePackage");
+        assert!(!pkg_json.contains("0.9101"), "Raw embedding float numbers must never enter EvidencePackage");
+
+        // Verify workspace profile contains only scalar summary fields
+        for prof in &package.workspace_semantic_profiles {
+            if prof.has_profile {
+                assert!(prof.alignment_score.is_some());
+                assert!(prof.alignment_band.is_some());
+                assert!(!prof.theme_summary.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_privacy_boundary_never_sends_unnecessary_application_metadata() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let ws = operations::create_workspace(&conn, "Browsing").unwrap();
+
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Read article on zero-knowledge succinct non-interactive arguments of knowledge",
+            Some("ZK Proofs"),
+            "{}",
+        ).unwrap();
+
+        // Insert active app and domain signals
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws.id),
+            Some(&target_item.id),
+            "active_app",
+            Some(&session.id),
+            &json!({ "app_name": "Google Chrome", "process_id": 12345, "window_title": "Confidential Window" }).to_string(),
+        ).unwrap();
+
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws.id),
+            Some(&target_item.id),
+            "url_metadata",
+            Some(&session.id),
+            &json!({ "domain": "sensitive-internal-wiki.corp.net", "url": "https://sensitive-internal-wiki.corp.net/secret" }).to_string(),
+        ).unwrap();
+
+        // 1. When active_app and browser_domain are disabled:
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_active_app = false;
+        settings.enable_browser_domain = false;
+        settings.enable_session_tracking = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        // Assert app_name, domain, and session_id are stripped from target_item
+        assert!(package.target_item.app_name.is_none(), "app_name must be None when enable_active_app is false");
+        assert!(package.target_item.domain.is_none(), "domain must be None when enable_browser_domain is false");
+        assert!(package.target_item.session_id.is_none(), "session_id must be None when enable_session_tracking is false");
+
+        // Assert signals are stripped from contextual_signals
+        for sig in &package.contextual_signals {
+            assert_ne!(sig.signal_type, "active_app", "active_app signal must be excluded when disabled");
+            assert_ne!(sig.signal_type, "url_metadata", "url_metadata signal must be excluded when disabled");
+        }
+
+        // Assert session evidence is cleared
+        assert!(package.session_context.is_none());
+        assert!(package.relevant_sessions.is_empty());
+
+        // Assert full process IDs or window handles never exist
+        let json_str = serde_json::to_string(&package).unwrap();
+        assert!(!json_str.contains("12345"), "OS Process IDs must not be leaked");
+        assert!(!json_str.contains("Confidential Window"), "Window titles must not be leaked");
+    }
+
+    #[test]
+    fn test_privacy_boundary_scrubs_all_secrets_credentials_and_tokens() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+
+        let content_with_secrets = r#"
+Deploy credentials:
+Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMC6Y5bP3iUrWgnBAxDqiDaJYhoo
+AWS_KEY: AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+OPENAI_KEY: sk-proj-1234567890abcdef1234567890abcdef
+GITHUB_TOKEN: ghp_1234567890abcdefghijklmnopqrstuvwxyz
+password: SuperSecretPassword123!
+DATABASE_URL: postgres://postgres:SecretDbPass123@prod-db.internal:5432/main_db
+API_ENDPOINT: https://admin:HttpBasicSecret456@service.corp.internal/v1
+CARD: 4532 0150 1234 5678
+PRIVATE_KEY:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0m4w4k0+pG7...
+-----END RSA PRIVATE KEY-----
+"#;
+
+        let scrubbed_direct = scrub_private_data(content_with_secrets);
+        assert!(!scrubbed_direct.contains("SuperSecretPassword123!"));
+        assert!(!scrubbed_direct.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!scrubbed_direct.contains("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"));
+        assert!(!scrubbed_direct.contains("sk-proj-1234567890abcdef1234567890abcdef"));
+        assert!(!scrubbed_direct.contains("ghp_1234567890abcdefghijklmnopqrstuvwxyz"));
+        assert!(!scrubbed_direct.contains("SecretDbPass123"));
+        assert!(!scrubbed_direct.contains("HttpBasicSecret456"));
+        assert!(!scrubbed_direct.contains("4532 0150 1234 5678"));
+        assert!(!scrubbed_direct.contains("MIIEowIBAAKCAQEA0"));
+
+        assert!(scrubbed_direct.contains("[REDACTED]") || scrubbed_direct.contains("[API_KEY_REDACTED]"));
+        assert!(scrubbed_direct.contains("[AWS_KEY_REDACTED]"));
+        assert!(scrubbed_direct.contains("[CARD_REDACTED]"));
+        assert!(scrubbed_direct.contains("[CONNECTION_STRING_REDACTED]"));
+        assert!(scrubbed_direct.contains("[CREDENTIAL_REDACTED]"));
+        assert!(scrubbed_direct.contains("[PRIVATE_KEY_REDACTED]"));
+
+        // Now test item packaged into EvidencePackage
+        let package_item_content = "Card: 4532 0150 1234 5678, DB: postgres://admin:SecretPass99@db.net/app, AWS: AKIAIOSFODNN7EXAMPLE";
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            package_item_content,
+            Some("Secrets Vault: password=AdminPassword789!"),
+            "{}",
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+        let pkg_json = serde_json::to_string(&package).unwrap();
+
+        // 1. Assert NONE of the plaintext secrets exist anywhere in the output
+        assert!(!pkg_json.contains("4532 0150 1234 5678"), "Credit card must be redacted");
+        assert!(!pkg_json.contains("SecretPass99"), "Database password must be redacted");
+        assert!(!pkg_json.contains("AKIAIOSFODNN7EXAMPLE"), "AWS Key ID must be redacted");
+        assert!(!pkg_json.contains("AdminPassword789!"), "Title password must be redacted");
+
+        // 2. Assert that redaction placeholders are present in the package JSON
+        assert!(pkg_json.contains("[CARD_REDACTED]"));
+        assert!(pkg_json.contains("[CONNECTION_STRING_REDACTED]"));
+        assert!(pkg_json.contains("[AWS_KEY_REDACTED]"));
+        assert!(pkg_json.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_privacy_boundary_truncates_oversized_snippets() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+
+        let massive_content = "A".repeat(1500);
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            &massive_content,
+            Some("Massive Content Item"),
+            "{}",
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        // Default max_snippet_chars is 200 (with "..." suffix => 203)
+        assert!(package.target_item.content_snippet.chars().count() <= 203);
+        assert!(package.target_item.content_snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn test_remote_llm_receives_strictly_evidence_package() {
+        let (conn, _path) = setup_test_db();
+        let session = operations::create_session(&conn).unwrap();
+        let _ws = operations::create_workspace(&conn, "DevOps").unwrap();
+
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Kubernetes ingress configuration for production gateway",
+            Some("K8s Ingress"),
+            "{}",
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &target_item.id).unwrap();
+
+        let config = AIProviderConfig {
+            provider_type: AIProviderType::RemoteLlm,
+            model_name: "gpt-4o-mini".to_string(),
+            endpoint: Some("https://api.openai.com/v1".to_string()),
+            api_key: Some("sk-test-key-mock".to_string()),
+            timeout_seconds: 5,
+            max_retries: 2,
+            custom_headers: std::collections::HashMap::new(),
+        };
+        let reasoner = RemoteLLMReasoner::new(config);
+
+        // Verify the prompt content formatted for the remote LLM:
+        let user_prompt = reasoner.format_user_prompt(&package);
+        
+        // The prompt MUST contain the sanitized EvidencePackage JSON
+        assert!(user_prompt.contains("Kubernetes ingress configuration"));
+        assert!(user_prompt.contains("EvidencePackage"));
+        assert!(user_prompt.contains("ai_privacy_boundary:strict_curated_evidence_only:v1"));
+
+        // The prompt must NOT contain raw provider secrets or unscrubbed database metadata
+        assert!(!user_prompt.contains("sk-test-key-mock"), "API key must not be leaked in the user prompt payload");
+    }
+
+    #[test]
+    fn test_privacy_boundary_custom_policy_audit() {
+        let policy = AIPrivacyPolicy {
+            enable_ai_reasoning: true,
+            allow_active_app: false,
+            allow_browser_domain: false,
+            allow_session_tracking: false,
+            max_related_items: 1,
+            max_snippet_chars: 50,
+            min_relationship_strength: 0.70,
+            scrub_secrets: true,
+        };
+
+        let boundary = AIPrivacyBoundary::new(policy);
+
+        let mut package = EvidencePackage {
+            target_item: TargetItemEvidence {
+                id: "target_1".to_string(),
+                item_type: "text".to_string(),
+                title: Some("Test item with password=secret".to_string()),
+                content_snippet: "Very long content exceeding fifty characters limit for testing privacy boundary truncation".to_string(),
+                app_name: Some("LeakedApp".to_string()),
+                domain: Some("leaked.domain.com".to_string()),
+                session_id: Some("sess_leaked".to_string()),
+                captured_at: "2026-09-04T12:00:00Z".to_string(),
+            },
+            candidate_contexts: vec![],
+            relevant_related_items: vec![
+                RelatedItemEvidence {
+                    item_id: "rel_1".to_string(),
+                    title: None,
+                    item_type: "text".to_string(),
+                    snippet: "Strong relation item".to_string(),
+                    workspace_id: None,
+                    workspace_name: None,
+                    relevance_score: 0.85,
+                },
+                RelatedItemEvidence {
+                    item_id: "rel_2".to_string(),
+                    title: None,
+                    item_type: "text".to_string(),
+                    snippet: "Weak relation item".to_string(),
+                    workspace_id: None,
+                    workspace_name: None,
+                    relevance_score: 0.50,
+                },
+            ],
+            relationships: vec![],
+            semantic_similarity_summaries: vec![],
+            relevant_sessions: vec![],
+            session_context: None,
+            workspace_semantic_profiles: vec![],
+            contextual_signals: vec![
+                CuratedContextSignal {
+                    signal_type: "active_app".to_string(),
+                    summary: "Application: LeakedApp".to_string(),
+                },
+            ],
+            temporal_context: TemporalEvidence {
+                age_days: 0.1,
+                recency_decay_weight: 1.0,
+                is_recent: true,
+            },
+            system_metadata: EvidenceMetadata {
+                generated_at: "2026-09-04T12:00:00Z".to_string(),
+                engine_version: "v1".to_string(),
+                total_db_items_excluded: 0,
+                privacy_boundary: "".to_string(),
+            },
+        };
+
+        boundary.audit_and_sanitize(&mut package).unwrap();
+
+        // 1. App name and domain stripped
+        assert!(package.target_item.app_name.is_none());
+        assert!(package.target_item.domain.is_none());
+        assert!(package.target_item.session_id.is_none());
+
+        // 2. Secret scrubbed
+        assert!(package.target_item.title.unwrap().contains("[REDACTED]"));
+
+        // 3. Truncated to 50 chars
+        assert!(package.target_item.content_snippet.chars().count() <= 53);
+
+        // 4. Weak relation filtered (< 0.70) and count capped to max_related_items = 1
+        assert_eq!(package.relevant_related_items.len(), 1);
+        assert_eq!(package.relevant_related_items[0].item_id, "rel_1");
+
+        // 5. Active app signal stripped
+        assert!(package.contextual_signals.is_empty());
+
+        // 6. Privacy boundary stamp set
+        assert_eq!(package.system_metadata.privacy_boundary, "ai_privacy_boundary:strict_curated_evidence_only:v1");
+    }
 }
+
