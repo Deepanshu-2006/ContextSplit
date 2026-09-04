@@ -50,6 +50,7 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
               } catch (e) {}
 
               setSuggestionData({
+                tier: existingSuggested.confidence >= 0.70 ? "high" : "moderate",
                 workspaceId: ws.id,
                 workspaceName: ws.name,
                 confidence: Math.round(existingSuggested.confidence * 100),
@@ -61,10 +62,45 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
 
           // 2. Evaluate item context against existing workspaces
           const interpretation = await db.evaluateItemContext(itemId);
-          if (interpretation.existing_workspaces.length > 0) {
+
+          if (interpretation.primary_interpretation === "ambiguous") {
+            // UNCERTAIN: Competing contexts, do NOT force into any workspace
+            const candidates = interpretation.existing_workspaces.slice(0, 3).map(w => ({
+              id: w.workspace_id,
+              name: w.workspace_name,
+              confidence: Math.round(w.confidence * 100),
+            }));
+            const topConfidence = interpretation.existing_workspaces[0]?.confidence || 0;
+            setSuggestionData({
+              tier: "uncertain",
+              confidence: Math.round(topConfidence * 100),
+              explanation: interpretation.summary,
+              uncertaintyReason: "Ambiguous affinity across multiple workspaces without a clear winner.",
+              competingCandidates: candidates,
+              reasons: interpretation.existing_workspaces[0]?.reasons || [],
+            });
+            return;
+          }
+
+          if (interpretation.primary_interpretation === "unassigned" || (interpretation.primary_interpretation as string) === "inbox") {
+            // NO CONTEXT: Weak evidence, do NOT force into any workspace
+            const topConfidence = interpretation.existing_workspaces[0]?.confidence || 0;
+            setSuggestionData({
+              tier: "no_context",
+              confidence: Math.round(topConfidence * 100),
+              explanation: interpretation.summary || "Insufficient evidence to associate with any workspace.",
+              uncertaintyReason: "Weak evidence (< 25% confidence). Item remains in Inbox.",
+              reasons: [],
+            });
+            return;
+          }
+
+          if (interpretation.primary_interpretation === "existing_workspace" && interpretation.existing_workspaces.length > 0) {
             const top = interpretation.existing_workspaces[0];
+            const tier = top.confidence >= 0.70 ? "high" : "moderate";
+
+            // Only persist as suggested membership if confidence is at least 0.60
             if (top.confidence >= 0.60) {
-              // Persist as suggested membership for future loads
               try {
                 await db.createContextMembership(
                   itemId,
@@ -76,14 +112,16 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
               } catch (err) {
                 // Ignore duplicate constraint if already inserted
               }
-
-              setSuggestionData({
-                workspaceId: top.workspace_id,
-                workspaceName: top.workspace_name,
-                confidence: Math.round(top.confidence * 100),
-                reasons: top.reasons,
-              });
             }
+
+            setSuggestionData({
+              tier,
+              workspaceId: top.workspace_id,
+              workspaceName: top.workspace_name,
+              confidence: Math.round(top.confidence * 100),
+              explanation: interpretation.summary,
+              reasons: top.reasons,
+            });
           }
         } catch (e) {
           console.error("Failed to fetch suggestions", e);
@@ -119,16 +157,18 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
     const wsId = suggestionData.workspaceId;
     setSuggestionDismissed(true);
     try {
-      // 1. Record dismissal on membership
-      await db.dismissContextMembership(itemId, wsId);
-      // 2. Record feedback signal
-      await db.createContextSignal(
-        wsId,
-        itemId,
-        "user_action",
-        null,
-        JSON.stringify({ action: "suggestion_dismissed", workspace_id: wsId })
-      );
+      if (wsId) {
+        // 1. Record dismissal on membership
+        await db.dismissContextMembership(itemId, wsId);
+        // 2. Record feedback signal
+        await db.createContextSignal(
+          wsId,
+          itemId,
+          "user_action",
+          null,
+          JSON.stringify({ action: "suggestion_dismissed", workspace_id: wsId })
+        );
+      }
       // Item remains in Inbox; not deleted; no confirmed membership created
     } catch (e) {
       console.error(e);

@@ -684,10 +684,29 @@ pub fn evaluate_item_context(
     let top_new = potential_new_contexts.first();
 
     let (primary_interpretation, summary) = if let Some(ws) = top_ws {
-        if ws.confidence >= 0.60 && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence) {
+        // Check if top candidate is ambiguous with runner-up
+        let is_ambiguous = existing_workspaces.len() > 1
+            && (existing_workspaces[0].score - existing_workspaces[1].score).abs() <= 0.12
+            && existing_workspaces[1].score >= 0.35;
+
+        if is_ambiguous {
+            let ws2 = &existing_workspaces[1];
+            (
+                "ambiguous".to_string(),
+                format!(
+                    "Ambiguous match: competing affinity between '{}' ({}) and '{}' ({}); item remains in Inbox without forced assignment",
+                    ws.workspace_name, ws.confidence_percentage, ws2.workspace_name, ws2.confidence_percentage
+                ),
+            )
+        } else if ws.confidence >= 0.60 && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence) {
             (
                 "existing_workspace".to_string(),
                 format!("Strong match to existing workspace '{}' ({})", ws.workspace_name, ws.confidence_percentage),
+            )
+        } else if ws.confidence < 0.25 {
+            (
+                "unassigned".to_string(),
+                "Weak signals detected; item remains in Inbox".to_string(),
             )
         } else if let Some(new_ctx) = top_new {
             if new_ctx.confidence >= 0.60 {
@@ -811,14 +830,24 @@ pub fn recalculate_workspace_suggested_memberships(
 
         // Deterministic recalculation
         let scores = score_item(conn, &target_item_id).unwrap_or_default();
+        let is_ambiguous = scores.len() > 1
+            && (scores[0].confidence - scores[1].confidence).abs() <= 0.12
+            && scores[1].confidence >= 0.35;
+
         let new_score = scores.into_iter().find(|s| s.workspace_id == workspace_id);
         let new_confidence = new_score.map(|s| s.confidence as f64).unwrap_or(0.0).clamp(0.0, 1.0);
 
         let old_confidence = existing_membership.as_ref().map(|m| m.confidence).unwrap_or(0.0);
         let delta = (new_confidence - old_confidence).abs();
 
-        // If changed by >= 1% or new suggested membership qualified
-        if delta >= 0.01 || (existing_membership.is_none() && new_confidence >= 0.35) {
+        // If changed by >= 1% or new suggested membership qualified (only when unambiguous)
+        let should_qualify = if existing_membership.is_some() {
+            delta >= 0.01
+        } else {
+            new_confidence >= 0.35 && !is_ambiguous
+        };
+
+        if should_qualify {
             // NEVER silently convert suggested to confirmed: always keeps "suggested"
             let membership = crate::db::operations::create_or_update_membership(
                 conn,

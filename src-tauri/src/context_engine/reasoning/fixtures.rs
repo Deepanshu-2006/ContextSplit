@@ -1,7 +1,7 @@
 use super::models::{
-    CandidateContextEvidence, CuratedContextSignal, EvidenceMetadata, EvidencePackage,
-    ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary, SessionEvidence,
-    TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary,
+    CandidateContextEvidence, CuratedContextSignal, DeterministicEvidenceAssessment, EvidenceMetadata,
+    EvidencePackage, ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary,
+    SessionEvidence, TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary,
 };
 
 /// Test fixtures for AI Context Reasoner scenarios.
@@ -140,6 +140,13 @@ pub fn strong_existing_context_fixture() -> EvidencePackage {
             },
         ],
         temporal_context: default_temporal(),
+        deterministic_assessment: DeterministicEvidenceAssessment {
+            confidence_band: "high".to_string(),
+            is_weak_evidence: false,
+            is_ambiguous: false,
+            competing_contexts: Vec::new(),
+            assessment_summary: "Strong deterministic evidence for 'Paris Trip' (89% affinity).".to_string(),
+        },
         system_metadata: default_metadata("strong_existing"),
     }
 }
@@ -230,6 +237,13 @@ pub fn strong_new_context_fixture() -> EvidencePackage {
             },
         ],
         temporal_context: default_temporal(),
+        deterministic_assessment: DeterministicEvidenceAssessment {
+            confidence_band: "high".to_string(),
+            is_weak_evidence: false,
+            is_ambiguous: false,
+            competing_contexts: Vec::new(),
+            assessment_summary: "Strong deterministic evidence for new context cluster 'Workout Plan' (82% affinity).".to_string(),
+        },
         system_metadata: default_metadata("strong_new"),
     }
 }
@@ -347,6 +361,13 @@ pub fn ambiguous_context_fixture() -> EvidencePackage {
             },
         ],
         temporal_context: default_temporal(),
+        deterministic_assessment: DeterministicEvidenceAssessment {
+            confidence_band: "uncertain".to_string(),
+            is_weak_evidence: false,
+            is_ambiguous: true,
+            competing_contexts: vec!["Paris Trip".to_string(), "London Client Meetings".to_string()],
+            assessment_summary: "Ambiguous signals: competing affinity between 'Paris Trip' (63%) and 'London Client Meetings' (59%).".to_string(),
+        },
         system_metadata: default_metadata("ambiguous"),
     }
 }
@@ -380,6 +401,13 @@ pub fn no_context_fixture() -> EvidencePackage {
             },
         ],
         temporal_context: default_temporal(),
+        deterministic_assessment: DeterministicEvidenceAssessment {
+            confidence_band: "none".to_string(),
+            is_weak_evidence: true,
+            is_ambiguous: false,
+            competing_contexts: Vec::new(),
+            assessment_summary: "No candidate contexts or matching signals were detected for this item.".to_string(),
+        },
         system_metadata: default_metadata("no_context"),
     }
 }
@@ -438,6 +466,13 @@ pub fn insufficient_evidence_fixture() -> EvidencePackage {
             },
         ],
         temporal_context: default_temporal(),
+        deterministic_assessment: DeterministicEvidenceAssessment {
+            confidence_band: "weak".to_string(),
+            is_weak_evidence: true,
+            is_ambiguous: false,
+            competing_contexts: Vec::new(),
+            assessment_summary: "Deterministic evidence for 'Quarterly Planning' is weak (14% affinity is below the actionable 25% threshold).".to_string(),
+        },
         system_metadata: default_metadata("insufficient_evidence"),
     }
 }

@@ -42,6 +42,9 @@ pub struct EvidencePackage {
     /// Temporal recency and decay evidence.
     pub temporal_context: TemporalEvidence,
 
+    /// Assessment of deterministic evidence strength, communicating weakness or ambiguity.
+    pub deterministic_assessment: DeterministicEvidenceAssessment,
+
     /// Package metadata ensuring reproducibility, versioning, and privacy boundaries.
     pub system_metadata: EvidenceMetadata,
 }
@@ -142,6 +145,23 @@ pub struct EvidenceMetadata {
     pub engine_version: String,
     pub total_db_items_excluded: usize,
     pub privacy_boundary: String,
+}
+
+/// Explicit assessment of deterministic evidence strength.
+/// Communicates weakness, ambiguity, and competing candidate contexts to the AI reasoner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeterministicEvidenceAssessment {
+    /// Overall confidence band: "high" | "moderate" | "uncertain" | "weak" | "none"
+    pub confidence_band: String,
+    /// True if deterministic evidence is weak or below the actionable threshold (< 0.25)
+    pub is_weak_evidence: bool,
+    /// True if competing signals or top candidates are close in score
+    pub is_ambiguous: bool,
+    /// Names of competing candidate contexts when ambiguous
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub competing_contexts: Vec<String>,
+    /// Natural-language summary of deterministic evidence strength or weakness
+    pub assessment_summary: String,
 }
 
 /// Explicit decision categories for ContextReasoningResult.

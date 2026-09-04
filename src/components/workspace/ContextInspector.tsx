@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit } from "lucide-react";
-import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata } from "../../services/db";
+import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit, AlertTriangle, Sparkles, HelpCircle } from "lucide-react";
+import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata, UnifiedContextInterpretation, ContextReasoningResult } from "../../services/db";
 
 interface ContextInspectorProps {
   itemId: string;
@@ -15,19 +15,23 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   const [relationships, setRelationships] = useState<ItemRelationship[]>([]);
   const [semanticStatus, setSemanticStatus] = useState<ItemSemanticStatus | null>(null);
   const [embeddingMeta, setEmbeddingMeta] = useState<ItemEmbeddingMetadata | null>(null);
+  const [interpretation, setInterpretation] = useState<UnifiedContextInterpretation | null>(null);
+  const [aiResult, setAiResult] = useState<ContextReasoningResult | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function fetchData() {
       try {
         setLoading(true);
-        const [fetchedItem, fetchedSignals, fetchedScores, fetchedRels, fetchedSemStatus, fetchedEmbMeta] = await Promise.all([
+        const [fetchedItem, fetchedSignals, fetchedScores, fetchedRels, fetchedSemStatus, fetchedEmbMeta, fetchedInterpretation] = await Promise.all([
           db.getItem(itemId),
           db.listContextSignals(null, itemId),
           db.scoreItem(itemId),
           db.getStrongestRelationships(itemId, 10),
           db.getItemSemanticStatus(itemId),
           db.getItemEmbeddingMetadata(itemId),
+          db.evaluateItemContext(itemId).catch(() => null),
         ]);
         setItem(fetchedItem);
         setSignals(fetchedSignals);
@@ -35,6 +39,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
         setRelationships(fetchedRels);
         setSemanticStatus(fetchedSemStatus);
         setEmbeddingMeta(fetchedEmbMeta);
+        setInterpretation(fetchedInterpretation);
       } catch (err) {
         console.error("Failed to fetch context data", err);
       } finally {
@@ -43,6 +48,18 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
     }
     fetchData();
   }, [itemId]);
+
+  const handleRunAiReasoning = async () => {
+    setAiLoading(true);
+    try {
+      const result = await db.analyzeItemContextAI(itemId);
+      setAiResult(result);
+    } catch (err) {
+      console.error("Failed to run AI reasoning", err);
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   const getSignalIcon = (type: string) => {
     switch (type) {
@@ -283,6 +300,49 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                 <span className="text-[10px] uppercase font-bold tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded">Inferred</span>
               </div>
               <div className="p-4 space-y-3">
+                {/* Confidence Assessment Banner */}
+                {interpretation && (
+                  <div className={`p-3 rounded-lg border text-xs flex flex-col gap-1 ${
+                    interpretation.primary_interpretation === "ambiguous"
+                      ? "bg-amber-50 border-amber-200 text-amber-900"
+                      : interpretation.primary_interpretation === "unassigned"
+                      ? "bg-slate-50 border-slate-200 text-slate-700"
+                      : (interpretation.existing_workspaces[0]?.confidence || 0) >= 0.70
+                      ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+                      : "bg-blue-50 border-blue-200 text-blue-900"
+                  }`}>
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      {interpretation.primary_interpretation === "ambiguous" ? (
+                        <>
+                          <AlertTriangle size={14} className="text-amber-600 shrink-0" />
+                          <span>Uncertain Context (Ambiguous)</span>
+                        </>
+                      ) : interpretation.primary_interpretation === "unassigned" ? (
+                        <>
+                          <HelpCircle size={14} className="text-slate-500 shrink-0" />
+                          <span>No Meaningful Context (Weak Signals)</span>
+                        </>
+                      ) : (interpretation.existing_workspaces[0]?.confidence || 0) >= 0.70 ? (
+                        <>
+                          <Sparkles size={14} className="text-emerald-600 shrink-0" />
+                          <span>High Confidence Match</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles size={14} className="text-blue-600 shrink-0" />
+                          <span>Moderate Confidence Match</span>
+                        </>
+                      )}
+                    </div>
+                    <p className="text-[11px] leading-relaxed opacity-90">{interpretation.summary}</p>
+                    {interpretation.primary_interpretation === "ambiguous" && (
+                      <p className="text-[10px] font-medium text-amber-700 mt-0.5">
+                        Item is NOT forced into any workspace. Remains safely in Inbox.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {scores.length === 0 ? (
                   <p className="text-xs text-gray-500 italic">No scores calculated.</p>
                 ) : (
@@ -316,6 +376,103 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                       </div>
                     )
                   })
+                )}
+              </div>
+            </div>
+
+            {/* Section 9: AI Context Reasoning */}
+            <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+              <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-1.5">
+                  <Sparkles size={14} className="text-purple-600" />
+                  9. AI Context Reasoning
+                </h3>
+                <span className="text-[10px] uppercase font-bold tracking-wider text-purple-700 bg-purple-100 px-2 py-0.5 rounded">
+                  Privacy Preserved
+                </span>
+              </div>
+              <div className="p-4 space-y-3">
+                {!aiResult ? (
+                  <div className="text-center py-4 space-y-2">
+                    <p className="text-xs text-gray-500">
+                      Query the isolated AI Reasoner with minimal EvidencePackage to analyze context and explanations.
+                    </p>
+                    <button
+                      onClick={handleRunAiReasoning}
+                      disabled={aiLoading}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs font-medium transition disabled:opacity-50"
+                    >
+                      <Sparkles size={12} />
+                      {aiLoading ? "Analyzing Evidence..." : "Run AI Context Reasoning"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-gray-500">Decision:</span>
+                        <span className={`text-xs px-2 py-0.5 rounded font-semibold capitalize ${
+                          aiResult.decision === "existing_context"
+                            ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                            : aiResult.decision === "new_context"
+                            ? "bg-purple-100 text-purple-800 border border-purple-200"
+                            : aiResult.decision === "uncertain"
+                            ? "bg-amber-100 text-amber-800 border border-amber-200"
+                            : "bg-slate-100 text-slate-700 border border-slate-200"
+                        }`}>
+                          {aiResult.decision.replace(/_/g, " ")}
+                        </span>
+                      </div>
+                      <span className="text-xs font-bold text-gray-700">
+                        {Math.round(aiResult.confidence * 100)}% confidence
+                      </span>
+                    </div>
+
+                    {aiResult.suggested_name && (
+                      <div className="text-xs flex items-center justify-between bg-gray-50 p-2 rounded border border-gray-100">
+                        <span className="text-gray-500">Suggested Context:</span>
+                        <span className="font-semibold text-gray-800">{aiResult.suggested_name}</span>
+                      </div>
+                    )}
+
+                    {aiResult.uncertainty_reason && (
+                      <div className="text-xs bg-amber-50 border border-amber-200 text-amber-900 p-2.5 rounded flex items-start gap-1.5">
+                        <AlertTriangle size={13} className="text-amber-600 mt-0.5 shrink-0" />
+                        <div>
+                          <span className="font-semibold block">Uncertainty Notice:</span>
+                          <span className="text-[11px]">{aiResult.uncertainty_reason}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="text-xs bg-gray-50 border border-gray-100 rounded p-2.5 space-y-1">
+                      <span className="font-medium text-gray-600 block">Explanation (Evidence Grounded):</span>
+                      <p className="text-gray-800 italic leading-relaxed">"{aiResult.explanation}"</p>
+                    </div>
+
+                    {aiResult.alternative_interpretations && aiResult.alternative_interpretations.length > 0 && (
+                      <div className="text-xs space-y-1">
+                        <span className="text-gray-500 font-medium">Alternative Interpretations:</span>
+                        <ul className="list-disc list-inside text-gray-600 space-y-1 pl-1">
+                          {aiResult.alternative_interpretations.map((alt, idx) => (
+                            <li key={idx}>
+                              <span className="font-medium text-gray-800">{alt.context_name}</span>{" "}
+                              <span className="text-gray-400 font-mono">({Math.round(alt.confidence * 100)}%)</span>:{" "}
+                              <span>{alt.rationale}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <button
+                      onClick={handleRunAiReasoning}
+                      disabled={aiLoading}
+                      className="text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center gap-1 pt-1"
+                    >
+                      <Sparkles size={11} /> Re-run AI Analysis
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

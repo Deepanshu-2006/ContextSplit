@@ -69,6 +69,7 @@ CRITICAL ARCHITECTURAL CONSTRAINTS:
 3. No Executable Code: NEVER emit executable instructions, SQL statements, shell commands, script tags, or code execution calls.
 4. DO NOT Expose Internal Scores or Embeddings: NEVER include raw internal scores, confidence percentages, decimal numbers (e.g. 0.85, 89%), weights, or embeddings (e.g. cosine similarity, vectors, [0.12, ...]) in the explanation. Internal confidence belongs ONLY in the numeric "confidence" field.
 5. Communicate Uncertainty: If evidence is insufficient, ambiguous, or competing, the explanation must clearly communicate uncertainty.
+6. The AI Must NOT Be Forced to Choose a Workspace: When uncertain or when evidence is weak, NEVER guess or force an arbitrary workspace selection. Return "uncertain" or "no_context" with "suggested_context_reference": null.
 
 HUMAN-READABLE EXPLANATION GUIDELINES:
 - Generate clear, concise natural language that explains the context association to the user.
@@ -93,10 +94,10 @@ Output MUST be valid JSON adhering exactly to the following schema:
 }
 
 DECISION RULES:
-- "existing_context": Use when item clearly belongs to an existing workspace. "suggested_context_reference" MUST be non-empty and match a candidate in the evidence package.
+- "existing_context": Use when item clearly belongs to an existing workspace with high or moderate confidence. "suggested_context_reference" MUST be non-empty and match a candidate in the evidence package.
 - "new_context": Use when item forms a cohesive new activity cluster. "suggested_name" MUST be non-empty.
-- "uncertain": Use when there are competing candidate contexts or ambiguity. "uncertainty_reason" MUST be non-empty, and explanation must communicate uncertainty.
-- "no_context": Use when evidence is insufficient or matching contexts are archived. Item remains in Inbox. Explanation must communicate limited or missing evidence.
+- "uncertain": Use when there are competing candidate contexts or ambiguous signals (e.g. deterministic_assessment.is_ambiguous is true). DO NOT choose a workspace: set "suggested_context_reference": null and "suggested_name": null. "uncertainty_reason" MUST be non-empty, and explanation must communicate uncertainty.
+- "no_context": Use when evidence is insufficient, weak (e.g. deterministic_assessment.is_weak_evidence is true), or matching contexts are archived. DO NOT choose a workspace: set "suggested_context_reference": null and "suggested_name": null. Item remains in Inbox. Explanation must communicate limited or missing evidence.
 "#
     }
 

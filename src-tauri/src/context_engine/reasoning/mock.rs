@@ -123,8 +123,8 @@ impl AIReasoner for MockAIReasoner {
 
         let top = &active_candidates[0];
 
-        // 3. Case: Weak contextual evidence across all candidates (< 0.25)
-        if top.deterministic_score < 0.25 {
+        // 3. Case: Weak contextual evidence across all candidates (< 0.25) or assessed as weak
+        if package.deterministic_assessment.is_weak_evidence || top.deterministic_score < 0.25 {
             let mut factors = top.evidence_factors.clone();
             if factors.is_empty() {
                 factors.push(format!("Top candidate '{}' shows minimal contextual affinity.", top.name));
@@ -154,9 +154,11 @@ impl AIReasoner for MockAIReasoner {
         }
 
         // 4. Case: Ambiguous conflict between top candidates (difference <= 0.12 and second >= 0.35)
-        let is_ambiguous = active_candidates.len() > 1
-            && (top.deterministic_score - active_candidates[1].deterministic_score).abs() <= 0.12
-            && active_candidates[1].deterministic_score >= 0.35;
+        // or explicitly assessed as ambiguous by deterministic assessment
+        let is_ambiguous = package.deterministic_assessment.is_ambiguous
+            || (active_candidates.len() > 1
+                && (top.deterministic_score - active_candidates[1].deterministic_score).abs() <= 0.12
+                && active_candidates[1].deterministic_score >= 0.35);
 
         if is_ambiguous {
             let second = &active_candidates[1];
@@ -174,24 +176,26 @@ impl AIReasoner for MockAIReasoner {
                 key_factors.push(format!("{}: {}", second.name, f));
             }
 
+            // List all competing candidates in alternatives so user/UI can choose without the AI forcing one
             let alternatives = active_candidates
                 .iter()
-                .skip(1)
                 .map(|c| AlternativeContextReasoning {
                     context_id: c.context_id.clone(),
                     context_name: c.name.clone(),
                     confidence: c.deterministic_score,
                     rationale: format!(
-                        "Close competitor with high affinity. {}",
+                        "Candidate with competing affinity. {}",
                         c.evidence_factors.first().cloned().unwrap_or_default()
                     ),
                 })
                 .collect();
 
+            // CRITICAL INVARIANT: The AI must NOT be forced to choose a Workspace!
+            // suggested_context_reference and suggested_name are strictly None for uncertain decisions.
             let result = ContextReasoningResult {
                 decision: ContextReasoningDecision::Uncertain,
-                suggested_context_reference: Some(top.context_id.clone()),
-                suggested_name: Some(top.name.clone()),
+                suggested_context_reference: None,
+                suggested_name: None,
                 confidence: avg_conf,
                 explanation: format!(
                     "This may be related to either '{}' or '{}', but the available evidence shows competing signals between them.",

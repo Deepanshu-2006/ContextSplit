@@ -3,9 +3,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::models::{
-    CandidateContextEvidence, CuratedContextSignal, EvidenceMetadata, EvidencePackage,
-    ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary, SessionEvidence,
-    TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary, ContextReasoningResult,
+    CandidateContextEvidence, CuratedContextSignal, DeterministicEvidenceAssessment, EvidenceMetadata,
+    EvidencePackage, ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary,
+    SessionEvidence, TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary, ContextReasoningResult,
 };
 pub use super::privacy::scrub_private_data;
 use super::privacy::{AIPrivacyBoundary, AIPrivacyPolicy};
@@ -553,7 +553,114 @@ impl EvidencePackageBuilder {
         };
 
         // -------------------------------------------------------------------
-        // 9. System Metadata & Excluded Metrics
+        // 9. Deterministic Evidence Assessment (Uncertainty & Ambiguity)
+        // -------------------------------------------------------------------
+        let active_candidates: Vec<_> = candidate_contexts
+            .iter()
+            .filter(|c| c.lifecycle_state != "archived")
+            .collect();
+
+        let has_actionable_candidate = active_candidates.iter().any(|c| {
+            if c.context_type == "workspace" {
+                c.deterministic_score >= 0.25
+            } else {
+                c.item_count > 1 || c.deterministic_score >= 0.60
+            }
+        });
+
+        let deterministic_assessment = if candidate_contexts.is_empty() {
+            DeterministicEvidenceAssessment {
+                confidence_band: "none".to_string(),
+                is_weak_evidence: true,
+                is_ambiguous: false,
+                competing_contexts: Vec::new(),
+                assessment_summary: "No candidate contexts or matching signals were detected for this item.".to_string(),
+            }
+        } else if active_candidates.is_empty() {
+            let archived_names: Vec<String> = candidate_contexts.iter().map(|c| c.name.clone()).collect();
+            DeterministicEvidenceAssessment {
+                confidence_band: "weak".to_string(),
+                is_weak_evidence: true,
+                is_ambiguous: false,
+                competing_contexts: Vec::new(),
+                assessment_summary: format!(
+                    "Matching contexts ({}) are archived by user; contextual signals are suppressed.",
+                    archived_names.join(", ")
+                ),
+            }
+        } else if !has_actionable_candidate {
+            let top = &active_candidates[0];
+            DeterministicEvidenceAssessment {
+                confidence_band: "weak".to_string(),
+                is_weak_evidence: true,
+                is_ambiguous: false,
+                competing_contexts: Vec::new(),
+                assessment_summary: format!(
+                    "Deterministic signals for '{}' are weak or insufficient (< 25% threshold); item remains in Inbox.",
+                    top.name
+                ),
+            }
+        } else {
+            let top = &active_candidates[0];
+            if top.deterministic_score < 0.25 {
+                DeterministicEvidenceAssessment {
+                    confidence_band: "weak".to_string(),
+                    is_weak_evidence: true,
+                    is_ambiguous: false,
+                    competing_contexts: Vec::new(),
+                    assessment_summary: format!(
+                        "Deterministic evidence for '{}' is weak ({:.0}% affinity is below the actionable 25% threshold).",
+                        top.name,
+                        top.deterministic_score * 100.0
+                    ),
+                }
+            } else if active_candidates.len() > 1
+                && (top.deterministic_score - active_candidates[1].deterministic_score).abs() <= 0.12
+                && active_candidates[1].deterministic_score >= 0.35
+            {
+                let second = &active_candidates[1];
+                DeterministicEvidenceAssessment {
+                    confidence_band: "uncertain".to_string(),
+                    is_weak_evidence: false,
+                    is_ambiguous: true,
+                    competing_contexts: vec![top.name.clone(), second.name.clone()],
+                    assessment_summary: format!(
+                        "Ambiguous signals: competing affinity between '{}' ({:.0}%) and '{}' ({:.0}%).",
+                        top.name,
+                        top.deterministic_score * 100.0,
+                        second.name,
+                        second.deterministic_score * 100.0
+                    ),
+                }
+            } else if top.deterministic_score >= 0.70 {
+                DeterministicEvidenceAssessment {
+                    confidence_band: "high".to_string(),
+                    is_weak_evidence: false,
+                    is_ambiguous: false,
+                    competing_contexts: Vec::new(),
+                    assessment_summary: format!(
+                        "Strong deterministic evidence for '{}' ({:.0}% affinity).",
+                        top.name,
+                        top.deterministic_score * 100.0
+                    ),
+                }
+            } else {
+                DeterministicEvidenceAssessment {
+                    confidence_band: "moderate".to_string(),
+                    is_weak_evidence: false,
+                    is_ambiguous: false,
+                    competing_contexts: Vec::new(),
+                    assessment_summary: format!(
+                        "Moderate deterministic evidence for '{}' ({:.0}% affinity).",
+                        top.name,
+                        top.deterministic_score * 100.0
+                    ),
+                }
+            }
+        };
+
+        // -------------------------------------------------------------------
+        // 10. System Metadata & Excluded Metrics
         // -------------------------------------------------------------------
         let included_items = 1 + relevant_related_items.len();
         let total_db_items_excluded = total_db_items.saturating_sub(included_items);
@@ -576,6 +683,7 @@ impl EvidencePackageBuilder {
             workspace_semantic_profiles,
             contextual_signals,
             temporal_context,
+            deterministic_assessment,
             system_metadata,
         };
 

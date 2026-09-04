@@ -214,7 +214,7 @@ export interface UnifiedContextInterpretation {
   item_id: string;
   existing_workspaces: ExistingWorkspaceEvaluation[];
   potential_new_contexts: PotentialNewContextEvaluation[];
-  primary_interpretation: "existing_workspace" | "new_context" | "unassigned";
+  primary_interpretation: "existing_workspace" | "new_context" | "unassigned" | "ambiguous";
   summary: string;
 }
 
@@ -412,6 +412,14 @@ export interface EvidenceMetadata {
   privacy_boundary: string;
 }
 
+export interface DeterministicEvidenceAssessment {
+  confidence_band: "high" | "moderate" | "uncertain" | "weak" | "none" | string;
+  is_weak_evidence: boolean;
+  is_ambiguous: boolean;
+  competing_contexts?: string[];
+  assessment_summary: string;
+}
+
 export interface EvidencePackage {
   target_item: TargetItemEvidence;
   candidate_contexts: CandidateContextEvidence[];
@@ -423,6 +431,7 @@ export interface EvidencePackage {
   workspace_semantic_profiles: WorkspaceProfileSummary[];
   contextual_signals: CuratedContextSignal[];
   temporal_context: TemporalEvidence;
+  deterministic_assessment: DeterministicEvidenceAssessment;
   system_metadata: EvidenceMetadata;
 }
 
