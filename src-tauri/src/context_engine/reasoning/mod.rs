@@ -6,6 +6,7 @@ pub mod validator;
 pub mod fixtures;
 pub mod provider;
 pub mod remote;
+pub mod privacy;
 
 #[cfg(test)]
 pub mod tests;
@@ -13,7 +14,8 @@ pub mod tests;
 pub use models::*;
 pub use traits::AIReasoner;
 pub use mock::MockAIReasoner;
-pub use builder::{build_evidence_package, analyze_item_context_ai, EvidencePackageBuilder, scrub_private_data};
+pub use builder::{build_evidence_package, analyze_item_context_ai, EvidencePackageBuilder};
+pub use privacy::{AIPrivacyBoundary, AIPrivacyPolicy, AIPrivacyViolation, scrub_private_data};
 pub use validator::{validate_reasoning_result, parse_and_validate_response, detect_executable_instructions, ReasoningValidationError};
 pub use fixtures::*;
 pub use provider::{

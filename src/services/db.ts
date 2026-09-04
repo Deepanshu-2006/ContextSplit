@@ -65,6 +65,7 @@ export interface PrivacySettings {
   enable_semantic_processing: boolean;
   semantic_provider: string;
   enable_semantic_suggestions: boolean;
+  enable_ai_reasoning: boolean;
 }
 
 export interface ItemRelationship {

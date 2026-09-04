@@ -231,6 +231,7 @@ mod tests {
             enable_semantic_processing: true,
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
+            enable_ai_reasoning: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();
@@ -274,6 +275,7 @@ mod tests {
             enable_semantic_processing: true,
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
+            enable_ai_reasoning: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();

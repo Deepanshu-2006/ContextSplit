@@ -29,6 +29,7 @@ mod tests {
             enable_semantic_processing: true,
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
+            enable_ai_reasoning: true,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -216,6 +217,7 @@ mod tests {
             enable_semantic_processing: false,
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: false,
+            enable_ai_reasoning: false,
         };
         crate::db::settings::update_settings(&conn2, settings_off).unwrap();
 

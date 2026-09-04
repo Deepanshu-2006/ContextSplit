@@ -16,6 +16,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     enable_semantic_processing: false,
     semantic_provider: "local",
     enable_semantic_suggestions: false,
+    enable_ai_reasoning: true,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -162,6 +163,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     checked={settings.enable_semantic_suggestions}
                     onChange={() => handleToggle("enable_semantic_suggestions")}
                     disabled={!settings.enable_semantic_processing}
+                  />
+
+                  <ToggleRow 
+                    icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>}
+                    title="Remote AI Context Reasoning"
+                    description="Allow ContextSplit to send minimal, privacy-scrubbed EvidencePackages to AI reasoners. When disabled, ContextSplit continues functioning exclusively using deterministic Context Engine logic."
+                    checked={settings.enable_ai_reasoning}
+                    onChange={() => handleToggle("enable_ai_reasoning")}
                   />
 
                   <div className="pt-4 mt-2">

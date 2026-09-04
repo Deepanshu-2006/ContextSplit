@@ -1,4 +1,3 @@
-use regex::Regex;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +7,8 @@ use super::models::{
     ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary, SessionEvidence,
     TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary, ContextReasoningResult,
 };
+pub use super::privacy::scrub_private_data;
+use super::privacy::{AIPrivacyBoundary, AIPrivacyPolicy};
 use super::traits::AIReasoner;
 
 /// Configurable builder that constructs a deterministic, privacy-sanitized
@@ -20,6 +21,7 @@ use super::traits::AIReasoner;
 /// 4. Does NOT include raw embeddings (`Vec<f32>` arrays are excluded; only summaries are produced).
 /// 5. Does NOT include internal database IDs (rowids, signal primary keys, OS process IDs).
 /// 6. Fully deterministic output with strict multi-key sorting.
+/// 7. Enforces AI Privacy Boundary and user privacy settings (blocks when disabled).
 #[derive(Debug, Clone)]
 pub struct EvidencePackageBuilder {
     pub max_candidate_contexts: usize,
@@ -30,19 +32,21 @@ pub struct EvidencePackageBuilder {
     pub max_snippet_length: usize,
     pub min_relationship_strength: f64,
     pub min_candidate_score: f64,
+    pub privacy_policy: Option<AIPrivacyPolicy>,
 }
 
 impl Default for EvidencePackageBuilder {
     fn default() -> Self {
         Self {
             max_candidate_contexts: 5,
-            max_related_items: 5,
+            max_related_items: 3,
             max_relationships: 8,
             max_semantic_summaries: 5,
             max_signals: 6,
-            max_snippet_length: 150,
-            min_relationship_strength: 0.35,
+            max_snippet_length: 200,
+            min_relationship_strength: 0.40,
             min_candidate_score: 0.05,
+            privacy_policy: None,
         }
     }
 }
@@ -50,6 +54,11 @@ impl Default for EvidencePackageBuilder {
 impl EvidencePackageBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_privacy_policy(mut self, policy: AIPrivacyPolicy) -> Self {
+        self.privacy_policy = Some(policy);
+        self
     }
 
     pub fn with_max_candidate_contexts(mut self, limit: usize) -> Self {
@@ -80,6 +89,18 @@ impl EvidencePackageBuilder {
     /// Constructs the EvidencePackage deterministically from the database.
     pub fn build(&self, conn: &Connection, item_id: &str) -> Result<EvidencePackage, String> {
         let now = chrono::Utc::now();
+
+        // 0. Resolve Privacy Policy & Boundary Check
+        let policy = match &self.privacy_policy {
+            Some(p) => p.clone(),
+            None => {
+                let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
+                AIPrivacyPolicy::from_privacy_settings(&settings)
+            }
+        };
+
+        let boundary = AIPrivacyBoundary::new(policy.clone());
+        boundary.check_permission().map_err(|e| e.to_string())?;
 
         // Count total items in the database to calculate total_db_items_excluded
         let total_db_items: usize = conn
@@ -122,25 +143,39 @@ impl EvidencePackageBuilder {
         let mut app_name: Option<String> = None;
         let mut domain: Option<String> = None;
 
-        for sig in &raw_signals {
-            if sig.signal_type == "active_app" {
-                if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
-                    if let Some(app) = v.get("app_name").and_then(|a| a.as_str()) {
-                        if app_name.is_none() {
-                            app_name = Some(app.to_string());
-                        }
-                    }
-                }
-            } else if sig.signal_type == "url_metadata" {
-                if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
-                    if let Some(d) = v.get("domain").and_then(|d| d.as_str()) {
-                        if domain.is_none() {
-                            domain = Some(d.to_string());
+        if policy.allow_active_app {
+            for sig in &raw_signals {
+                if sig.signal_type == "active_app" {
+                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                        if let Some(app) = v.get("app_name").and_then(|a| a.as_str()) {
+                            if app_name.is_none() {
+                                app_name = Some(app.to_string());
+                            }
                         }
                     }
                 }
             }
         }
+
+        if policy.allow_browser_domain {
+            for sig in &raw_signals {
+                if sig.signal_type == "url_metadata" {
+                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                        if let Some(d) = v.get("domain").and_then(|d| d.as_str()) {
+                            if domain.is_none() {
+                                domain = Some(d.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let session_id = if policy.allow_session_tracking {
+            item.session_id.clone()
+        } else {
+            None
+        };
 
         let target_item = TargetItemEvidence {
             id: item.id.clone(),
@@ -149,7 +184,7 @@ impl EvidencePackageBuilder {
             content_snippet,
             app_name,
             domain,
-            session_id: item.session_id.clone(),
+            session_id,
             captured_at: item.created_at.clone(),
         };
 
@@ -239,9 +274,12 @@ impl EvidencePackageBuilder {
         let raw_relationships = crate::db::operations::get_item_relationships(conn, item_id)
             .unwrap_or_default();
 
+        let effective_min_strength = self.min_relationship_strength.max(policy.min_relationship_strength);
+        let effective_max_related_items = self.max_related_items.min(policy.max_related_items);
+
         let mut filtered_relationships = Vec::new();
         for rel in raw_relationships {
-            if rel.strength >= self.min_relationship_strength {
+            if rel.strength >= effective_min_strength {
                 let other_id = if rel.item_a_id == item.id {
                     rel.item_b_id
                 } else {
@@ -287,9 +325,10 @@ impl EvidencePackageBuilder {
                 }
 
                 // Add to relevant related items if not already added
-                if seen_related_item_ids.insert(other_id.clone()) && relevant_related_items.len() < self.max_related_items {
-                    let short_snippet = if other_item.content.chars().count() > 80 {
-                        let t: String = other_item.content.chars().take(80).collect();
+                if seen_related_item_ids.insert(other_id.clone()) && relevant_related_items.len() < effective_max_related_items {
+                    let max_snippet = self.max_snippet_length.min(policy.max_snippet_chars);
+                    let short_snippet = if other_item.content.chars().count() > max_snippet {
+                        let t: String = other_item.content.chars().take(max_snippet).collect();
                         format!("{}...", t)
                     } else {
                         other_item.content.clone()
@@ -346,33 +385,35 @@ impl EvidencePackageBuilder {
         let mut relevant_sessions = Vec::new();
         let mut target_session_evidence: Option<SessionEvidence> = None;
 
-        if let Some(sess_id) = &item.session_id {
-            let mut sess_stmt = conn.prepare("SELECT workspace_id FROM items WHERE session_id = ?").map_err(|e| e.to_string())?;
-            let mut sess_workspaces = HashSet::new();
-            let mut count = 0;
+        if policy.allow_session_tracking {
+            if let Some(sess_id) = &item.session_id {
+                let mut sess_stmt = conn.prepare("SELECT workspace_id FROM items WHERE session_id = ?").map_err(|e| e.to_string())?;
+                let mut sess_workspaces = HashSet::new();
+                let mut count = 0;
 
-            let rows = sess_stmt.query_map([sess_id], |r| r.get::<_, Option<String>>(0)).map_err(|e| e.to_string())?;
-            for r in rows.flatten() {
-                count += 1;
-                if let Some(ws_id) = r {
-                    if let Some(name) = ws_name_map.get(&ws_id) {
-                        sess_workspaces.insert(name.clone());
+                let rows = sess_stmt.query_map([sess_id], |r| r.get::<_, Option<String>>(0)).map_err(|e| e.to_string())?;
+                for r in rows.flatten() {
+                    count += 1;
+                    if let Some(ws_id) = r {
+                        if let Some(name) = ws_name_map.get(&ws_id) {
+                            sess_workspaces.insert(name.clone());
+                        }
                     }
                 }
+
+                let mut ws_list: Vec<String> = sess_workspaces.into_iter().collect();
+                ws_list.sort();
+
+                let sess_ev = SessionEvidence {
+                    session_id: sess_id.clone(),
+                    item_count: count,
+                    is_target_session: true,
+                    associated_workspaces: ws_list,
+                };
+
+                target_session_evidence = Some(sess_ev.clone());
+                relevant_sessions.push(sess_ev);
             }
-
-            let mut ws_list: Vec<String> = sess_workspaces.into_iter().collect();
-            ws_list.sort();
-
-            let sess_ev = SessionEvidence {
-                session_id: sess_id.clone(),
-                item_count: count,
-                is_target_session: true,
-                associated_workspaces: ws_list,
-            };
-
-            target_session_evidence = Some(sess_ev.clone());
-            relevant_sessions.push(sess_ev);
         }
 
         // -------------------------------------------------------------------
@@ -446,22 +487,26 @@ impl EvidencePackageBuilder {
 
             match sig.signal_type.as_str() {
                 "active_app" => {
-                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
-                        if let Some(app) = v.get("app_name").and_then(|a| a.as_str()) {
-                            contextual_signals.push(CuratedContextSignal {
-                                signal_type: "active_app".to_string(),
-                                summary: format!("Application: {}", app),
-                            });
+                    if policy.allow_active_app {
+                        if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                            if let Some(app) = v.get("app_name").and_then(|a| a.as_str()) {
+                                contextual_signals.push(CuratedContextSignal {
+                                    signal_type: "active_app".to_string(),
+                                    summary: format!("Application: {}", app),
+                                });
+                            }
                         }
                     }
                 }
                 "url_metadata" => {
-                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
-                        if let Some(dom) = v.get("domain").and_then(|d| d.as_str()) {
-                            contextual_signals.push(CuratedContextSignal {
-                                signal_type: "url_metadata".to_string(),
-                                summary: format!("Domain: {}", dom),
-                            });
+                    if policy.allow_browser_domain {
+                        if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                            if let Some(dom) = v.get("domain").and_then(|d| d.as_str()) {
+                                contextual_signals.push(CuratedContextSignal {
+                                    signal_type: "url_metadata".to_string(),
+                                    summary: format!("Domain: {}", dom),
+                                });
+                            }
                         }
                     }
                 }
@@ -517,10 +562,10 @@ impl EvidencePackageBuilder {
             generated_at: now.to_rfc3339(),
             engine_version: "ContextSplit-v0.1.0".to_string(),
             total_db_items_excluded,
-            privacy_boundary: "deterministic_curated_facts_only".to_string(),
+            privacy_boundary: "ai_privacy_boundary:strict_curated_evidence_only:v1".to_string(),
         };
 
-        Ok(EvidencePackage {
+        let mut package = EvidencePackage {
             target_item,
             candidate_contexts,
             relevant_related_items,
@@ -532,33 +577,17 @@ impl EvidencePackageBuilder {
             contextual_signals,
             temporal_context,
             system_metadata,
-        })
+        };
+
+        boundary.audit_and_sanitize(&mut package).map_err(|e| e.to_string())?;
+
+        Ok(package)
     }
 }
 
 /// Helper function to round floating point values to 4 decimal places for determinism.
 fn round_to_4_dp(val: f64) -> f64 {
     (val * 10000.0).round() / 10000.0
-}
-
-/// Scrubs credentials, tokens, passwords, and sensitive keys from text content.
-pub fn scrub_private_data(input: &str) -> String {
-    let mut safe = input.to_string();
-
-    let patterns = [
-        (Regex::new(r"Bearer\s+[A-Za-z0-9\-\._~+/]+").unwrap(), "Bearer [REDACTED]"),
-        (Regex::new(r"ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap(), "[JWT_REDACTED]"),
-        (Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), "[AWS_KEY_REDACTED]"),
-        (Regex::new(r"sk-[A-Za-z0-9]{20,}").unwrap(), "[API_KEY_REDACTED]"),
-        (Regex::new(r"(?i)\b(password|passwd|secret|apikey|token)\s*[:=]\s*[^\s,;]+").unwrap(), "$1: [REDACTED]"),
-        (Regex::new(r"\b(?:\d[ -]*?){13,16}\b").unwrap(), "[CARD_REDACTED]"),
-    ];
-
-    for (re, replacement) in &patterns {
-        safe = re.replace_all(&safe, *replacement).to_string();
-    }
-
-    safe
 }
 
 /// Convenience builder function using default builder parameters.

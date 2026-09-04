@@ -82,15 +82,7 @@ impl ContextProvider for ActiveAppProvider {
     }
 
     fn collect(&self, conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
-        let settings = crate::db::settings::get_settings(conn).unwrap_or(crate::db::settings::PrivacySettings {
-            enable_active_app: false,
-            enable_window_title: false,
-            enable_browser_domain: false,
-            enable_session_tracking: false,
-            enable_semantic_processing: true,
-            semantic_provider: "local".to_string(),
-            enable_semantic_suggestions: true,
-        });
+        let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
 
         if !settings.enable_active_app {
             return vec![];
@@ -128,15 +120,7 @@ impl ContextProvider for UrlContextProvider {
     }
 
     fn collect(&self, conn: &rusqlite::Connection, event: Option<&ContextEvent>) -> Vec<ContextSignalParams> {
-        let settings = crate::db::settings::get_settings(conn).unwrap_or(crate::db::settings::PrivacySettings {
-            enable_active_app: false,
-            enable_window_title: false,
-            enable_browser_domain: false,
-            enable_session_tracking: false,
-            enable_semantic_processing: true,
-            semantic_provider: "local".to_string(),
-            enable_semantic_suggestions: true,
-        });
+        let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
 
         if !settings.enable_browser_domain {
             return vec![];

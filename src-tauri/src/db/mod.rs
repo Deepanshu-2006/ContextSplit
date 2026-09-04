@@ -294,6 +294,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 14;
     }
 
+    if user_version < 15 {
+        conn.execute("ALTER TABLE settings ADD COLUMN enable_ai_reasoning INTEGER DEFAULT 1", [])?;
+        user_version = 15;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support
