@@ -399,6 +399,31 @@ export interface CuratedContextSignal {
   summary: string;
 }
 
+export interface RawCapturePayload {
+  content: string;
+  data_type?: string | null;
+  title?: string | null;
+  source_method?: "clipboard" | "drag_drop" | "manual" | "file_watch" | "hotkey" | "api" | string;
+  platform?: "macos" | "windows" | "linux" | "generic";
+  app_name?: string | null;
+  window_title?: string | null;
+  process_info?: string | null;
+  file_paths?: string[];
+  mime_type?: string | null;
+  original_url?: string | null;
+  size_bytes?: number | null;
+  workspace_id?: string | null;
+  raw_metadata?: Record<string, unknown> | null;
+}
+
+export interface CaptureResult {
+  item: Item;
+  signals_emitted: number;
+  session_id: string | null;
+  semantic_status: string;
+  is_duplicate: boolean;
+}
+
 export interface TemporalEvidence {
   age_days: number;
   recency_decay_weight: number;
@@ -745,6 +770,10 @@ export const db = {
 
   clearAiReasoningCache: () =>
     invoke<number>("clear_ai_reasoning_cache"),
+
+  // Cross-Platform Capture
+  captureRawEvent: (payload: RawCapturePayload) =>
+    invoke<CaptureResult>("capture_raw_event", { payload }),
 };
 
 

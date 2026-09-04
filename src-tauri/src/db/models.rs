@@ -11,7 +11,7 @@ pub struct Workspace {
     pub archived_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: String,
     pub workspace_id: Option<String>,
