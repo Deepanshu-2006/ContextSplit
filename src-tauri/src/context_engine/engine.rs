@@ -46,6 +46,7 @@ pub struct ContextEngine {
     pub semantic_provider: Option<Arc<Box<dyn crate::semantic::SemanticProvider>>>,
     pub semantic_similarity: std::sync::Mutex<crate::semantic::similarity::SemanticSimilarityService>,
     pub inactivity_threshold_secs: i64,
+    pub ai_reasoner: Arc<dyn crate::context_engine::reasoning::AIReasoner>,
 }
 
 impl ContextEngine {
@@ -55,12 +56,34 @@ impl ContextEngine {
             semantic_provider: None,
             semantic_similarity: std::sync::Mutex::new(crate::semantic::similarity::SemanticSimilarityService::new(1000)),
             inactivity_threshold_secs: 1800, // 30 minutes default
+            ai_reasoner: crate::context_engine::reasoning::create_default_ai_reasoner(),
         }
     }
     
     pub fn set_semantic_provider(&mut self, provider: Box<dyn crate::semantic::SemanticProvider>) {
         self.semantic_provider = Some(Arc::new(provider));
     }
+
+    /// Sets the active AI reasoning provider abstraction.
+    /// Notice: ContextEngine depends only on the `AIReasoner` trait, not concrete provider implementations.
+    pub fn set_ai_reasoner(&mut self, reasoner: Arc<dyn crate::context_engine::reasoning::AIReasoner>) {
+        self.ai_reasoner = reasoner;
+    }
+
+    /// Returns a reference to the active AI reasoning provider abstraction.
+    pub fn ai_reasoner(&self) -> Arc<dyn crate::context_engine::reasoning::AIReasoner> {
+        Arc::clone(&self.ai_reasoner)
+    }
+
+    /// Runs contextual AI analysis for an item using the configured AIReasoner.
+    pub fn analyze_item_context_ai(
+        &self,
+        conn: &Connection,
+        item_id: &str,
+    ) -> Result<crate::context_engine::reasoning::ContextReasoningResult, String> {
+        crate::context_engine::reasoning::analyze_item_context_ai(conn, item_id, self.ai_reasoner.as_ref())
+    }
+
     
     pub fn register(&mut self, provider: Box<dyn ContextProvider>) {
         self.providers.push(provider);

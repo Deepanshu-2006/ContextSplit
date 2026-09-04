@@ -17,4 +17,15 @@ pub trait AIReasoner: Send + Sync {
 
     /// Unique identifier for the provider (e.g., "mock", "ollama", "gemini").
     fn provider_id(&self) -> &str;
+
+    /// Type/category of the provider (e.g., "mock", "remote_llm").
+    fn provider_type(&self) -> &str {
+        self.provider_id()
+    }
+
+    /// Checks if the provider is currently available and properly configured.
+    fn is_available(&self) -> bool {
+        true
+    }
 }
+

@@ -232,6 +232,7 @@ pub enum AIReasoningError {
     InvalidEvidence(String),
     InferenceFailed(String),
     InvalidResponse(String),
+    InvalidConfiguration(String),
 }
 
 impl std::fmt::Display for AIReasoningError {
@@ -241,6 +242,7 @@ impl std::fmt::Display for AIReasoningError {
             AIReasoningError::InvalidEvidence(msg) => write!(f, "Invalid evidence package: {}", msg),
             AIReasoningError::InferenceFailed(msg) => write!(f, "AI reasoning inference failed: {}", msg),
             AIReasoningError::InvalidResponse(msg) => write!(f, "AI response failed schema validation: {}", msg),
+            AIReasoningError::InvalidConfiguration(msg) => write!(f, "Invalid AI provider configuration: {}", msg),
         }
     }
 }

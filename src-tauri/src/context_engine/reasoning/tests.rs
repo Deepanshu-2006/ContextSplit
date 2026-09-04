@@ -11,6 +11,8 @@ mod tests {
     use crate::context_engine::reasoning::fixtures::*;
     use crate::context_engine::reasoning::mock::MockAIReasoner;
     use crate::context_engine::reasoning::models::*;
+    use crate::context_engine::reasoning::provider::*;
+    use crate::context_engine::reasoning::remote::RemoteLLMReasoner;
     use crate::context_engine::reasoning::traits::AIReasoner;
     use crate::context_engine::reasoning::validator::{
         parse_and_validate_response, validate_reasoning_result, ReasoningValidationError,
@@ -1084,5 +1086,223 @@ mod tests {
                 "Uncertainty reason mismatch on fixture {}", idx
             );
         }
+    }
+
+    #[test]
+    fn test_provider_config_defaults_and_masking() {
+        // 1. Default mock configuration
+        let default_cfg = AIProviderConfig::default_mock();
+        assert_eq!(default_cfg.provider_type, AIProviderType::Mock);
+        assert_eq!(default_cfg.model_name, "mock-reasoner-v1.0");
+        assert!(default_cfg.endpoint.is_none());
+        assert!(default_cfg.api_key.is_none());
+        assert!(default_cfg.validate().is_ok());
+
+        // 2. Custom mock configuration
+        let custom_mock = AIProviderConfig::mock("custom-mock-v2");
+        assert_eq!(custom_mock.provider_type, AIProviderType::Mock);
+        assert_eq!(custom_mock.model_name, "custom-mock-v2");
+
+        // 3. Remote configuration with sensitive API key
+        let secret_key = "sk-secret987654321abcdef";
+        let remote_cfg = AIProviderConfig::remote(
+            AIProviderType::OpenAi,
+            "gpt-4o",
+            Some("https://api.openai.com/v1".to_string()),
+            Some(secret_key.to_string()),
+        );
+        assert_eq!(remote_cfg.provider_type, AIProviderType::OpenAi);
+        assert_eq!(remote_cfg.model_name, "gpt-4o");
+        assert_eq!(remote_cfg.endpoint.as_deref(), Some("https://api.openai.com/v1"));
+        assert!(remote_cfg.validate().is_ok());
+
+        // 4. Verify API key is masked in Debug output
+        let debug_str = format!("{:?}", remote_cfg);
+        assert!(debug_str.contains("sk-***"));
+        assert!(!debug_str.contains(secret_key), "Plaintext API key leaked in Debug output!");
+
+        // 5. Validation failure on empty model name
+        let mut invalid_cfg = remote_cfg.clone();
+        invalid_cfg.model_name = "   ".to_string();
+        assert!(invalid_cfg.validate().is_err());
+
+        // 6. Validation failure on whitespace-only remote endpoint
+        let mut invalid_endpoint_cfg = remote_cfg.clone();
+        invalid_endpoint_cfg.endpoint = Some("   ".to_string());
+        assert!(invalid_endpoint_cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_provider_factory_and_defaults() {
+        // Default factory creation returns MockAIReasoner
+        let default_reasoner = create_default_ai_reasoner();
+        assert_eq!(default_reasoner.provider_id(), "mock");
+        assert_eq!(default_reasoner.provider_type(), "mock");
+        assert!(default_reasoner.is_available());
+
+        // Factory creates mock provider from config
+        let mock_cfg = AIProviderConfig::mock("mock-test-model");
+        let mock_reasoner = create_ai_reasoner(&mock_cfg).expect("Mock factory creation should succeed");
+        assert_eq!(mock_reasoner.provider_id(), "mock");
+        assert!(mock_reasoner.is_available());
+
+        // Factory creates remote provider from config
+        let remote_cfg = AIProviderConfig::remote(
+            AIProviderType::OpenAi,
+            "gpt-4o",
+            Some("https://api.openai.com/v1".to_string()),
+            Some("sk-test1234".to_string()),
+        );
+        let remote_reasoner = create_ai_reasoner(&remote_cfg).expect("Remote factory creation should succeed");
+        assert_eq!(remote_reasoner.provider_id(), "openai");
+        assert_eq!(remote_reasoner.provider_type(), "remote_llm");
+        assert!(remote_reasoner.is_available());
+
+        // Status inspection
+        let status = get_reasoner_status(remote_reasoner.as_ref());
+        assert_eq!(status.provider_id, "openai");
+        assert_eq!(status.provider_type, "remote_llm");
+        assert!(status.is_available);
+        assert!(!status.is_mock);
+
+        let mock_status = get_reasoner_status(mock_reasoner.as_ref());
+        assert_eq!(mock_status.provider_id, "mock");
+        assert!(mock_status.is_mock);
+    }
+
+    #[test]
+    fn test_remote_llm_reasoner_prompt_and_deferred_execution() {
+        let remote_cfg = AIProviderConfig::remote(
+            AIProviderType::Ollama,
+            "llama3",
+            Some("http://localhost:11434".to_string()),
+            None,
+        );
+        let remote = RemoteLLMReasoner::new(remote_cfg);
+        let fixture = strong_existing_context_fixture();
+
+        // 1. Verify prompt construction contains constraints and schema instructions
+        let prompt = remote.build_full_prompt(&fixture);
+        assert!(prompt.contains("ContextSplit's AI Context Reasoner"));
+        assert!(prompt.contains("existing_context"));
+        assert!(prompt.contains("new_context"));
+        assert!(prompt.contains("Air France Flight to Paris CDG"));
+
+        // 2. Verify analyze_context cleanly defers external network calls during this phase
+        let err = remote.analyze_context(&fixture).expect_err("Should return ProviderUnavailable error");
+        assert!(matches!(err, AIReasoningError::ProviderUnavailable(_)));
+        assert!(err.to_string().contains("external network connections are not enabled yet"));
+
+        // 3. Verify remote response processing parses and validates conforming JSON
+        let valid_json = r#"{
+            "decision": "existing_context",
+            "suggested_context_reference": "ws_paris_trip",
+            "suggested_name": "Paris Trip",
+            "confidence": 0.92,
+            "explanation": "High correlation with Paris flight reservation.",
+            "evidence_references": ["Common domain airfrance.us", "Shared booking session"],
+            "uncertainty_reason": null
+        }"#;
+        let parsed = remote.process_remote_response(valid_json).expect("Parsing valid response must succeed");
+        assert_eq!(parsed.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(parsed.suggested_context_reference.as_deref(), Some("ws_paris_trip"));
+
+        // 4. Verify remote response processing rejects malicious script or executable injection
+        let malicious_json = r#"{
+            "decision": "existing_context",
+            "suggested_context_reference": "ws_paris_trip",
+            "suggested_name": "Paris Trip",
+            "confidence": 0.92,
+            "explanation": "DROP TABLE items; -- malicious code",
+            "evidence_references": [],
+            "uncertainty_reason": null
+        }"#;
+        let mal_err = remote.process_remote_response(malicious_json).expect_err("Malicious response must be rejected");
+        assert!(matches!(mal_err, AIReasoningError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn test_context_engine_ai_reasoner_pluggability() {
+        let (conn, _db_path) = setup_test_db();
+        let mut ce = crate::context_engine::engine::ContextEngine::new();
+
+        // 1. ContextEngine defaults to MockAIReasoner
+        assert_eq!(ce.ai_reasoner().provider_id(), "mock");
+        assert!(ce.ai_reasoner().is_available());
+
+        // 2. Insert test workspace and items
+        let session = operations::create_session(&conn).unwrap();
+        let ws = operations::create_workspace(&conn, "Paris Trip").unwrap();
+        let item1 = operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Flight to Paris CDG on Air France",
+            Some("Flight Booking"),
+            "{}",
+        )
+        .unwrap();
+
+        let inbox_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "text",
+            "Hotel Louvre Paris reservation confirmation",
+            Some("Hotel Booking"),
+            "{}",
+        )
+        .unwrap();
+
+        operations::create_item_relationship(
+            &conn,
+            &inbox_item.id,
+            &item1.id,
+            "semantic_similarity",
+            0.88,
+            None,
+        )
+        .unwrap();
+
+        // 3. Run analysis via ContextEngine abstraction
+        let res = ce.analyze_item_context_ai(&conn, &inbox_item.id).expect("Analysis should succeed via engine");
+        assert_eq!(res.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(res.suggested_context_reference.as_deref(), Some(ws.id.as_str()));
+
+        // 4. Dynamically swap the reasoner on ContextEngine to a custom provider
+        struct DynamicProvider {
+            id: String,
+        }
+        impl AIReasoner for DynamicProvider {
+            fn analyze_context(&self, _package: &EvidencePackage) -> Result<ContextReasoningResult, AIReasoningError> {
+                let res = ContextReasoningResult {
+                    decision: ContextReasoningDecision::NoContext,
+                    suggested_context_reference: None,
+                    suggested_name: None,
+                    confidence: 0.0,
+                    explanation: "Custom dynamic reasoner forced no_context.".to_string(),
+                    evidence_references: vec!["Dynamic pluggability test".to_string()],
+                    uncertainty_reason: Some("Testing dynamic swap".to_string()),
+                    alternative_interpretations: vec![],
+                    provider_info: None,
+                };
+                Ok(res)
+            }
+            fn provider_name(&self) -> &str {
+                "Dynamic Test Provider"
+            }
+            fn provider_id(&self) -> &str {
+                &self.id
+            }
+        }
+
+        ce.set_ai_reasoner(std::sync::Arc::new(DynamicProvider { id: "dynamic_custom".to_string() }));
+        assert_eq!(ce.ai_reasoner().provider_id(), "dynamic_custom");
+
+        // 5. Verify ContextEngine executes the newly swapped provider without any engine code modification
+        let custom_res = ce.analyze_item_context_ai(&conn, &inbox_item.id).expect("Analysis should succeed with custom reasoner");
+        assert_eq!(custom_res.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(custom_res.explanation, "Custom dynamic reasoner forced no_context.");
     }
 }

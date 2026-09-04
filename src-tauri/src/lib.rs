@@ -570,9 +570,9 @@ fn analyze_item_context_ai(
     item_id: &str,
     state: State<'_, AppState>,
 ) -> Result<context_engine::reasoning::ContextReasoningResult, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-    let reasoner = context_engine::reasoning::MockAIReasoner::new();
-    context_engine::reasoning::analyze_item_context_ai(&conn, item_id, &reasoner)
+    ce.analyze_item_context_ai(&conn, item_id)
 }
 
 #[tauri::command]
@@ -582,6 +582,15 @@ fn get_evidence_package(
 ) -> Result<context_engine::reasoning::EvidencePackage, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     context_engine::reasoning::build_evidence_package(&conn, item_id)
+}
+
+#[tauri::command]
+fn get_ai_provider_status(
+    state: State<'_, AppState>,
+) -> Result<context_engine::reasoning::AIProviderStatus, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    let reasoner = ce.ai_reasoner();
+    Ok(context_engine::reasoning::get_reasoner_status(reasoner.as_ref()))
 }
 
 
@@ -728,7 +737,8 @@ pub fn run() {
             get_context_overview,
             // AI Context Reasoning
             analyze_item_context_ai,
-            get_evidence_package
+            get_evidence_package,
+            get_ai_provider_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
