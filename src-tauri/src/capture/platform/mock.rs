@@ -1,6 +1,6 @@
 use super::PlatformCaptureAdapter;
 use crate::capture::models::{
-    CaptureError, CaptureMethod, PlatformClipboardInput, PlatformDragDropInput,
+    CaptureError, CaptureMethod, CaptureType, PlatformClipboardInput, PlatformDragDropInput,
     PlatformManualInput, PlatformType, PlatformWindowContext, RawCapturePayload,
 };
 
@@ -84,7 +84,7 @@ impl PlatformCaptureAdapter for MockCaptureAdapter {
         &self,
         input: PlatformDragDropInput,
     ) -> Result<RawCapturePayload, CaptureError> {
-        let mut payload = RawCapturePayload::new("", CaptureMethod::DragAndDrop)
+        let mut payload = RawCapturePayload::new("", CaptureType::DragDrop)
             .with_platform(self.platform);
 
         payload.app_name = input.active_app.or_else(|| self.simulated_window_context.as_ref().map(|c| c.app_name.clone()));

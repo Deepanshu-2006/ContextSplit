@@ -1,45 +1,41 @@
 use serde::{Deserialize, Serialize};
 
 /// Method or user action through which content was captured.
+/// Supports standard capture types and custom extensions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CaptureMethod {
+pub enum CaptureType {
     Clipboard,
-    DragAndDrop,
+    DragDrop,
     Manual,
-    FileWatch,
-    HotKey,
-    Api,
-    Other(String),
+    #[serde(untagged)]
+    Custom(String),
 }
 
-impl std::fmt::Display for CaptureMethod {
+impl std::fmt::Display for CaptureType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Clipboard => write!(f, "clipboard"),
-            Self::DragAndDrop => write!(f, "drag_drop"),
+            Self::DragDrop => write!(f, "drag_drop"),
             Self::Manual => write!(f, "manual"),
-            Self::FileWatch => write!(f, "file_watch"),
-            Self::HotKey => write!(f, "hotkey"),
-            Self::Api => write!(f, "api"),
-            Self::Other(s) => write!(f, "{}", s),
+            Self::Custom(s) => write!(f, "{}", s),
         }
     }
 }
 
-impl From<&str> for CaptureMethod {
+impl From<&str> for CaptureType {
     fn from(s: &str) -> Self {
         match s {
             "clipboard" => Self::Clipboard,
-            "drag_drop" | "drag_and_drop" => Self::DragAndDrop,
+            "drag_drop" | "drag_and_drop" => Self::DragDrop,
             "manual" => Self::Manual,
-            "file_watch" => Self::FileWatch,
-            "hotkey" => Self::HotKey,
-            "api" => Self::Api,
-            other => Self::Other(other.to_string()),
+            other => Self::Custom(other.to_string()),
         }
     }
 }
+
+/// Backwards-compatibility type alias.
+pub type CaptureMethod = CaptureType;
 
 /// Target operating system platform where the capture originated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -58,6 +54,17 @@ impl std::fmt::Display for PlatformType {
             Self::Windows => write!(f, "windows"),
             Self::Linux => write!(f, "linux"),
             Self::Generic => write!(f, "generic"),
+        }
+    }
+}
+
+impl From<&str> for PlatformType {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "macos" | "darwin" => Self::MacOS,
+            "windows" | "win32" => Self::Windows,
+            "linux" => Self::Linux,
+            _ => Self::Generic,
         }
     }
 }
@@ -83,39 +90,60 @@ impl PlatformType {
     }
 }
 
-/// High-level data category of the captured item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// High-level content type of the captured item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ItemType {
-    Text,
+pub enum ContentType {
+    PlainText,
     Url,
     Image,
     File,
-    Code,
+    RichText,
+    Unknown,
+    #[serde(untagged)]
+    Custom(String),
 }
 
-impl std::fmt::Display for ItemType {
+impl std::fmt::Display for ContentType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Text => write!(f, "text"),
+            Self::PlainText => write!(f, "plain_text"),
             Self::Url => write!(f, "url"),
             Self::Image => write!(f, "image"),
             Self::File => write!(f, "file"),
-            Self::Code => write!(f, "code"),
+            Self::RichText => write!(f, "rich_text"),
+            Self::Unknown => write!(f, "unknown"),
+            Self::Custom(s) => write!(f, "{}", s),
         }
     }
 }
 
-impl From<&str> for ItemType {
+impl From<&str> for ContentType {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "url" => Self::Url,
-            "image" => Self::Image,
+            "plain_text" | "text" => Self::PlainText,
+            "url" | "uri" => Self::Url,
+            "image" | "png" | "jpeg" | "jpg" | "webp" => Self::Image,
             "file" => Self::File,
-            "code" => Self::Code,
-            _ => Self::Text,
+            "rich_text" | "rtf" | "html" => Self::RichText,
+            "unknown" => Self::Unknown,
+            other => Self::Custom(other.to_string()),
         }
     }
+}
+
+/// Backwards-compatibility type alias.
+pub type ItemType = ContentType;
+
+/// Originating application metadata and window context.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceMetadata {
+    pub window_title: Option<String>,
+    pub process_name: Option<String>,
+    pub bundle_identifier: Option<String>,
+    pub url_origin: Option<String>,
+    #[serde(default)]
+    pub extra: serde_json::Value,
 }
 
 /// Raw, unconverted capture payload received from a platform-specific listener or UI.
@@ -128,7 +156,7 @@ pub struct RawCapturePayload {
     /// Optional user-provided or window-derived title
     pub title: Option<String>,
     /// How the content was captured
-    pub source_method: CaptureMethod,
+    pub source_method: CaptureType,
     /// Originating operating system platform
     pub platform: PlatformType,
     /// Active application name at the moment of capture
@@ -152,7 +180,7 @@ pub struct RawCapturePayload {
 }
 
 impl RawCapturePayload {
-    pub fn new(content: impl Into<String>, source_method: CaptureMethod) -> Self {
+    pub fn new(content: impl Into<String>, source_method: CaptureType) -> Self {
         Self {
             content: content.into(),
             data_type: None,
@@ -188,42 +216,194 @@ impl RawCapturePayload {
     }
 }
 
-/// Normalized, validated capture event ready to be saved and ingested into Context Engine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NormalizedCaptureEvent {
-    /// Normalized data category ("text", "url", "image", "file", "code")
-    pub item_type: String,
-    /// Cleaned, normalized content
+/// Normalized, platform-independent CaptureEvent model.
+///
+/// CRITICAL ARCHITECTURAL RULE:
+/// CaptureEvent is strictly decoupled from any single OS, exposing a canonical schema
+/// that any platform adapter can produce and that CaptureCore ingests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureEvent {
+    /// Unique identifier for this capture event
+    pub event_id: String,
+    /// Method used to capture the content (clipboard, drag_drop, manual, custom)
+    pub capture_type: CaptureType,
+    /// ISO 8601 / RFC 3339 UTC capture timestamp
+    pub timestamp: String,
+    /// Category of captured data (plain_text, url, image, file, rich_text, unknown)
+    pub content_type: ContentType,
+    /// Cleaned, normalized content string
     pub content: String,
-    /// Normalized title (inferred if absent)
-    pub title: Option<String>,
-    /// Source capture method
-    pub source_method: CaptureMethod,
-    /// Platform where captured
+    /// Name of the originating foreground application (e.g. "Safari", "VS Code")
+    pub source_application: Option<String>,
+    /// Detailed metadata about the source window/process
+    pub source_metadata: SourceMetadata,
+    /// Platform where the capture occurred
     pub platform: PlatformType,
-    /// Active application name
-    pub app_name: Option<String>,
-    /// Active window title
-    pub window_title: Option<String>,
-    /// Normalized domain (for URLs)
-    pub domain: Option<String>,
-    /// Normalized filename (for files)
-    pub filename: Option<String>,
-    /// Normalized MIME type
-    pub mime_type: Option<String>,
-    /// Canonical source URL
-    pub original_url: Option<String>,
-    /// Content or file size in bytes
-    pub size_bytes: usize,
-    /// Target workspace (None for Inbox)
-    pub workspace_id: Option<String>,
-    /// Associated ContextSession ID
-    pub session_id: Option<String>,
-    /// ISO 8601 / RFC 3339 capture timestamp
-    pub captured_at: String,
-    /// Full structured metadata JSON value
+    /// Extensible structured metadata JSON map
     pub metadata: serde_json::Value,
 }
+
+impl CaptureEvent {
+    /// Creates a new CaptureEvent with generated UUID and current UTC timestamp.
+    pub fn new(
+        capture_type: CaptureType,
+        content_type: ContentType,
+        content: impl Into<String>,
+        platform: PlatformType,
+    ) -> Self {
+        Self {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            capture_type,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            content_type,
+            content: content.into(),
+            source_application: None,
+            source_metadata: SourceMetadata::default(),
+            platform,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    /// Validates the CaptureEvent against schema and data integrity constraints.
+    pub fn validate(&self) -> Result<(), CaptureError> {
+        // 1. Event ID validation
+        if self.event_id.trim().is_empty() {
+            return Err(CaptureError::ProcessingError("event_id cannot be empty".to_string()));
+        }
+        if self.event_id.contains('\0') {
+            return Err(CaptureError::ProcessingError("event_id contains illegal null bytes".to_string()));
+        }
+
+        // 2. Timestamp validation (RFC 3339)
+        if chrono::DateTime::parse_from_rfc3339(&self.timestamp).is_err() {
+            return Err(CaptureError::ProcessingError(format!(
+                "Invalid RFC 3339 timestamp: '{}'",
+                self.timestamp
+            )));
+        }
+
+        // 3. Content emptiness and null byte validation
+        if self.content.trim().is_empty() && self.content_type != ContentType::Unknown {
+            return Err(CaptureError::EmptyContent);
+        }
+        if self.content.contains('\0') {
+            return Err(CaptureError::ProcessingError("content contains illegal null bytes".to_string()));
+        }
+
+        // 4. Size bounds
+        if self.content.len() > 10 * 1024 * 1024 {
+            return Err(CaptureError::PayloadTooLarge {
+                size: self.content.len(),
+                limit: 10 * 1024 * 1024,
+            });
+        }
+
+        // 5. Type-specific validation
+        match &self.content_type {
+            ContentType::Url => {
+                let trimmed = self.content.trim();
+                if !trimmed.starts_with("http://")
+                    && !trimmed.starts_with("https://")
+                    && !trimmed.starts_with("file://")
+                {
+                    return Err(CaptureError::InvalidUrl(format!(
+                        "URL must begin with http://, https://, or file:// (got: {})",
+                        trimmed
+                    )));
+                }
+            }
+            ContentType::File => {
+                let trimmed = self.content.trim();
+                if trimmed.is_empty() {
+                    return Err(CaptureError::InvalidFile("File path cannot be empty".to_string()));
+                }
+            }
+            ContentType::Image => {
+                let trimmed = self.content.trim();
+                if trimmed.is_empty() {
+                    return Err(CaptureError::InvalidImage("Image content is empty".to_string()));
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Convenience accessor for legacy item_type string ("text", "url", "image", "file").
+    pub fn item_type_str(&self) -> &str {
+        match &self.content_type {
+            ContentType::PlainText => "text",
+            ContentType::Url => "url",
+            ContentType::Image => "image",
+            ContentType::File => "file",
+            ContentType::RichText => "text",
+            ContentType::Unknown => "text",
+            ContentType::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Convenience accessor for title stored in metadata or source_metadata.
+    pub fn title(&self) -> Option<String> {
+        self.metadata
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| self.source_metadata.window_title.clone())
+    }
+
+    /// Convenience accessor for target workspace_id.
+    pub fn workspace_id(&self) -> Option<String> {
+        self.metadata
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Convenience accessor for session_id.
+    pub fn session_id(&self) -> Option<String> {
+        self.metadata
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Convenience accessor for domain.
+    pub fn domain(&self) -> Option<String> {
+        self.metadata
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Convenience accessor for filename.
+    pub fn filename(&self) -> Option<String> {
+        self.metadata
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Convenience accessor for MIME type.
+    pub fn mime_type(&self) -> Option<String> {
+        self.metadata
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Convenience accessor for size in bytes.
+    pub fn size_bytes(&self) -> usize {
+        self.metadata
+            .get("size")
+            .and_then(|v| v.as_u64())
+            .map(|s| s as usize)
+            .unwrap_or(self.content.len())
+    }
+}
+
+/// Backwards compatibility alias.
+pub type NormalizedCaptureEvent = CaptureEvent;
 
 /// Result returned after successful processing by CaptureCore.
 #[derive(Debug, Clone, Serialize, Deserialize)]

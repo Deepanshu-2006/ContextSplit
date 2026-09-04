@@ -1,7 +1,9 @@
 use serde_json::json;
 use std::path::Path;
 
-use super::models::{CaptureError, NormalizedCaptureEvent, RawCapturePayload};
+use super::models::{
+    CaptureError, CaptureEvent, ContentType, RawCapturePayload, SourceMetadata,
+};
 
 /// Platform-independent normalizer for raw capture payloads.
 #[derive(Debug, Clone, Default)]
@@ -12,13 +14,13 @@ impl CaptureNormalizer {
         Self
     }
 
-    /// Normalizes a validated raw capture payload into a structured `NormalizedCaptureEvent`.
-    pub fn normalize(&self, payload: &RawCapturePayload) -> Result<NormalizedCaptureEvent, CaptureError> {
+    /// Normalizes a validated raw capture payload into a structured `CaptureEvent`.
+    pub fn normalize(&self, payload: &RawCapturePayload) -> Result<CaptureEvent, CaptureError> {
         let now = chrono::Utc::now().to_rfc3339();
 
-        // 1. Determine or infer Item Type
+        // 1. Determine or infer Item / Content Type
         let raw_content = payload.content.trim();
-        let item_type = self.infer_item_type(payload, raw_content);
+        let content_type = self.infer_content_type(payload, raw_content);
 
         // 2. Normalize content, domain, filename, mime_type, and title based on type
         let mut domain: Option<String> = None;
@@ -26,10 +28,14 @@ impl CaptureNormalizer {
         let mut mime_type: Option<String> = payload.mime_type.clone();
         let mut original_url: Option<String> = payload.original_url.clone();
         let mut normalized_content = raw_content.to_string();
-        let mut title = payload.title.as_deref().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let mut title = payload
+            .title
+            .as_deref()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
 
-        match item_type.as_str() {
-            "url" => {
+        match &content_type {
+            ContentType::Url => {
                 let cleaned_url = self.normalize_url(raw_content);
                 domain = self.extract_domain(&cleaned_url);
                 original_url = Some(cleaned_url.clone());
@@ -38,17 +44,25 @@ impl CaptureNormalizer {
                     mime_type = Some("text/uri-list".to_string());
                 }
                 if title.is_none() {
-                    title = self.infer_url_title(&cleaned_url, domain.as_deref(), payload.window_title.as_deref());
+                    title = self.infer_url_title(
+                        &cleaned_url,
+                        domain.as_deref(),
+                        payload.window_title.as_deref(),
+                    );
                 }
             }
-            "file" => {
+            ContentType::File => {
                 let path_to_use = if !payload.file_paths.is_empty() {
                     &payload.file_paths[0]
                 } else {
                     raw_content
                 };
                 let path_obj = Path::new(path_to_use);
-                let fname = path_obj.file_name().and_then(|f| f.to_str()).unwrap_or("unnamed_file").to_string();
+                let fname = path_obj
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("unnamed_file")
+                    .to_string();
                 filename = Some(fname.clone());
                 if mime_type.is_none() {
                     mime_type = Some(self.infer_mime_type_from_path(path_to_use));
@@ -58,7 +72,7 @@ impl CaptureNormalizer {
                 }
                 normalized_content = path_to_use.to_string();
             }
-            "image" => {
+            ContentType::Image => {
                 if mime_type.is_none() {
                     mime_type = Some("image/png".to_string());
                 }
@@ -70,17 +84,17 @@ impl CaptureNormalizer {
                     });
                 }
             }
-            "code" => {
+            ContentType::RichText => {
                 normalized_content = raw_content.replace("\r\n", "\n");
                 if mime_type.is_none() {
-                    mime_type = Some("text/plain".to_string());
+                    mime_type = Some("text/rtf".to_string());
                 }
                 if title.is_none() {
                     title = self.infer_text_title(&normalized_content, payload.window_title.as_deref());
                 }
             }
             _ => {
-                // General text
+                // Plain text or other
                 normalized_content = raw_content.replace("\r\n", "\n");
                 if mime_type.is_none() {
                     mime_type = Some("text/plain".to_string());
@@ -94,12 +108,19 @@ impl CaptureNormalizer {
         // 3. Calculate size
         let size_bytes = payload.size_bytes.unwrap_or(normalized_content.len());
 
-        // 4. Construct metadata JSON
+        // 4. Construct metadata JSON map
         let mut meta_map = serde_json::Map::new();
         meta_map.insert("source".to_string(), json!(payload.source_method.to_string()));
         meta_map.insert("platform".to_string(), json!(payload.platform.to_string()));
         meta_map.insert("size".to_string(), json!(size_bytes));
+        meta_map.insert("content_type".to_string(), json!(content_type.to_string()));
 
+        if let Some(t) = &title {
+            meta_map.insert("title".to_string(), json!(t));
+        }
+        if let Some(ws) = &payload.workspace_id {
+            meta_map.insert("workspace_id".to_string(), json!(ws));
+        }
         if let Some(app) = &payload.app_name {
             meta_map.insert("app_name".to_string(), json!(app));
         }
@@ -131,59 +152,70 @@ impl CaptureNormalizer {
             }
         }
 
-        Ok(NormalizedCaptureEvent {
-            item_type,
-            content: normalized_content,
-            title,
-            source_method: payload.source_method.clone(),
-            platform: payload.platform,
-            app_name: payload.app_name.clone(),
+        let source_metadata = SourceMetadata {
             window_title: payload.window_title.clone(),
-            domain,
-            filename,
-            mime_type,
-            original_url,
-            size_bytes,
-            workspace_id: payload.workspace_id.clone(),
-            session_id: None, // Resolved dynamically by CaptureCore
-            captured_at: now,
+            process_name: payload.process_info.clone(),
+            bundle_identifier: None,
+            url_origin: original_url,
+            extra: json!({}),
+        };
+
+        Ok(CaptureEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            capture_type: payload.source_method.clone(),
+            timestamp: now,
+            content_type,
+            content: normalized_content,
+            source_application: payload.app_name.clone(),
+            source_metadata,
+            platform: payload.platform,
             metadata: serde_json::Value::Object(meta_map),
         })
     }
 
-    /// Infers the high-level data type ("text", "url", "image", "file", "code").
-    fn infer_item_type(&self, payload: &RawCapturePayload, content: &str) -> String {
+    /// Infers ContentType enum from payload and content.
+    fn infer_content_type(&self, payload: &RawCapturePayload, content: &str) -> ContentType {
         if let Some(explicit) = &payload.data_type {
             let lower = explicit.to_lowercase();
-            if lower == "url" || lower == "image" || lower == "file" || lower == "code" || lower == "text" {
-                return lower;
+            match lower.as_str() {
+                "url" | "uri" => return ContentType::Url,
+                "image" | "png" | "jpeg" | "jpg" | "webp" => return ContentType::Image,
+                "file" => return ContentType::File,
+                "rich_text" | "rtf" | "html" => return ContentType::RichText,
+                "plain_text" | "text" | "code" => return ContentType::PlainText,
+                "unknown" => return ContentType::Unknown,
+                other => return ContentType::Custom(other.to_string()),
             }
         }
 
         if !payload.file_paths.is_empty() {
-            return "file".to_string();
+            return ContentType::File;
         }
 
         if content.starts_with("data:image/") {
-            return "image".to_string();
+            return ContentType::Image;
         }
 
         if content.starts_with("http://") || content.starts_with("https://") {
-            return "url".to_string();
+            return ContentType::Url;
         }
 
         if content.starts_with("file://") {
-            return "file".to_string();
+            return ContentType::File;
         }
 
         // Check if content is a single existing filesystem path
-        if content.starts_with('/') || (content.len() > 3 && content.chars().nth(1) == Some(':') && content.chars().nth(2) == Some('\\')) {
+        if content.starts_with('/')
+            || (content.len() > 3
+                && content.chars().nth(1) == Some(':')
+                && content.chars().nth(2) == Some('\\'))
+        {
             if Path::new(content).exists() {
-                return "file".to_string();
+                return ContentType::File;
             }
         }
 
-        "text".to_string()
+        ContentType::PlainText
     }
 
     /// Cleans and normalizes URL string.

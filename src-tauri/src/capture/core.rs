@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::models::{CaptureError, CaptureResult, NormalizedCaptureEvent, RawCapturePayload};
+use super::models::{CaptureError, CaptureEvent, CaptureResult, RawCapturePayload};
 use super::normalizer::CaptureNormalizer;
 use super::validator::CaptureValidator;
 use crate::context_engine::engine::{ContextEngine, ContextEvent};
@@ -34,9 +34,11 @@ impl CaptureCore {
         self.validator.validate(raw)
     }
 
-    /// Step 2: Normalize the raw event
-    pub fn normalize(&self, raw: &RawCapturePayload) -> Result<NormalizedCaptureEvent, CaptureError> {
-        self.normalizer.normalize(raw)
+    /// Step 2: Normalize the raw event into a structured CaptureEvent
+    pub fn normalize(&self, raw: &RawCapturePayload) -> Result<CaptureEvent, CaptureError> {
+        let event = self.normalizer.normalize(raw)?;
+        event.validate()?;
+        Ok(event)
     }
 
     /// Executes the full 5-step capture pipeline in headless mode (pure Database + ContextEngine).
@@ -55,16 +57,24 @@ impl CaptureCore {
 
         // Step 3: Create / Update the Item in the Database
         let session_id = context_engine.and_then(|ce| ce.get_or_update_active_session(conn).ok());
-        event.session_id = session_id.clone();
+        if let Some(sess) = &session_id {
+            if let Some(map) = event.metadata.as_object_mut() {
+                map.insert("session_id".to_string(), json!(sess));
+            }
+        }
 
         let metadata_str = event.metadata.to_string();
+        let item_type = event.item_type_str().to_string();
+        let workspace_id = event.workspace_id();
+        let title = event.title();
+
         let item = operations::create_item(
             conn,
-            event.workspace_id.as_deref(),
+            workspace_id.as_deref(),
             session_id.as_deref(),
-            &event.item_type,
+            &item_type,
             &event.content,
-            event.title.as_deref(),
+            title.as_deref(),
             &metadata_str,
         )
         .map_err(|e| CaptureError::DatabaseError(e.to_string()))?;
@@ -77,7 +87,7 @@ impl CaptureCore {
         let _ = operations::update_item_semantic_status(conn, &item.id, semantic_status, None);
 
         // Step 4: Generate ContextSignals
-        let signals_emitted = self.generate_context_signals(conn, &item.id, &event, &settings)?;
+        let signals_emitted = self.generate_context_signals(conn, &item.id, &event, session_id.as_deref(), &settings)?;
 
         // Step 5: Pass the Item into the Context Engine
         if let Some(ce) = context_engine {
@@ -85,9 +95,9 @@ impl CaptureCore {
                 conn,
                 ContextEvent::Capture {
                     item_id: item.id.clone(),
-                    workspace_id: event.workspace_id.clone(),
-                    source: event.source_method.to_string(),
-                    data_type: event.item_type.clone(),
+                    workspace_id,
+                    source: event.capture_type.to_string(),
+                    data_type: item_type,
                     metadata: event.metadata.clone(),
                 },
             );
@@ -126,27 +136,31 @@ impl CaptureCore {
         &self,
         conn: &Connection,
         item_id: &str,
-        event: &NormalizedCaptureEvent,
+        event: &CaptureEvent,
+        session_id: Option<&str>,
         settings: &crate::db::settings::PrivacySettings,
     ) -> Result<usize, CaptureError> {
         let mut count = 0;
+        let ws_id = event.workspace_id();
 
         // 1. Capture Event Signal (Always recorded)
         let capture_payload = json!({
-            "source": event.source_method.to_string(),
+            "event_id": event.event_id,
+            "source": event.capture_type.to_string(),
             "platform": event.platform.to_string(),
-            "data_type": event.item_type,
-            "size": event.size_bytes,
-            "captured_at": event.captured_at
+            "data_type": event.item_type_str(),
+            "content_type": event.content_type.to_string(),
+            "size": event.size_bytes(),
+            "captured_at": event.timestamp
         })
         .to_string();
 
         if crate::context_engine::operations::create_context_signal(
             conn,
-            event.workspace_id.as_deref(),
+            ws_id.as_deref(),
             Some(item_id),
             "capture_event",
-            event.session_id.as_deref(),
+            session_id,
             &capture_payload,
         )
         .is_ok()
@@ -156,14 +170,14 @@ impl CaptureCore {
 
         // 2. Active App Signal (If present and permitted by privacy)
         if settings.enable_active_app {
-            if let Some(app) = &event.app_name {
+            if let Some(app) = &event.source_application {
                 let app_payload = json!({ "app_name": app }).to_string();
                 if crate::context_engine::operations::create_context_signal(
                     conn,
-                    event.workspace_id.as_deref(),
+                    ws_id.as_deref(),
                     Some(item_id),
                     "active_app",
-                    event.session_id.as_deref(),
+                    session_id,
                     &app_payload,
                 )
                 .is_ok()
@@ -175,14 +189,14 @@ impl CaptureCore {
 
         // 3. Window Title Signal (If present and permitted by privacy)
         if settings.enable_window_title {
-            if let Some(win) = &event.window_title {
+            if let Some(win) = &event.source_metadata.window_title {
                 let win_payload = json!({ "window_title": win }).to_string();
                 if crate::context_engine::operations::create_context_signal(
                     conn,
-                    event.workspace_id.as_deref(),
+                    ws_id.as_deref(),
                     Some(item_id),
                     "window_title",
-                    event.session_id.as_deref(),
+                    session_id,
                     &win_payload,
                 )
                 .is_ok()
@@ -194,19 +208,19 @@ impl CaptureCore {
 
         // 4. URL Metadata Signal (If present and permitted by privacy)
         if settings.enable_browser_domain {
-            if let Some(dom) = &event.domain {
+            if let Some(dom) = event.domain() {
                 let url_payload = json!({
                     "domain": dom,
-                    "original_url": event.original_url
+                    "original_url": event.source_metadata.url_origin
                 })
                 .to_string();
 
                 if crate::context_engine::operations::create_context_signal(
                     conn,
-                    event.workspace_id.as_deref(),
+                    ws_id.as_deref(),
                     Some(item_id),
                     "url_metadata",
-                    event.session_id.as_deref(),
+                    session_id,
                     &url_payload,
                 )
                 .is_ok()
@@ -217,20 +231,20 @@ impl CaptureCore {
         }
 
         // 5. File Metadata Signal (If file)
-        if let Some(fname) = &event.filename {
+        if let Some(fname) = event.filename() {
             let file_payload = json!({
                 "filename": fname,
-                "mime_type": event.mime_type,
-                "size": event.size_bytes
+                "mime_type": event.mime_type(),
+                "size": event.size_bytes()
             })
             .to_string();
 
             if crate::context_engine::operations::create_context_signal(
                 conn,
-                event.workspace_id.as_deref(),
+                ws_id.as_deref(),
                 Some(item_id),
                 "file_metadata",
-                event.session_id.as_deref(),
+                session_id,
                 &file_payload,
             )
             .is_ok()
@@ -266,16 +280,25 @@ impl CaptureCore {
                     None
                 }
             };
-            event.session_id = session_id_opt.clone();
+
+            if let Some(sess) = &session_id_opt {
+                if let Some(map) = event.metadata.as_object_mut() {
+                    map.insert("session_id".to_string(), json!(sess));
+                }
+            }
 
             let metadata_str = event.metadata.to_string();
+            let item_type = event.item_type_str().to_string();
+            let workspace_id = event.workspace_id();
+            let title = event.title();
+
             let item = operations::create_item(
                 &conn,
-                event.workspace_id.as_deref(),
+                workspace_id.as_deref(),
                 session_id_opt.as_deref(),
-                &event.item_type,
+                &item_type,
                 &event.content,
-                event.title.as_deref(),
+                title.as_deref(),
                 &metadata_str,
             )
             .map_err(|e| CaptureError::DatabaseError(e.to_string()))?;
@@ -286,7 +309,7 @@ impl CaptureCore {
             let semantic_status = if enable_semantic { "pending" } else { "failed" };
             let _ = operations::update_item_semantic_status(&conn, &item.id, semantic_status, None);
 
-            let signals_count = self.generate_context_signals(&conn, &item.id, &event, &settings)?;
+            let signals_count = self.generate_context_signals(&conn, &item.id, &event, session_id_opt.as_deref(), &settings)?;
 
             (item, session_id_opt, signals_count, enable_semantic)
         };
@@ -303,9 +326,9 @@ impl CaptureCore {
                     &conn,
                     ContextEvent::Capture {
                         item_id: item.id.clone(),
-                        workspace_id: event.workspace_id.clone(),
-                        source: event.source_method.to_string(),
-                        data_type: event.item_type.clone(),
+                        workspace_id: event.workspace_id(),
+                        source: event.capture_type.to_string(),
+                        data_type: event.item_type_str().to_string(),
                         metadata: event.metadata.clone(),
                     },
                 );

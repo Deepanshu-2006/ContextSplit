@@ -18,9 +18,9 @@ pub mod tests;
 // Re-exports for public usage
 pub use core::CaptureCore;
 pub use models::{
-    CaptureError, CaptureMethod, CaptureResult, ItemType, NormalizedCaptureEvent,
-    PlatformClipboardInput, PlatformDragDropInput, PlatformManualInput, PlatformType,
-    PlatformWindowContext, RawCapturePayload,
+    CaptureError, CaptureEvent, CaptureMethod, CaptureResult, CaptureType, ContentType,
+    ItemType, NormalizedCaptureEvent, PlatformClipboardInput, PlatformDragDropInput,
+    PlatformManualInput, PlatformType, PlatformWindowContext, RawCapturePayload, SourceMetadata,
 };
 pub use normalizer::CaptureNormalizer;
 pub use platform::{

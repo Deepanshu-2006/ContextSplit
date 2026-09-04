@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use super::PlatformCaptureAdapter;
 use crate::capture::models::{
-    CaptureError, CaptureMethod, PlatformClipboardInput, PlatformDragDropInput,
+    CaptureError, CaptureMethod, CaptureType, PlatformClipboardInput, PlatformDragDropInput,
     PlatformManualInput, PlatformType, PlatformWindowContext, RawCapturePayload,
 };
 
@@ -133,7 +133,7 @@ impl PlatformCaptureAdapter for MacOSCaptureAdapter {
         &self,
         input: PlatformDragDropInput,
     ) -> Result<RawCapturePayload, CaptureError> {
-        let mut payload = RawCapturePayload::new("", CaptureMethod::DragAndDrop)
+        let mut payload = RawCapturePayload::new("", CaptureType::DragDrop)
             .with_platform(PlatformType::MacOS);
 
         payload.app_name = input.active_app;
