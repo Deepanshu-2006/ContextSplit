@@ -61,7 +61,7 @@ impl AIReasoner for MockAIReasoner {
                 suggested_context_reference: None,
                 suggested_name: None,
                 confidence: 0.0,
-                explanation: "No candidate workspaces or context candidates match this item. Item remains in Inbox awaiting further activity signals or explicit user placement.".to_string(),
+                explanation: "There is insufficient evidence to associate this item with a context; no matching workspaces or activity patterns were detected. The item remains in Inbox.".to_string(),
                 evidence_references: vec![
                     "Zero candidate contexts provided in the evidence package.".to_string(),
                     "No shared session, domain, or semantic associations detected.".to_string(),
@@ -71,6 +71,8 @@ impl AIReasoner for MockAIReasoner {
                 provider_info,
             };
             result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            super::validator::validate_explanation_grounding(&result, package)
+                .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
             return Ok(result);
         }
 
@@ -94,7 +96,7 @@ impl AIReasoner for MockAIReasoner {
             let archived_names: Vec<String> = package
                 .candidate_contexts
                 .iter()
-                .map(|c| format!("'{}' (archived)", c.name))
+                .map(|c| c.name.clone())
                 .collect();
             let result = ContextReasoningResult {
                 decision: ContextReasoningDecision::NoContext,
@@ -102,18 +104,20 @@ impl AIReasoner for MockAIReasoner {
                 suggested_name: None,
                 confidence: 0.0,
                 explanation: format!(
-                    "Item matches candidate contexts ({}), but all matching contexts are archived by user preference. Active suggestions are suppressed.",
+                    "This item may have potential overlap with {}, but the available evidence is limited because matching contexts are archived.",
                     archived_names.join(", ")
                 ),
                 evidence_references: vec![
-                    "User lifecycle settings have archived matching contexts.".to_string(),
-                    "Suppression applied to avoid surfacing inactive workspaces.".to_string(),
+                    "Matching contexts are explicitly archived by user settings.".to_string(),
+                    "Context suggestions are suppressed for archived workspaces.".to_string(),
                 ],
                 uncertainty_reason: Some("All matching contexts are explicitly archived by user.".to_string()),
                 alternative_interpretations: Vec::new(),
                 provider_info,
             };
             result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            super::validator::validate_explanation_grounding(&result, package)
+                .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
             return Ok(result);
         }
 
@@ -123,7 +127,7 @@ impl AIReasoner for MockAIReasoner {
         if top.deterministic_score < 0.25 {
             let mut factors = top.evidence_factors.clone();
             if factors.is_empty() {
-                factors.push(format!("Top candidate '{}' scored only {:.0}%.", top.name, top.deterministic_score * 100.0));
+                factors.push(format!("Top candidate '{}' shows minimal contextual affinity.", top.name));
             }
 
             let result = ContextReasoningResult {
@@ -132,19 +136,20 @@ impl AIReasoner for MockAIReasoner {
                 suggested_name: None,
                 confidence: top.deterministic_score,
                 explanation: format!(
-                    "Weak contextual evidence observed. While '{}' showed marginal affinity ({:.0}%), the signals are insufficient to warrant a confident context suggestion.",
-                    top.name,
-                    top.deterministic_score * 100.0
+                    "This may be related to {}, but the available evidence is limited.",
+                    top.name
                 ),
                 evidence_references: factors,
                 uncertainty_reason: Some(format!(
-                    "Highest confidence score ({:.0}%) is below the actionable threshold of 25%.",
-                    top.deterministic_score * 100.0
+                    "Available signals for '{}' are below the actionable threshold of 25%.",
+                    top.name
                 )),
                 alternative_interpretations: Vec::new(),
                 provider_info,
             };
             result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            super::validator::validate_explanation_grounding(&result, package)
+                .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
             return Ok(result);
         }
 
@@ -159,11 +164,8 @@ impl AIReasoner for MockAIReasoner {
 
             let mut key_factors = Vec::new();
             key_factors.push(format!(
-                "Competing affinity between '{}' ({:.0}%) and '{}' ({:.0}%).",
-                top.name,
-                top.deterministic_score * 100.0,
-                second.name,
-                second.deterministic_score * 100.0
+                "Competing affinity between '{}' and '{}'.",
+                top.name, second.name
             ));
             for f in top.evidence_factors.iter().take(2) {
                 key_factors.push(format!("{}: {}", top.name, f));
@@ -180,8 +182,7 @@ impl AIReasoner for MockAIReasoner {
                     context_name: c.name.clone(),
                     confidence: c.deterministic_score,
                     rationale: format!(
-                        "Close competitor with {:.0}% confidence. {}",
-                        c.deterministic_score * 100.0,
+                        "Close competitor with high affinity. {}",
                         c.evidence_factors.first().cloned().unwrap_or_default()
                     ),
                 })
@@ -193,11 +194,9 @@ impl AIReasoner for MockAIReasoner {
                 suggested_name: Some(top.name.clone()),
                 confidence: avg_conf,
                 explanation: format!(
-                    "Contextual ambiguity detected: Item exhibits balanced signals between '{}' ({:.0}%) and '{}' ({:.0}%). User review recommended before confirming membership.",
+                    "This may be related to either '{}' or '{}', but the available evidence shows competing signals between them.",
                     top.name,
-                    top.deterministic_score * 100.0,
-                    second.name,
-                    second.deterministic_score * 100.0
+                    second.name
                 ),
                 evidence_references: key_factors,
                 uncertainty_reason: Some(format!(
@@ -208,13 +207,15 @@ impl AIReasoner for MockAIReasoner {
                 provider_info,
             };
             result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+            super::validator::validate_explanation_grounding(&result, package)
+                .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
             return Ok(result);
         }
 
         // 5. Case: Clear, single leading context recommendation
         let mut key_factors = top.evidence_factors.clone();
         if key_factors.is_empty() {
-            key_factors.push(format!("Deterministic context score is {:.0}%.", top.deterministic_score * 100.0));
+            key_factors.push("Strong contextual affinity inferred from grounded evidence factors.".to_string());
         }
 
         if package.temporal_context.is_recent {
@@ -241,8 +242,7 @@ impl AIReasoner for MockAIReasoner {
                 context_name: c.name.clone(),
                 confidence: c.deterministic_score,
                 rationale: format!(
-                    "Lower affinity match ({:.0}%). {}",
-                    c.deterministic_score * 100.0,
+                    "Alternative candidate with lower affinity. {}",
                     c.evidence_factors.first().cloned().unwrap_or_default()
                 ),
             })
@@ -254,30 +254,110 @@ impl AIReasoner for MockAIReasoner {
             ContextReasoningDecision::NewContext
         };
 
-        let summary = format!(
-            "Item strongly aligns with '{}' ({:.0}% confidence, {}). Inferred from grounded evidence including {}.",
-            top.name,
-            top.deterministic_score * 100.0,
-            top.confidence_band,
-            if !top.evidence_factors.is_empty() {
-                top.evidence_factors[0].to_lowercase()
+        // Synthesize grounded human-readable explanation
+        let is_travel_keyword = |text: &str| {
+            let lower = text.to_lowercase();
+            lower.contains("flight")
+                || lower.contains("hotel")
+                || lower.contains("paris")
+                || lower.contains("trip")
+                || lower.contains("travel")
+                || lower.contains("tour")
+                || lower.contains("booking")
+                || lower.contains("cdg")
+                || lower.contains("airbnb")
+                || lower.contains("eurostar")
+                || lower.contains("reservation")
+        };
+
+        let has_travel = package.target_item.title.as_deref().map_or(false, is_travel_keyword)
+            || is_travel_keyword(&package.target_item.content_snippet)
+            || is_travel_keyword(&top.name);
+
+        let has_similar_items = !package.relevant_related_items.is_empty()
+            || !package.semantic_similarity_summaries.is_empty()
+            || top.evidence_factors.iter().any(|f| f.to_lowercase().contains("similar"));
+
+        let has_shared_domain = package.target_item.domain.is_some()
+            || top.evidence_factors.iter().any(|f| f.to_lowercase().contains("domain"));
+
+        let has_shared_session = package.session_context.is_some()
+            || !package.relevant_sessions.is_empty()
+            || top.evidence_factors.iter().any(|f| f.to_lowercase().contains("session"));
+
+        let explanation = if top.context_type == "workspace" {
+            if has_similar_items && has_shared_domain {
+                if has_travel {
+                    format!(
+                        "This appears related to {} because it is similar to several recent travel-research items and shares domains already associated with that context.",
+                        top.name
+                    )
+                } else {
+                    format!(
+                        "This appears related to {} because it is similar to several recent items and shares domains already associated with that context.",
+                        top.name
+                    )
+                }
+            } else if has_similar_items && has_shared_session {
+                format!(
+                    "This appears related to {} because it is similar to recent items and was captured during the same activity session.",
+                    top.name
+                )
+            } else if has_similar_items {
+                format!(
+                    "This appears related to {} because it is similar to several recent items associated with that context.",
+                    top.name
+                )
+            } else if has_shared_domain {
+                format!(
+                    "This appears related to {} because it shares domains already associated with that context.",
+                    top.name
+                )
+            } else if has_shared_session {
+                format!(
+                    "This appears related to {} because it was captured during an active session associated with that context.",
+                    top.name
+                )
             } else {
-                "cross-signal contextual coherence".to_string()
+                format!(
+                    "This appears related to {} based on consistent activity and domain patterns associated with that context.",
+                    top.name
+                )
             }
-        );
+        } else {
+            // New Context
+            if has_similar_items && has_shared_session {
+                format!(
+                    "This appears to form a new context for {} because it represents a distinct cluster of related activity items captured in the same session.",
+                    top.name
+                )
+            } else if has_similar_items {
+                format!(
+                    "This appears to form a new context for {} because it forms a cohesive cluster of related items distinct from existing workspaces.",
+                    top.name
+                )
+            } else {
+                format!(
+                    "This appears to form a new context for {} because it represents a distinct cluster of recent activity.",
+                    top.name
+                )
+            }
+        };
 
         let result = ContextReasoningResult {
             decision,
             suggested_context_reference: Some(top.context_id.clone()),
             suggested_name: Some(top.name.clone()),
             confidence: top.deterministic_score,
-            explanation: summary,
+            explanation,
             evidence_references: key_factors,
             uncertainty_reason: None,
             alternative_interpretations: alternatives,
             provider_info,
         };
         result.validate().map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+        super::validator::validate_explanation_grounding(&result, package)
+            .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
         Ok(result)
     }
 }

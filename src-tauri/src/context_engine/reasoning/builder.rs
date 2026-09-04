@@ -604,5 +604,7 @@ pub fn analyze_item_context_ai(
     reasoner: &dyn AIReasoner,
 ) -> Result<ContextReasoningResult, String> {
     let package = build_evidence_package(conn, item_id)?;
-    reasoner.analyze_context(&package).map_err(|e| e.to_string())
+    let result = reasoner.analyze_context(&package).map_err(|e| e.to_string())?;
+    super::validator::validate_explanation_grounding(&result, &package).map_err(|e| e.to_string())?;
+    Ok(result)
 }

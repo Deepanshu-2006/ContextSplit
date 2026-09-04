@@ -6,7 +6,7 @@ use super::models::{
 };
 use super::provider::AIProviderConfig;
 use super::traits::AIReasoner;
-use super::validator::parse_and_validate_response;
+use super::validator::{parse_and_validate_response, validate_explanation_grounding};
 
 /// Generic adapter for Remote LLM providers (e.g., OpenAI, Ollama, Gemini, OpenRouter, vLLM).
 /// Features:
@@ -61,29 +61,42 @@ impl RemoteLLMReasoner {
     /// Generates the strict system prompt detailing the output schema and reasoning requirements.
     pub fn generate_system_prompt(&self) -> &'static str {
         r#"You are ContextSplit's AI Context Reasoner.
-Your task is to analyze an EvidencePackage containing facts gathered by the deterministic Context Engine and produce a structured contextual interpretation.
+Your task is to analyze an EvidencePackage containing facts gathered by the deterministic Context Engine and produce a structured contextual interpretation with a human-readable explanation.
 
 CRITICAL ARCHITECTURAL CONSTRAINTS:
-1. You are purely advisory. You CANNOT move items, create workspaces, modify databases, or delete items.
-2. Ground all deductions strictly in the provided evidence. DO NOT invent facts, workspace IDs, or evidence.
-3. NEVER emit executable instructions, SQL statements, shell commands, script tags, or code execution calls.
-4. Output MUST be valid JSON adhering exactly to the following schema:
+1. Purely Advisory: You CANNOT move items, create workspaces, modify databases, or delete items.
+2. Grounded Evidence Only: The explanation must ONLY use evidence present in the EvidencePackage. DO NOT introduce unsupported facts, fictitious workspaces, unobserved activities, or speculative details.
+3. No Executable Code: NEVER emit executable instructions, SQL statements, shell commands, script tags, or code execution calls.
+4. DO NOT Expose Internal Scores or Embeddings: NEVER include raw internal scores, confidence percentages, decimal numbers (e.g. 0.85, 89%), weights, or embeddings (e.g. cosine similarity, vectors, [0.12, ...]) in the explanation. Internal confidence belongs ONLY in the numeric "confidence" field.
+5. Communicate Uncertainty: If evidence is insufficient, ambiguous, or competing, the explanation must clearly communicate uncertainty.
 
+HUMAN-READABLE EXPLANATION GUIDELINES:
+- Generate clear, concise natural language that explains the context association to the user.
+- Reference actual domain names, apps, related items, or activity sessions present in the EvidencePackage.
+- When evidence is strong:
+  Example: "This appears related to Paris Trip because it is similar to several recent travel-research items and shares domains already associated with that context."
+- When evidence is insufficient or ambiguous:
+  Example: "This may be related to Paris Trip, but the available evidence is limited."
+  Example: "This may be related to either Work or Personal, but the available evidence shows competing signals between them."
+  Example: "There is insufficient evidence to associate this item with a context; no matching workspaces or activity patterns were found."
+
+JSON OUTPUT SCHEMA:
+Output MUST be valid JSON adhering exactly to the following schema:
 {
   "decision": "existing_context" | "new_context" | "uncertain" | "no_context",
   "suggested_context_reference": string | null,
   "suggested_name": string | null,
   "confidence": float (between 0.0 and 1.0),
-  "explanation": string (plain natural language explanation),
+  "explanation": string (human-readable natural language explanation without scores or embeddings),
   "evidence_references": [string, ...],
   "uncertainty_reason": string | null
 }
 
 DECISION RULES:
-- "existing_context": Use when item clearly belongs to an existing workspace. "suggested_context_reference" MUST be non-empty.
+- "existing_context": Use when item clearly belongs to an existing workspace. "suggested_context_reference" MUST be non-empty and match a candidate in the evidence package.
 - "new_context": Use when item forms a cohesive new activity cluster. "suggested_name" MUST be non-empty.
-- "uncertain": Use when there are competing candidate contexts or ambiguity. "uncertainty_reason" MUST be non-empty.
-- "no_context": Use when evidence is insufficient (< 25% confidence) or matching contexts are archived. Item remains in Inbox.
+- "uncertain": Use when there are competing candidate contexts or ambiguity. "uncertainty_reason" MUST be non-empty, and explanation must communicate uncertainty.
+- "no_context": Use when evidence is insufficient or matching contexts are archived. Item remains in Inbox. Explanation must communicate limited or missing evidence.
 "#
     }
 
@@ -218,7 +231,16 @@ impl AIReasoner for RemoteLLMReasoner {
                         match response.json::<Value>() {
                             Ok(body) => match self.extract_content_from_response(&body) {
                                 Ok(content_str) => match self.process_remote_response(&content_str) {
-                                    Ok(result) => return Ok(result),
+                                    Ok(result) => {
+                                        if let Err(e) = validate_explanation_grounding(&result, package) {
+                                            last_error = Some(AIReasoningError::InvalidResponse(format!(
+                                                "AI Reasoner output failed factual grounding: {}",
+                                                e
+                                            )));
+                                        } else {
+                                            return Ok(result);
+                                        }
+                                    }
                                     Err(err) => {
                                         last_error = Some(err);
                                     }

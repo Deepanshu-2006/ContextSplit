@@ -13,6 +13,9 @@ pub enum ReasoningValidationError {
     EmptyExplanation(String),
     ExecutableInstructionsDetected(String),
     MalformedJson(String),
+    ExposedInternalMetrics(String),
+    UncertaintyNotCommunicated(String),
+    UnsupportedFactDetected(String),
 }
 
 impl std::fmt::Display for ReasoningValidationError {
@@ -31,11 +34,60 @@ impl std::fmt::Display for ReasoningValidationError {
                 write!(f, "Executable instructions rejected: {}", msg)
             }
             ReasoningValidationError::MalformedJson(msg) => write!(f, "Malformed reasoning JSON: {}", msg),
+            ReasoningValidationError::ExposedInternalMetrics(msg) => {
+                write!(f, "Exposed internal metrics or embeddings rejected: {}", msg)
+            }
+            ReasoningValidationError::UncertaintyNotCommunicated(msg) => {
+                write!(f, "Uncertainty communication missing: {}", msg)
+            }
+            ReasoningValidationError::UnsupportedFactDetected(msg) => {
+                write!(f, "Unsupported fact or ungrounded entity detected: {}", msg)
+            }
         }
     }
 }
 
 impl std::error::Error for ReasoningValidationError {}
+
+/// Scans text for leaked internal scores, confidence percentages, or vector embeddings.
+/// Returns Some(matched_description) if prohibited internal metrics are found.
+pub fn detect_exposed_internal_metrics(text: &str) -> Option<String> {
+    let metric_patterns = [
+        // Raw decimal scores like 0.85, 0.892, 0.14
+        (
+            Regex::new(r"\b0\.\d{2,}\b").unwrap(),
+            "raw floating-point score",
+        ),
+        // Score/confidence/similarity assignments
+        (
+            Regex::new(r"(?i)\b(score|confidence|affinity|similarity|weight)\s*[:=]\s*\d").unwrap(),
+            "explicit internal score metric",
+        ),
+        // Percentage score metrics in explanation
+        (
+            Regex::new(r"(?i)\b\d{1,3}%\s*(confidence|score|affinity|similarity|match)?\b").unwrap(),
+            "percentage score metric",
+        ),
+        // Vector and embedding technical jargon
+        (
+            Regex::new(r"(?i)\b(cosine\s+similarity|vector\s+(space|dimension|distance|model)|vec<f32>|raw\s+embedding)\b").unwrap(),
+            "vector embedding jargon",
+        ),
+        // Raw vector array bracket notation
+        (
+            Regex::new(r"\[\s*-?\d+\.\d+\s*,\s*-?\d+\.\d+").unwrap(),
+            "raw embedding vector array",
+        ),
+    ];
+
+    for (re, desc) in &metric_patterns {
+        if let Some(m) = re.find(text) {
+            return Some(format!("{} detected ('{}')", desc, m.as_str()));
+        }
+    }
+
+    None
+}
 
 /// Scans text for executable instructions, shell scripts, SQL queries, or code injection attempts.
 /// Returns Some(matched_description) if dangerous executable syntax is found.
@@ -81,11 +133,13 @@ pub fn detect_executable_instructions(text: &str) -> Option<String> {
 ///
 /// RULES:
 /// 1. Confidence must be a valid float between 0.0 and 1.0 (no NaN, no Inf, no negatives).
-/// 2. `explanation` must be a non-empty natural language string.
+/// 2. `explanation` must be a non-empty human-readable natural language string.
 /// 3. If decision == `existing_context`, `suggested_context_reference` must be non-empty.
 /// 4. If decision == `new_context`, `suggested_name` must be non-empty.
-/// 5. If decision == `uncertain`, `uncertainty_reason` must be non-empty.
-/// 6. NO executable instructions or script injections in any string field.
+/// 5. If decision == `uncertain`, `uncertainty_reason` must be non-empty and explanation must communicate uncertainty.
+/// 6. If decision == `no_context`, explanation must clearly communicate lack of evidence or context.
+/// 7. Zero exposure of internal scores, percentages, or embeddings in the explanation.
+/// 8. NO executable instructions or script injections in any string field.
 pub fn validate_reasoning_result(result: &ContextReasoningResult) -> Result<(), ReasoningValidationError> {
     // 1. Validate confidence score
     if result.confidence.is_nan() || result.confidence.is_infinite() {
@@ -100,14 +154,41 @@ pub fn validate_reasoning_result(result: &ContextReasoningResult) -> Result<(), 
         )));
     }
 
-    // 2. Validate explanation
+    // 2. Validate explanation non-empty
     if result.explanation.trim().is_empty() {
         return Err(ReasoningValidationError::EmptyExplanation(
             "Explanation must be a non-empty human-readable string".to_string(),
         ));
     }
 
-    // 3. Decision-specific requirements
+    // 3. Security Check: Never allow executable instructions in any string field
+    let mut fields_to_check = vec![
+        ("explanation", &result.explanation),
+    ];
+
+    if let Some(r) = &result.suggested_context_reference {
+        fields_to_check.push(("suggested_context_reference", r));
+    }
+    if let Some(name) = &result.suggested_name {
+        fields_to_check.push(("suggested_name", name));
+    }
+    if let Some(u) = &result.uncertainty_reason {
+        fields_to_check.push(("uncertainty_reason", u));
+    }
+    for ref_str in &result.evidence_references {
+        fields_to_check.push(("evidence_references", ref_str));
+    }
+
+    for (field_name, val) in fields_to_check {
+        if let Some(hazard) = detect_executable_instructions(val) {
+            return Err(ReasoningValidationError::ExecutableInstructionsDetected(format!(
+                "Field '{}' contains dangerous instruction: {}",
+                field_name, hazard
+            )));
+        }
+    }
+
+    // 4. Decision-specific requirements
     match result.decision {
         ContextReasoningDecision::ExistingContext => {
             match &result.suggested_context_reference {
@@ -144,31 +225,150 @@ pub fn validate_reasoning_result(result: &ContextReasoningResult) -> Result<(), 
         }
     }
 
-    // 4. Security Check: Never allow executable instructions in any string field
-    let mut fields_to_check = vec![
-        ("explanation", &result.explanation),
-    ];
-
-    if let Some(r) = &result.suggested_context_reference {
-        fields_to_check.push(("suggested_context_reference", r));
-    }
-    if let Some(name) = &result.suggested_name {
-        fields_to_check.push(("suggested_name", name));
-    }
-    if let Some(u) = &result.uncertainty_reason {
-        fields_to_check.push(("uncertainty_reason", u));
-    }
-    for ref_str in &result.evidence_references {
-        fields_to_check.push(("evidence_references", ref_str));
+    // 5. Invariant: Do not expose internal scores or embeddings in the explanation
+    if let Some(metric_leak) = detect_exposed_internal_metrics(&result.explanation) {
+        return Err(ReasoningValidationError::ExposedInternalMetrics(format!(
+            "Explanation exposes internal score or embedding: {}",
+            metric_leak
+        )));
     }
 
-    for (field_name, val) in fields_to_check {
-        if let Some(hazard) = detect_executable_instructions(val) {
-            return Err(ReasoningValidationError::ExecutableInstructionsDetected(format!(
-                "Field '{}' contains dangerous instruction: {}",
-                field_name, hazard
-            )));
+    // 6. Invariant: Clear communication of uncertainty when evidence is insufficient or ambiguous
+    match result.decision {
+        ContextReasoningDecision::Uncertain => {
+            let expl_lower = result.explanation.to_lowercase();
+            let uncertainty_markers = [
+                "may be related",
+                "uncertain",
+                "limited",
+                "insufficient",
+                "competing",
+                "ambiguous",
+                "unclear",
+                "conflict",
+                "review",
+                "tentative",
+                "provisional",
+                "balanced",
+                "divided",
+            ];
+            let communicates_uncertainty = uncertainty_markers.iter().any(|&m| expl_lower.contains(m));
+            if !communicates_uncertainty {
+                return Err(ReasoningValidationError::UncertaintyNotCommunicated(
+                    "Decisions marked 'uncertain' must clearly communicate uncertainty in the explanation (e.g. 'This may be related to ..., but the available evidence is limited.')".to_string(),
+                ));
+            }
         }
+        ContextReasoningDecision::NoContext => {
+            let expl_lower = result.explanation.to_lowercase();
+            let no_context_markers = [
+                "limited",
+                "insufficient",
+                "uncertain",
+                "no context",
+                "no candidate",
+                "no matching",
+                "weak",
+                "inbox",
+                "unassociated",
+                "archived",
+                "not enough",
+                "minimal",
+                "does not match",
+                "no evidence",
+                "marginal",
+                "unclear",
+            ];
+            let communicates_uncertainty = no_context_markers.iter().any(|&m| expl_lower.contains(m));
+            if !communicates_uncertainty {
+                return Err(ReasoningValidationError::UncertaintyNotCommunicated(
+                    "Decisions marked 'no_context' must clearly communicate insufficient evidence or lack of matching context in the explanation".to_string(),
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Validates that an explanation and its deduction are strictly grounded in the provided EvidencePackage.
+/// Rejects hallucinated workspace references, fictitious context names, or unobserved claims.
+pub fn validate_explanation_grounding(
+    result: &ContextReasoningResult,
+    package: &super::models::EvidencePackage,
+) -> Result<(), ReasoningValidationError> {
+    // 1. Gather all valid context references and names from the package
+    let mut valid_context_ids = std::collections::HashSet::new();
+    let mut valid_context_names = std::collections::HashSet::new();
+
+    for cand in &package.candidate_contexts {
+        valid_context_ids.insert(cand.context_id.as_str());
+        valid_context_names.insert(cand.name.to_lowercase());
+    }
+    for prof in &package.workspace_semantic_profiles {
+        valid_context_ids.insert(prof.workspace_id.as_str());
+        valid_context_names.insert(prof.workspace_name.to_lowercase());
+    }
+    for item in &package.relevant_related_items {
+        if let Some(ws_id) = &item.workspace_id {
+            valid_context_ids.insert(ws_id.as_str());
+        }
+        if let Some(ws_name) = &item.workspace_name {
+            valid_context_names.insert(ws_name.to_lowercase());
+        }
+    }
+    for sess in &package.relevant_sessions {
+        for ws in &sess.associated_workspaces {
+            valid_context_names.insert(ws.to_lowercase());
+            valid_context_ids.insert(ws.as_str());
+        }
+    }
+    if let Some(sess) = &package.session_context {
+        for ws in &sess.associated_workspaces {
+            valid_context_names.insert(ws.to_lowercase());
+            valid_context_ids.insert(ws.as_str());
+        }
+    }
+
+    // 2. Existing context grounding checks
+    if result.decision == ContextReasoningDecision::ExistingContext {
+        if let Some(ref_id) = &result.suggested_context_reference {
+            if !valid_context_ids.contains(ref_id.as_str()) {
+                return Err(ReasoningValidationError::UnsupportedFactDetected(format!(
+                    "Suggested context reference '{}' does not exist in the EvidencePackage candidate contexts or workspaces",
+                    ref_id
+                )));
+            }
+        }
+        if let Some(name) = &result.suggested_name {
+            if !valid_context_names.contains(&name.to_lowercase()) {
+                return Err(ReasoningValidationError::UnsupportedFactDetected(format!(
+                    "Suggested context name '{}' does not match any candidate context in the EvidencePackage",
+                    name
+                )));
+            }
+        }
+    }
+
+    // 3. No context grounding checks
+    if result.decision == ContextReasoningDecision::NoContext {
+        if let Some(ref_id) = &result.suggested_context_reference {
+            if !ref_id.trim().is_empty() {
+                return Err(ReasoningValidationError::UnsupportedFactDetected(format!(
+                    "Decision 'no_context' cannot reference an existing context ('{}')",
+                    ref_id
+                )));
+            }
+        }
+    }
+
+    // 4. Internal metrics & embedding leak check
+    if let Some(hazard) = detect_exposed_internal_metrics(&result.explanation) {
+        return Err(ReasoningValidationError::ExposedInternalMetrics(format!(
+            "Explanation exposes internal score or embedding: {}",
+            hazard
+        )));
     }
 
     Ok(())

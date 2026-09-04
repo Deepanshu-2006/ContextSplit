@@ -18,7 +18,8 @@ mod tests {
     use crate::context_engine::reasoning::remote::RemoteLLMReasoner;
     use crate::context_engine::reasoning::traits::AIReasoner;
     use crate::context_engine::reasoning::validator::{
-        parse_and_validate_response, validate_reasoning_result, ReasoningValidationError,
+        detect_exposed_internal_metrics, parse_and_validate_response,
+        validate_explanation_grounding, validate_reasoning_result, ReasoningValidationError,
     };
     use crate::db::{self, operations, settings::PrivacySettings};
 
@@ -177,7 +178,7 @@ mod tests {
         assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
         assert!(result.suggested_context_reference.is_some());
         assert!(result.uncertainty_reason.is_some());
-        assert!(result.explanation.contains("Contextual ambiguity detected"));
+        assert!(result.explanation.contains("competing signals") || result.explanation.contains("Paris Trip"));
         assert_eq!(result.alternative_interpretations.len(), 1);
         assert_eq!(result.alternative_interpretations[0].context_name, "France Research");
     }
@@ -203,7 +204,7 @@ mod tests {
         assert_eq!(result.decision, ContextReasoningDecision::NoContext);
         assert_eq!(result.suggested_context_reference, None);
         assert!(result.uncertainty_reason.is_some());
-        assert!(result.explanation.contains("Weak contextual evidence"));
+        assert!(result.explanation.contains("available evidence is limited"));
     }
 
     #[test]
@@ -1922,6 +1923,234 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
 
         // 6. Privacy boundary stamp set
         assert_eq!(package.system_metadata.privacy_boundary, "ai_privacy_boundary:strict_curated_evidence_only:v1");
+    }
+
+    #[test]
+    fn test_human_readable_strong_explanation_matches_exact_spec() {
+        let fixture = strong_existing_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::ExistingContext);
+        assert_eq!(result.suggested_name.as_deref(), Some("Paris Trip"));
+        assert_eq!(
+            result.explanation,
+            "This appears related to Paris Trip because it is similar to several recent travel-research items and shares domains already associated with that context."
+        );
+        assert!(result.uncertainty_reason.is_none());
+
+        // Invariant checks
+        assert!(detect_exposed_internal_metrics(&result.explanation).is_none());
+        assert!(validate_explanation_grounding(&result, &fixture).is_ok());
+    }
+
+    #[test]
+    fn test_human_readable_uncertain_explanation_matches_exact_spec() {
+        let package = base_dummy_package(vec![CandidateContextEvidence {
+            context_id: "ws_paris".to_string(),
+            name: "Paris Trip".to_string(),
+            context_type: "workspace".to_string(),
+            lifecycle_state: "active".to_string(),
+            deterministic_score: 0.18,
+            deterministic_confidence: 0.18,
+            confidence_band: "Low".to_string(),
+            evidence_factors: vec!["Marginal domain overlap".to_string()],
+            item_count: 5,
+            temporal_recency_score: 0.5,
+        }]);
+
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&package).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(
+            result.explanation,
+            "This may be related to Paris Trip, but the available evidence is limited."
+        );
+        assert!(result.uncertainty_reason.is_some());
+
+        // Invariant checks
+        assert!(detect_exposed_internal_metrics(&result.explanation).is_none());
+        assert!(validate_explanation_grounding(&result, &package).is_ok());
+    }
+
+    #[test]
+    fn test_validation_rejects_exposed_internal_scores_in_explanation() {
+        let base_res = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Paris Trip".to_string()),
+            confidence: 0.85,
+            explanation: "Valid text".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        // 1. Raw float decimal leak (e.g. 0.85)
+        let mut res1 = base_res.clone();
+        res1.explanation = "This item matches Paris Trip with 0.85 confidence score.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res1),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+
+        // 2. Explicit score indicator (e.g. score: 0.9)
+        let mut res2 = base_res.clone();
+        res2.explanation = "Related to Paris Trip because score: 0.9 exceeds threshold.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res2),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+
+        // 3. Percentage score indicator (e.g. 89% confidence)
+        let mut res3 = base_res.clone();
+        res3.explanation = "Strong match with 89% confidence based on recent flights.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res3),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_exposed_embeddings_in_explanation() {
+        let base_res = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Paris Trip".to_string()),
+            confidence: 0.85,
+            explanation: "Valid text".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        // 1. Cosine similarity technical jargon
+        let mut res1 = base_res.clone();
+        res1.explanation = "High cosine similarity observed with travel items.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res1),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+
+        // 2. Vector embedding reference
+        let mut res2 = base_res.clone();
+        res2.explanation = "Item sits close in the vector space to Paris Trip.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res2),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+
+        // 3. Raw vector array representation
+        let mut res3 = base_res.clone();
+        res3.explanation = "Item embedding [0.245, -0.912] matches cluster.".to_string();
+        assert!(matches!(
+            validate_reasoning_result(&res3),
+            Err(ReasoningValidationError::ExposedInternalMetrics(_))
+        ));
+    }
+
+    #[test]
+    fn test_validation_rejects_uncertain_without_communicating_uncertainty() {
+        // Uncertain decision must communicate uncertainty in explanation
+        let res = ContextReasoningResult {
+            decision: ContextReasoningDecision::Uncertain,
+            suggested_context_reference: Some("ws_1".to_string()),
+            suggested_name: Some("Paris Trip".to_string()),
+            confidence: 0.50,
+            explanation: "This definitely belongs to Paris Trip without a doubt.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: Some("Competing signals".to_string()),
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        assert!(matches!(
+            validate_reasoning_result(&res),
+            Err(ReasoningValidationError::UncertaintyNotCommunicated(_))
+        ));
+    }
+
+    #[test]
+    fn test_grounding_rejects_hallucinated_workspace_or_unsupported_facts() {
+        let fixture = strong_existing_context_fixture(); // contains "Paris Trip" and "General Work"
+
+        // 1. Hallucinated workspace reference
+        let fake_res = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_mars_colony".to_string()), // Nonexistent in package!
+            suggested_name: Some("Mars Colony".to_string()),
+            confidence: 0.90,
+            explanation: "This appears related to Mars Colony because of space exploration items.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        let err = validate_explanation_grounding(&fake_res, &fixture);
+        assert!(matches!(err, Err(ReasoningValidationError::UnsupportedFactDetected(_))));
+
+        // 2. Hallucinated workspace name for real ID
+        let mismatch_res = ContextReasoningResult {
+            decision: ContextReasoningDecision::ExistingContext,
+            suggested_context_reference: Some("ws_paris_trip".to_string()),
+            suggested_name: Some("Fictitious Trip".to_string()), // Real ID, but fake name!
+            confidence: 0.90,
+            explanation: "This appears related to Fictitious Trip.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: None,
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        let err2 = validate_explanation_grounding(&mismatch_res, &fixture);
+        assert!(matches!(err2, Err(ReasoningValidationError::UnsupportedFactDetected(_))));
+    }
+
+    #[test]
+    fn test_grounding_rejects_no_context_with_unsupported_reference() {
+        let fixture = no_context_fixture();
+
+        let invalid_no_context = ContextReasoningResult {
+            decision: ContextReasoningDecision::NoContext,
+            suggested_context_reference: Some("ws_unexpected_link".to_string()), // NoContext cannot link to a workspace!
+            suggested_name: None,
+            confidence: 0.0,
+            explanation: "There is insufficient evidence to associate this item with a context; item remains in Inbox.".to_string(),
+            evidence_references: vec![],
+            uncertainty_reason: Some("No matching signals".to_string()),
+            provider_info: None,
+            alternative_interpretations: vec![],
+        };
+
+        let err = validate_explanation_grounding(&invalid_no_context, &fixture);
+        assert!(matches!(err, Err(ReasoningValidationError::UnsupportedFactDetected(_))));
+    }
+
+    #[test]
+    fn test_remote_system_prompt_demands_human_readable_and_bans_scores() {
+        let config = AIProviderConfig::default();
+        let reasoner = RemoteLLMReasoner::new(config);
+        let prompt = reasoner.generate_system_prompt();
+
+        // 1. Must ban exposed internal scores or embeddings
+        assert!(prompt.contains("DO NOT Expose Internal Scores or Embeddings"));
+        assert!(prompt.contains("NEVER include raw internal scores"));
+        assert!(prompt.contains("cosine similarity"));
+
+        // 2. Must require grounding exclusively in EvidencePackage
+        assert!(prompt.contains("The explanation must ONLY use evidence present in the EvidencePackage"));
+        assert!(prompt.contains("DO NOT introduce unsupported facts"));
+
+        // 3. Must require communicating uncertainty
+        assert!(prompt.contains("Communicate Uncertainty"));
+
+        // 4. Must include the exact few-shot examples
+        assert!(prompt.contains("This appears related to Paris Trip because it is similar to several recent travel-research items and shares domains already associated with that context."));
+        assert!(prompt.contains("This may be related to Paris Trip, but the available evidence is limited."));
     }
 }
 
