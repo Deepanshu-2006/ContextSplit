@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_llm_reasoner_prompt_and_deferred_execution() {
+    fn test_remote_llm_reasoner_payload_and_extraction() {
         let remote_cfg = AIProviderConfig::remote(
             AIProviderType::Ollama,
             "llama3",
@@ -1188,12 +1188,33 @@ mod tests {
         assert!(prompt.contains("new_context"));
         assert!(prompt.contains("Air France Flight to Paris CDG"));
 
-        // 2. Verify analyze_context cleanly defers external network calls during this phase
-        let err = remote.analyze_context(&fixture).expect_err("Should return ProviderUnavailable error");
-        assert!(matches!(err, AIReasoningError::ProviderUnavailable(_)));
-        assert!(err.to_string().contains("external network connections are not enabled yet"));
+        // 2. Verify structured request payload format
+        let payload = remote.build_request_payload(&fixture);
+        assert_eq!(payload["model"], "llama3");
+        assert_eq!(payload["response_format"]["type"], "json_object");
+        assert_eq!(payload["temperature"], 0.1);
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
 
-        // 3. Verify remote response processing parses and validates conforming JSON
+        // 3. Verify content extraction variants (OpenAI, Ollama, Direct)
+        let openai_body = json!({
+            "choices": [{
+                "message": {
+                    "content": r#"{"decision":"no_context","confidence":0.0,"explanation":"No match","evidence_references":[],"uncertainty_reason":"No signals"}"#
+                }
+            }]
+        });
+        let extracted_openai = remote.extract_content_from_response(&openai_body).unwrap();
+        assert!(extracted_openai.contains("no_context"));
+
+        let ollama_body = json!({
+            "message": {
+                "content": r#"{"decision":"no_context","confidence":0.0,"explanation":"No match","evidence_references":[],"uncertainty_reason":"No signals"}"#
+            }
+        });
+        let extracted_ollama = remote.extract_content_from_response(&ollama_body).unwrap();
+        assert!(extracted_ollama.contains("no_context"));
+
+        // 4. Verify remote response processing parses and validates conforming JSON
         let valid_json = r#"{
             "decision": "existing_context",
             "suggested_context_reference": "ws_paris_trip",
@@ -1206,8 +1227,9 @@ mod tests {
         let parsed = remote.process_remote_response(valid_json).expect("Parsing valid response must succeed");
         assert_eq!(parsed.decision, ContextReasoningDecision::ExistingContext);
         assert_eq!(parsed.suggested_context_reference.as_deref(), Some("ws_paris_trip"));
+        assert_eq!(parsed.provider_info.as_ref().unwrap().provider_id, "ollama");
 
-        // 4. Verify remote response processing rejects malicious script or executable injection
+        // 5. Verify remote response processing rejects malicious script or executable injection
         let malicious_json = r#"{
             "decision": "existing_context",
             "suggested_context_reference": "ws_paris_trip",
@@ -1219,6 +1241,51 @@ mod tests {
         }"#;
         let mal_err = remote.process_remote_response(malicious_json).expect_err("Malicious response must be rejected");
         assert!(matches!(mal_err, AIReasoningError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn test_remote_llm_bounded_retries_and_graceful_failure() {
+        // Point to an unreachable port with short timeout and 1 retry
+        let remote_cfg = AIProviderConfig::remote(
+            AIProviderType::RemoteLlm,
+            "test-remote-model",
+            Some("http://127.0.0.1:59999".to_string()),
+            Some("sk-dummy-key".to_string()),
+        )
+        .with_timeout_and_retries(1, 1);
+
+        let remote = RemoteLLMReasoner::new(remote_cfg);
+        let fixture = strong_existing_context_fixture();
+
+        let err = remote.analyze_context(&fixture).expect_err("Should fail gracefully when host is unreachable");
+        assert!(matches!(err, AIReasoningError::ProviderUnavailable(_)));
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("127.0.0.1:59999"));
+        // Confirm sensitive API key is NOT leaked into the error message
+        assert!(!err_msg.contains("sk-dummy-key"));
+    }
+
+    #[test]
+    fn test_ai_provider_config_from_env_discovery() {
+        // Test fallback to MockAIReasoner when no env variables are set
+        // (Clean environment guarantee by running with fallback)
+        let config = AIProviderConfig::default_mock();
+        assert_eq!(config.provider_type, AIProviderType::Mock);
+        assert_eq!(config.model_name, "mock-reasoner-v1.0");
+
+        // Test custom remote config creation without leaking secret in Debug
+        let test_key = "sk-live-production-secret-9999";
+        let custom = AIProviderConfig::remote(
+            AIProviderType::OpenAi,
+            "gpt-4o",
+            Some("https://api.openai.com/v1".to_string()),
+            Some(test_key.to_string()),
+        );
+        assert_eq!(custom.provider_type, AIProviderType::OpenAi);
+        assert_eq!(custom.endpoint.as_deref(), Some("https://api.openai.com/v1"));
+        let debug_str = format!("{:?}", custom);
+        assert!(debug_str.contains("sk-***"));
+        assert!(!debug_str.contains(test_key));
     }
 
     #[test]

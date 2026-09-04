@@ -114,10 +114,105 @@ impl AIProviderConfig {
             model_name: model_name.to_string(),
             endpoint,
             api_key,
-            timeout_seconds: 30,
+            timeout_seconds: 15,
             max_retries: 2,
             custom_headers: HashMap::new(),
         }
+    }
+
+    /// Sets custom timeout and retry limits.
+    pub fn with_timeout_and_retries(mut self, timeout_seconds: u64, max_retries: u32) -> Self {
+        self.timeout_seconds = timeout_seconds;
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Discovers provider configuration from external environment variables without hardcoding secrets.
+    /// Priority:
+    /// 1. Explicit `CONTEXTSPLIT_LLM_PROVIDER` (e.g., "openai", "ollama", "gemini", "mock", "remote")
+    /// 2. Implicit detection via `OPENAI_API_KEY`, `OLLAMA_HOST`, `GEMINI_API_KEY`
+    /// 3. Fallback to `MockAIReasoner` for seamless, deterministic local execution.
+    pub fn from_env() -> Self {
+        let timeout_seconds = std::env::var("CONTEXTSPLIT_LLM_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(15);
+
+        let max_retries = std::env::var("CONTEXTSPLIT_LLM_MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2);
+
+        let custom_model = std::env::var("CONTEXTSPLIT_LLM_MODEL").ok();
+        let custom_endpoint = std::env::var("CONTEXTSPLIT_LLM_ENDPOINT").ok();
+        let custom_key = std::env::var("CONTEXTSPLIT_LLM_API_KEY").ok();
+
+        if let Ok(prov_str) = std::env::var("CONTEXTSPLIT_LLM_PROVIDER") {
+            match prov_str.to_lowercase().as_str() {
+                "openai" => {
+                    let key = custom_key.or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                    let endpoint = custom_endpoint
+                        .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                        .or_else(|| Some("https://api.openai.com/v1".to_string()));
+                    let model = custom_model.unwrap_or_else(|| "gpt-4o-mini".to_string());
+                    return Self::remote(AIProviderType::OpenAi, &model, endpoint, key)
+                        .with_timeout_and_retries(timeout_seconds, max_retries);
+                }
+                "ollama" => {
+                    let endpoint = custom_endpoint
+                        .or_else(|| std::env::var("OLLAMA_HOST").ok())
+                        .or_else(|| Some("http://localhost:11434".to_string()));
+                    let model = custom_model.unwrap_or_else(|| "llama3".to_string());
+                    return Self::remote(AIProviderType::Ollama, &model, endpoint, custom_key)
+                        .with_timeout_and_retries(timeout_seconds, max_retries);
+                }
+                "gemini" => {
+                    let key = custom_key.or_else(|| std::env::var("GEMINI_API_KEY").ok());
+                    let endpoint = custom_endpoint
+                        .or_else(|| Some("https://generativelanguage.googleapis.com/v1beta".to_string()));
+                    let model = custom_model.unwrap_or_else(|| "gemini-1.5-flash".to_string());
+                    return Self::remote(AIProviderType::Gemini, &model, endpoint, key)
+                        .with_timeout_and_retries(timeout_seconds, max_retries);
+                }
+                "remote" | "remote_llm" => {
+                    let model = custom_model.unwrap_or_else(|| "remote-llm".to_string());
+                    return Self::remote(AIProviderType::RemoteLlm, &model, custom_endpoint, custom_key)
+                        .with_timeout_and_retries(timeout_seconds, max_retries);
+                }
+                "mock" => {
+                    let model = custom_model.unwrap_or_else(|| "mock-reasoner-v1.0".to_string());
+                    return Self::mock(&model);
+                }
+                _ => {}
+            }
+        }
+
+        // Implicit vendor discovery from environment
+        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            let endpoint = custom_endpoint
+                .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                .or_else(|| Some("https://api.openai.com/v1".to_string()));
+            let model = custom_model.unwrap_or_else(|| "gpt-4o-mini".to_string());
+            return Self::remote(AIProviderType::OpenAi, &model, endpoint, Some(key))
+                .with_timeout_and_retries(timeout_seconds, max_retries);
+        }
+
+        if let Ok(host) = std::env::var("OLLAMA_HOST") {
+            let model = custom_model.unwrap_or_else(|| "llama3".to_string());
+            return Self::remote(AIProviderType::Ollama, &model, Some(host), None)
+                .with_timeout_and_retries(timeout_seconds, max_retries);
+        }
+
+        if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+            let endpoint = custom_endpoint
+                .or_else(|| Some("https://generativelanguage.googleapis.com/v1beta".to_string()));
+            let model = custom_model.unwrap_or_else(|| "gemini-1.5-flash".to_string());
+            return Self::remote(AIProviderType::Gemini, &model, endpoint, Some(key))
+                .with_timeout_and_retries(timeout_seconds, max_retries);
+        }
+
+        // Default to MockAIReasoner when no external provider is configured
+        Self::default_mock()
     }
 
     /// Validates configuration parameters.

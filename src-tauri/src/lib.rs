@@ -622,7 +622,7 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let conn = db::init(app_data_dir)?;
             
-            let mut ce = ContextEngine::new();
+            let mut ce = ContextEngine::from_env();
             ce.register(Box::new(CaptureContextProvider));
             ce.register(Box::new(UserActionContextProvider));
             ce.register(Box::new(WorkspaceContextProvider));

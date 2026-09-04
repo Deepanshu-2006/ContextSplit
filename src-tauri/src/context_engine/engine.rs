@@ -59,6 +59,21 @@ impl ContextEngine {
             ai_reasoner: crate::context_engine::reasoning::create_default_ai_reasoner(),
         }
     }
+
+    /// Constructs ContextEngine discovering external AI provider from environment if configured.
+    pub fn from_env() -> Self {
+        let env_config = crate::context_engine::reasoning::AIProviderConfig::from_env();
+        let ai_reasoner = crate::context_engine::reasoning::create_ai_reasoner(&env_config)
+            .unwrap_or_else(|_| crate::context_engine::reasoning::create_default_ai_reasoner());
+
+        Self { 
+            providers: vec![],
+            semantic_provider: None,
+            semantic_similarity: std::sync::Mutex::new(crate::semantic::similarity::SemanticSimilarityService::new(1000)),
+            inactivity_threshold_secs: 1800,
+            ai_reasoner,
+        }
+    }
     
     pub fn set_semantic_provider(&mut self, provider: Box<dyn crate::semantic::SemanticProvider>) {
         self.semantic_provider = Some(Arc::new(provider));
