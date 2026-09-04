@@ -585,6 +585,35 @@ fn get_evidence_package(
 }
 
 #[tauri::command]
+fn get_candidate_evidence_package(
+    candidate_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::reasoning::EvidencePackage, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::reasoning::build_candidate_evidence_package(&conn, candidate_id)
+}
+
+#[tauri::command]
+fn suggest_candidate_name_ai(
+    candidate_id: &str,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    ce.suggest_candidate_name_ai(&conn, candidate_id)
+}
+
+#[tauri::command]
+fn suggest_item_group_name_ai(
+    item_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    ce.suggest_item_group_name_ai(&conn, &item_ids)
+}
+
+#[tauri::command]
 fn get_ai_provider_status(
     state: State<'_, AppState>,
 ) -> Result<context_engine::reasoning::AIProviderStatus, String> {
@@ -738,6 +767,9 @@ pub fn run() {
             // AI Context Reasoning
             analyze_item_context_ai,
             get_evidence_package,
+            get_candidate_evidence_package,
+            suggest_candidate_name_ai,
+            suggest_item_group_name_ai,
             get_ai_provider_status
         ])
         .run(tauri::generate_context!())

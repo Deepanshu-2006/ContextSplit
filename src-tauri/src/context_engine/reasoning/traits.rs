@@ -12,6 +12,19 @@ pub trait AIReasoner: Send + Sync {
     /// Analyzes structured facts from an EvidencePackage and returns an interpretation.
     fn analyze_context(&self, package: &EvidencePackage) -> Result<ContextReasoningResult, AIReasoningError>;
 
+    /// Suggests a concise (2–4 words), evidence-grounded name for a new ContextCandidate.
+    fn suggest_candidate_name(&self, package: &EvidencePackage) -> Result<String, AIReasoningError> {
+        let result = self.analyze_context(package)?;
+        if let Some(name) = result.suggested_name {
+            if !name.trim().is_empty() {
+                return Ok(name.trim().to_string());
+            }
+        }
+        Err(AIReasoningError::InvalidResponse(
+            "No candidate name could be suggested from evidence".to_string(),
+        ))
+    }
+
     /// Human-readable display name of the reasoning provider (e.g., "Mock AI Reasoner", "Gemini 1.5 Flash").
     fn provider_name(&self) -> &str;
 

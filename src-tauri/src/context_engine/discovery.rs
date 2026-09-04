@@ -607,10 +607,24 @@ pub fn run_discovery(conn: &Connection) -> Result<Vec<ContextCandidate>> {
         }
         let metadata = meta_val.to_string();
 
-        // Generate deterministic candidate name
-        let generated_name = generate_candidate_name(conn, &cm.items)?;
+        // Generate deterministic candidate name as primary fallback
+        let deterministic_name = generate_candidate_name(conn, &cm.items)?;
 
-        let candidate = create_candidate(conn, score.confidence, Some(&generated_name), &metadata)?;
+        // Try AI-assisted naming if AI reasoning is available/enabled
+        let mut final_name = deterministic_name.clone();
+        if let Ok(settings) = crate::db::settings::get_settings(conn) {
+            if settings.enable_ai_reasoning {
+                let reasoner = crate::context_engine::reasoning::create_default_ai_reasoner();
+                if let Ok(ai_name) = crate::context_engine::reasoning::suggest_item_group_name_ai(conn, &cm.items, &*reasoner) {
+                    let trimmed = ai_name.trim();
+                    if !trimmed.is_empty() {
+                        final_name = trimmed.to_string();
+                    }
+                }
+            }
+        }
+
+        let candidate = create_candidate(conn, score.confidence, Some(&final_name), &metadata)?;
 
         // Attach contributing items with their normalized relevance scores
         for ci in &score.contributing_items {

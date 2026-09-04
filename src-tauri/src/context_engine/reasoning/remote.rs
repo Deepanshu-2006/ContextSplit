@@ -302,5 +302,21 @@ impl AIReasoner for RemoteLLMReasoner {
             ))
         }))
     }
+
+    fn suggest_candidate_name(&self, package: &EvidencePackage) -> Result<String, AIReasoningError> {
+        let result = self.analyze_context(package)?;
+        if let Some(name) = result.suggested_name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                super::validator::validate_candidate_name(trimmed, package)
+                    .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+                return Ok(trimmed.to_string());
+            }
+        }
+        Err(AIReasoningError::InvalidResponse(
+            "Remote LLM did not provide a valid suggested name for the candidate".to_string(),
+        ))
+    }
 }
+
 

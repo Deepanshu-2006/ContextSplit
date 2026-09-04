@@ -364,4 +364,102 @@ impl AIReasoner for MockAIReasoner {
             .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
         Ok(result)
     }
+
+    fn suggest_candidate_name(&self, package: &EvidencePackage) -> Result<String, AIReasoningError> {
+        let stop_words: std::collections::HashSet<&str> = [
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with",
+            "is", "of", "from", "by", "as", "into", "like", "this", "that", "these", "those",
+            "item", "context", "workspace", "new", "untitled", "various", "general", "activity"
+        ].into_iter().collect();
+
+        // 1. Check target item and related items for specific keywords
+        let mut word_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        let mut all_texts = Vec::new();
+        if let Some(ref title) = package.target_item.title {
+            all_texts.push(title.clone());
+        }
+        all_texts.push(package.target_item.content_snippet.clone());
+
+        for rel in &package.relevant_related_items {
+            if let Some(ref t) = rel.title {
+                all_texts.push(t.clone());
+            }
+            all_texts.push(rel.snippet.clone());
+        }
+
+        if let Some(ref domain) = package.target_item.domain {
+            all_texts.push(domain.clone());
+        }
+        if let Some(ref app) = package.target_item.app_name {
+            all_texts.push(app.clone());
+        }
+
+        for signal in &package.contextual_signals {
+            all_texts.push(signal.summary.clone());
+        }
+
+        // Domain-specific counts
+        let mut domains: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        if let Some(ref dom) = package.target_item.domain {
+            *domains.entry(dom.clone()).or_insert(0) += 1;
+        }
+        for signal in &package.contextual_signals {
+            if signal.signal_type == "url_metadata" {
+                if let Some(dom) = signal.summary.strip_prefix("Domain: ") {
+                    *domains.entry(dom.trim().to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        for text in &all_texts {
+            let cleaned: String = text.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+            for word in cleaned.split_whitespace() {
+                let lower = word.to_lowercase();
+                if lower.len() >= 3 && !stop_words.contains(lower.as_str()) {
+                    let cap = {
+                        let mut c = word.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(f) => f.to_uppercase().collect::<String>() + c.as_str().to_lowercase().as_str(),
+                        }
+                    };
+                    *word_freq.entry(cap).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut sorted_words: Vec<(String, usize)> = word_freq.into_iter().collect();
+        sorted_words.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let name = if !sorted_words.is_empty() {
+            // Pick top 2 to 3 most salient words
+            let chosen: Vec<String> = sorted_words.iter().take(3).map(|(w, _)| w.clone()).collect();
+            if chosen.len() == 1 {
+                format!("{} Project", chosen[0])
+            } else {
+                chosen.join(" ")
+            }
+        } else if let Some((top_dom, _)) = domains.into_iter().max_by_key(|(_, c)| *c) {
+            let clean_dom = top_dom
+                .replace(".com", "")
+                .replace(".org", "")
+                .replace(".net", "")
+                .replace(".io", "")
+                .replace(".paris", "");
+            let mut cap = clean_dom.chars();
+            let cap_dom = match cap.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + cap.as_str(),
+            };
+            format!("{} Web Activity", cap_dom)
+        } else {
+            "New Activity Context".to_string()
+        };
+
+        super::validator::validate_candidate_name(&name, package)
+            .map_err(|e| AIReasoningError::InvalidResponse(e.to_string()))?;
+
+        Ok(name)
+    }
 }

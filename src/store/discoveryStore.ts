@@ -19,6 +19,7 @@ interface DiscoveryState {
   reviewCandidate: (id: string) => Promise<void>;
   dismissCandidate: (id: string) => Promise<void>;
   updateCandidateName: (id: string, newName: string) => Promise<void>;
+  suggestCandidateNameAI: (candidateId: string) => Promise<string | null>;
   removeItemFromCandidate: (candidateId: string, itemId: string) => Promise<void>;
   createWorkspaceFromCandidate: (candidateId: string, workspaceName: string) => Promise<void>;
   closeReview: () => void;
@@ -160,6 +161,18 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
     } catch (err) {
       console.error('Failed to update candidate name:', err);
     }
+  },
+
+  suggestCandidateNameAI: async (candidateId: string) => {
+    try {
+      const suggested = await db.suggestCandidateNameAI(candidateId);
+      if (suggested && suggested.trim()) {
+        return suggested.trim();
+      }
+    } catch (err) {
+      console.warn('AI candidate naming unavailable or failed:', err);
+    }
+    return null;
   },
 
   removeItemFromCandidate: async (candidateId: string, itemId: string) => {

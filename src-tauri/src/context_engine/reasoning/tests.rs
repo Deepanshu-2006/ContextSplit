@@ -6,7 +6,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::context_engine::reasoning::builder::{
-        analyze_item_context_ai, build_evidence_package, scrub_private_data, EvidencePackageBuilder,
+        analyze_item_context_ai, build_candidate_evidence_package, build_evidence_package,
+        build_item_group_evidence_package, scrub_private_data, suggest_candidate_name_ai,
+        suggest_item_group_name_ai, EvidencePackageBuilder,
     };
     use crate::context_engine::reasoning::fixtures::*;
     use crate::context_engine::reasoning::mock::MockAIReasoner;
@@ -2358,6 +2360,286 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
             new_memberships.iter().all(|m| m.item_id != target_item.id),
             "Ambiguous item must NOT be forced into a workspace suggestion"
         );
+    }
+
+    #[test]
+    fn test_ai_assisted_candidate_naming_grounded_in_evidence() {
+        let (conn, _db_path) = setup_test_db();
+        let reasoner = MockAIReasoner::new();
+
+        // Create 2 items in Inbox with clear Paris travel theme
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Louvre museum tickets and opening hours",
+            Some("Louvre Museum"),
+            "{}",
+        ).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&i1.id),
+            "url_metadata",
+            None,
+            &json!({ "domain": "louvre.fr" }).to_string(),
+        );
+
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Paris hotel reservation confirmation near Eiffel tower",
+            Some("Paris Hotel"),
+            "{}",
+        ).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&i2.id),
+            "url_metadata",
+            None,
+            &json!({ "domain": "booking.com" }).to_string(),
+        );
+
+        // Request AI-assisted candidate naming
+        let name = suggest_item_group_name_ai(&conn, &[i1.id.clone(), i2.id.clone()], &reasoner).unwrap();
+
+        // Name must be 2–4 words preferred, non-empty, and grounded in evidence
+        let words: Vec<&str> = name.split_whitespace().collect();
+        assert!(words.len() >= 2 && words.len() <= 4, "Name should be 2–4 words, got '{}' (len {})", name, words.len());
+        assert!(!name.is_empty());
+        assert!(name != "New Context" && name != "Untitled");
+    }
+
+    #[test]
+    fn test_ai_candidate_naming_avoids_generic_when_specific_evidence_exists() {
+        let (conn, _db_path) = setup_test_db();
+        let reasoner = MockAIReasoner::new();
+
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "TripWise frontend architecture design and state management",
+            Some("TripWise Frontend"),
+            "{}",
+        ).unwrap();
+
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "TripWise backend SQLite schema migrations",
+            Some("TripWise Backend"),
+            "{}",
+        ).unwrap();
+
+        let name = suggest_item_group_name_ai(&conn, &[i1.id, i2.id], &reasoner).unwrap();
+        assert!(name.contains("Tripwise") || name.contains("TripWise") || name.contains("Frontend") || name.contains("Backend"));
+        assert_ne!(name, "New Context");
+        assert_ne!(name, "General Project");
+    }
+
+    #[test]
+    fn test_ai_candidate_naming_fallback_on_failure() {
+        let (conn, _db_path) = setup_test_db();
+
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Rust compiler optimization benchmarks",
+            Some("Compiler Benchmarks"),
+            "{}",
+        ).unwrap();
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Rust async runtime profiling",
+            Some("Async Runtime"),
+            "{}",
+        ).unwrap();
+
+        // Deterministic fallback always produces a valid non-empty name
+        let deterministic_name = crate::context_engine::discovery::generate_candidate_name(&conn, &[i1.id.clone(), i2.id.clone()]).unwrap();
+        assert!(!deterministic_name.is_empty());
+        assert!(deterministic_name.contains("Rust") || deterministic_name.contains("Compiler") || deterministic_name.contains("Runtime") || deterministic_name.contains("Bench"));
+    }
+
+    #[test]
+    fn test_ai_candidate_naming_disabled_setting_fallback() {
+        let (conn, _db_path) = setup_test_db();
+
+        // Disable remote AI reasoning
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_ai_reasoning = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Figma design system components",
+            Some("Figma Components"),
+            "{}",
+        ).unwrap();
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Figma UI color tokens and typography",
+            Some("Figma Design Tokens"),
+            "{}",
+        ).unwrap();
+        let i3 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Figma layout grids and wireframes",
+            Some("Figma Layout Grids"),
+            "{}",
+        ).unwrap();
+
+        // Create semantic relationship between items
+        operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.90, None).unwrap();
+        operations::create_item_relationship(&conn, &i2.id, &i3.id, "semantic_similarity", 0.88, None).unwrap();
+        operations::create_item_relationship(&conn, &i1.id, &i3.id, "semantic_similarity", 0.85, None).unwrap();
+
+        // Run context discovery with AI reasoning disabled
+        let candidates = crate::context_engine::discovery::run_discovery(&conn).unwrap();
+
+        // Discovery must succeed using deterministic naming without failing
+        assert!(!candidates.is_empty());
+        let cand = &candidates[0];
+        assert!(cand.label.is_some());
+        let label = cand.label.as_ref().unwrap();
+        assert!(!label.is_empty());
+    }
+
+    #[test]
+    fn test_ai_candidate_naming_does_not_break_context_discovery() {
+        let (conn, _db_path) = setup_test_db();
+        let reasoner = MockAIReasoner::new();
+
+        // Ensure AI reasoning is enabled
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_ai_reasoning = true;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Database clustering query optimizations",
+            Some("DB Query Optimization"),
+            "{}",
+        ).unwrap();
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Database indexing and execution plan",
+            Some("DB Indexing"),
+            "{}",
+        ).unwrap();
+        let i3 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Database connection pooling configuration",
+            Some("DB Connection Pooling"),
+            "{}",
+        ).unwrap();
+
+        // Add relationships
+        operations::create_item_relationship(&conn, &i1.id, &i2.id, "semantic_similarity", 0.92, None).unwrap();
+        operations::create_item_relationship(&conn, &i2.id, &i3.id, "semantic_similarity", 0.89, None).unwrap();
+        operations::create_item_relationship(&conn, &i1.id, &i3.id, "semantic_similarity", 0.86, None).unwrap();
+
+        // Test building candidate evidence package directly
+        let pkg_group = build_item_group_evidence_package(&conn, &[i1.id.clone(), i2.id.clone(), i3.id.clone()]).unwrap();
+        assert!(!pkg_group.target_item.content_snippet.is_empty());
+
+        // Run discovery
+        let candidates = crate::context_engine::discovery::run_discovery(&conn).unwrap();
+        assert!(!candidates.is_empty(), "Context discovery must create candidates");
+
+        let cand = &candidates[0];
+        assert!(cand.label.is_some());
+        assert!(!cand.label.as_ref().unwrap().is_empty());
+        assert_eq!(cand.status, "detected");
+
+        // Verify building evidence package for existing candidate record
+        let pkg_cand = build_candidate_evidence_package(&conn, &cand.id).unwrap();
+        assert!(!pkg_cand.target_item.content_snippet.is_empty());
+
+        // Verify suggest_candidate_name_ai works on the discovered candidate
+        let ai_name = suggest_candidate_name_ai(&conn, &cand.id, &reasoner).unwrap();
+        assert!(!ai_name.is_empty());
+        let words: Vec<&str> = ai_name.split_whitespace().collect();
+        assert!(words.len() >= 2 && words.len() <= 4);
+    }
+
+    #[test]
+    fn test_ai_naming_strict_non_mutation_invariant() {
+        let (conn, _db_path) = setup_test_db();
+        let reasoner = MockAIReasoner::new();
+
+        let i1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Machine Learning inference pipeline",
+            Some("ML Pipeline"),
+            "{}",
+        ).unwrap();
+        let i2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Model training dataset preparation",
+            Some("Dataset Prep"),
+            "{}",
+        ).unwrap();
+
+        let items_before: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let workspaces_before: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let memberships_before: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+
+        // Request AI naming
+        let name = suggest_item_group_name_ai(&conn, &[i1.id.clone(), i2.id.clone()], &reasoner).unwrap();
+        assert!(!name.is_empty());
+
+        let items_after: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let workspaces_after: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let memberships_after: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+
+        // INVARIANTS: AI naming MUST NOT create or mutate workspaces or items
+        assert_eq!(items_before, items_after, "AI naming must NOT create items");
+        assert_eq!(workspaces_before, workspaces_after, "AI naming must NOT create workspaces");
+        assert_eq!(memberships_before, memberships_after, "AI naming must NOT create memberships");
+
+        // Items must still be in Inbox (workspace_id = None)
+        let item1 = operations::get_item(&conn, &i1.id).unwrap();
+        let item2 = operations::get_item(&conn, &i2.id).unwrap();
+        assert_eq!(item1.workspace_id, None);
+        assert_eq!(item2.workspace_id, None);
     }
 }
 

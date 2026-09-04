@@ -383,3 +383,33 @@ pub fn parse_and_validate_response(raw_json: &str) -> Result<ContextReasoningRes
     validate_reasoning_result(&result)?;
     Ok(result)
 }
+
+/// Validates an AI-suggested candidate name against privacy and grounding rules.
+pub fn validate_candidate_name(name: &str, _package: &super::models::EvidencePackage) -> Result<(), ReasoningValidationError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ReasoningValidationError::MissingSuggestedName("Candidate name cannot be empty".to_string()));
+    }
+    if trimmed.len() > 60 {
+        return Err(ReasoningValidationError::InvalidConfidence("Candidate name exceeds maximum allowed length".to_string()));
+    }
+
+    // Check for exposed internal metrics or embeddings
+    if let Some(hazard) = detect_exposed_internal_metrics(trimmed) {
+        return Err(ReasoningValidationError::ExposedInternalMetrics(format!(
+            "Candidate name exposes internal score or metric: {}",
+            hazard
+        )));
+    }
+
+    // Check for executable instructions or code snippets
+    if let Some(hazard) = detect_executable_instructions(trimmed) {
+        return Err(ReasoningValidationError::ExecutableInstructionsDetected(format!(
+            "Candidate name contains executable pattern: {}",
+            hazard
+        )));
+    }
+
+    Ok(())
+}
+

@@ -707,5 +707,15 @@ export const db = {
 
   getEvidencePackage: (itemId: string) =>
     invoke<EvidencePackage>("get_evidence_package", { itemId }),
+
+  getCandidateEvidencePackage: (candidateId: string) =>
+    invoke<EvidencePackage>("get_candidate_evidence_package", { candidateId }),
+
+  suggestCandidateNameAI: (candidateId: string) =>
+    invoke<string>("suggest_candidate_name_ai", { candidateId }),
+
+  suggestItemGroupNameAI: (itemIds: string[]) =>
+    invoke<string>("suggest_item_group_name_ai", { itemIds }),
 };
+
 

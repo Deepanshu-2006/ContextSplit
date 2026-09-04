@@ -691,6 +691,106 @@ impl EvidencePackageBuilder {
 
         Ok(package)
     }
+
+    /// Constructs an EvidencePackage representing a group of candidate items for AI naming.
+    pub fn build_for_item_group(&self, conn: &Connection, item_ids: &[String]) -> Result<EvidencePackage, String> {
+        if item_ids.is_empty() {
+            return Err("Cannot build EvidencePackage for empty item group".to_string());
+        }
+
+        // The primary item is item_ids[0]
+        let primary_id = &item_ids[0];
+        let mut package = self.build(conn, primary_id)?;
+
+        // Ensure all other items in the group are added into relevant_related_items if not already present
+        let existing_ids: HashSet<String> = package
+            .relevant_related_items
+            .iter()
+            .map(|r| r.item_id.clone())
+            .collect();
+
+        for other_id in item_ids.iter().skip(1) {
+            if !existing_ids.contains(other_id) {
+                if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
+                    let raw_snippet = match other_item.item_type.as_str() {
+                        "image" => "[Image data excluded]".to_string(),
+                        "file" => {
+                            if let Ok(meta_val) = serde_json::from_str::<Value>(&other_item.metadata) {
+                                let fname = meta_val.get("filename").and_then(|v| v.as_str()).unwrap_or("unnamed_file");
+                                format!("[File: {}]", fname)
+                            } else {
+                                "[File content excluded]".to_string()
+                            }
+                        }
+                        _ => {
+                            let trimmed = other_item.content.trim();
+                            if trimmed.chars().count() > self.max_snippet_length {
+                                let truncated: String = trimmed.chars().take(self.max_snippet_length).collect();
+                                format!("{}...", truncated)
+                            } else {
+                                trimmed.to_string()
+                            }
+                        }
+                    };
+                    package.relevant_related_items.push(super::models::RelatedItemEvidence {
+                        item_id: other_item.id.clone(),
+                        title: other_item.title.as_deref().map(scrub_private_data),
+                        item_type: other_item.item_type.clone(),
+                        snippet: scrub_private_data(&raw_snippet),
+                        workspace_id: other_item.workspace_id.clone(),
+                        workspace_name: None,
+                        relevance_score: 1.0,
+                    });
+                }
+            }
+        }
+
+        // Fetch signals for all items in the group
+        for id in item_ids.iter().skip(1) {
+            let item_signals = crate::context_engine::operations::list_context_signals(conn, None, Some(id)).unwrap_or_default();
+            for sig in item_signals {
+                if sig.signal_type == "active_app" {
+                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                        if let Some(app) = v.get("app_name").and_then(|a| a.as_str()) {
+                            package.contextual_signals.push(super::models::CuratedContextSignal {
+                                signal_type: "active_app".to_string(),
+                                summary: format!("Application: {}", app),
+                            });
+                        }
+                    }
+                } else if sig.signal_type == "url_metadata" {
+                    if let Ok(v) = serde_json::from_str::<Value>(&sig.payload) {
+                        if let Some(d) = v.get("domain").and_then(|d| d.as_str()) {
+                            package.contextual_signals.push(super::models::CuratedContextSignal {
+                                signal_type: "url_metadata".to_string(),
+                                summary: format!("Domain: {}", d),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(package)
+    }
+
+    /// Constructs an EvidencePackage representing a discovered ContextCandidate.
+    pub fn build_for_candidate(&self, conn: &Connection, candidate_id: &str) -> Result<EvidencePackage, String> {
+        let mut stmt = conn
+            .prepare("SELECT item_id FROM context_candidate_items WHERE candidate_id = ?1 ORDER BY relevance_score DESC")
+            .map_err(|e| e.to_string())?;
+        let item_ids: Vec<String> = stmt
+            .query_map(rusqlite::params![candidate_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if item_ids.is_empty() {
+            return Err(format!("ContextCandidate '{}' has no associated items", candidate_id));
+        }
+
+        self.build_for_item_group(conn, &item_ids)
+    }
 }
 
 /// Helper function to round floating point values to 4 decimal places for determinism.
@@ -701,6 +801,16 @@ fn round_to_4_dp(val: f64) -> f64 {
 /// Convenience builder function using default builder parameters.
 pub fn build_evidence_package(conn: &Connection, item_id: &str) -> Result<EvidencePackage, String> {
     EvidencePackageBuilder::default().build(conn, item_id)
+}
+
+/// Convenience builder function for candidate items.
+pub fn build_candidate_evidence_package(conn: &Connection, candidate_id: &str) -> Result<EvidencePackage, String> {
+    EvidencePackageBuilder::default().build_for_candidate(conn, candidate_id)
+}
+
+/// Convenience builder function for item groups.
+pub fn build_item_group_evidence_package(conn: &Connection, item_ids: &[String]) -> Result<EvidencePackage, String> {
+    EvidencePackageBuilder::default().build_for_item_group(conn, item_ids)
 }
 
 /// Advisory reasoning invocation.
@@ -716,3 +826,26 @@ pub fn analyze_item_context_ai(
     super::validator::validate_explanation_grounding(&result, &package).map_err(|e| e.to_string())?;
     Ok(result)
 }
+
+/// AI-assisted naming for a ContextCandidate.
+/// If AI reasoning fails, times out, or is disabled, this returns an Err so caller can fallback to deterministic name.
+pub fn suggest_candidate_name_ai(
+    conn: &Connection,
+    candidate_id: &str,
+    reasoner: &dyn AIReasoner,
+) -> Result<String, String> {
+    let package = build_candidate_evidence_package(conn, candidate_id)?;
+    reasoner.suggest_candidate_name(&package).map_err(|e| e.to_string())
+}
+
+/// AI-assisted naming for an arbitrary group of items.
+/// If AI reasoning fails, times out, or is disabled, this returns an Err so caller can fallback to deterministic name.
+pub fn suggest_item_group_name_ai(
+    conn: &Connection,
+    item_ids: &[String],
+    reasoner: &dyn AIReasoner,
+) -> Result<String, String> {
+    let package = build_item_group_evidence_package(conn, item_ids)?;
+    reasoner.suggest_candidate_name(&package).map_err(|e| e.to_string())
+}
+

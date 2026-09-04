@@ -99,6 +99,24 @@ impl ContextEngine {
         crate::context_engine::reasoning::analyze_item_context_ai(conn, item_id, self.ai_reasoner.as_ref())
     }
 
+    /// Suggests an AI-assisted candidate name using the configured AIReasoner.
+    pub fn suggest_candidate_name_ai(
+        &self,
+        conn: &Connection,
+        candidate_id: &str,
+    ) -> Result<String, String> {
+        crate::context_engine::reasoning::suggest_candidate_name_ai(conn, candidate_id, self.ai_reasoner.as_ref())
+    }
+
+    /// Suggests an AI-assisted name for a group of items using the configured AIReasoner.
+    pub fn suggest_item_group_name_ai(
+        &self,
+        conn: &Connection,
+        item_ids: &[String],
+    ) -> Result<String, String> {
+        crate::context_engine::reasoning::suggest_item_group_name_ai(conn, item_ids, self.ai_reasoner.as_ref())
+    }
+
     
     pub fn register(&mut self, provider: Box<dyn ContextProvider>) {
         self.providers.push(provider);

@@ -28,12 +28,14 @@ export function CandidateReviewModal() {
     closeReview,
     dismissCandidate,
     updateCandidateName,
+    suggestCandidateNameAI,
     removeItemFromCandidate,
     createWorkspaceFromCandidate,
   } = useDiscoveryStore();
 
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState('');
+  const [isAiSuggesting, setIsAiSuggesting] = useState(false);
   const [showCreateConfirm, setShowCreateConfirm] = useState(false);
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
 
@@ -53,6 +55,20 @@ export function CandidateReviewModal() {
     if (candidate && editedName.trim()) {
       await updateCandidateName(candidate.id, editedName.trim());
       setIsEditingName(false);
+    }
+  };
+
+  const handleAiSuggestName = async () => {
+    if (!candidate) return;
+    setIsAiSuggesting(true);
+    try {
+      const suggested = await suggestCandidateNameAI(candidate.id);
+      if (suggested) {
+        setEditedName(suggested);
+        await updateCandidateName(candidate.id, suggested);
+      }
+    } finally {
+      setIsAiSuggesting(false);
     }
   };
 
@@ -175,8 +191,8 @@ export function CandidateReviewModal() {
                         </button>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2.5 group">
-                        <span className="text-[16px] font-semibold text-gray-900 truncate">
+                      <div className="flex items-center gap-2.5 group flex-wrap">
+                        <span className="text-[16px] font-semibold text-gray-900 truncate max-w-[280px]">
                           {candidate?.label || 'New Context'}
                         </span>
                         <button
@@ -185,6 +201,15 @@ export function CandidateReviewModal() {
                           title="Click to rename context"
                         >
                           <Edit2 size={13} />
+                        </button>
+                        <button
+                          onClick={handleAiSuggestName}
+                          disabled={isAiSuggesting}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 transition-colors disabled:opacity-50 cursor-pointer"
+                          title="Suggest a concise 2–4 word name grounded in evidence"
+                        >
+                          <Sparkles size={11} className={isAiSuggesting ? "animate-spin" : "text-purple-500"} />
+                          {isAiSuggesting ? "Suggesting..." : "AI Suggest"}
                         </button>
                       </div>
                     )}
