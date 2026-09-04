@@ -475,7 +475,8 @@ export type AIFailureReason =
   | 'provider_error'
   | 'malformed_response'
   | 'evidence_unavailable'
-  | 'internal_error';
+  | 'internal_error'
+  | { gated: string };
 
 /**
  * Top-level response from the `analyze_item_context_ai` command.
@@ -727,8 +728,8 @@ export const db = {
     invoke<ContextOverview>("get_context_overview", { workspaceId }),
 
   // AI Context Reasoning
-  analyzeItemContextAI: (itemId: string) =>
-    invoke<AIContextReasoningResponse>("analyze_item_context_ai", { itemId }),
+  analyzeItemContextAI: (itemId: string, isUserExplicit: boolean = false) =>
+    invoke<AIContextReasoningResponse>("analyze_item_context_ai", { itemId, isUserExplicit }),
 
   getEvidencePackage: (itemId: string) =>
     invoke<EvidencePackage>("get_evidence_package", { itemId }),

@@ -7,6 +7,8 @@ pub mod fixtures;
 pub mod provider;
 pub mod remote;
 pub mod privacy;
+pub mod gating;
+pub mod cache;
 
 #[cfg(test)]
 pub mod tests;

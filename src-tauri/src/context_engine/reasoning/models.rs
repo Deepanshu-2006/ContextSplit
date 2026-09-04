@@ -289,6 +289,8 @@ pub enum AIFailureReason {
     EvidenceUnavailable,
     /// An unexpected internal error occurred inside the reasoning layer.
     InternalError,
+    /// Gated deterministically to avoid redundant or unhelpful LLM calls.
+    Gated(String),
 }
 
 impl std::fmt::Display for AIFailureReason {
@@ -301,6 +303,7 @@ impl std::fmt::Display for AIFailureReason {
             AIFailureReason::MalformedResponse => write!(f, "AI provider returned an unreadable response"),
             AIFailureReason::EvidenceUnavailable => write!(f, "Not enough evidence to build AI context"),
             AIFailureReason::InternalError     => write!(f, "An unexpected error occurred in AI reasoning"),
+            AIFailureReason::Gated(reason)     => write!(f, "AI Analysis bypassed: {}", reason),
         }
     }
 }

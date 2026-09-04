@@ -568,6 +568,7 @@ fn update_temporal_decay_config(
 #[tauri::command]
 fn analyze_item_context_ai(
     item_id: &str,
+    is_user_explicit: bool,
     state: State<'_, AppState>,
 ) -> Result<context_engine::reasoning::AIContextReasoningResponse, String> {
     let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
@@ -578,6 +579,7 @@ fn analyze_item_context_ai(
         &conn,
         item_id,
         ce.ai_reasoner().as_ref(),
+        is_user_explicit,
     );
     Ok(response)
 }

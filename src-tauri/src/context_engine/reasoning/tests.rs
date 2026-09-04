@@ -42,6 +42,8 @@ mod tests {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: true,
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.9,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -1364,8 +1366,7 @@ mod tests {
             "Hotel Louvre Paris reservation confirmation",
             Some("Hotel Booking"),
             "{}",
-        )
-        .unwrap();
+        ).unwrap();
 
         operations::create_item_relationship(
             &conn,
@@ -2674,7 +2675,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::timeout();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable, "Timeout should mark AI as unavailable");
         assert!(response.ai_result.is_none(), "ai_result must be None on timeout");
@@ -2695,7 +2696,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::rate_limited();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable);
         assert!(response.ai_result.is_none());
@@ -2715,7 +2716,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::malformed_response();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable);
         assert!(response.ai_result.is_none());
@@ -2734,7 +2735,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::unavailable();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable);
         assert!(response.ai_result.is_none());
@@ -2769,6 +2770,8 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: false,  // <-- DISABLED
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.9,
         }).unwrap();
 
         let item_id = operations::create_item(&conn, None, None, "text", "disabled AI test", None, "{}")
@@ -2776,7 +2779,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
             .id;
 
         let reasoner = MockAIReasoner::new();  // Would succeed if called, but won't be reached
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable, "AI must be reported unavailable when disabled in settings");
         assert!(response.ai_result.is_none());
@@ -2798,7 +2801,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::misconfigured();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable);
         assert!(response.ai_result.is_none());
@@ -2813,7 +2816,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let reasoner = MockAIReasoner::new();
 
         // Pass a non-existent item ID — EvidencePackage cannot be built
-        let response = analyze_item_context_ai_graceful(&conn, "nonexistent-item-id-xyz", &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, "nonexistent-item-id-xyz", &reasoner, false);
 
         assert!(response.ai_unavailable, "Missing item must result in ai_unavailable");
         assert!(response.ai_result.is_none());
@@ -2828,7 +2831,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = FailingMockAIReasoner::inference_failed();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         assert!(response.ai_unavailable);
         assert!(response.ai_result.is_none());
@@ -2848,7 +2851,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
 
         // Simulate AI timeout
         let reasoner = FailingMockAIReasoner::timeout();
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
         assert!(response.ai_unavailable);
 
         // Workspace creation must still succeed
@@ -2872,8 +2875,8 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
 
         // Simulate AI malformed response
         let reasoner = FailingMockAIReasoner::malformed_response();
-        let r1 = analyze_item_context_ai_graceful(&conn, &i1.id, &reasoner);
-        let r2 = analyze_item_context_ai_graceful(&conn, &i2.id, &reasoner);
+        let r1 = analyze_item_context_ai_graceful(&conn, &i1.id, &reasoner, false);
+        let r2 = analyze_item_context_ai_graceful(&conn, &i2.id, &reasoner, false);
 
         assert!(r1.ai_unavailable);
         assert!(r2.ai_unavailable);
@@ -2901,7 +2904,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
 
         // AI is rate-limited
         let reasoner = FailingMockAIReasoner::rate_limited();
-        let ai_response = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner);
+        let ai_response = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner, false);
         assert!(ai_response.ai_unavailable);
 
         // Deterministic scoring must still work via workspace score
@@ -2950,12 +2953,103 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         let item_id = setup_item_for_failure_tests(&conn);
         let reasoner = MockAIReasoner::new();
 
-        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner);
+        let response = analyze_item_context_ai_graceful(&conn, &item_id, &reasoner, false);
 
         // With a working MockAIReasoner, we expect a result (may be unavailable due to
         // empty candidate contexts — that's OK, it will return no_context, not an error)
         assert!(!response.ai_unavailable || response.failure_reason == Some(AIFailureReason::EvidenceUnavailable),
             "Successful or evidence-only result must not report other failure reasons");
     }
-}
 
+    struct DummyReasoner {
+        result: ContextReasoningResult,
+    }
+    impl AIReasoner for DummyReasoner {
+        fn provider_name(&self) -> &str { "Dummy" }
+        fn provider_id(&self) -> &str { "dummy" }
+        fn analyze_context(&self, _package: &EvidencePackage) -> Result<ContextReasoningResult, AIReasoningError> {
+            Ok(self.result.clone())
+        }
+    }
+
+    #[test]
+    fn test_ai_gating_bypasses_analysis() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let reasoner = DummyReasoner {
+            result: ContextReasoningResult {
+                decision: ContextReasoningDecision::NewContext,
+                suggested_context_reference: None,
+                suggested_name: Some("Test Context".to_string()),
+                confidence: 0.9,
+                explanation: "test".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            }
+        };
+        
+        let item = operations::create_item(&conn, None, None, "text", "gating test", None, "{}").unwrap();
+        let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.95, None, "{}").unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item.id, 0.95).unwrap();
+
+        // Should be gated because confidence 0.95 > threshold 0.9
+        let response = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner, false);
+        assert!(response.ai_unavailable);
+        assert_eq!(response.failure_reason, Some(AIFailureReason::Gated("High deterministic confidence".to_string())));
+        
+        // When explicit, should NOT be gated
+        let response_explicit = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner, true);
+        assert!(!response_explicit.ai_unavailable);
+        assert!(response_explicit.ai_result.is_some());
+    }
+
+    #[test]
+    fn test_ai_reasoning_caching() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        let reasoner = DummyReasoner {
+            result: ContextReasoningResult {
+                decision: ContextReasoningDecision::NewContext,
+                suggested_context_reference: None,
+                suggested_name: Some("Test Cache".to_string()),
+                confidence: 0.8,
+                explanation: "cache".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            }
+        };
+        
+        let item = operations::create_item(&conn, None, None, "text", "cache test", None, "{}").unwrap();
+        let candidate = crate::context_engine::discovery::create_candidate(&conn, 0.5, None, "{}").unwrap();
+        crate::context_engine::discovery::add_item_to_candidate(&conn, &candidate.id, &item.id, 0.5).unwrap();
+
+        // First call should run AI
+        let response1 = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner, false);
+        assert!(!response1.ai_unavailable);
+        assert!(response1.ai_result.is_some());
+
+        // Change the mock reasoner to return something else
+        let reasoner_changed = DummyReasoner {
+            result: ContextReasoningResult {
+                decision: ContextReasoningDecision::NewContext,
+                suggested_context_reference: None,
+                suggested_name: Some("Test Cache Changed".to_string()),
+                confidence: 0.8,
+                explanation: "cache changed".to_string(),
+                evidence_references: vec![],
+                uncertainty_reason: None,
+                alternative_interpretations: vec![],
+                provider_info: None,
+            }
+        };
+
+        // Second call should return cached result, ignoring changed reasoner
+        let response2 = analyze_item_context_ai_graceful(&conn, &item.id, &reasoner_changed, false);
+        assert!(!response2.ai_unavailable);
+        assert_eq!(response2.ai_result.unwrap().suggested_name, Some("Test Cache".to_string()));
+    }
+}

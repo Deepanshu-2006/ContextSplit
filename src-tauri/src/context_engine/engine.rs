@@ -250,6 +250,8 @@ mod tests {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: true,
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.9,
         }).unwrap();
 
         let mut ce = ContextEngine::new();
@@ -294,6 +296,8 @@ mod tests {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: true,
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.9,
         }).unwrap();
 
         let mut ce = ContextEngine::new();

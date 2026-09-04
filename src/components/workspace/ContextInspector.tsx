@@ -56,7 +56,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
     setAiUnavailable(false);
     setAiUnavailableReason(null);
     try {
-      const response = await db.analyzeItemContextAI(itemId);
+      const response = await db.analyzeItemContextAI(itemId, true);
       if (response.ai_unavailable) {
         setAiResult(null);
         setAiUnavailable(true);

@@ -299,6 +299,23 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 15;
     }
 
+    if user_version < 16 {
+        conn.execute("ALTER TABLE settings ADD COLUMN ai_gating_enabled INTEGER DEFAULT 1", [])?;
+        conn.execute("ALTER TABLE settings ADD COLUMN ai_gating_confidence_threshold REAL DEFAULT 0.85", [])?;
+        
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ai_reasoning_cache (
+                package_hash TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        
+        user_version = 16;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

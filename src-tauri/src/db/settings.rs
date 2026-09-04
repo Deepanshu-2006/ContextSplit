@@ -11,6 +11,8 @@ pub struct PrivacySettings {
     pub semantic_provider: String,
     pub enable_semantic_suggestions: bool,
     pub enable_ai_reasoning: bool,
+    pub ai_gating_enabled: bool,
+    pub ai_gating_confidence_threshold: f64,
 }
 
 impl Default for PrivacySettings {
@@ -24,12 +26,14 @@ impl Default for PrivacySettings {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: true,
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.85,
         }
     }
 }
 
 pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
-    let mut stmt = conn.prepare("SELECT enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning FROM settings WHERE id = 'default'")?;
+    let mut stmt = conn.prepare("SELECT enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold FROM settings WHERE id = 'default'")?;
     
     let settings = stmt.query_row([], |row| {
         Ok(PrivacySettings {
@@ -41,6 +45,8 @@ pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
             semantic_provider: row.get::<_, String>(5).unwrap_or_else(|_| "local".to_string()),
             enable_semantic_suggestions: row.get::<_, i32>(6).unwrap_or(1) != 0,
             enable_ai_reasoning: row.get::<_, i32>(7).unwrap_or(1) != 0,
+            ai_gating_enabled: row.get::<_, i32>(8).unwrap_or(1) != 0,
+            ai_gating_confidence_threshold: row.get::<_, f64>(9).unwrap_or(0.85),
         })
     })?;
     
@@ -49,25 +55,20 @@ pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
 
 pub fn update_settings(conn: &Connection, settings: PrivacySettings) -> Result<()> {
     conn.execute(
-        "UPDATE settings SET 
-            enable_active_app = ?1,
-            enable_window_title = ?2,
-            enable_browser_domain = ?3,
-            enable_session_tracking = ?4,
-            enable_semantic_processing = ?5,
-            semantic_provider = ?6,
-            enable_semantic_suggestions = ?7,
-            enable_ai_reasoning = ?8
-         WHERE id = 'default'",
+        "INSERT OR REPLACE INTO settings 
+         (id, enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
-            if settings.enable_active_app { 1 } else { 0 },
-            if settings.enable_window_title { 1 } else { 0 },
-            if settings.enable_browser_domain { 1 } else { 0 },
-            if settings.enable_session_tracking { 1 } else { 0 },
-            if settings.enable_semantic_processing { 1 } else { 0 },
+            settings.enable_active_app,
+            settings.enable_window_title,
+            settings.enable_browser_domain,
+            settings.enable_session_tracking,
+            settings.enable_semantic_processing,
             settings.semantic_provider,
-            if settings.enable_semantic_suggestions { 1 } else { 0 },
-            if settings.enable_ai_reasoning { 1 } else { 0 },
+            settings.enable_semantic_suggestions,
+            settings.enable_ai_reasoning,
+            settings.ai_gating_enabled,
+            settings.ai_gating_confidence_threshold
         ],
     )?;
     

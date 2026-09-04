@@ -109,7 +109,7 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
         set({ isAiReasoningLoading: true });
         const firstItemId = details.items[0].item.id;
         try {
-          const aiResponse = await db.analyzeItemContextAI(firstItemId);
+          const aiResponse = await db.analyzeItemContextAI(firstItemId, false);
           if (aiResponse.ai_unavailable) {
             // AI failed gracefully — deterministic modal still shows fully
             set({

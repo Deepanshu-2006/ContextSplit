@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::models::{
-    AIContextReasoningResponse, AIFailureReason, AIReasoningError,
+    AIContextReasoningResponse, AIFailureReason,
     CandidateContextEvidence, CuratedContextSignal, DeterministicEvidenceAssessment, EvidenceMetadata,
     EvidencePackage, ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary,
     SessionEvidence, TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary, ContextReasoningResult,
@@ -862,6 +862,7 @@ pub fn analyze_item_context_ai_graceful(
     conn: &Connection,
     item_id: &str,
     reasoner: &dyn AIReasoner,
+    is_user_explicit: bool,
 ) -> AIContextReasoningResponse {
     // Step 1: Check if AI reasoning is disabled in user settings.
     let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
@@ -905,9 +906,36 @@ pub fn analyze_item_context_ai_graceful(
         }
     };
 
-    // Step 4: Run AI inference — map every error variant to AIFailureReason.
+    // Step 4: Caching - Check if this exact package has been reasoned about recently
+    let package_hash = crate::context_engine::reasoning::cache::hash_evidence_package(&package);
+    if let Ok(Some(cached_result)) = crate::context_engine::reasoning::cache::get_cached_reasoning(conn, &package_hash) {
+        return AIContextReasoningResponse {
+            ai_result: Some(cached_result),
+            ai_unavailable: false,
+            unavailability_reason: None,
+            failure_reason: None,
+        };
+    }
+
+    // Step 5: AI Invocation Gating
+    let gating_decision = crate::context_engine::reasoning::gating::evaluate_gating(&package, &settings, is_user_explicit);
+    if !gating_decision.should_invoke {
+        let reason = AIFailureReason::Gated(gating_decision.reason.clone());
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(reason.to_string()),
+            failure_reason: Some(reason),
+        };
+    }
+
+    // Step 6: Run AI inference — map every error variant to AIFailureReason.
     let reasoning_result = match reasoner.analyze_context(&package) {
-        Ok(r) => r,
+        Ok(r) => {
+            // Cache successful results
+            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, item_id, &r);
+            r
+        },
         Err(ai_err) => {
             let reason = AIFailureReason::from_reasoning_error(&ai_err);
             return AIContextReasoningResponse {

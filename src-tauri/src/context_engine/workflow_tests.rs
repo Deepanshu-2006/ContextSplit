@@ -30,6 +30,8 @@ mod tests {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: true,
             enable_ai_reasoning: true,
+            ai_gating_enabled: true,
+            ai_gating_confidence_threshold: 0.9,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -218,6 +220,8 @@ mod tests {
             semantic_provider: "local".to_string(),
             enable_semantic_suggestions: false,
             enable_ai_reasoning: false,
+            ai_gating_enabled: false,
+            ai_gating_confidence_threshold: 0.9,
         };
         crate::db::settings::update_settings(&conn2, settings_off).unwrap();
 
