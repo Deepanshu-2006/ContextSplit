@@ -77,6 +77,26 @@ mod tests {
     }
 
     fn base_dummy_package(candidates: Vec<CandidateContextEvidence>) -> EvidencePackage {
+        let is_weak = candidates.is_empty() || candidates[0].deterministic_score < 0.25;
+        let is_ambiguous = candidates.len() > 1
+            && (candidates[0].deterministic_score - candidates[1].deterministic_score).abs() <= 0.12
+            && candidates[1].deterministic_score >= 0.35;
+        let band = if is_weak {
+            "weak".to_string()
+        } else if is_ambiguous {
+            "uncertain".to_string()
+        } else if candidates[0].deterministic_score >= 0.70 {
+            "high".to_string()
+        } else {
+            "moderate".to_string()
+        };
+
+        let competing = if is_ambiguous {
+            vec![candidates[0].name.clone(), candidates[1].name.clone()]
+        } else {
+            Vec::new()
+        };
+
         EvidencePackage {
             target_item: dummy_target_item(),
             candidate_contexts: candidates,
@@ -88,6 +108,13 @@ mod tests {
             workspace_semantic_profiles: Vec::new(),
             contextual_signals: Vec::new(),
             temporal_context: dummy_temporal_evidence(),
+            deterministic_assessment: DeterministicEvidenceAssessment {
+                confidence_band: band,
+                is_weak_evidence: is_weak,
+                is_ambiguous,
+                competing_contexts: competing,
+                assessment_summary: "Test deterministic assessment summary".to_string(),
+            },
             system_metadata: dummy_metadata(),
         }
     }
@@ -176,11 +203,12 @@ mod tests {
         let result = reasoner.analyze_context(&package).unwrap();
 
         assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
-        assert!(result.suggested_context_reference.is_some());
+        // CRITICAL INVARIANT: The AI must NOT be forced to choose a Workspace!
+        assert_eq!(result.suggested_context_reference, None);
+        assert_eq!(result.suggested_name, None);
         assert!(result.uncertainty_reason.is_some());
         assert!(result.explanation.contains("competing signals") || result.explanation.contains("Paris Trip"));
-        assert_eq!(result.alternative_interpretations.len(), 1);
-        assert_eq!(result.alternative_interpretations[0].context_name, "France Research");
+        assert_eq!(result.alternative_interpretations.len(), 2);
     }
 
     #[test]
@@ -391,7 +419,7 @@ mod tests {
         let ws1 = operations::create_workspace(&conn, "Paris Trip").unwrap();
         let _ws2 = operations::create_workspace(&conn, "Work Project").unwrap();
 
-        let _item1 = operations::create_item(&conn, Some(&ws1.id), None, "text", "Paris hotel", Some("Hotel"), "{}").unwrap();
+        let item1 = operations::create_item(&conn, Some(&ws1.id), None, "text", "Paris hotel", Some("Hotel"), "{}").unwrap();
         let _item2 = operations::create_item(&conn, Some(&ws1.id), None, "text", "Paris flight", Some("Flight"), "{}").unwrap();
         let inbox_item = operations::create_item(&conn, None, None, "text", "Eiffel tower ticket", Some("Ticket"), "{}").unwrap();
 
@@ -403,6 +431,16 @@ mod tests {
             "active_app",
             None,
             &json!({ "app_name": "Google Chrome" }).to_string(),
+        ).unwrap();
+
+        // Add semantic relationship so inbox_item has strong evidence for Paris Trip
+        operations::create_item_relationship(
+            &conn,
+            &inbox_item.id,
+            &item1.id,
+            "semantic_similarity",
+            0.85,
+            None,
         ).unwrap();
 
         // Query state counts BEFORE AI reasoning
@@ -1019,14 +1057,14 @@ mod tests {
         let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
 
         assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
-        assert_eq!(result.suggested_context_reference.as_deref(), Some("ws_paris_trip"));
-        assert_eq!(result.suggested_name.as_deref(), Some("Paris Trip"));
+        // CRITICAL INVARIANT: The AI must NOT be forced to choose a Workspace!
+        assert_eq!(result.suggested_context_reference, None);
+        assert_eq!(result.suggested_name, None);
         assert!((result.confidence - 0.61).abs() < 1e-4);
         assert!(result.uncertainty_reason.is_some());
         let uncertainty = result.uncertainty_reason.as_ref().unwrap();
         assert!(uncertainty.contains("Paris Trip") && uncertainty.contains("London Client Meetings"));
-        assert!(!result.alternative_interpretations.is_empty());
-        assert_eq!(result.alternative_interpretations[0].context_id, "ws_london_meetings");
+        assert_eq!(result.alternative_interpretations.len(), 2);
 
         validate_reasoning_result(&result).expect("Result must pass strict schema validation");
     }
@@ -1893,6 +1931,13 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
                 recency_decay_weight: 1.0,
                 is_recent: true,
             },
+            deterministic_assessment: DeterministicEvidenceAssessment {
+                confidence_band: "none".to_string(),
+                is_weak_evidence: true,
+                is_ambiguous: false,
+                competing_contexts: vec![],
+                assessment_summary: "No candidates".to_string(),
+            },
             system_metadata: EvidenceMetadata {
                 generated_at: "2026-09-04T12:00:00Z".to_string(),
                 engine_version: "v1".to_string(),
@@ -2151,6 +2196,168 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         // 4. Must include the exact few-shot examples
         assert!(prompt.contains("This appears related to Paris Trip because it is similar to several recent travel-research items and shares domains already associated with that context."));
         assert!(prompt.contains("This may be related to Paris Trip, but the available evidence is limited."));
+
+        // 5. Must explicitly instruct that the AI must NOT be forced to choose a workspace
+        assert!(prompt.contains("The AI Must NOT Be Forced to Choose a Workspace"));
+        assert!(prompt.contains("set \"suggested_context_reference\": null"));
+    }
+
+    #[test]
+    fn test_mock_reasoner_ambiguous_does_not_force_workspace() {
+        let fixture = ambiguous_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::Uncertain);
+        // The AI must NOT be forced to choose a Workspace
+        assert_eq!(result.suggested_context_reference, None);
+        assert_eq!(result.suggested_name, None);
+        assert!(result.uncertainty_reason.is_some());
+        // Alternatives contain all competing candidates for user selection
+        assert_eq!(result.alternative_interpretations.len(), 2);
+        let names: Vec<_> = result.alternative_interpretations.iter().map(|a| a.context_name.as_str()).collect();
+        assert!(names.contains(&"Paris Trip") && names.contains(&"London Client Meetings"));
+    }
+
+    #[test]
+    fn test_mock_reasoner_no_context_does_not_force_workspace() {
+        let fixture = no_context_fixture();
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&fixture).expect("Reasoning should succeed");
+
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        // The AI must NOT be forced to choose a Workspace
+        assert_eq!(result.suggested_context_reference, None);
+        assert_eq!(result.suggested_name, None);
+        assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_evidence_package_communicates_weak_evidence_uncertainty() {
+        let (conn, _path) = setup_test_db();
+        // Insert an isolated item with no workspace or relationships
+        let item = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "vague note about lunch tomorrow",
+            Some("Personal"),
+            "{}",
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &item.id).expect("Build should succeed");
+
+        // The EvidencePackage must communicate weak evidence uncertainty
+        assert!(package.deterministic_assessment.is_weak_evidence);
+        assert!(
+            package.deterministic_assessment.confidence_band == "weak"
+                || package.deterministic_assessment.confidence_band == "none"
+        );
+        assert!(!package.deterministic_assessment.assessment_summary.is_empty());
+
+        // When reasoning over this weak package, AI must return NoContext without forcing a workspace
+        let reasoner = MockAIReasoner::new();
+        let result = reasoner.analyze_context(&package).expect("Reasoning should succeed");
+        assert_eq!(result.decision, ContextReasoningDecision::NoContext);
+        assert_eq!(result.suggested_context_reference, None);
+    }
+
+    #[test]
+    fn test_evidence_package_communicates_ambiguity() {
+        let fixture = ambiguous_context_fixture();
+        assert!(fixture.deterministic_assessment.is_ambiguous);
+        assert_eq!(fixture.deterministic_assessment.confidence_band, "uncertain");
+        assert_eq!(fixture.deterministic_assessment.competing_contexts.len(), 2);
+        assert!(fixture.deterministic_assessment.assessment_summary.contains("Ambiguous signals"));
+    }
+
+    #[test]
+    fn test_ambiguous_items_do_not_get_forced_into_workspaces() {
+        let (conn, _path) = setup_test_db();
+
+        // Create two competing workspaces
+        let ws1 = operations::create_workspace(&conn, "Paris Vacation").unwrap();
+        let ws2 = operations::create_workspace(&conn, "London Trip").unwrap();
+
+        // Create an item in ws1 with domain eurostar.com
+        let item1 = operations::create_item(
+            &conn,
+            Some(&ws1.id),
+            None,
+            "text",
+            "Paris hotel reservation",
+            Some("Paris Hotel"),
+            "{}",
+        ).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws1.id),
+            Some(&item1.id),
+            "url_metadata",
+            None,
+            &serde_json::json!({ "domain": "eurostar.com" }).to_string(),
+        );
+
+        // Create an item in ws2 with domain eurostar.com
+        let item2 = operations::create_item(
+            &conn,
+            Some(&ws2.id),
+            None,
+            "text",
+            "London meeting notes",
+            Some("London Office"),
+            "{}",
+        ).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            Some(&ws2.id),
+            Some(&item2.id),
+            "url_metadata",
+            None,
+            &serde_json::json!({ "domain": "eurostar.com" }).to_string(),
+        );
+
+        // Create unassigned ticket with common domain eurostar.com
+        let target_item = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Eurostar ticket London to Paris",
+            Some("Eurostar Booking"),
+            "{}",
+        ).unwrap();
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&target_item.id),
+            "url_metadata",
+            None,
+            &serde_json::json!({ "domain": "eurostar.com" }).to_string(),
+        );
+
+        // Add relationships with items in both workspaces to produce competing high affinity (> 0.35)
+        operations::create_item_relationship(&conn, &target_item.id, &item1.id, "semantic_similarity", 0.60, None).unwrap();
+        operations::create_item_relationship(&conn, &target_item.id, &item2.id, "semantic_similarity", 0.58, None).unwrap();
+
+        // Evaluate item context
+        let interp = crate::context_engine::scoring::evaluate_item_context(&conn, &target_item.id).unwrap();
+
+        // Ambiguous item MUST NOT be forced into "existing_workspace"!
+        assert_eq!(interp.primary_interpretation, "ambiguous");
+        assert!(interp.summary.contains("Ambiguous match"));
+
+        // Recalculating workspace suggested memberships MUST NOT auto-create a suggested membership for ambiguous items
+        let new_memberships = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(
+            &conn,
+            &ws1.id,
+            None,
+        ).unwrap();
+        assert!(
+            new_memberships.iter().all(|m| m.item_id != target_item.id),
+            "Ambiguous item must NOT be forced into a workspace suggestion"
+        );
     }
 }
 
