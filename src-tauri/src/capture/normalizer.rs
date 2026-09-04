@@ -324,4 +324,96 @@ impl CaptureNormalizer {
         }
         .to_string()
     }
+
+    /// Normalizes a pre-constructed `CaptureEvent` ensuring consistent whitespace,
+    /// CRLF normalization, domain extraction, filename detection, MIME resolution, and metadata mapping.
+    pub fn normalize_event(&self, mut event: CaptureEvent) -> Result<CaptureEvent, CaptureError> {
+        let raw_content = event.content.trim();
+        let mut normalized_content = raw_content.replace("\r\n", "\n");
+
+        let mut meta_map = match event.metadata.as_object() {
+            Some(obj) => obj.clone(),
+            None => serde_json::Map::new(),
+        };
+
+        // Ensure baseline metadata fields
+        meta_map.insert("source".to_string(), json!(event.capture_type.to_string()));
+        meta_map.insert("platform".to_string(), json!(event.platform.to_string()));
+        meta_map.insert("content_type".to_string(), json!(event.content_type.to_string()));
+
+        if let Some(app) = &event.source_application {
+            meta_map.entry("app_name".to_string()).or_insert_with(|| json!(app));
+        }
+        if let Some(win) = &event.source_metadata.window_title {
+            meta_map.entry("window_title".to_string()).or_insert_with(|| json!(win));
+        }
+        if let Some(proc) = &event.source_metadata.process_name {
+            meta_map.entry("process_info".to_string()).or_insert_with(|| json!(proc));
+        }
+
+        match &event.content_type {
+            ContentType::Url => {
+                let cleaned_url = self.normalize_url(&normalized_content);
+                let domain = self.extract_domain(&cleaned_url);
+                if let Some(dom) = &domain {
+                    meta_map.entry("domain".to_string()).or_insert_with(|| json!(dom));
+                }
+                meta_map.entry("mime_type".to_string()).or_insert_with(|| json!("text/uri-list"));
+                meta_map.entry("original_url".to_string()).or_insert_with(|| json!(&cleaned_url));
+                if !meta_map.contains_key("title") {
+                    if let Some(t) = self.infer_url_title(&cleaned_url, domain.as_deref(), event.source_metadata.window_title.as_deref()) {
+                        meta_map.insert("title".to_string(), json!(t));
+                    }
+                }
+                normalized_content = cleaned_url;
+            }
+            ContentType::File => {
+                let path_obj = Path::new(&normalized_content);
+                let fname = path_obj
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("unnamed_file")
+                    .to_string();
+                meta_map.entry("filename".to_string()).or_insert_with(|| json!(&fname));
+                meta_map.entry("mime_type".to_string()).or_insert_with(|| json!(self.infer_mime_type_from_path(&normalized_content)));
+                if !meta_map.contains_key("title") {
+                    meta_map.insert("title".to_string(), json!(fname));
+                }
+            }
+            ContentType::Image => {
+                meta_map.entry("mime_type".to_string()).or_insert_with(|| json!("image/png"));
+                if !meta_map.contains_key("title") {
+                    let title = if let Some(app) = &event.source_application {
+                        format!("Image from {}", app)
+                    } else {
+                        "Captured Image".to_string()
+                    };
+                    meta_map.insert("title".to_string(), json!(title));
+                }
+            }
+            ContentType::RichText => {
+                meta_map.entry("mime_type".to_string()).or_insert_with(|| json!("text/rtf"));
+                if !meta_map.contains_key("title") {
+                    if let Some(t) = self.infer_text_title(&normalized_content, event.source_metadata.window_title.as_deref()) {
+                        meta_map.insert("title".to_string(), json!(t));
+                    }
+                }
+            }
+            _ => {
+                meta_map.entry("mime_type".to_string()).or_insert_with(|| json!("text/plain"));
+                if !meta_map.contains_key("title") {
+                    if let Some(t) = self.infer_text_title(&normalized_content, event.source_metadata.window_title.as_deref()) {
+                        meta_map.insert("title".to_string(), json!(t));
+                    }
+                }
+            }
+        }
+
+        meta_map.insert("size".to_string(), json!(normalized_content.len()));
+
+        event.content = normalized_content;
+        event.metadata = serde_json::Value::Object(meta_map);
+
+        Ok(event)
+    }
 }

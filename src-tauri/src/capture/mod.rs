@@ -2,6 +2,7 @@ pub mod core;
 pub mod engine;
 pub mod models;
 pub mod normalizer;
+pub mod pipeline;
 pub mod platform;
 pub mod target;
 pub mod validator;
@@ -17,6 +18,7 @@ pub mod tests;
 
 // Re-exports for public usage
 pub use core::CaptureCore;
+pub use pipeline::CapturePipeline;
 pub use models::{
     CaptureError, CaptureEvent, CaptureMethod, CaptureResult, CaptureType, ContentType,
     ItemType, NormalizedCaptureEvent, PlatformClipboardInput, PlatformDragDropInput,

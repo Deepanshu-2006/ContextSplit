@@ -578,4 +578,170 @@ mod tests {
 
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
+
+    // =======================================================================
+    // 6. CapturePipeline 9-Step & Capture Types Tests
+    // =======================================================================
+
+    #[test]
+    fn test_capture_pipeline_clipboard_type() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Meeting notes from client synchronization call",
+            PlatformType::MacOS,
+        );
+
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event).unwrap();
+        assert_eq!(result.item.item_type, "text");
+        assert_eq!(result.item.content, "Meeting notes from client synchronization call");
+        assert_eq!(result.item.workspace_id, None, "Must be placed in Inbox");
+        assert!(result.session_id.is_some());
+        assert!(!result.is_duplicate);
+        assert!(result.signals_emitted >= 1);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_pipeline_drag_drop_type() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let mut event = CaptureEvent::new(
+            CaptureType::DragDrop,
+            ContentType::File,
+            "/Users/deepanshukhatri/Documents/Quarterly_Report_2026.pdf",
+            PlatformType::MacOS,
+        );
+        event.source_application = Some("Finder".to_string());
+
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event).unwrap();
+        assert_eq!(result.item.item_type, "file");
+        assert_eq!(result.item.content, "/Users/deepanshukhatri/Documents/Quarterly_Report_2026.pdf");
+        assert_eq!(result.item.title.as_deref(), Some("Quarterly_Report_2026.pdf"));
+        assert!(!result.is_duplicate);
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&result.item.id)).unwrap();
+        assert!(signals.iter().any(|s| s.signal_type == "file_metadata"));
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_pipeline_manual_type() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let ws = operations::create_workspace(&conn, "College Project").unwrap();
+
+        let mut event = CaptureEvent::new(
+            CaptureType::Manual,
+            ContentType::PlainText,
+            "Research topic: Distributed Consensus in Context Engines",
+            PlatformType::Generic,
+        );
+        event.metadata = json!({
+            "workspace_id": ws.id,
+            "title": "Consensus Research"
+        });
+
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event).unwrap();
+        assert_eq!(result.item.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(result.item.title.as_deref(), Some("Consensus Research"));
+        assert!(!result.is_duplicate);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_pipeline_custom_extensibility_type() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let custom_type = CaptureType::from("browser_extension_v3");
+        let event = CaptureEvent::new(
+            custom_type.clone(),
+            ContentType::Url,
+            "https://developer.mozilla.org/en-US/docs/Web/API",
+            PlatformType::MacOS,
+        );
+
+        assert_eq!(event.capture_type, CaptureType::Custom("browser_extension_v3".to_string()));
+
+        let result = pipeline.process_event_headless(&conn, Some(&engine), event).unwrap();
+        assert_eq!(result.item.item_type, "url");
+        assert_eq!(result.item.workspace_id, None);
+        assert!(!result.is_duplicate);
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&result.item.id)).unwrap();
+        let cap_sig = signals.iter().find(|s| s.signal_type == "capture_event").unwrap();
+        assert!(cap_sig.payload.contains("browser_extension_v3"));
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_pipeline_deduplication() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new().with_dedup_window_secs(10);
+
+        let event1 = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Identical captured string",
+            PlatformType::MacOS,
+        );
+
+        let res1 = pipeline.process_event_headless(&conn, Some(&engine), event1.clone()).unwrap();
+        assert!(!res1.is_duplicate, "First capture must not be flagged duplicate");
+
+        // Consecutive capture with identical content within window
+        let res2 = pipeline.process_event_headless(&conn, Some(&engine), event1).unwrap();
+        assert!(res2.is_duplicate, "Second identical capture must be flagged duplicate");
+        assert_eq!(res2.item.id, res1.item.id, "Duplicate capture should reference the existing item");
+
+        // Verify only 1 item was created in DB
+        let items = operations::list_items(&conn, None).unwrap();
+        assert_eq!(items.len(), 1, "Database should contain only 1 item");
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_capture_pipeline_inbox_and_session_association() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_test_engine();
+        let pipeline = crate::capture::CapturePipeline::new();
+
+        let event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Random inbox thought for later organization",
+            PlatformType::MacOS,
+        );
+
+        let res = pipeline.process_event_headless(&conn, Some(&engine), event).unwrap();
+
+        // 1. Verify item is in Inbox (workspace_id = None)
+        assert!(res.item.workspace_id.is_none());
+
+        // 2. Verify item is in the list of Inbox items
+        let inbox_items = operations::list_items(&conn, None).unwrap();
+        assert!(inbox_items.iter().any(|i| i.id == res.item.id));
+
+        // 3. Verify session was associated
+        assert!(res.session_id.is_some());
+        assert_eq!(res.item.session_id, res.session_id);
+
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
 }
