@@ -1,183 +1,45 @@
-use tauri::{AppHandle, Manager, Emitter};
-use serde_json::json;
-use crate::{AppState, db::operations};
+use tauri::{AppHandle, Manager};
+
+use crate::AppState;
+use super::core::CaptureCore;
+use super::models::{CaptureMethod, RawCapturePayload};
 use super::target::CaptureRequest;
 
+/// Legacy entry point for processing a capture request from the UI, now routing directly through CaptureCore.
 pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(), String> {
-    // 1. Serialize metadata
-    let metadata = json!({
-        "source": req.source,
-        "filename": req.filename,
-        "mime_type": req.mime_type,
-        "original_url": req.original_url,
-        "size": req.size
-    }).to_string();
+    let source_method = req
+        .source
+        .as_deref()
+        .map(CaptureMethod::from)
+        .unwrap_or(CaptureMethod::Manual);
 
-    let title_opt = req.title.as_deref();
-    let state = app_handle.state::<AppState>();
-
-    // --- Step A: Create item & get session_id in a single short-lived lock scope ---
-    let item = {
-        let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-
-        // Determine active session (hold context_engine only briefly inside this scope)
-        let session_id_opt = {
-            if let Ok(ce) = state.context_engine.lock() {
-                ce.get_or_update_active_session(&conn).ok()
-            } else {
-                None
-            }
-            // context_engine lock is dropped here
-        };
-
-        let item = operations::create_item(
-            &conn,
-            None, // Inbox
-            session_id_opt.as_deref(),
-            &req.data_type,
-            &req.content,
-            title_opt,
-            &metadata,
-        ).map_err(|e| e.to_string())?;
-
-        // Check semantic settings while we have conn
-        let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(&conn) {
-            settings.enable_semantic_processing
-        } else { true };
-
-        // Mark status
-        if enable_semantic {
-            let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "pending", None);
-        } else {
-            let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "failed", None);
-        }
-
-        item
-        // conn (db_conn lock) is dropped here
-    };
-
-    // --- Step B: Collect context signals — use a fresh short lock scope ---
-    {
-        let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-        if let Ok(ce) = state.context_engine.lock() {
-            let cap_metadata = json!({
-                "filename": req.filename,
-                "mime_type": req.mime_type,
-                "original_url": req.original_url,
-                "size": req.size,
-                "content": if req.data_type == "url" { Some(req.content.clone()) } else { None }
-            });
-            ce.process_event(&conn, crate::context_engine::engine::ContextEvent::Capture {
-                item_id: item.id.clone(),
-                workspace_id: req.workspace_id.clone(),
-                source: req.source.clone().unwrap_or_else(|| "unknown".to_string()),
-                data_type: req.data_type.clone(),
-                metadata: cap_metadata,
-            });
-        }
-        // Generate relationships while we have conn but NOT context_engine
-        let _ = crate::context_engine::relationships::generate_relationships(&conn, &item.id);
-        // conn + context_engine locks are dropped here
+    let mut payload = RawCapturePayload::new(req.content.clone(), source_method);
+    payload.data_type = Some(req.data_type.clone());
+    payload.title = req.title.clone();
+    payload.mime_type = req.mime_type.clone();
+    payload.original_url = req.original_url.clone();
+    payload.size_bytes = req.size;
+    payload.workspace_id = req.workspace_id.clone();
+    if let Some(f) = &req.filename {
+        payload.file_paths = vec![f.clone()];
     }
 
-    // --- Step C: Kick off async semantic embedding — no lock held here ---
+    let core = CaptureCore::new();
+    let _result = core.process_app(app_handle.clone(), payload).map_err(|e| e.to_string())?;
+
+    // Report success to target overlay if active
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        // Get provider handle without holding any lock for more than a moment
-        let provider_opt = {
-            if let Ok(ce) = state.context_engine.lock() {
-                ce.get_semantic_provider()
-            } else {
-                None
-            }
-            // context_engine lock dropped
-        };
-
-        if let Some(provider) = provider_opt {
-            let builder = crate::semantic::builder::SemanticContentBuilder::new();
-            let text_to_embed = builder.build(&item);
-
-            if !text_to_embed.trim().is_empty() {
-                let item_id = item.id.clone();
-                let app_handle_clone = app_handle.clone();
-
-                // Mark as processing with a quick lock
-                if let Ok(conn) = state.db_conn.lock() {
-                    let _ = crate::db::operations::update_item_semantic_status(&conn, &item_id, "processing", None);
-                }
-                // conn dropped
-
-                tauri::async_runtime::spawn(async move {
-                    let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
-                        match provider.generate_embedding(&text_to_embed) {
-                            Ok(emb) => Ok((emb, provider.status().model_name.clone())),
-                            Err(e) => Err(e),
-                        }
-                    });
-
-                    let mut success = false;
-                    let mut final_model = None;
-
-                    if let Ok(result) = join_handle.await {
-                        if let Ok((embedding, model_name)) = result {
-                            final_model = Some(model_name.clone());
-                            if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                                // Save embedding
-                                let saved = if let Ok(conn) = state.db_conn.lock() {
-                                    crate::db::operations::save_item_embedding(
-                                        &conn, &item_id, &embedding, &model_name, &model_name
-                                    ).is_ok()
-                                } else { false };
-                                // db_conn lock dropped
-
-                                // Generate semantic relationships in a separate lock acquisition
-                                if saved {
-                                    if let Ok(ce) = state.context_engine.lock() {
-                                        if let Ok(conn) = state.db_conn.lock() {
-                                            let _ = crate::context_engine::relationships::generate_semantic_relationships(&ce, &conn, &item_id);
-                                        }
-                                    }
-                                    success = true;
-                                }
-                            }
-                        }
-                    }
-
-                    // Update final status
-                    if let Some(state) = app_handle_clone.try_state::<crate::AppState>() {
-                        if let Ok(conn) = state.db_conn.lock() {
-                            if success {
-                                let _ = crate::db::operations::update_item_semantic_status(
-                                    &conn, &item_id, "ready", final_model.as_deref()
-                                );
-                            } else {
-                                let _ = crate::db::operations::update_item_semantic_status(
-                                    &conn, &item_id, "failed", None
-                                );
-                                let _ = crate::db::operations::increment_semantic_retries(&conn, &item_id);
-                            }
-                        }
-                    }
-                });
-            } else {
-                // No text to embed → mark ready immediately
-                if let Ok(conn) = state.db_conn.lock() {
-                    let _ = crate::db::operations::update_item_semantic_status(&conn, &item.id, "ready", None);
-                }
-            }
+        if let Some(system_target) = app_handle.try_state::<super::SystemTarget>() {
+            use super::target::CaptureTarget;
+            let _ = system_target.report_success(&req);
         }
     }
-
-    // 3. Emit Tauri Event (no locks held)
-    let _ = app_handle.emit("clipboard://new-item", &item);
-
-    // 4. Show Notification
-    let system_target = app_handle.state::<super::SystemTarget>();
-    use super::target::CaptureTarget;
-    let _ = system_target.report_success(&req);
 
     Ok(())
 }
 
+/// Retries failed semantic embedding generation for a captured item.
 pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
     let state = app_handle.state::<AppState>();
 
@@ -185,8 +47,9 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
     let item_opt = {
         if let Ok(conn) = state.db_conn.lock() {
             crate::db::operations::get_item(&conn, item_id).ok()
-        } else { None }
-        // db_conn lock dropped
+        } else {
+            None
+        }
     };
 
     let item = match item_opt {
@@ -200,18 +63,22 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
             crate::db::settings::get_settings(&conn)
                 .map(|s| s.enable_semantic_processing)
                 .unwrap_or(true)
-        } else { true }
-        // db_conn lock dropped
+        } else {
+            true
+        }
     };
 
-    if !enable_semantic { return; }
+    if !enable_semantic {
+        return;
+    }
 
     // Get provider with a brief lock
     let provider_opt = {
         if let Ok(ce) = state.context_engine.lock() {
             ce.get_semantic_provider()
-        } else { None }
-        // context_engine lock dropped
+        } else {
+            None
+        }
     };
 
     let provider = match provider_opt {
@@ -222,24 +89,32 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
     let builder = crate::semantic::builder::SemanticContentBuilder::new();
     let text_to_embed = builder.build(&item);
 
-    if text_to_embed.trim().is_empty() { return; }
+    if text_to_embed.trim().is_empty() {
+        return;
+    }
 
     let item_id_clone = item_id.to_string();
     let app_handle_clone = app_handle.clone();
 
     // Mark as processing with a brief lock
     if let Ok(conn) = state.db_conn.lock() {
-        let _ = crate::db::operations::update_item_semantic_status(&conn, &item_id_clone, "processing", None);
+        let _ = crate::db::operations::update_item_semantic_status(
+            &conn,
+            &item_id_clone,
+            "processing",
+            None,
+        );
     }
-    // db_conn lock dropped
 
     tauri::async_runtime::spawn(async move {
-        let join_handle = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<f32>, String), String> {
-            match provider.generate_embedding(&text_to_embed) {
-                Ok(emb) => Ok((emb, provider.status().model_name.clone())),
-                Err(e) => Err(e),
-            }
-        });
+        let join_handle = tauri::async_runtime::spawn_blocking(
+            move || -> Result<(Vec<f32>, String), String> {
+                match provider.generate_embedding(&text_to_embed) {
+                    Ok(emb) => Ok((emb, provider.status().model_name.clone())),
+                    Err(e) => Err(e),
+                }
+            },
+        );
 
         let mut success = false;
         let mut final_model = None;
@@ -251,16 +126,26 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
                     // Save embedding
                     let saved = if let Ok(conn) = state.db_conn.lock() {
                         crate::db::operations::save_item_embedding(
-                            &conn, &item_id_clone, &embedding, &model_name, &model_name
-                        ).is_ok()
-                    } else { false };
-                    // db_conn lock dropped
+                            &conn,
+                            &item_id_clone,
+                            &embedding,
+                            &model_name,
+                            &model_name,
+                        )
+                        .is_ok()
+                    } else {
+                        false
+                    };
 
                     if saved {
                         // Generate relationships in a fresh lock pair
                         if let Ok(ce) = state.context_engine.lock() {
                             if let Ok(conn) = state.db_conn.lock() {
-                                let _ = crate::context_engine::relationships::generate_semantic_relationships(&ce, &conn, &item_id_clone);
+                                let _ = crate::context_engine::relationships::generate_semantic_relationships(
+                                    &ce,
+                                    &conn,
+                                    &item_id_clone,
+                                );
                             }
                         }
                         success = true;
@@ -273,13 +158,22 @@ pub fn retry_item_embedding(app_handle: AppHandle, item_id: &str) {
             if let Ok(conn) = state.db_conn.lock() {
                 if success {
                     let _ = crate::db::operations::update_item_semantic_status(
-                        &conn, &item_id_clone, "ready", final_model.as_deref()
+                        &conn,
+                        &item_id_clone,
+                        "ready",
+                        final_model.as_deref(),
                     );
                 } else {
                     let _ = crate::db::operations::update_item_semantic_status(
-                        &conn, &item_id_clone, "failed", None
+                        &conn,
+                        &item_id_clone,
+                        "failed",
+                        None,
                     );
-                    let _ = crate::db::operations::increment_semantic_retries(&conn, &item_id_clone);
+                    let _ = crate::db::operations::increment_semantic_retries(
+                        &conn,
+                        &item_id_clone,
+                    );
                 }
             }
         }

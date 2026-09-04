@@ -645,6 +645,12 @@ fn clear_ai_reasoning_cache(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+fn capture_raw_event(payload: capture::RawCapturePayload, app: tauri::AppHandle) -> Result<capture::CaptureResult, String> {
+    let core = capture::CaptureCore::new();
+    core.process_app(app, payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn handle_capture(req: capture::target::CaptureRequest, app: tauri::AppHandle) -> Result<(), String> {
     capture::engine::process_capture(app, req)
 }
@@ -730,6 +736,7 @@ pub fn run() {
             update_item,
             delete_item,
             move_item,
+            capture_raw_event,
             handle_capture,
             show_notch,
             hide_notch,
