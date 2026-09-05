@@ -10,6 +10,7 @@ pub mod target;
 pub mod validator;
 pub mod notch;
 pub mod windows_target;
+pub mod drag_normalizer;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -23,6 +24,7 @@ pub mod tests;
 // Re-exports for public usage
 pub use core::CaptureCore;
 pub use pipeline::CapturePipeline;
+pub use drag_normalizer::{DragPayloadNormalizer, RawDragPayload};
 pub use privacy::{
     ClipboardPrivacyFilter, ClipboardPrivacyFilterConfig, PrivacyFilterResult, PrivacyRejection,
     PrivacyRejectionReason, SensitiveContentType,

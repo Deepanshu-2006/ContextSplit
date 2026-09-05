@@ -16,6 +16,10 @@ impl CaptureNormalizer {
 
     /// Normalizes a validated raw capture payload into a structured `CaptureEvent`.
     pub fn normalize(&self, payload: &RawCapturePayload) -> Result<CaptureEvent, CaptureError> {
+        if payload.source_method == super::models::CaptureType::DragDrop {
+            return super::drag_normalizer::DragPayloadNormalizer::new().normalize_raw_payload(payload);
+        }
+
         let now = chrono::Utc::now().to_rfc3339();
 
         // 1. Determine or infer Item / Content Type
