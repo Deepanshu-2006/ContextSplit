@@ -71,9 +71,8 @@ impl CaptureTarget for WindowsTarget {
         Ok(())
     }
 
-    fn handle_drop(&self, _request: CaptureRequest) -> Result<(), String> {
-        println!("WindowsTarget: handle_drop()");
-        Ok(())
+    fn handle_drop(&self, request: CaptureRequest) -> Result<(), String> {
+        super::engine::process_capture(self.app_handle.clone(), request)
     }
 
     fn report_success(&self, _req: &CaptureRequest) -> Result<(), String> {

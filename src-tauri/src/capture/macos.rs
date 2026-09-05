@@ -82,10 +82,8 @@ impl CaptureTarget for MacOSTarget {
         Ok(())
     }
 
-    fn handle_drop(&self, _request: CaptureRequest) -> Result<(), String> {
-        // TODO: Pass the request to the existing capture engine
-        println!("MacOSTarget: handle_drop()");
-        Ok(())
+    fn handle_drop(&self, request: CaptureRequest) -> Result<(), String> {
+        super::engine::process_capture(self.app_handle.clone(), request)
     }
 
     fn report_success(&self, _req: &CaptureRequest) -> Result<(), String> {

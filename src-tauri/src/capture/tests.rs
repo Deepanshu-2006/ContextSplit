@@ -8,6 +8,7 @@ mod tests {
     use crate::capture::core::CaptureCore;
     use crate::capture::models::*;
     use crate::capture::normalizer::CaptureNormalizer;
+    use crate::capture::TargetState;
     use crate::capture::platform::{
         MacOSCaptureAdapter, MacOSClipboardAdapter, MockCaptureAdapter, PlatformCaptureAdapter,
         WindowsCaptureAdapter, WindowsClipboardAdapter,
@@ -1268,4 +1269,260 @@ mod tests {
         let sig_count: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |row| row.get(0)).unwrap();
         assert_eq!(sig_count, 0, "Zero context signals must be recorded on privacy rejection");
     }
+
+    // =======================================================================
+    // 12. Platform Target End-to-End Pipeline & Equivalence Tests
+    // =======================================================================
+
+    #[test]
+    fn test_macos_drag_notch_target_to_context_engine_pipeline() {
+        let (conn, _temp_dir) = setup_test_db();
+        let ce = create_test_engine();
+        let core = CaptureCore::new();
+
+        // 1. Setup workspace
+        let ws = operations::create_workspace(&conn, "Tokyo Trip").unwrap();
+
+        // 2. Simulate macOS Notch Target gesture state machine
+        let notch_controller = crate::capture::notch::NotchCaptureController::new(|_| {});
+        assert_eq!(notch_controller.get_state(), TargetState::Idle);
+
+        // Drag enters notch area
+        notch_controller.on_drag_enter();
+        assert_eq!(notch_controller.get_state(), TargetState::Hover);
+
+        // Drag over active activation/release zone
+        notch_controller.on_drag_over(true);
+        assert_eq!(notch_controller.get_state(), TargetState::Active);
+
+        // User releases inside notch target -> Accepted
+        let drop_accepted = notch_controller.on_drop();
+        assert!(drop_accepted);
+        assert_eq!(notch_controller.get_state(), TargetState::Idle);
+
+        // 3. Construct raw drag request (representing dropped link)
+        let drag_req = crate::capture::target::CaptureRequest {
+            data_type: "url".to_string(),
+            content: "https://tokyotower.jp/en/guide".to_string(),
+            title: Some("Tokyo Tower Guide".to_string()),
+            source: Some("drag_drop".to_string()),
+            filename: None,
+            mime_type: Some("text/uri-list".to_string()),
+            original_url: Some("https://tokyotower.jp/en/guide".to_string()),
+            size: Some(30),
+            workspace_id: Some(ws.id.clone()),
+        };
+
+        // 4. Normalize through shared DragPayloadNormalizer for macOS
+        let event = crate::capture::drag_normalizer::DragPayloadNormalizer::new()
+            .normalize_capture_request(&drag_req, PlatformType::MacOS)
+            .unwrap();
+
+        assert_eq!(event.capture_type, CaptureType::DragDrop);
+        assert_eq!(event.platform, PlatformType::MacOS);
+        assert_eq!(event.content_type, ContentType::Url);
+
+        // 5. Ingest through CaptureCore pipeline with active ContextEngine
+        let result = core.process_event_headless(&conn, Some(&ce), event).unwrap();
+
+        // 6. Verify Item persistence in DB
+        assert_eq!(result.item.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(result.item.content, "https://tokyotower.jp/en/guide");
+        assert_eq!(result.item.item_type, "url");
+        assert_eq!(result.item.title.as_deref(), Some("Tokyo Tower Guide"));
+
+        // 7. Verify ContextSignals recorded in DB
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), Some(&result.item.id)).unwrap();
+        assert!(!signals.is_empty(), "ContextSignals must be generated for macOS drop");
+        let signal_types: Vec<&str> = signals.iter().map(|s| s.signal_type.as_str()).collect();
+        assert!(signal_types.contains(&"capture_event"));
+        assert!(signal_types.contains(&"url_metadata"));
+
+        // 8. Trigger success notification on notch controller
+        notch_controller.on_capture_success();
+        assert_eq!(notch_controller.get_state(), TargetState::Idle);
+    }
+
+    #[test]
+    fn test_windows_drag_capture_target_to_context_engine_pipeline() {
+        let (conn, _temp_dir) = setup_test_db();
+        let ce = create_test_engine();
+        let core = CaptureCore::new();
+
+        // 1. Setup workspace
+        let ws = operations::create_workspace(&conn, "Kyoto Tour").unwrap();
+
+        // 2. Simulate Windows Floating Target gesture state machine
+        let windows_controller = crate::capture::windows_target::WindowsCaptureTargetController::new(|_| {});
+        assert_eq!(windows_controller.get_state(), TargetState::Idle);
+
+        // Global drag detected across screen
+        windows_controller.on_drag_detected();
+        assert_eq!(windows_controller.get_state(), TargetState::DragDetected);
+
+        // Drag enters floating target area
+        windows_controller.on_drag_enter();
+        assert_eq!(windows_controller.get_state(), TargetState::Hover);
+
+        // Drag over active activation/release zone
+        windows_controller.on_drag_over(true);
+        assert_eq!(windows_controller.get_state(), TargetState::Active);
+
+        // User releases inside Windows target -> Accepted
+        let drop_accepted = windows_controller.on_drop();
+        assert!(drop_accepted);
+        assert_eq!(windows_controller.get_state(), TargetState::Idle);
+
+        // 3. Construct raw drag request (representing dropped link)
+        let drag_req = crate::capture::target::CaptureRequest {
+            data_type: "url".to_string(),
+            content: "https://kyoto-travel.org/en/spots/fushimi-inari".to_string(),
+            title: Some("Fushimi Inari Guide".to_string()),
+            source: Some("drag_drop".to_string()),
+            filename: None,
+            mime_type: Some("text/uri-list".to_string()),
+            original_url: Some("https://kyoto-travel.org/en/spots/fushimi-inari".to_string()),
+            size: Some(48),
+            workspace_id: Some(ws.id.clone()),
+        };
+
+        // 4. Normalize through shared DragPayloadNormalizer for Windows
+        let event = crate::capture::drag_normalizer::DragPayloadNormalizer::new()
+            .normalize_capture_request(&drag_req, PlatformType::Windows)
+            .unwrap();
+
+        assert_eq!(event.capture_type, CaptureType::DragDrop);
+        assert_eq!(event.platform, PlatformType::Windows);
+        assert_eq!(event.content_type, ContentType::Url);
+
+        // 5. Ingest through CaptureCore pipeline with active ContextEngine
+        let result = core.process_event_headless(&conn, Some(&ce), event).unwrap();
+
+        // 6. Verify Item persistence in DB
+        assert_eq!(result.item.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(result.item.content, "https://kyoto-travel.org/en/spots/fushimi-inari");
+        assert_eq!(result.item.item_type, "url");
+        assert_eq!(result.item.title.as_deref(), Some("Fushimi Inari Guide"));
+
+        // 7. Verify ContextSignals recorded in DB
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), Some(&result.item.id)).unwrap();
+        assert!(!signals.is_empty(), "ContextSignals must be generated for Windows drop");
+        let signal_types: Vec<&str> = signals.iter().map(|s| s.signal_type.as_str()).collect();
+        assert!(signal_types.contains(&"capture_event"));
+        assert!(signal_types.contains(&"url_metadata"));
+
+        // 8. Trigger success notification on Windows controller
+        windows_controller.on_capture_success();
+        assert_eq!(windows_controller.get_state(), TargetState::Idle);
+    }
+
+    #[test]
+    fn test_cross_platform_target_item_equivalence() {
+        let (conn_mac, _dir_mac) = setup_test_db();
+        let ce_mac = create_test_engine();
+        let core = CaptureCore::new();
+
+        let (conn_win, _dir_win) = setup_test_db();
+        let ce_win = create_test_engine();
+
+        // Test identical payload dropped on macOS vs Windows
+        let test_cases = vec![
+            (
+                "url",
+                "https://contextsplit.dev/docs/architecture",
+                Some("Architecture Docs"),
+                None,
+            ),
+            (
+                "text",
+                "Research notes on context engines and vector similarity.",
+                Some("Research Notes"),
+                None,
+            ),
+            (
+                "file",
+                "/Users/shared/documents/spec.pdf",
+                Some("spec.pdf"),
+                Some("spec.pdf"),
+            ),
+        ];
+
+        for (dtype, content, title, fname) in test_cases {
+            let req_mac = crate::capture::target::CaptureRequest {
+                data_type: dtype.to_string(),
+                content: content.to_string(),
+                title: title.map(|t| t.to_string()),
+                source: Some("drag_drop".to_string()),
+                filename: fname.map(|f| f.to_string()),
+                mime_type: None,
+                original_url: None,
+                size: Some(content.len()),
+                workspace_id: None,
+            };
+
+            let req_win = req_mac.clone();
+
+            // Process macOS flow
+            let event_mac = crate::capture::drag_normalizer::DragPayloadNormalizer::new()
+                .normalize_capture_request(&req_mac, PlatformType::MacOS)
+                .unwrap();
+            let result_mac = core.process_event_headless(&conn_mac, Some(&ce_mac), event_mac).unwrap();
+
+            // Process Windows flow
+            let event_win = crate::capture::drag_normalizer::DragPayloadNormalizer::new()
+                .normalize_capture_request(&req_win, PlatformType::Windows)
+                .unwrap();
+            let result_win = core.process_event_headless(&conn_win, Some(&ce_win), event_win).unwrap();
+
+            // Verify equivalent Item records
+            assert_eq!(result_mac.item.content, result_win.item.content, "Item content must be equivalent");
+            assert_eq!(result_mac.item.item_type, result_win.item.item_type, "Item type must be equivalent");
+            assert_eq!(result_mac.item.title, result_win.item.title, "Item title must be equivalent");
+            assert_eq!(result_mac.item.workspace_id, result_win.item.workspace_id, "Item workspace must be equivalent");
+        }
+    }
+
+    #[test]
+    fn test_platform_ui_isolation_no_classification_logic_in_targets() {
+        // Verify that target controllers strictly manage TargetState presentation and emit gestures
+        let controller = crate::capture::target::CaptureTargetController::new(|state| {
+            // Controller callback receives strictly TargetState
+            match state {
+                TargetState::Idle
+                | TargetState::DragDetected
+                | TargetState::Hover
+                | TargetState::Active
+                | TargetState::Captured
+                | TargetState::Cancelled => {}
+            }
+        });
+
+        // Ensure controllers do not contain any workspace classification logic
+        controller.on_drag_detected();
+        controller.on_drag_enter();
+        controller.on_drag_over(true);
+        assert_eq!(controller.get_state(), TargetState::Active);
+
+        // Dropping accepts drag purely at the UI level
+        let accepted = controller.on_drop();
+        assert!(accepted);
+        assert_eq!(controller.get_state(), TargetState::Idle);
+
+        // Core processing and classification remains 100% inside ContextEngine / CaptureCore
+        let (conn, _dir) = setup_test_db();
+        let ce = create_test_engine();
+        let _ws = operations::create_workspace(&conn, "Project Alpha").unwrap();
+
+        let event = CaptureEvent::new(
+            CaptureType::DragDrop,
+            ContentType::PlainText,
+            "Deploying Project Alpha backend services",
+            PlatformType::MacOS,
+        );
+
+        let result = CaptureCore::new().process_event_headless(&conn, Some(&ce), event).unwrap();
+        assert_eq!(result.item.item_type, "text");
+        assert!(result.signals_emitted > 0);
+    }
 }
+
