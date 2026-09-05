@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    Emitter, Manager,
 };
 
 pub struct TrayMenuItems {

@@ -64,6 +64,7 @@ impl MacOSClipboardAdapter {
     }
 
     pub fn with_privacy_settings(mut self, settings: PrivacySettings) -> Self {
+        self.privacy_filter = self.privacy_filter.with_privacy_settings(&settings);
         self.privacy_settings = settings;
         self
     }
@@ -89,7 +90,7 @@ impl MacOSClipboardAdapter {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.enabled && self.privacy_filter.is_enabled()
+        self.enabled && self.privacy_filter.is_enabled() && !self.privacy_settings.capture_paused
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -98,7 +99,7 @@ impl MacOSClipboardAdapter {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.privacy_filter.is_paused()
+        self.privacy_filter.is_paused() || self.privacy_settings.capture_paused
     }
 
     pub fn pause_for(&mut self, duration: std::time::Duration) {
@@ -114,6 +115,7 @@ impl MacOSClipboardAdapter {
     }
 
     pub fn set_privacy_settings(&mut self, settings: PrivacySettings) {
+        self.privacy_filter = self.privacy_filter.clone().with_privacy_settings(&settings);
         self.privacy_settings = settings;
     }
 
@@ -137,7 +139,7 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
     }
 
     fn is_enabled(&self) -> bool {
-        self.enabled && self.privacy_filter.is_enabled()
+        self.enabled && self.privacy_filter.is_enabled() && !self.privacy_settings.capture_paused
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -146,6 +148,7 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
     }
 
     fn set_privacy_settings(&mut self, settings: PrivacySettings) {
+        self.privacy_filter = self.privacy_filter.clone().with_privacy_settings(&settings);
         self.privacy_settings = settings;
     }
 
@@ -159,7 +162,7 @@ impl ClipboardCaptureAdapter for MacOSClipboardAdapter {
         active_app: Option<String>,
         window_title: Option<String>,
     ) -> Result<Option<CaptureEvent>, CaptureError> {
-        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() {
+        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() || self.privacy_settings.capture_paused {
             return Ok(None);
         }
 
@@ -295,6 +298,7 @@ impl WindowsClipboardAdapter {
     }
 
     pub fn with_privacy_settings(mut self, settings: PrivacySettings) -> Self {
+        self.privacy_filter = self.privacy_filter.with_privacy_settings(&settings);
         self.privacy_settings = settings;
         self
     }
@@ -320,7 +324,7 @@ impl WindowsClipboardAdapter {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.enabled && self.privacy_filter.is_enabled()
+        self.enabled && self.privacy_filter.is_enabled() && !self.privacy_settings.capture_paused
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -329,7 +333,7 @@ impl WindowsClipboardAdapter {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.privacy_filter.is_paused()
+        self.privacy_filter.is_paused() || self.privacy_settings.capture_paused
     }
 
     pub fn pause_for(&mut self, duration: std::time::Duration) {
@@ -345,6 +349,7 @@ impl WindowsClipboardAdapter {
     }
 
     pub fn set_privacy_settings(&mut self, settings: PrivacySettings) {
+        self.privacy_filter = self.privacy_filter.clone().with_privacy_settings(&settings);
         self.privacy_settings = settings;
     }
 
@@ -368,7 +373,7 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
     }
 
     fn is_enabled(&self) -> bool {
-        self.enabled && self.privacy_filter.is_enabled()
+        self.enabled && self.privacy_filter.is_enabled() && !self.privacy_settings.capture_paused
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -377,6 +382,7 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
     }
 
     fn set_privacy_settings(&mut self, settings: PrivacySettings) {
+        self.privacy_filter = self.privacy_filter.clone().with_privacy_settings(&settings);
         self.privacy_settings = settings;
     }
 
@@ -390,7 +396,7 @@ impl ClipboardCaptureAdapter for WindowsClipboardAdapter {
         active_app: Option<String>,
         window_title: Option<String>,
     ) -> Result<Option<CaptureEvent>, CaptureError> {
-        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() {
+        if !self.enabled || !self.privacy_filter.is_enabled() || self.privacy_filter.is_paused() || self.privacy_settings.capture_paused {
             return Ok(None);
         }
 

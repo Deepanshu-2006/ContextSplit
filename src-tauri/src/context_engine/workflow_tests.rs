@@ -4,12 +4,34 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
-    use crate::db::{self, operations, settings::PrivacySettings};
+    use crate::capture::models::{
+        CaptureEvent, CaptureType, ContentType, PlatformType,
+    };
+    use crate::capture::drag_normalizer::{DragPayloadNormalizer, RawDragPayload};
+    use crate::capture::platform::clipboard::{
+        MacOSClipboardAdapter, WindowsClipboardAdapter,
+    };
+    use crate::capture::notch::NotchCaptureController;
+    use crate::capture::windows_target::WindowsCaptureTargetController;
+    use crate::capture::target::TargetState;
+    use crate::capture::pipeline::CapturePipeline;
+    use crate::capture::privacy::ClipboardPrivacyFilter;
+    use crate::context_engine::discovery;
     use crate::context_engine::engine::{ContextEngine, ContextEvent};
-    use crate::context_engine::providers::{CaptureContextProvider, UserActionContextProvider, WorkspaceContextProvider, UrlContextProvider};
+    use crate::context_engine::providers::{
+        CaptureContextProvider, UrlContextProvider, UserActionContextProvider,
+        WorkspaceContextProvider,
+    };
+    use crate::context_engine::reasoning::{
+        analyze_item_context_ai_graceful,
+        mock::MockAIReasoner,
+        models::AIFailureReason,
+    };
     use crate::context_engine::relationships;
     use crate::context_engine::scoring;
+    use crate::db::{self, operations, settings::PrivacySettings};
 
     // Helper to setup a test DB with temp file
     fn setup_test_db() -> (Connection, PathBuf) {
@@ -1266,6 +1288,393 @@ mod tests {
         let weak_package = build_evidence_package(&conn, &item_insufficient.id).unwrap();
         assert!(weak_package.deterministic_assessment.is_weak_evidence, "I. Evidence assessment must mark weak evidence");
         assert_eq!(operations::get_item(&conn, &item_insufficient.id).unwrap().workspace_id, None);
+
+        // Clean up temp database
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    // =======================================================================
+    // Day 11: Cross-Platform Capture Integration Test (17 Core Verifications)
+    // =======================================================================
+    #[test]
+    fn test_day11_cross_platform_capture_integration() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_engine();
+
+        // Base Workspaces
+        let ws_rust = operations::create_workspace(&conn, "Rust Systems").unwrap();
+        let _ws_design = operations::create_workspace(&conn, "Design Systems").unwrap();
+
+        let settings = crate::db::settings::get_settings(&conn).unwrap();
+
+        // Seed context items in Rust Systems
+        let item_seed1 = operations::create_item(
+            &conn,
+            Some(&ws_rust.id),
+            None,
+            "url",
+            "https://doc.rust-lang.org/book/ch01-00-getting-started.html",
+            Some("Rust Book Getting Started"),
+            r#"{"domain":"doc.rust-lang.org","app_name":"Safari"}"#,
+        )
+        .unwrap();
+        let _ = operations::create_or_update_membership(&conn, &item_seed1.id, &ws_rust.id, "confirmed", 1.0, "user").unwrap();
+
+        // ===================================================================
+        // 1. Verification Requirements 1 & 2: Platform Clipboard Capture & Normalization
+        // MACOS: Clipboard -> MacOSClipboardAdapter -> CaptureEvent -> CapturePipeline -> Item -> Context Engine
+        // WINDOWS: Clipboard -> WindowsClipboardAdapter -> CaptureEvent -> CapturePipeline -> Item -> Context Engine
+        // ===================================================================
+        let mut mac_clipboard = MacOSClipboardAdapter::new().with_privacy_settings(settings.clone());
+        let mut win_clipboard = WindowsClipboardAdapter::new().with_privacy_settings(settings.clone());
+
+        let raw_url = "https://github.com/rust-lang/rust\r\n";
+        let mac_app = Some("Safari".to_string());
+        let mac_win_title = Some("GitHub - rust-lang/rust: Empowering everyone".to_string());
+        let win_app = Some("msedge.exe".to_string());
+        let win_win_title = Some("GitHub - rust-lang/rust: Empowering everyone".to_string());
+
+        let mac_event = mac_clipboard
+            .on_clipboard_change(Some(raw_url.to_string()), mac_app.clone(), mac_win_title.clone())
+            .unwrap()
+            .expect("macOS clipboard adapter must produce CaptureEvent");
+
+        let win_event = win_clipboard
+            .on_clipboard_change(Some(raw_url.to_string()), win_app.clone(), win_win_title.clone())
+            .unwrap()
+            .expect("Windows clipboard adapter must produce CaptureEvent");
+
+        // Verify 1: Both platforms produce equivalent normalized CaptureEvents
+        assert_eq!(mac_event.content, "https://github.com/rust-lang/rust", "1. macOS content normalized");
+        assert_eq!(win_event.content, "https://github.com/rust-lang/rust", "1. Windows content normalized");
+        assert_eq!(mac_event.content_type, ContentType::Url, "1. macOS content_type detected as Url");
+        assert_eq!(win_event.content_type, ContentType::Url, "1. Windows content_type detected as Url");
+        assert_eq!(mac_event.capture_type, CaptureType::Clipboard);
+        assert_eq!(win_event.capture_type, CaptureType::Clipboard);
+        assert_eq!(mac_event.domain().as_deref(), Some("github.com"), "1. macOS domain extracted");
+        assert_eq!(win_event.domain().as_deref(), Some("github.com"), "1. Windows domain extracted");
+        assert_eq!(mac_event.platform, PlatformType::MacOS, "1. macOS platform tagged");
+        assert_eq!(win_event.platform, PlatformType::Windows, "1. Windows platform tagged");
+
+        // Process through CapturePipeline (without deduplication so both distinct platform items persist)
+        let pipeline = CapturePipeline::new().without_deduplication();
+
+        let mac_result = pipeline.process_event_headless(&conn, Some(&engine), mac_event).unwrap();
+        let win_result = pipeline.process_event_headless(&conn, Some(&engine), win_event).unwrap();
+
+        // Verify 2: Both platforms create equivalent Item structures
+        assert_eq!(mac_result.item.item_type, "url", "2. macOS item type is url");
+        assert_eq!(win_result.item.item_type, "url", "2. Windows item type is url");
+        assert_eq!(mac_result.item.content, "https://github.com/rust-lang/rust", "2. macOS item content matches");
+        assert_eq!(win_result.item.content, "https://github.com/rust-lang/rust", "2. Windows item content matches");
+        assert_eq!(mac_result.item.workspace_id, None, "2. Captured macOS item starts in Inbox");
+        assert_eq!(win_result.item.workspace_id, None, "2. Captured Windows item starts in Inbox");
+
+        // Verify 3: ContextSignals are generated consistently
+        let mac_signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&mac_result.item.id)).unwrap();
+        let win_signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&win_result.item.id)).unwrap();
+
+        assert_eq!(mac_signals.len(), win_signals.len(), "3. ContextSignal counts must match across platforms");
+        assert!(mac_signals.iter().any(|s| s.signal_type == "capture_event"), "3. macOS capture_event signal present");
+        assert!(win_signals.iter().any(|s| s.signal_type == "capture_event"), "3. Windows capture_event signal present");
+        assert!(mac_signals.iter().any(|s| s.signal_type == "active_app"), "3. macOS active_app signal present");
+        assert!(win_signals.iter().any(|s| s.signal_type == "active_app"), "3. Windows active_app signal present");
+        assert!(mac_signals.iter().any(|s| s.signal_type == "window_title"), "3. macOS window_title signal present");
+        assert!(win_signals.iter().any(|s| s.signal_type == "window_title"), "3. Windows window_title signal present");
+        assert!(mac_signals.iter().any(|s| s.signal_type == "url_metadata"), "3. macOS url_metadata signal present");
+        assert!(win_signals.iter().any(|s| s.signal_type == "url_metadata"), "3. Windows url_metadata signal present");
+
+        // Verify 4: ContextSessions are generated consistently
+        assert!(mac_result.session_id.is_some(), "4. macOS item associated with session");
+        assert!(win_result.session_id.is_some(), "4. Windows item associated with session");
+        assert_eq!(mac_result.session_id, win_result.session_id, "4. Consecutive captures share active ContextSession");
+
+        // Verify 5: Context Engine receives Items and updates context state
+        let relationships = crate::context_engine::graph::get_strongest_relationships(&conn, &mac_result.item.id, 10).unwrap();
+        assert!(!relationships.is_empty(), "5. Context Engine generates relationships for captured items");
+        let emb_mac = operations::get_item_embedding(&conn, &mac_result.item.id).unwrap();
+        assert!(emb_mac.is_some(), "5. Semantic embedding indexed for macOS item");
+        let emb_win = operations::get_item_embedding(&conn, &win_result.item.id).unwrap();
+        assert!(emb_win.is_some(), "5. Semantic embedding indexed for Windows item");
+
+        // ===================================================================
+        // 2. Verification Requirements 13, 14, 15: Drag Capture & Target Controller Lifecycle
+        // MACOS: Drag -> NotchCaptureController -> CaptureEvent -> CapturePipeline
+        // WINDOWS: Drag -> WindowsCaptureTargetController -> CaptureEvent -> CapturePipeline
+        // ===================================================================
+        let mac_notch_events = Arc::new(Mutex::new(Vec::new()));
+        let mac_events_cb = mac_notch_events.clone();
+        let mac_notch = NotchCaptureController::new(move |st| mac_events_cb.lock().unwrap().push(st));
+
+        let win_target_events = Arc::new(Mutex::new(Vec::new()));
+        let win_events_cb = win_target_events.clone();
+        let win_target = WindowsCaptureTargetController::new(move |st| win_events_cb.lock().unwrap().push(st));
+
+        // Verify 14: Drag activation feedback works
+        assert_eq!(mac_notch.get_state(), TargetState::Idle);
+        assert_eq!(win_target.get_state(), TargetState::Idle);
+
+        mac_notch.on_drag_detected();
+        assert_eq!(mac_notch.get_state(), TargetState::DragDetected);
+        mac_notch.on_drag_enter();
+        assert_eq!(mac_notch.get_state(), TargetState::Hover);
+        mac_notch.on_drag_over(true);
+        assert_eq!(mac_notch.get_state(), TargetState::Active, "14. macOS Active feedback state reached");
+
+        win_target.on_drag_detected();
+        assert_eq!(win_target.get_state(), TargetState::DragDetected);
+        win_target.on_drag_enter();
+        assert_eq!(win_target.get_state(), TargetState::Hover);
+        win_target.on_drag_over(true);
+        assert_eq!(win_target.get_state(), TargetState::Active, "14. Windows Active feedback state reached");
+
+        // Verify 13: Drag cancellation works
+        let cancel_controller = WindowsCaptureTargetController::new(|_| {});
+        cancel_controller.on_drag_enter();
+        assert_eq!(cancel_controller.get_state(), TargetState::Hover);
+        cancel_controller.on_drag_leave();
+        assert_eq!(cancel_controller.get_state(), TargetState::Idle, "13. Leaving drag area returns to Idle");
+
+        cancel_controller.on_drag_detected();
+        cancel_controller.on_drag_enter();
+        cancel_controller.on_drag_over(true);
+        assert_eq!(cancel_controller.get_state(), TargetState::Active);
+        cancel_controller.on_drag_leave();
+        assert_eq!(cancel_controller.get_state(), TargetState::Idle, "13. Drag leave from active returns to Idle");
+
+        // Verify 15: Capture confirmation works
+        let mac_drop_accepted = mac_notch.on_drop();
+        assert!(mac_drop_accepted, "15. macOS drop accepted");
+        let win_drop_accepted = win_target.on_drop();
+        assert!(win_drop_accepted, "15. Windows drop accepted");
+
+        // Drag payload normalization across platforms
+        let drag_normalizer = DragPayloadNormalizer::new();
+        let mac_drag_raw = RawDragPayload {
+            url: Some("https://doc.rust-lang.org/cargo/index.html".to_string()),
+            app_name: Some("Safari".to_string()),
+            platform: Some(PlatformType::MacOS),
+            ..Default::default()
+        };
+        let win_drag_raw = RawDragPayload {
+            url: Some("https://doc.rust-lang.org/cargo/index.html\r\n".to_string()),
+            app_name: Some("explorer.exe".to_string()),
+            platform: Some(PlatformType::Windows),
+            ..Default::default()
+        };
+
+        let mac_drag_event = drag_normalizer.normalize_drag_payload(&mac_drag_raw).unwrap();
+        let win_drag_event = drag_normalizer.normalize_drag_payload(&win_drag_raw).unwrap();
+
+        assert_eq!(mac_drag_event.content, "https://doc.rust-lang.org/cargo/index.html");
+        assert_eq!(win_drag_event.content, "https://doc.rust-lang.org/cargo/index.html");
+        assert_eq!(mac_drag_event.content_type, ContentType::Url);
+        assert_eq!(win_drag_event.content_type, ContentType::Url);
+
+        let mac_drag_item = pipeline.process_event_headless(&conn, Some(&engine), mac_drag_event).unwrap();
+        let win_drag_item = pipeline.process_event_headless(&conn, Some(&engine), win_drag_event).unwrap();
+        assert_eq!(mac_drag_item.item.content, "https://doc.rust-lang.org/cargo/index.html");
+        assert_eq!(win_drag_item.item.content, "https://doc.rust-lang.org/cargo/index.html");
+
+        // ===================================================================
+        // 3. Verification Requirement 6: Existing ContextMembership Logic
+        // ===================================================================
+        let membership = operations::create_or_update_membership(
+            &conn,
+            &mac_result.item.id,
+            &ws_rust.id,
+            "suggested",
+            0.88,
+            "context_engine",
+        )
+        .unwrap();
+        assert_eq!(membership.membership_type, "suggested");
+        assert_eq!(membership.confidence, 0.88);
+
+        let confirmed = operations::confirm_membership(&conn, &mac_result.item.id, &ws_rust.id).unwrap();
+        assert_eq!(confirmed.membership_type, "confirmed");
+        assert_eq!(confirmed.confidence, 1.0);
+
+        let retrieved = operations::get_item_workspace_membership(&conn, &mac_result.item.id, &ws_rust.id).unwrap();
+        assert!(retrieved.is_some(), "6. Confirmed membership must be retrievable");
+        assert_eq!(retrieved.unwrap().membership_type, "confirmed");
+
+        // ===================================================================
+        // 4. Verification Requirement 7: New ContextCandidates Discovery
+        // ===================================================================
+        let item_cand1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Quantum entanglement algorithms in quantum computing research",
+            Some("Quantum Entanglement"),
+            r#"{"app_name":"Notes"}"#,
+        )
+        .unwrap();
+        let item_cand2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Quantum error correction codes in fault-tolerant qubits",
+            Some("Quantum Error Correction"),
+            r#"{"app_name":"Notes"}"#,
+        )
+        .unwrap();
+        let item_cand3 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Quantum supremacy benchmark results on superconducting quantum processors",
+            Some("Quantum Supremacy"),
+            r#"{"app_name":"Notes"}"#,
+        )
+        .unwrap();
+
+        // Create explicit strong topic relationships between candidates (cluster of 3)
+        let _ = operations::create_item_relationship(&conn, &item_cand1.id, &item_cand2.id, "same_topic", 0.95, None).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_cand2.id, &item_cand3.id, "same_topic", 0.95, None).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item_cand1.id, &item_cand3.id, "same_topic", 0.95, None).unwrap();
+
+        let candidates = discovery::run_discovery(&conn).unwrap();
+        assert!(!candidates.is_empty(), "7. Context candidate cluster must be discovered");
+        assert!(candidates.iter().any(|c| c.label.as_deref().unwrap_or("").to_lowercase().contains("quantum") || c.metadata.contains("quantum") || c.metadata.contains("item_count")));
+
+        // ===================================================================
+        // 5. Verification Requirements 8 & 9: AI Reasoning Asynchronous & Non-Blocking Resilience
+        // ===================================================================
+        let reasoner = MockAIReasoner::new();
+        let ai_res = analyze_item_context_ai_graceful(&conn, &mac_result.item.id, &reasoner, true);
+        assert!(!ai_res.ai_unavailable, "8. AI reasoning completes gracefully");
+        assert!(ai_res.ai_result.is_some(), "8. AI result is generated");
+
+        // Test AI failure resilience: Timeout (tested on uncached Windows item)
+        let timeout_reasoner = TimeoutMockReasoner;
+        let timeout_res = analyze_item_context_ai_graceful(&conn, &win_result.item.id, &timeout_reasoner, true);
+        assert!(timeout_res.ai_unavailable, "9. AI Timeout handled gracefully");
+        assert_eq!(timeout_res.failure_reason, Some(AIFailureReason::Timeout));
+        // Verify item and DB persistence untouched
+        assert_eq!(operations::get_item(&conn, &win_result.item.id).unwrap().id, win_result.item.id);
+
+        // Test AI failure resilience: Malformed Response (tested on uncached drag item)
+        let malformed_reasoner = MalformedMockReasoner;
+        let malformed_res = analyze_item_context_ai_graceful(&conn, &mac_drag_item.item.id, &malformed_reasoner, true);
+        assert!(malformed_res.ai_unavailable, "9. AI Malformed response handled gracefully");
+        assert_eq!(malformed_res.failure_reason, Some(AIFailureReason::MalformedResponse));
+        assert_eq!(operations::get_item(&conn, &mac_drag_item.item.id).unwrap().id, mac_drag_item.item.id);
+
+        // ===================================================================
+        // 6. Verification Requirement 10: Privacy Filtering Before Persistence
+        // ===================================================================
+        let sensitive_text = "Personal credential api_key=sk-1234567890abcdef1234567890abcdef and password=SuperSecretPassword123!";
+        let privacy_filtered_mac = mac_clipboard.on_clipboard_change(Some(sensitive_text.to_string()), Some("1Password".to_string()), None).unwrap();
+        assert!(privacy_filtered_mac.is_none(), "10. macOS adapter filters sensitive credentials");
+
+        let privacy_filtered_win = win_clipboard.on_clipboard_change(Some(sensitive_text.to_string()), Some("Bitwarden".to_string()), None).unwrap();
+        assert!(privacy_filtered_win.is_none(), "10. Windows adapter filters sensitive credentials");
+
+        let direct_sensitive_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            sensitive_text,
+            PlatformType::MacOS,
+        );
+        let audit_res = pipeline.process_event_headless(&conn, Some(&engine), direct_sensitive_event);
+        assert!(audit_res.is_err(), "10. Pipeline audit rejects sensitive credentials before persistence");
+
+        // ===================================================================
+        // 7. Verification Requirement 11: Global Pause Mode
+        // ===================================================================
+        let mut pause_settings = crate::db::settings::get_settings(&conn).unwrap();
+        pause_settings.capture_paused = true;
+        crate::db::settings::update_settings(&conn, pause_settings.clone()).unwrap();
+
+        let mut paused_mac_clipboard = MacOSClipboardAdapter::new().with_privacy_settings(pause_settings.clone());
+        let mut paused_win_clipboard = WindowsClipboardAdapter::new().with_privacy_settings(pause_settings.clone());
+        let paused_pipeline = CapturePipeline::new().with_privacy_filter(ClipboardPrivacyFilter::new().with_privacy_settings(&pause_settings));
+
+        let mac_paused_out = paused_mac_clipboard.on_clipboard_change(Some("Copied while paused".to_string()), None, None).unwrap();
+        assert!(mac_paused_out.is_none(), "11. macOS clipboard returns None when paused");
+
+        let win_paused_out = paused_win_clipboard.on_clipboard_change(Some("Copied while paused".to_string()), None, None).unwrap();
+        assert!(win_paused_out.is_none(), "11. Windows clipboard returns None when paused");
+
+        let auto_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Automatic item while paused",
+            PlatformType::MacOS,
+        );
+        let paused_pipeline_res = paused_pipeline.process_event_headless(&conn, Some(&engine), auto_event);
+        assert!(paused_pipeline_res.is_err(), "11. Automatic capture rejected when paused");
+
+        // Target controller gesture behavior in pause mode
+        let paused_target = WindowsCaptureTargetController::new(|_| {});
+        paused_target.set_paused(true);
+        paused_target.on_drag_enter();
+        assert_eq!(paused_target.get_state(), TargetState::Paused);
+        assert!(!paused_target.on_drop(), "11. Drop rejected when paused");
+
+        // Manual capture remains permitted
+        let manual_event = CaptureEvent::new(
+            CaptureType::Manual,
+            ContentType::PlainText,
+            "Manual user note while paused",
+            PlatformType::MacOS,
+        );
+        let manual_res = paused_pipeline.process_event_headless(&conn, Some(&engine), manual_event).unwrap();
+        assert_eq!(manual_res.item.content, "Manual user note while paused", "11. Manual capture succeeds while paused");
+
+        // Resume capture
+        pause_settings.capture_paused = false;
+        crate::db::settings::update_settings(&conn, pause_settings).unwrap();
+
+        // ===================================================================
+        // 8. Verification Requirement 12: Duplicate Clipboard Deduplication
+        // ===================================================================
+        let mut dedup_mac_clipboard = MacOSClipboardAdapter::new();
+        let text_to_repeat = "Unique Clipboard String 12345";
+
+        let first_clip = dedup_mac_clipboard.on_clipboard_change(Some(text_to_repeat.to_string()), None, None).unwrap();
+        assert!(first_clip.is_some(), "First clipboard copy produces event");
+
+        let second_clip = dedup_mac_clipboard.on_clipboard_change(Some(text_to_repeat.to_string()), None, None).unwrap();
+        assert!(second_clip.is_none(), "12. Repeated identical clipboard content produces None");
+
+        // Pipeline deduplication
+        let dedup_pipeline = CapturePipeline::new().with_dedup_window_secs(10);
+        let evt1 = CaptureEvent::new(CaptureType::Clipboard, ContentType::PlainText, "Dedup Test Content", PlatformType::MacOS);
+        let res1 = dedup_pipeline.process_event_headless(&conn, Some(&engine), evt1).unwrap();
+        assert!(!res1.is_duplicate);
+
+        let evt2 = CaptureEvent::new(CaptureType::Clipboard, ContentType::PlainText, "Dedup Test Content", PlatformType::Windows);
+        let res2 = dedup_pipeline.process_event_headless(&conn, Some(&engine), evt2).unwrap();
+        assert!(res2.is_duplicate, "12. Pipeline flags duplicate item within window");
+
+        // ===================================================================
+        // 9. Verification Requirement 16: Application Restart Persistence
+        // ===================================================================
+        let count_items_before: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let count_workspaces_before: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let count_memberships_before: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+
+        drop(conn);
+
+        // Reopen new connection (simulating cold app restart)
+        let conn2 = Connection::open(&db_path).unwrap();
+
+        let count_items_after: i64 = conn2.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let count_workspaces_after: i64 = conn2.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let count_memberships_after: i64 = conn2.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+
+        assert_eq!(count_items_before, count_items_after, "16. Items count preserved across restart");
+        assert_eq!(count_workspaces_before, count_workspaces_after, "16. Workspaces preserved across restart");
+        assert_eq!(count_memberships_before, count_memberships_after, "16. Memberships preserved across restart");
+
+        let reloaded_item = operations::get_item(&conn2, &mac_result.item.id).unwrap();
+        assert_eq!(reloaded_item.content, "https://github.com/rust-lang/rust");
 
         // Clean up temp database
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
