@@ -12,11 +12,15 @@ export const CaptureOrb: React.FC = () => {
 
   useEffect(() => {
     if (isWindowsOrb) {
-      const unlisten = listen('windows-target-state-changed', (event) => {
+      const unlisten = listen('target-state-changed', (event) => {
+        setTargetState(event.payload as string);
+      });
+      const unlistenLegacy = listen('windows-target-state-changed', (event) => {
         setTargetState(event.payload as string);
       });
       return () => {
         unlisten.then(f => f());
+        unlistenLegacy.then(f => f());
       };
     }
   }, [isWindowsOrb]);
@@ -40,24 +44,32 @@ export const CaptureOrb: React.FC = () => {
       content = <div className="w-6 h-1 rounded-full bg-white/70"></div>;
       break;
 
-    case 'prominent':
+    case 'drag_detected':
+      // Global drag detected -> floating target begins subtle gentle pulse
+      innerClasses += "w-24 h-4 rounded-full bg-blue-500/30 border border-blue-400/40 shadow-md scale-95 opacity-80 animate-pulse";
+      content = <div className="w-8 h-1 rounded-full bg-blue-400"></div>;
+      break;
+
+    case 'hover':
     case 'hovering':
+    case 'prominent':
     case 'visible':
-      // 2 & 3. User begins dragging supported content -> Target becomes visually prominent
+      // Drag enters target area -> expands into prominent floating capsule
       innerClasses += "w-44 h-12 rounded-2xl bg-white/95 dark:bg-zinc-900/95 border border-black/10 dark:border-white/15 shadow-xl scale-100 opacity-100 ring-2 ring-black/5";
       content = (
         <div className="flex items-center gap-2 text-gray-700 dark:text-zinc-200">
           <ArrowDownToLine size={16} className="text-blue-500 animate-bounce" />
-          <span className="font-medium text-xs tracking-wide">ContextSplit Capture</span>
+          <span className="font-semibold text-xs tracking-wide">ContextSplit Capture</span>
         </div>
       );
       break;
 
+    case 'active':
     case 'activated':
-      // 4. When dragged content enters the target -> show an activated/highlight state
-      innerClasses += "w-52 h-14 rounded-2xl bg-blue-600/95 text-white border border-blue-400 shadow-2xl scale-105 opacity-100 ring-4 ring-blue-400/40";
+      // Direct release sweet spot -> highlighted state
+      innerClasses += "w-52 h-14 rounded-2xl bg-blue-600/95 text-white border border-blue-400 shadow-2xl scale-105 opacity-100 ring-4 ring-blue-400/40 animate-pulse";
       content = (
-        <div className="flex items-center gap-2 text-white animate-pulse">
+        <div className="flex items-center gap-2 text-white">
           <ArrowDownToLine size={18} strokeWidth={2.5} />
           <span className="font-semibold text-sm tracking-wide">Release to capture</span>
         </div>

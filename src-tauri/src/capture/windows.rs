@@ -42,6 +42,7 @@ impl WindowsTarget {
         let app_handle_clone = app_handle.clone();
         let windows_controller = Arc::new(WindowsCaptureTargetController::new(Box::new(move |state| {
             if let Some(window) = app_handle_clone.get_webview_window("windows-orb-target") {
+                let _ = window.emit("target-state-changed", state);
                 let _ = window.emit("windows-target-state-changed", state);
             }
         }) as Box<dyn Fn(WindowsTargetState) + Send + Sync>));

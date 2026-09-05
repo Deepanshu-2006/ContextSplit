@@ -40,7 +40,7 @@ pub use platform::{
     get_platform_adapter, ClipboardCaptureAdapter, MacOSCaptureAdapter, MacOSClipboardAdapter,
     MockCaptureAdapter, PlatformCaptureAdapter, WindowsCaptureAdapter, WindowsClipboardAdapter,
 };
-pub use target::{CaptureRequest, CaptureTarget};
+pub use target::{CaptureRequest, CaptureTarget, CaptureTargetController, TargetState};
 pub use validator::CaptureValidator;
 
 #[cfg(target_os = "macos")]

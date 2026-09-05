@@ -43,10 +43,11 @@ impl MacOSTarget {
         let app_handle_clone = app_handle.clone();
         let notch_controller = Arc::new(NotchCaptureController::new(Box::new(move |state| {
             if let Some(window) = app_handle_clone.get_webview_window("macos-notch-target") {
+                let _ = window.emit("target-state-changed", state);
                 let _ = window.emit("notch-state-changed", state);
                 
                 match state {
-                    NotchState::Hovering | NotchState::Activated | NotchState::Captured | NotchState::Cancelled => {
+                    NotchState::DragDetected | NotchState::Hover | NotchState::Active | NotchState::Captured | NotchState::Cancelled => {
                         let _ = window.show();
                     }
                     NotchState::Idle => {
