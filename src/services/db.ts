@@ -565,6 +565,10 @@ export const db = {
     return invoke("delete_item", { id });
   },
 
+  async emptyInbox(): Promise<number> {
+    return invoke("empty_inbox");
+  },
+
   // Context Signal operations
   async createContextSignal(
     workspaceId: string | null,

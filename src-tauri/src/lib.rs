@@ -123,6 +123,14 @@ fn delete_item(id: &str, state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn empty_inbox(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<usize, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let count = db::operations::empty_inbox(&conn).map_err(|e| e.to_string())?;
+    let _ = app.emit("inbox://updated", ());
+    Ok(count)
+}
+
+#[tauri::command]
 fn get_item_semantic_status(id: &str, state: State<'_, AppState>) -> Result<Option<db::models::ItemSemanticStatus>, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     db::operations::get_item_semantic_status(&conn, id).map_err(|e| e.to_string())
@@ -910,6 +918,7 @@ pub fn run() {
             list_items,
             update_item,
             delete_item,
+            empty_inbox,
             move_item,
             capture_raw_event,
             handle_capture,

@@ -20,6 +20,7 @@ interface WorkspaceState {
   selectWorkspace: (id: string | "inbox") => void;
   renameWorkspace: (id: string, newName: string) => Promise<void>;
   deleteWorkspace: (id: string) => Promise<void>;
+  emptyInbox: () => Promise<void>;
   listenForClipboard: () => Promise<() => void>;
   setCaptureState: (state: CaptureTargetState) => void;
   updateItemPosition: (id: string, x: number, y: number) => Promise<void>;
@@ -266,8 +267,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
 
+  emptyInbox: async () => {
+    try {
+      await db.emptyInbox();
+      set({ inboxCount: 0 });
+      if (get().activeWorkspaceId === "inbox") {
+        set({ activeItems: [] });
+      }
+    } catch (err) {
+      console.error("Failed to empty inbox:", err);
+    }
+  },
+
   listenForClipboard: async () => {
-    const unlisten = await listen<Item>('clipboard://new-item', (event) => {
+    const unlistenNew = await listen<Item>('clipboard://new-item', (event) => {
       const newItem = event.payload;
       const state = get();
       
@@ -282,6 +295,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ activeItems: [newItem, ...state.activeItems] });
       }
     });
-    return unlisten;
+
+    const unlistenUpdated = await listen('inbox://updated', async () => {
+      try {
+        const inboxItems = await db.listItems(null);
+        set({ inboxCount: inboxItems.length });
+        if (get().activeWorkspaceId === "inbox") {
+          set({ activeItems: inboxItems });
+        }
+      } catch (err) {
+        console.error("Failed to refresh inbox:", err);
+      }
+    });
+
+    return () => {
+      unlistenNew();
+      unlistenUpdated();
+    };
   }
 }));

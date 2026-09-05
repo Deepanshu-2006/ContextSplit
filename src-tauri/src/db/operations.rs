@@ -349,6 +349,11 @@ pub fn delete_item(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn empty_inbox(conn: &Connection) -> Result<usize> {
+    let count = conn.execute("DELETE FROM items WHERE workspace_id IS NULL", [])?;
+    Ok(count)
+}
+
 pub fn move_item(
     conn: &Connection,
     id: &str,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { Canvas } from "./components/workspace/Canvas";
@@ -19,28 +19,19 @@ import "./App.css";
 function App() {
   const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
   const { checkForCandidates } = useDiscoveryStore();
-  const [isNotchTarget, setIsNotchTarget] = useState(false);
-  const [isOrbTarget, setIsOrbTarget] = useState(false);
-  const [isToastTarget, setIsToastTarget] = useState(false);
+  
+  const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
+  const isNotchTarget = windowLabel === "macos-notch-target";
+  const isOrbTarget = windowLabel === "windows-orb-target";
+  const isToastTarget = windowLabel === "capture-toast";
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
 
   useEffect(() => {
-    // Check if we are rendering in the secondary macOS overlay window
-    if (getCurrentWindow().label === "macos-notch-target") {
-      setIsNotchTarget(true);
-      return; // Skip loading workspaces and clipboard for the notch window
-    }
-
-    if (getCurrentWindow().label === "windows-orb-target") {
-      setIsOrbTarget(true);
+    // Only main window loads workspaces and clipboard monitor
+    if (isNotchTarget || isOrbTarget || isToastTarget) {
       return;
-    }
-
-    if (getCurrentWindow().label === "capture-toast") {
-      setIsToastTarget(true);
-      return; // Skip loading workspaces for toast window
     }
 
     loadWorkspaces();
@@ -63,7 +54,7 @@ function App() {
         unlisten();
       }
     };
-  }, [loadWorkspaces, listenForClipboard, checkForCandidates]);
+  }, [loadWorkspaces, listenForClipboard, checkForCandidates, isNotchTarget, isOrbTarget, isToastTarget]);
 
   if (isNotchTarget) {
     return (
