@@ -1,8 +1,11 @@
 use super::target::{CaptureTarget, CaptureRequest};
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
+use super::windows_target::{WindowsCaptureTargetController, WindowsTargetState};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize, Emitter};
+use std::sync::Arc;
 
 pub struct WindowsTarget {
     app_handle: AppHandle,
+    pub windows_controller: Arc<WindowsCaptureTargetController<Box<dyn Fn(WindowsTargetState) + Send + Sync>>>,
 }
 
 impl WindowsTarget {
@@ -36,7 +39,14 @@ impl WindowsTarget {
             });
         }
         
-        Self { app_handle }
+        let app_handle_clone = app_handle.clone();
+        let windows_controller = Arc::new(WindowsCaptureTargetController::new(Box::new(move |state| {
+            if let Some(window) = app_handle_clone.get_webview_window("windows-orb-target") {
+                let _ = window.emit("windows-target-state-changed", state);
+            }
+        }) as Box<dyn Fn(WindowsTargetState) + Send + Sync>));
+        
+        Self { app_handle, windows_controller }
     }
 }
 
@@ -56,24 +66,22 @@ impl CaptureTarget for WindowsTarget {
     }
 
     fn set_active(&self, active: bool) -> Result<(), String> {
-        // TODO: Highlight the drop zone
         println!("WindowsTarget: set_active({})", active);
         Ok(())
     }
 
     fn handle_drop(&self, _request: CaptureRequest) -> Result<(), String> {
-        // TODO: Pass the request to the existing capture engine
         println!("WindowsTarget: handle_drop()");
         Ok(())
     }
 
     fn report_success(&self, _req: &CaptureRequest) -> Result<(), String> {
-        // Native Windows notifications replaced by custom CaptureToast UI
+        self.windows_controller.on_capture_success();
         Ok(())
     }
 
     fn report_failure(&self, error: &str) -> Result<(), String> {
-        // TODO: Trigger failure animation
+        self.windows_controller.on_capture_failure();
         println!("WindowsTarget: report_failure({})", error);
         Ok(())
     }

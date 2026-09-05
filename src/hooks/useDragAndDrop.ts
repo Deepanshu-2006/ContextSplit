@@ -1,20 +1,26 @@
 import { useEffect } from 'react';
 import { useWorkspaceStore } from '../store/workspaceStore';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export function useDragAndDrop() {
   const { setCaptureState } = useWorkspaceStore();
 
   useEffect(() => {
     let dragCounter = 0;
+    const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
+    const isNotch = windowLabel === "macos-notch-target";
+    const isWindowsOrb = windowLabel === "windows-orb-target";
 
     const handleDragEnter = async (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       dragCounter++;
       if (dragCounter === 1) {
-        if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+        if (isNotch) {
           await invoke('notch_drag_enter');
+        } else if (isWindowsOrb) {
+          await invoke('windows_target_drag_enter');
         } else {
           setCaptureState('visible');
         }
@@ -25,10 +31,13 @@ export function useDragAndDrop() {
       e.preventDefault();
       e.stopPropagation();
       
-      if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+      if (isNotch) {
         // Check if near center (Y axis is less relevant for notch, let's say X is near center)
         const isNearCenter = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8;
         await invoke('notch_drag_over', { isNearCenter });
+      } else if (isWindowsOrb) {
+        const isInsideTarget = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8 && e.clientY < 120;
+        await invoke('windows_target_drag_over', { isInsideTarget });
       }
     };
 
@@ -37,8 +46,10 @@ export function useDragAndDrop() {
       e.stopPropagation();
       dragCounter--;
       if (dragCounter === 0) {
-        if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+        if (isNotch) {
           await invoke('notch_drag_leave');
+        } else if (isWindowsOrb) {
+          await invoke('windows_target_drag_leave');
         } else {
           setCaptureState('hidden');
         }
@@ -50,12 +61,12 @@ export function useDragAndDrop() {
       e.stopPropagation();
       dragCounter = 0;
       
-      const isNotch = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target";
-      
       const dt = e.dataTransfer;
       if (!dt) {
         if (isNotch) {
           await invoke('notch_drag_leave');
+        } else if (isWindowsOrb) {
+          await invoke('windows_target_drag_leave');
         } else {
           setCaptureState('hidden');
         }
@@ -65,6 +76,12 @@ export function useDragAndDrop() {
       if (isNotch) {
         // For Notch Target, check if drop is accepted (i.e., state is Activated)
         const accepted = await invoke<boolean>('notch_drop');
+        if (!accepted) {
+          return;
+        }
+      } else if (isWindowsOrb) {
+        // For Windows Orb Target, check if drop is accepted (i.e., state is Activated)
+        const accepted = await invoke<boolean>('windows_target_drop');
         if (!accepted) {
           return;
         }
@@ -132,19 +149,19 @@ export function useDragAndDrop() {
 
         if (req) {
           await invoke('handle_capture', { req });
-          if (!isNotch) {
+          if (!isNotch && !isWindowsOrb) {
             setCaptureState('success');
             setTimeout(() => setCaptureState('hidden'), 2000);
           }
         } else {
-          if (!isNotch) {
+          if (!isNotch && !isWindowsOrb) {
             setCaptureState('failure');
             setTimeout(() => setCaptureState('hidden'), 2000);
           }
         }
       } catch (err) {
         console.error('Failed to process drop:', err);
-        if (!isNotch) {
+        if (!isNotch && !isWindowsOrb) {
           setCaptureState('failure');
           setTimeout(() => setCaptureState('hidden'), 2000);
         }

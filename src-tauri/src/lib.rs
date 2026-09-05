@@ -696,6 +696,45 @@ fn notch_drop(state: State<'_, capture::SystemTarget>) -> bool {
     return false;
 }
 
+#[tauri::command]
+fn show_windows_target(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
+    use capture::target::CaptureTarget;
+    state.show()
+}
+
+#[tauri::command]
+fn hide_windows_target(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
+    use capture::target::CaptureTarget;
+    state.hide()
+}
+
+#[tauri::command]
+fn windows_target_drag_enter(_state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "windows")]
+    _state.windows_controller.on_drag_enter();
+}
+
+#[tauri::command]
+fn windows_target_drag_over(_is_inside_target: bool, _state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "windows")]
+    _state.windows_controller.on_drag_over(_is_inside_target);
+}
+
+#[tauri::command]
+fn windows_target_drag_leave(_state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "windows")]
+    _state.windows_controller.on_drag_leave();
+}
+
+#[tauri::command]
+fn windows_target_drop(_state: State<'_, capture::SystemTarget>) -> bool {
+    #[cfg(target_os = "windows")]
+    return _state.windows_controller.on_drop();
+    
+    #[cfg(not(target_os = "windows"))]
+    return false;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -809,6 +848,12 @@ pub fn run() {
             notch_drag_over,
             notch_drag_leave,
             notch_drop,
+            show_windows_target,
+            hide_windows_target,
+            windows_target_drag_enter,
+            windows_target_drag_over,
+            windows_target_drag_leave,
+            windows_target_drop,
             create_context_signal,
             get_context_signal,
             list_context_signals,

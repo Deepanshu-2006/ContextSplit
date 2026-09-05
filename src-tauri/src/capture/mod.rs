@@ -9,6 +9,7 @@ pub mod queue;
 pub mod target;
 pub mod validator;
 pub mod notch;
+pub mod windows_target;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

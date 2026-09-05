@@ -3,15 +3,17 @@ import { useWorkspaceStore } from '../../store/workspaceStore';
 import { Check, X } from 'lucide-react';
 import { useCursorProximity } from '../../hooks/useCursorProximity';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export const CaptureTarget: React.FC = () => {
   const { captureState } = useWorkspaceStore();
   const targetRef = useRef<HTMLDivElement>(null);
   const proximity = useCursorProximity(targetRef);
   const [notchState, setNotchState] = useState<string>('idle');
+  const isNotch = typeof window !== 'undefined' && getCurrentWindow().label === "macos-notch-target";
   
   useEffect(() => {
-    if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+    if (isNotch) {
       const unlisten = listen('notch-state-changed', (event) => {
         setNotchState(event.payload as string);
       });
@@ -19,9 +21,7 @@ export const CaptureTarget: React.FC = () => {
         unlisten.then(f => f());
       };
     }
-  }, []);
-
-  const isNotch = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target";
+  }, [isNotch]);
   
   if (!isNotch && captureState === 'hidden') return null;
   if (isNotch && notchState === 'idle') return null;
