@@ -12,15 +12,17 @@ export const CaptureToastRenderer = () => {
     const unlisten = listen('capture://event', async (event: any) => {
       const payload = event.payload;
       
-      const title = payload.metadata?.title || payload.source_metadata?.window_title || payload.source_application || "Captured";
+      const title = payload.metadata?.title || payload.source_metadata?.window_title || payload.source_application || "Captured to Inbox";
       
       let content = payload.content || "";
       if (payload.content_type === "url") {
         content = payload.metadata?.domain || content;
       } else if (payload.content_type === "file") {
         content = payload.metadata?.filename || content;
-      } else if (content.length > 50) {
-        content = content.substring(0, 50) + "...";
+      } else if (payload.content_type === "image") {
+        content = "Image saved to Inbox";
+      } else if (content.length > 45) {
+        content = content.substring(0, 45) + "...";
       }
 
       setToast({
@@ -48,13 +50,19 @@ export const CaptureToastRenderer = () => {
   if (!toast) return null;
 
   return (
-    <div className="bg-white rounded-xl shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-gray-100 p-3.5 flex items-start gap-3.5 w-[280px] pointer-events-auto transition-all duration-300">
-      <div className="bg-green-100 text-green-600 rounded-full p-1.5 mt-0.5 shrink-0">
-        <Check size={16} strokeWidth={3} />
+    <div className="bg-white/95 dark:bg-zinc-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-black/10 dark:border-white/15 p-3.5 flex items-center gap-3 w-[300px] pointer-events-auto transition-all duration-300">
+      <div className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 rounded-xl p-2 shrink-0 border border-emerald-500/20">
+        <Check size={18} strokeWidth={2.5} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden text-left">
-        <h4 className="text-[13px] font-semibold text-gray-900 truncate leading-tight">{toast.title}</h4>
-        <p className="text-[11px] text-gray-500 truncate mt-1 leading-tight">{toast.content}</p>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[12px] font-bold text-gray-900 dark:text-white tracking-tight leading-tight truncate">
+            {toast.title}
+          </span>
+        </div>
+        <p className="text-[11px] text-gray-500 dark:text-zinc-400 truncate mt-0.5 font-medium leading-tight">
+          {toast.content}
+        </p>
       </div>
     </div>
   );
