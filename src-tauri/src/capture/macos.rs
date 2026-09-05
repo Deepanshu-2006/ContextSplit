@@ -47,7 +47,7 @@ impl MacOSTarget {
                 let _ = window.emit("notch-state-changed", state);
                 
                 match state {
-                    NotchState::DragDetected | NotchState::Hover | NotchState::Active | NotchState::Captured | NotchState::Cancelled => {
+                    NotchState::DragDetected | NotchState::Hover | NotchState::Active | NotchState::Captured | NotchState::Cancelled | NotchState::Paused => {
                         let _ = window.show();
                     }
                     NotchState::Idle => {

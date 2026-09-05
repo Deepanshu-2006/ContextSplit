@@ -248,7 +248,12 @@ impl ClipboardPrivacyFilter {
     }
 
     /// Maps user PrivacySettings into the filter configuration.
-    pub fn with_privacy_settings(self, _settings: &PrivacySettings) -> Self {
+    pub fn with_privacy_settings(mut self, settings: &PrivacySettings) -> Self {
+        if settings.capture_paused {
+            self.pause_indefinitely();
+        } else {
+            self.resume();
+        }
         self
     }
 
@@ -497,7 +502,30 @@ impl ClipboardPrivacyFilter {
 
     /// Evaluates a strongly-typed `CaptureEvent` against all privacy rules.
     pub fn filter_event(&self, event: &CaptureEvent) -> PrivacyFilterResult {
-        // If capture type is not clipboard, verify general sensitive content
+        // Manual captures are permitted even when automatic capture is paused
+        if event.capture_type == CaptureType::Manual {
+            if let Some(sensitive_type) = self.detect_sensitive_content(&event.content) {
+                return PrivacyFilterResult::Rejected(PrivacyRejection {
+                    reason: PrivacyRejectionReason::SensitiveContent {
+                        content_type: sensitive_type,
+                    },
+                    explanation: "Capture rejected: Sensitive content detected.".to_string(),
+                });
+            }
+            return PrivacyFilterResult::Allowed;
+        }
+
+        // Automatic captures (Clipboard, DragDrop, etc.) must obey global pause mode
+        if self.is_paused() {
+            return PrivacyFilterResult::Rejected(PrivacyRejection {
+                reason: PrivacyRejectionReason::MonitoringPaused {
+                    until: self.config.paused_until.clone(),
+                },
+                explanation: "Automatic capture is paused.".to_string(),
+            });
+        }
+
+        // If capture type is not clipboard (e.g. DragDrop), verify general sensitive content
         if event.capture_type != CaptureType::Clipboard {
             // Check sensitive content for all capture types
             if let Some(sensitive_type) = self.detect_sensitive_content(&event.content) {

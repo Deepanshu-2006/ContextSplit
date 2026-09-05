@@ -44,6 +44,7 @@ mod tests {
             enable_ai_reasoning: true,
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -1493,7 +1494,8 @@ mod tests {
                 | TargetState::Hover
                 | TargetState::Active
                 | TargetState::Captured
-                | TargetState::Cancelled => {}
+                | TargetState::Cancelled
+                | TargetState::Paused => {}
             }
         });
 
@@ -1523,6 +1525,163 @@ mod tests {
         let result = CaptureCore::new().process_event_headless(&conn, Some(&ce), event).unwrap();
         assert_eq!(result.item.item_type, "text");
         assert!(result.signals_emitted > 0);
+    }
+
+    // =======================================================================
+    // Global Capture Pause Mode Tests
+    // =======================================================================
+
+    #[test]
+    fn test_capture_pause_ignores_clipboard_and_drag() {
+        let (conn, _dir) = setup_test_db();
+        let ce = create_test_engine();
+
+        // 1. Enable pause mode in privacy filter / settings
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.capture_paused = true;
+        crate::db::settings::update_settings(&conn, settings.clone()).unwrap();
+
+        let privacy_filter = ClipboardPrivacyFilter::new().with_privacy_settings(&settings);
+        assert!(privacy_filter.is_paused());
+
+        let custom_pipeline = crate::capture::pipeline::CapturePipeline::new()
+            .with_privacy_filter(privacy_filter);
+
+        // 2. Attempt automatic clipboard capture
+        let clipboard_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::PlainText,
+            "Sensitive copied text during paused state",
+            PlatformType::MacOS,
+        );
+
+        let clip_res = custom_pipeline.process_event_headless(&conn, Some(&ce), clipboard_event);
+        assert!(clip_res.is_err(), "Automatic clipboard capture must be rejected when paused");
+        if let Err(CaptureError::PrivacyRejected(reason)) = clip_res {
+            assert!(reason.to_lowercase().contains("paused"), "Reason must mention paused: {}", reason);
+        } else {
+            panic!("Expected PrivacyRejected error");
+        }
+
+        // 3. Attempt automatic drag-and-drop capture
+        let drag_event = CaptureEvent::new(
+            CaptureType::DragDrop,
+            ContentType::Url,
+            "https://example.com/dropped-item",
+            PlatformType::Windows,
+        );
+
+        let drag_res = custom_pipeline.process_event_headless(&conn, Some(&ce), drag_event);
+        assert!(drag_res.is_err(), "Automatic drag capture must be rejected when paused");
+
+        // 4. Verify ZERO items and ZERO context signals were created in the database
+        let count_items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_items, 0, "No items must be created when capture is paused");
+
+        let count_signals: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_signals, 0, "No context signals must be created when capture is paused");
+    }
+
+    #[test]
+    fn test_capture_pause_allows_manual_capture() {
+        let (conn, _dir) = setup_test_db();
+        let ce = create_test_engine();
+
+        // Enable pause mode
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.capture_paused = true;
+        crate::db::settings::update_settings(&conn, settings.clone()).unwrap();
+
+        let privacy_filter = ClipboardPrivacyFilter::new().with_privacy_settings(&settings);
+        let pipeline = crate::capture::pipeline::CapturePipeline::new()
+            .with_privacy_filter(privacy_filter);
+
+        // Manual capture event (e.g. user manually adds an item or uses explicit manual shortcut)
+        let manual_event = CaptureEvent::new(
+            CaptureType::Manual,
+            ContentType::PlainText,
+            "Manual user capture notes while pause mode is active",
+            PlatformType::MacOS,
+        );
+
+        let result = pipeline.process_event_headless(&conn, Some(&ce), manual_event).unwrap();
+        assert_eq!(result.item.content, "Manual user capture notes while pause mode is active");
+        assert_eq!(result.item.item_type, "text");
+
+        // Verify the manual item is persisted in the database
+        let count_items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(count_items, 1, "Manual capture item must be persisted");
+    }
+
+    #[test]
+    fn test_capture_pause_db_settings_persistence() {
+        let (conn, _dir) = setup_test_db();
+
+        // 1. Initial settings should have capture_paused = false (or default)
+        let initial = crate::db::settings::get_settings(&conn).unwrap();
+        assert!(!initial.capture_paused);
+
+        // 2. Update settings to pause capture
+        let mut updated = initial.clone();
+        updated.capture_paused = true;
+        crate::db::settings::update_settings(&conn, updated).unwrap();
+
+        // 3. Re-read settings from database
+        let fetched = crate::db::settings::get_settings(&conn).unwrap();
+        assert!(fetched.capture_paused, "capture_paused must be persisted as true");
+
+        // 4. Resume capture
+        let mut resumed = fetched.clone();
+        resumed.capture_paused = false;
+        crate::db::settings::update_settings(&conn, resumed).unwrap();
+
+        // 5. Re-read and verify resumed state
+        let fetched_resumed = crate::db::settings::get_settings(&conn).unwrap();
+        assert!(!fetched_resumed.capture_paused, "capture_paused must be persisted as false");
+    }
+
+    #[test]
+    fn test_target_controller_paused_gesture_and_drop_rejection() {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        let controller = crate::capture::target::CaptureTargetController::new(move |state| {
+            events_clone.lock().unwrap().push(state);
+        });
+
+        // Set paused
+        controller.set_paused(true);
+        assert!(controller.is_paused());
+
+        // Gestures during pause mode
+        controller.on_drag_detected();
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        controller.on_drag_enter();
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        controller.on_drag_over(true);
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        // Dropping on target during pause mode is rejected
+        let accepted = controller.on_drop();
+        assert!(!accepted, "Drop must be rejected when target is paused");
+        assert_eq!(controller.get_state(), TargetState::Idle);
+
+        // Resume target
+        controller.set_paused(false);
+        assert!(!controller.is_paused());
+
+        // Now drag and drop proceeds normally
+        controller.on_drag_enter();
+        assert_eq!(controller.get_state(), TargetState::Hover);
+
+        controller.on_drag_over(true);
+        assert_eq!(controller.get_state(), TargetState::Active);
+
+        let accepted_now = controller.on_drop();
+        assert!(accepted_now, "Drop must be accepted after resume");
+        assert_eq!(controller.get_state(), TargetState::Idle);
     }
 }
 

@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
-import { Check, X, ArrowDownToLine } from 'lucide-react';
+import { Check, X, ArrowDownToLine, PauseCircle } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -18,12 +18,20 @@ export const CaptureOrb: React.FC = () => {
       const unlistenLegacy = listen('windows-target-state-changed', (event) => {
         setTargetState(event.payload as string);
       });
+      const unlistenPause = listen('capture-pause-changed', (event) => {
+        if (event.payload === true) {
+          setTargetState('paused');
+        } else if (targetState === 'paused') {
+          setTargetState('idle');
+        }
+      });
       return () => {
         unlisten.then(f => f());
         unlistenLegacy.then(f => f());
+        unlistenPause.then(f => f());
       };
     }
-  }, [isWindowsOrb]);
+  }, [isWindowsOrb, targetState]);
 
   // If not in the windows-orb-target window and workspace captureState is hidden, don't render
   if (!isWindowsOrb && captureState === 'hidden') return null;
@@ -42,6 +50,18 @@ export const CaptureOrb: React.FC = () => {
       // 1. Target remains unobtrusive when idle
       innerClasses += "w-20 h-3 rounded-full bg-black/20 dark:bg-white/20 hover:bg-black/40 border border-white/20 shadow-sm scale-90 opacity-60";
       content = <div className="w-6 h-1 rounded-full bg-white/70"></div>;
+      break;
+
+    case 'paused':
+    case 'pause':
+      // Target indicates paused state
+      innerClasses += "w-44 h-12 rounded-2xl bg-amber-600/95 text-white border border-amber-400 shadow-xl scale-100 opacity-100 ring-2 ring-amber-400/40";
+      content = (
+        <div className="flex items-center gap-2 text-white">
+          <PauseCircle size={18} strokeWidth={2.5} />
+          <span className="font-semibold text-xs tracking-wide">Capture Paused</span>
+        </div>
+      );
       break;
 
     case 'drag_detected':

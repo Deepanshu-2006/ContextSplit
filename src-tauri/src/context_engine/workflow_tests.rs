@@ -32,6 +32,7 @@ mod tests {
             enable_ai_reasoning: true,
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -222,6 +223,7 @@ mod tests {
             enable_ai_reasoning: false,
             ai_gating_enabled: false,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         };
         crate::db::settings::update_settings(&conn2, settings_off).unwrap();
 

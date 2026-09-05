@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +18,8 @@ pub enum TargetState {
     Captured,
     /// Drag left the target area or drop was cancelled/rejected; returning to Idle.
     Cancelled,
+    /// Automatic capture is paused; indicates paused status and rejects drops.
+    Paused,
 }
 
 impl std::fmt::Display for TargetState {
@@ -28,6 +31,7 @@ impl std::fmt::Display for TargetState {
             Self::Active => write!(f, "active"),
             Self::Captured => write!(f, "captured"),
             Self::Cancelled => write!(f, "cancelled"),
+            Self::Paused => write!(f, "paused"),
         }
     }
 }
@@ -40,6 +44,7 @@ impl From<&str> for TargetState {
             "active" | "activated" => Self::Active,
             "captured" | "success" => Self::Captured,
             "cancelled" | "canceled" | "failure" => Self::Cancelled,
+            "paused" | "pause" => Self::Paused,
             _ => Self::Idle,
         }
     }
@@ -51,6 +56,7 @@ where
     F: Fn(TargetState) + Send + Sync + 'static,
 {
     state: Arc<Mutex<TargetState>>,
+    is_paused: Arc<AtomicBool>,
     on_state_change: F,
 }
 
@@ -63,12 +69,32 @@ where
         on_state_change(TargetState::Idle);
         Self {
             state: Arc::new(Mutex::new(TargetState::Idle)),
+            is_paused: Arc::new(AtomicBool::new(false)),
             on_state_change,
         }
     }
 
     pub fn get_state(&self) -> TargetState {
         *self.state.lock().unwrap()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.is_paused.store(paused, Ordering::Relaxed);
+        if paused {
+            let state = self.get_state();
+            if state != TargetState::Idle && state != TargetState::Cancelled && state != TargetState::Captured {
+                self.transition_to(TargetState::Paused);
+            }
+        } else {
+            let state = self.get_state();
+            if state == TargetState::Paused {
+                self.transition_to(TargetState::Idle);
+            }
+        }
     }
 
     fn transition_to(&self, new_state: TargetState) {
@@ -79,6 +105,10 @@ where
 
     /// User begins dragging supported content across the system.
     pub fn on_drag_detected(&self) {
+        if self.is_paused() {
+            self.transition_to(TargetState::Paused);
+            return;
+        }
         let state = self.get_state();
         if state == TargetState::Idle || state == TargetState::Cancelled {
             self.transition_to(TargetState::DragDetected);
@@ -87,6 +117,10 @@ where
 
     /// Dragged content enters the target bounds or proximity window.
     pub fn on_drag_enter(&self) {
+        if self.is_paused() {
+            self.transition_to(TargetState::Paused);
+            return;
+        }
         let state = self.get_state();
         if state == TargetState::Idle || state == TargetState::DragDetected || state == TargetState::Cancelled {
             self.transition_to(TargetState::Hover);
@@ -95,6 +129,10 @@ where
 
     /// Drag position updates relative to target center/activation zone.
     pub fn on_drag_over(&self, is_active_zone: bool) {
+        if self.is_paused() {
+            self.transition_to(TargetState::Paused);
+            return;
+        }
         let state = self.get_state();
         match state {
             TargetState::Hover | TargetState::DragDetected if is_active_zone => {
@@ -110,6 +148,10 @@ where
     /// Drag left the target area.
     pub fn on_drag_leave(&self) {
         let state = self.get_state();
+        if state == TargetState::Paused {
+            self.transition_to(TargetState::Idle);
+            return;
+        }
         if state == TargetState::Hover || state == TargetState::Active || state == TargetState::DragDetected {
             self.transition_to(TargetState::Cancelled);
             self.transition_to(TargetState::Idle);
@@ -118,6 +160,11 @@ where
 
     /// Content was dropped. Returns `true` if accepted (in `Active` state), `false` if rejected.
     pub fn on_drop(&self) -> bool {
+        if self.is_paused() {
+            self.transition_to(TargetState::Cancelled);
+            self.transition_to(TargetState::Idle);
+            return false;
+        }
         let state = self.get_state();
         if state == TargetState::Active {
             self.transition_to(TargetState::Idle);
@@ -449,5 +496,59 @@ mod tests {
                 TargetState::Idle
             ]
         );
+    }
+
+    #[test]
+    fn test_target_controller_paused_state_transitions() {
+        let history = Arc::new(Mutex::new(Vec::new()));
+        let hist_clone = history.clone();
+
+        let controller = CaptureTargetController::new(move |state| {
+            hist_clone.lock().unwrap().push(state);
+        });
+
+        // Set paused
+        controller.set_paused(true);
+        assert!(controller.is_paused());
+
+        // Drag detected while paused -> transitions to Paused
+        controller.on_drag_detected();
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        // Drag enters target area while paused -> remains in Paused
+        controller.on_drag_enter();
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        // Drag over active zone while paused -> remains in Paused
+        controller.on_drag_over(true);
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        // Drop while paused -> rejected (returns false) and resets to Idle
+        let accepted = controller.on_drop();
+        assert!(!accepted);
+        assert_eq!(controller.get_state(), TargetState::Idle);
+
+        // Resume capture
+        controller.set_paused(false);
+        assert!(!controller.is_paused());
+
+        // Drag enter now transitions to Hover normally
+        controller.on_drag_enter();
+        assert_eq!(controller.get_state(), TargetState::Hover);
+    }
+
+    #[test]
+    fn test_target_controller_pause_while_hovering() {
+        let controller = CaptureTargetController::new(|_| {});
+        controller.on_drag_enter();
+        assert_eq!(controller.get_state(), TargetState::Hover);
+
+        // Pausing while active/hover transitions immediately to Paused
+        controller.set_paused(true);
+        assert_eq!(controller.get_state(), TargetState::Paused);
+
+        // Drag leave resets to Idle
+        controller.on_drag_leave();
+        assert_eq!(controller.get_state(), TargetState::Idle);
     }
 }

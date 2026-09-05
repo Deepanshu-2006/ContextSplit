@@ -252,6 +252,7 @@ mod tests {
             enable_ai_reasoning: true,
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         }).unwrap();
 
         let mut ce = ContextEngine::new();
@@ -298,6 +299,7 @@ mod tests {
             enable_ai_reasoning: true,
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         }).unwrap();
 
         let mut ce = ContextEngine::new();

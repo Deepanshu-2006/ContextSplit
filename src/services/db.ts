@@ -66,6 +66,7 @@ export interface PrivacySettings {
   semantic_provider: string;
   enable_semantic_suggestions: boolean;
   enable_ai_reasoning: boolean;
+  capture_paused?: boolean;
 }
 
 export interface ItemRelationship {
@@ -774,6 +775,16 @@ export const db = {
   // Cross-Platform Capture
   captureRawEvent: (payload: RawCapturePayload) =>
     invoke<CaptureResult>("capture_raw_event", { payload }),
+
+  // Global Capture Pause
+  toggleCapturePause: () =>
+    invoke<boolean>("toggle_capture_pause"),
+
+  setCapturePaused: (paused: boolean) =>
+    invoke<boolean>("set_capture_paused", { paused }),
+
+  isCapturePaused: () =>
+    invoke<boolean>("is_capture_paused"),
 };
 
 

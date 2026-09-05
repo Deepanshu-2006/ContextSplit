@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
-import { Check, X, ArrowDownToLine, Sparkles } from 'lucide-react';
+import { Check, X, ArrowDownToLine, Sparkles, PauseCircle } from 'lucide-react';
 import { useCursorProximity } from '../../hooks/useCursorProximity';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -20,12 +20,20 @@ export const CaptureTarget: React.FC = () => {
       const unlistenLegacy = listen('notch-state-changed', (event) => {
         setNotchState(event.payload as string);
       });
+      const unlistenPause = listen('capture-pause-changed', (event) => {
+        if (event.payload === true) {
+          setNotchState('paused');
+        } else if (notchState === 'paused') {
+          setNotchState('idle');
+        }
+      });
       return () => {
         unlisten.then(f => f());
         unlistenLegacy.then(f => f());
+        unlistenPause.then(f => f());
       };
     }
-  }, [isNotch]);
+  }, [isNotch, notchState]);
   
   if (!isNotch && captureState === 'hidden') return null;
   if (isNotch && notchState === 'idle') return null;
@@ -63,6 +71,16 @@ export const CaptureTarget: React.FC = () => {
           <div className="flex items-center gap-2 text-white">
             <ArrowDownToLine size={18} strokeWidth={2.5} />
             <span className="font-semibold text-sm tracking-wide">Release to capture</span>
+          </div>
+        );
+        break;
+      case 'paused':
+      case 'pause':
+        stateClasses = "bg-amber-500/90 text-white border-amber-400 shadow-xl scale-100 opacity-100 ring-2 ring-amber-400/40";
+        content = (
+          <div className="flex items-center gap-2 text-white">
+            <PauseCircle size={18} strokeWidth={2.5} />
+            <span className="font-semibold text-sm tracking-wide">Capture Paused</span>
           </div>
         );
         break;

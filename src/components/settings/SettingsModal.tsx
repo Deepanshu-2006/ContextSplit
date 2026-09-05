@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Shield, LayoutTemplate, Type, Globe, Clock, Info } from "lucide-react";
+import { X, Shield, LayoutTemplate, Type, Globe, Clock, Info, PauseCircle } from "lucide-react";
 import { db, PrivacySettings } from "../../services/db";
 
 interface SettingsModalProps {
@@ -17,6 +17,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     semantic_provider: "local",
     enable_semantic_suggestions: false,
     enable_ai_reasoning: true,
+    capture_paused: false,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -82,6 +83,18 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           ) : (
             <div className="space-y-6">
               
+              <div className="p-4 rounded-xl border border-amber-200 bg-amber-50/60 dark:bg-amber-950/20 dark:border-amber-800/40">
+                <ToggleRow 
+                  icon={<PauseCircle size={18} />}
+                  title="Pause Automatic Capture"
+                  description="Temporarily pause all automatic clipboard and drag-and-drop capture. No items or context signals will be created while paused."
+                  checked={!!settings.capture_paused}
+                  onChange={() => handleToggle("capture_paused")}
+                  activeBg="bg-amber-500"
+                  activeIconBg="bg-amber-100 text-amber-700"
+                />
+              </div>
+
               <ToggleRow 
                 icon={<LayoutTemplate size={18} />}
                 title="Active Application"
@@ -236,18 +249,22 @@ function ToggleRow({
   description, 
   checked, 
   onChange,
-  disabled = false
+  disabled = false,
+  activeBg = "bg-indigo-500",
+  activeIconBg = "bg-indigo-50 text-indigo-600",
 }: { 
   icon: React.ReactNode, 
   title: string, 
   description: string, 
   checked: boolean, 
   onChange: () => void,
-  disabled?: boolean
+  disabled?: boolean,
+  activeBg?: string,
+  activeIconBg?: string,
 }) {
   return (
     <div className={`flex items-start gap-4 ${disabled ? 'opacity-50' : ''}`}>
-      <div className={`p-2 rounded-lg mt-0.5 ${checked ? 'bg-indigo-50 text-indigo-600' : 'bg-gray-100 text-gray-500'}`}>
+      <div className={`p-2 rounded-lg mt-0.5 ${checked ? activeIconBg : 'bg-gray-100 text-gray-500'}`}>
         {icon}
       </div>
       <div className="flex-1">
@@ -264,7 +281,7 @@ function ToggleRow({
               onChange={onChange}
               disabled={disabled}
             />
-            <div className={`block w-10 h-6 rounded-full transition-colors ${checked ? 'bg-indigo-500' : 'bg-gray-200'}`}></div>
+            <div className={`block w-10 h-6 rounded-full transition-colors ${checked ? activeBg : 'bg-gray-200'}`}></div>
             <div className={`absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${checked ? 'translate-x-4' : ''}`}></div>
           </div>
         </label>

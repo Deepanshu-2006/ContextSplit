@@ -6,7 +6,7 @@ pub mod context_engine;
 pub mod semantic;
 
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use db::models::{Workspace, Item, ContextSignal};
 use context_engine::engine::{ContextEngine, ContextEvent};
 use context_engine::providers::{CaptureContextProvider, UserActionContextProvider, WorkspaceContextProvider, ActiveAppProvider, UrlContextProvider};
@@ -215,6 +215,47 @@ fn get_strongest_relationships(
     crate::context_engine::graph::get_strongest_relationships(&conn, item_id, limit).map_err(|e| e.to_string())
 }
 
+pub fn set_capture_paused_internal(app_handle: &tauri::AppHandle, paused: bool) -> Result<bool, String> {
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        state.capture_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(conn) = state.db_conn.lock() {
+            if let Ok(mut settings) = crate::db::settings::get_settings(&conn) {
+                settings.capture_paused = paused;
+                let _ = crate::db::settings::update_settings(&conn, settings);
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(target) = app_handle.try_state::<crate::capture::SystemTarget>() {
+        #[cfg(target_os = "macos")]
+        target.notch_controller.set_paused(paused);
+        #[cfg(target_os = "windows")]
+        target.windows_controller.set_paused(paused);
+    }
+
+    crate::tray::update_tray_capture_status(paused);
+    let _ = app_handle.emit("capture-pause-changed", paused);
+
+    Ok(paused)
+}
+
+#[tauri::command]
+fn toggle_capture_pause(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+    let current = state.capture_paused.load(std::sync::atomic::Ordering::Relaxed);
+    set_capture_paused_internal(&app, !current)
+}
+
+#[tauri::command]
+fn set_capture_paused(paused: bool, app: tauri::AppHandle) -> Result<bool, String> {
+    set_capture_paused_internal(&app, paused)
+}
+
+#[tauri::command]
+fn is_capture_paused(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.capture_paused.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<crate::db::settings::PrivacySettings, String> {
     let conn = state.db_conn.lock().unwrap();
@@ -222,9 +263,25 @@ fn get_settings(state: State<'_, AppState>) -> Result<crate::db::settings::Priva
 }
 
 #[tauri::command]
-fn update_settings(settings: crate::db::settings::PrivacySettings, state: State<'_, AppState>) -> Result<(), String> {
+fn update_settings(settings: crate::db::settings::PrivacySettings, state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    let paused = settings.capture_paused;
+    state.capture_paused.store(paused, std::sync::atomic::Ordering::Relaxed);
+
     let conn = state.db_conn.lock().unwrap();
-    crate::db::settings::update_settings(&conn, settings).map_err(|e| e.to_string())
+    crate::db::settings::update_settings(&conn, settings).map_err(|e| e.to_string())?;
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Some(target) = app.try_state::<crate::capture::SystemTarget>() {
+        #[cfg(target_os = "macos")]
+        target.notch_controller.set_paused(paused);
+        #[cfg(target_os = "windows")]
+        target.windows_controller.set_paused(paused);
+    }
+
+    crate::tray::update_tray_capture_status(paused);
+    let _ = app.emit("capture-pause-changed", paused);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -748,6 +805,9 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let conn = db::init(app_data_dir)?;
             
+            let initial_settings = crate::db::settings::get_settings(&conn).unwrap_or_default();
+            let initial_paused = initial_settings.capture_paused;
+
             let mut ce = ContextEngine::from_env();
             ce.register(Box::new(CaptureContextProvider));
             ce.register(Box::new(UserActionContextProvider));
@@ -759,9 +819,11 @@ pub fn run() {
             app.manage(AppState {
                 db_conn: Mutex::new(conn),
                 context_engine: Mutex::new(ce),
-                capture_paused: std::sync::atomic::AtomicBool::new(false),
+                capture_paused: std::sync::atomic::AtomicBool::new(initial_paused),
             });
             
+            crate::tray::update_tray_capture_status(initial_paused);
+
             // Start the clipboard monitor loop
             let app_handle = app.handle().clone();
             clipboard::start_monitor(app_handle.clone());
@@ -792,6 +854,10 @@ pub fn run() {
             
             // Initialize Capture Target Overlay
             let system_target = capture::SystemTarget::new(app_handle.clone());
+            #[cfg(target_os = "macos")]
+            system_target.notch_controller.set_paused(initial_paused);
+            #[cfg(target_os = "windows")]
+            system_target.windows_controller.set_paused(initial_paused);
             app.manage(system_target);
             
             // Initialize Capture Toast Window
@@ -854,6 +920,9 @@ pub fn run() {
             windows_target_drag_over,
             windows_target_drag_leave,
             windows_target_drop,
+            toggle_capture_pause,
+            set_capture_paused,
+            is_capture_paused,
             create_context_signal,
             get_context_signal,
             list_context_signals,

@@ -342,6 +342,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 17;
     }
 
+    if user_version < 18 {
+        let _ = conn.execute("ALTER TABLE settings ADD COLUMN capture_paused INTEGER DEFAULT 0", []);
+        user_version = 18;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

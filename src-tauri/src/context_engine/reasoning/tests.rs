@@ -44,6 +44,7 @@ mod tests {
             enable_ai_reasoning: true,
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 
@@ -2772,6 +2773,7 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
             enable_ai_reasoning: false,  // <-- DISABLED
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
         }).unwrap();
 
         let item_id = operations::create_item(&conn, None, None, "text", "disabled AI test", None, "{}")

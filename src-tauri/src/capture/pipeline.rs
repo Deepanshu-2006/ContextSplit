@@ -416,6 +416,19 @@ impl CapturePipeline {
         // Step 1 & 2: Validate
         self.validate(&event)?;
 
+        // Check global capture pause mode for automatic captures
+        if event.capture_type != crate::capture::models::CaptureType::Manual {
+            let is_paused = if let Some(st) = app_handle.try_state::<AppState>() {
+                st.capture_paused.load(std::sync::atomic::Ordering::Relaxed)
+            } else {
+                false
+            };
+
+            if is_paused {
+                return Err(CaptureError::PrivacyRejected("Capture is paused".to_string()));
+            }
+        }
+
         // Step 3: Normalize content
         let mut normalized_event = self.normalize(event)?;
 

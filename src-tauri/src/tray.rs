@@ -1,8 +1,25 @@
+use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    Manager, Emitter
+    AppHandle, Emitter, Manager,
 };
+
+pub struct TrayMenuItems {
+    pub status_item: MenuItem<tauri::Wry>,
+    pub toggle_capture_item: MenuItem<tauri::Wry>,
+}
+
+static TRAY_ITEMS: Mutex<Option<TrayMenuItems>> = Mutex::new(None);
+
+pub fn update_tray_capture_status(paused: bool) {
+    if let Ok(guard) = TRAY_ITEMS.lock() {
+        if let Some(items) = guard.as_ref() {
+            let _ = items.status_item.set_text(if paused { "Capture Status: Paused" } else { "Capture Status: Active" });
+            let _ = items.toggle_capture_item.set_text(if paused { "Resume Capture" } else { "Pause Capture" });
+        }
+    }
+}
 
 pub fn create_tray(app: &tauri::App) -> Result<(), tauri::Error> {
     let inbox_i = MenuItem::with_id(app, "inbox", "Inbox", true, None::<&str>)?;
@@ -25,8 +42,12 @@ pub fn create_tray(app: &tauri::App) -> Result<(), tauri::Error> {
         ],
     )?;
 
-    let status_clone = status_i.clone();
-    let toggle_capture_clone = toggle_capture_i.clone();
+    if let Ok(mut guard) = TRAY_ITEMS.lock() {
+        *guard = Some(TrayMenuItems {
+            status_item: status_i.clone(),
+            toggle_capture_item: toggle_capture_i.clone(),
+        });
+    }
 
     let _tray = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -42,11 +63,7 @@ pub fn create_tray(app: &tauri::App) -> Result<(), tauri::Error> {
                 "toggle_capture" => {
                     let state = app_handle.state::<crate::AppState>();
                     let current = state.capture_paused.load(std::sync::atomic::Ordering::Relaxed);
-                    let new_state = !current;
-                    state.capture_paused.store(new_state, std::sync::atomic::Ordering::Relaxed);
-                    
-                    let _ = status_clone.set_text(if new_state { "Capture Status: Paused" } else { "Capture Status: Active" });
-                    let _ = toggle_capture_clone.set_text(if new_state { "Resume Capture" } else { "Pause Capture" });
+                    let _ = crate::set_capture_paused_internal(app_handle, !current);
                 }
                 "settings" => {
                     if let Some(window) = app_handle.get_webview_window("main") {
