@@ -11,6 +11,7 @@ import { ContextOverviewPanel } from "./components/workspace/ContextOverviewPane
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
+import { CaptureToastRenderer } from "./components/workspace/CaptureToastRenderer";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import "./App.css";
@@ -20,6 +21,7 @@ function App() {
   const { checkForCandidates } = useDiscoveryStore();
   const [isNotchTarget, setIsNotchTarget] = useState(false);
   const [isOrbTarget, setIsOrbTarget] = useState(false);
+  const [isToastTarget, setIsToastTarget] = useState(false);
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
@@ -34,6 +36,11 @@ function App() {
     if (getCurrentWindow().label === "windows-orb-target") {
       setIsOrbTarget(true);
       return;
+    }
+
+    if (getCurrentWindow().label === "capture-toast") {
+      setIsToastTarget(true);
+      return; // Skip loading workspaces for toast window
     }
 
     loadWorkspaces();
@@ -70,6 +77,14 @@ function App() {
     return (
       <div className="w-screen h-screen flex justify-center bg-transparent">
         <CaptureOrb />
+      </div>
+    );
+  }
+
+  if (isToastTarget) {
+    return (
+      <div className="w-screen h-screen flex justify-end items-end p-4 bg-transparent overflow-hidden pointer-events-none">
+        <CaptureToastRenderer />
       </div>
     );
   }

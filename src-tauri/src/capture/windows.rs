@@ -67,21 +67,8 @@ impl CaptureTarget for WindowsTarget {
         Ok(())
     }
 
-    fn report_success(&self, req: &CaptureRequest) -> Result<(), String> {
-        use tauri_plugin_notification::NotificationExt;
-        
-        let (emoji, action) = match req.data_type.as_str() {
-            "url" => ("🔗", "Link grabbed"),
-            "image" => ("🖼️", "Image saved"),
-            "file" => ("📄", "File saved"),
-            _ => ("📝", "Text saved"),
-        };
-        
-        let _ = self.app_handle.notification()
-            .title("ContextSplit")
-            .body(format!("{} {}", action, emoji))
-            .show();
-            
+    fn report_success(&self, _req: &CaptureRequest) -> Result<(), String> {
+        // Native Windows notifications replaced by custom CaptureToast UI
         Ok(())
     }
 

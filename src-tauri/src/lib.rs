@@ -720,6 +720,36 @@ pub fn run() {
             let system_target = capture::SystemTarget::new(app_handle.clone());
             app.manage(system_target);
             
+            // Initialize Capture Toast Window
+            if app_handle.get_webview_window("capture-toast").is_none() {
+                let _ = tauri::WebviewWindowBuilder::new(
+                    &app_handle,
+                    "capture-toast",
+                    tauri::WebviewUrl::App("index.html".into())
+                )
+                .title("Capture Notification")
+                .inner_size(320.0, 100.0)
+                .transparent(true)
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .visible(false)
+                .accept_first_mouse(false)
+                .focused(false)
+                .build()
+                .map(|window| {
+                    if let Ok(Some(monitor)) = window.primary_monitor() {
+                        let monitor_size = monitor.size();
+                        let window_size = window.outer_size().unwrap_or(tauri::PhysicalSize::new(320, 100));
+                        
+                        let x = monitor_size.width.saturating_sub(window_size.width + 24) as i32;
+                        let y = monitor_size.height.saturating_sub(window_size.height + 24) as i32;
+                        
+                        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+                    }
+                });
+            }
+            
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
