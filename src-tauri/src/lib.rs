@@ -669,6 +669,33 @@ fn hide_notch(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
     state.hide()
 }
 
+#[tauri::command]
+fn notch_drag_enter(state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "macos")]
+    state.notch_controller.on_drag_enter();
+}
+
+#[tauri::command]
+fn notch_drag_over(is_near_center: bool, state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "macos")]
+    state.notch_controller.on_drag_over(is_near_center);
+}
+
+#[tauri::command]
+fn notch_drag_leave(state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "macos")]
+    state.notch_controller.on_drag_leave();
+}
+
+#[tauri::command]
+fn notch_drop(state: State<'_, capture::SystemTarget>) -> bool {
+    #[cfg(target_os = "macos")]
+    return state.notch_controller.on_drop();
+    
+    #[cfg(not(target_os = "macos"))]
+    return false;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -778,6 +805,10 @@ pub fn run() {
             handle_capture,
             show_notch,
             hide_notch,
+            notch_drag_enter,
+            notch_drag_over,
+            notch_drag_leave,
+            notch_drop,
             create_context_signal,
             get_context_signal,
             list_context_signals,

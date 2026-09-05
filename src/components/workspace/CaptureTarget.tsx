@@ -1,21 +1,41 @@
-import React, { useRef } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { Check, X } from 'lucide-react';
 import { useCursorProximity } from '../../hooks/useCursorProximity';
+import { listen } from '@tauri-apps/api/event';
 
 export const CaptureTarget: React.FC = () => {
   const { captureState } = useWorkspaceStore();
   const targetRef = useRef<HTMLDivElement>(null);
   const proximity = useCursorProximity(targetRef);
+  const [notchState, setNotchState] = useState<string>('idle');
+  
+  useEffect(() => {
+    if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+      const unlisten = listen('notch-state-changed', (event) => {
+        setNotchState(event.payload as string);
+      });
+      return () => {
+        unlisten.then(f => f());
+      };
+    }
+  }, []);
 
-  if (captureState === 'hidden') return null;
+  const isNotch = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target";
+  
+  if (!isNotch && captureState === 'hidden') return null;
+  if (isNotch && notchState === 'idle') return null;
 
   const baseClasses = "fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-2xl flex items-center justify-center transition-all duration-200 ease-out border backdrop-blur-md overflow-hidden pointer-events-none w-48 h-14 origin-center";
   
   let stateClasses = "";
   let content = <span className="font-medium text-sm text-gray-800">Drop to ContextSplit</span>;
 
-  if (captureState === 'success') {
+  const resolvedState = isNotch ? 
+    (notchState === 'captured' ? 'success' : notchState === 'cancelled' ? 'failure' : null) 
+    : captureState;
+
+  if (resolvedState === 'success') {
     stateClasses = "bg-green-500/90 border-green-600 shadow-lg scale-100 opacity-100";
     content = (
       <div className="flex items-center gap-2 text-white">
@@ -23,7 +43,7 @@ export const CaptureTarget: React.FC = () => {
         <span className="font-semibold text-sm">Saved</span>
       </div>
     );
-  } else if (captureState === 'failure') {
+  } else if (resolvedState === 'failure') {
     stateClasses = "bg-red-500/90 border-red-600 shadow-lg scale-100 opacity-100 animate-pulse";
     content = (
       <div className="flex items-center gap-2 text-white">
@@ -31,6 +51,14 @@ export const CaptureTarget: React.FC = () => {
         <span className="font-semibold text-sm">Failed</span>
       </div>
     );
+  } else if (isNotch) {
+    if (notchState === 'hovering') {
+        stateClasses = "bg-white/90 border-black/10 shadow-md scale-90 opacity-95";
+        content = <span className="font-medium text-sm text-gray-600">ContextSplit</span>;
+    } else if (notchState === 'activated') {
+        stateClasses = "bg-blue-100/95 border-blue-300 shadow-xl scale-110 opacity-100 ring-4 ring-blue-500/30";
+        content = <span className="font-semibold text-sm text-blue-700">Release to capture</span>;
+    }
   } else {
     // Proximity states handle the visual representation when capturing is 'visible'
     switch (proximity) {

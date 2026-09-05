@@ -8,27 +8,40 @@ export function useDragAndDrop() {
   useEffect(() => {
     let dragCounter = 0;
 
-    const handleDragEnter = (e: DragEvent) => {
+    const handleDragEnter = async (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       dragCounter++;
       if (dragCounter === 1) {
-        setCaptureState('visible');
+        if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+          await invoke('notch_drag_enter');
+        } else {
+          setCaptureState('visible');
+        }
       }
     };
 
-    const handleDragOver = (e: DragEvent) => {
+    const handleDragOver = async (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      // Visual proximity state is now handled independently in CaptureTarget
+      
+      if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+        // Check if near center (Y axis is less relevant for notch, let's say X is near center)
+        const isNearCenter = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8;
+        await invoke('notch_drag_over', { isNearCenter });
+      }
     };
 
-    const handleDragLeave = (e: DragEvent) => {
+    const handleDragLeave = async (e: DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
       dragCounter--;
       if (dragCounter === 0) {
-        setCaptureState('hidden');
+        if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target") {
+          await invoke('notch_drag_leave');
+        } else {
+          setCaptureState('hidden');
+        }
       }
     };
 
@@ -37,10 +50,24 @@ export function useDragAndDrop() {
       e.stopPropagation();
       dragCounter = 0;
       
+      const isNotch = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label === "macos-notch-target";
+      
       const dt = e.dataTransfer;
       if (!dt) {
-        setCaptureState('hidden');
+        if (isNotch) {
+          await invoke('notch_drag_leave');
+        } else {
+          setCaptureState('hidden');
+        }
         return;
+      }
+
+      if (isNotch) {
+        // For Notch Target, check if drop is accepted (i.e., state is Activated)
+        const accepted = await invoke<boolean>('notch_drop');
+        if (!accepted) {
+          return;
+        }
       }
 
       try {
@@ -53,10 +80,6 @@ export function useDragAndDrop() {
           const file = dt.files[0];
           const isImage = file.type.startsWith('image/');
           
-          // Convert file to base64 data URI so Rust can handle it easily
-          // In a production app with huge files we'd just send the path, 
-          // but browser security prevents getting absolute paths easily without Tauri plugins.
-          // Since we are prototyping cross-platform, FileReader is robust.
           const dataUri = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = (ev) => resolve(ev.target?.result as string);
@@ -109,17 +132,22 @@ export function useDragAndDrop() {
 
         if (req) {
           await invoke('handle_capture', { req });
-          setCaptureState('success');
-          // Hide success message after 2 seconds
-          setTimeout(() => setCaptureState('hidden'), 2000);
+          if (!isNotch) {
+            setCaptureState('success');
+            setTimeout(() => setCaptureState('hidden'), 2000);
+          }
         } else {
-          setCaptureState('failure');
-          setTimeout(() => setCaptureState('hidden'), 2000);
+          if (!isNotch) {
+            setCaptureState('failure');
+            setTimeout(() => setCaptureState('hidden'), 2000);
+          }
         }
       } catch (err) {
         console.error('Failed to process drop:', err);
-        setCaptureState('failure');
-        setTimeout(() => setCaptureState('hidden'), 2000);
+        if (!isNotch) {
+          setCaptureState('failure');
+          setTimeout(() => setCaptureState('hidden'), 2000);
+        }
       }
     };
 

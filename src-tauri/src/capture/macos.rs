@@ -1,8 +1,11 @@
 use super::target::{CaptureTarget, CaptureRequest};
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
+use super::notch::{NotchCaptureController, NotchState};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize, Emitter};
+use std::sync::Arc;
 
 pub struct MacOSTarget {
     app_handle: AppHandle,
+    pub notch_controller: Arc<NotchCaptureController<Box<dyn Fn(NotchState) + Send + Sync>>>,
 }
 
 impl MacOSTarget {
@@ -34,13 +37,26 @@ impl MacOSTarget {
                     
                     let _ = window.set_position(PhysicalPosition::new(x, y));
                 }
-                
-                // TODO: Further macOS specific window styling (ignoresMouseEvents, NSWindowCollectionBehavior)
-                // can be done via raw Objective-C hooks if needed, but for now Tauri's builder covers most.
             });
         }
         
-        Self { app_handle }
+        let app_handle_clone = app_handle.clone();
+        let notch_controller = Arc::new(NotchCaptureController::new(Box::new(move |state| {
+            if let Some(window) = app_handle_clone.get_webview_window("macos-notch-target") {
+                let _ = window.emit("notch-state-changed", state);
+                
+                match state {
+                    NotchState::Hovering | NotchState::Activated | NotchState::Captured | NotchState::Cancelled => {
+                        let _ = window.show();
+                    }
+                    NotchState::Idle => {
+                        let _ = window.hide();
+                    }
+                }
+            }
+        }) as Box<dyn Fn(NotchState) + Send + Sync>));
+        
+        Self { app_handle, notch_controller }
     }
 }
 
@@ -72,12 +88,12 @@ impl CaptureTarget for MacOSTarget {
     }
 
     fn report_success(&self, _req: &CaptureRequest) -> Result<(), String> {
-        // Native macOS notifications replaced by custom CaptureToast UI
+        self.notch_controller.on_capture_success();
         Ok(())
     }
 
     fn report_failure(&self, error: &str) -> Result<(), String> {
-        // TODO: Trigger failure animation
+        self.notch_controller.on_capture_failure();
         println!("MacOSTarget: report_failure({})", error);
         Ok(())
     }

@@ -8,6 +8,7 @@ pub mod privacy;
 pub mod queue;
 pub mod target;
 pub mod validator;
+pub mod notch;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
