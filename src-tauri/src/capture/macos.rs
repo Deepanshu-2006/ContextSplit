@@ -17,23 +17,23 @@ impl MacOSTarget {
                 "macos-notch-target",
                 WebviewUrl::App("index.html".into())
             )
-            .title("ContextSplit Capture")
-            .inner_size(300.0, 100.0) // Adjust based on notch size
+            .title("ContextSplit Capture Notch")
+            .inner_size(320.0, 100.0) // Adjust based on notch size
             .transparent(true)
             .decorations(false)
             .always_on_top(true)
             .skip_taskbar(true)
-            .visible(false)
+            .visible(true)
             .accept_first_mouse(true) // Allow drag and drop immediately
             .build()
             .map(|window| {
                 // Position window at top center of primary monitor
                 if let Ok(Some(monitor)) = window.primary_monitor() {
                     let monitor_size = monitor.size();
-                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(300, 100));
+                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(320, 100));
                     
                     let x = (monitor_size.width as i32 / 2) - (window_size.width as i32 / 2);
-                    let y = 0; // Top of the screen
+                    let y = 0; // Top of the screen flush against bezel/notch
                     
                     let _ = window.set_position(PhysicalPosition::new(x, y));
                 }
@@ -45,15 +45,6 @@ impl MacOSTarget {
             if let Some(window) = app_handle_clone.get_webview_window("macos-notch-target") {
                 let _ = window.emit("target-state-changed", state);
                 let _ = window.emit("notch-state-changed", state);
-                
-                match state {
-                    NotchState::DragDetected | NotchState::Hover | NotchState::Active | NotchState::Captured | NotchState::Cancelled | NotchState::Paused => {
-                        let _ = window.show();
-                    }
-                    NotchState::Idle => {
-                        let _ = window.hide();
-                    }
-                }
             }
         }) as Box<dyn Fn(NotchState) + Send + Sync>));
         

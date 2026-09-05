@@ -146,7 +146,7 @@ impl ContextEngine {
                         let now = Utc::now();
                         let diff = now.signed_duration_since(last_activity).num_seconds();
                         
-                        if diff > self.inactivity_threshold_secs {
+                        if diff >= self.inactivity_threshold_secs {
                             // Expired. End it and create a new one.
                             let _ = operations::end_session(conn, &session.id);
                             
