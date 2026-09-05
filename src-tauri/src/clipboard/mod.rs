@@ -2,7 +2,7 @@ use arboard::Clipboard;
 use clipboard_master::{CallbackResult, ClipboardHandler, Master};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::capture::models::PlatformClipboardInput;
 use crate::capture::{get_platform_adapter, CaptureCore};
@@ -46,6 +46,12 @@ impl Monitor {
     }
 
     fn process_clipboard(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(state) = self.app_handle.try_state::<crate::AppState>() {
+            if state.capture_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(());
+            }
+        }
+        
         let mut clipboard = Clipboard::new()?;
 
         // Give the OS a tiny moment to write the data to the clipboard.

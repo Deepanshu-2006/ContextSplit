@@ -1,5 +1,6 @@
 mod db;
 mod clipboard;
+mod tray;
 pub mod capture;
 pub mod context_engine;
 pub mod semantic;
@@ -13,6 +14,7 @@ use context_engine::providers::{CaptureContextProvider, UserActionContextProvide
 pub struct AppState {
     pub db_conn: Mutex<rusqlite::Connection>,
     pub context_engine: Mutex<ContextEngine>,
+    pub capture_paused: std::sync::atomic::AtomicBool,
 }
 
 #[tauri::command]
@@ -672,6 +674,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            tray::create_tray(app)?;
+
             let app_data_dir = app.path().app_data_dir().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let conn = db::init(app_data_dir)?;
             
@@ -686,6 +693,7 @@ pub fn run() {
             app.manage(AppState {
                 db_conn: Mutex::new(conn),
                 context_engine: Mutex::new(ce),
+                capture_paused: std::sync::atomic::AtomicBool::new(false),
             });
             
             // Start the clipboard monitor loop
