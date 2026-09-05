@@ -517,6 +517,43 @@ impl CapturePipeline {
         let _ = app_handle.emit("inbox://updated", &item);
         let _ = app_handle.emit("capture://event", &normalized_event);
 
+        // Universal system notification (macOS / Windows native notification center banner)
+        {
+            use tauri_plugin_notification::NotificationExt;
+            let title = normalized_event.title()
+                .or_else(|| normalized_event.source_metadata.window_title.clone())
+                .or_else(|| normalized_event.source_metadata.process_name.clone())
+                .unwrap_or_else(|| "ContextSplit Capture".to_string());
+
+            let body = match normalized_event.content_type {
+                crate::capture::models::ContentType::Url => {
+                    normalized_event.domain().unwrap_or_else(|| {
+                        let c = normalized_event.content.trim();
+                        if c.len() > 60 { format!("{}...", &c[..60]) } else { c.to_string() }
+                    })
+                }
+                crate::capture::models::ContentType::File => {
+                    normalized_event.filename().unwrap_or_else(|| "File saved to Inbox".to_string())
+                }
+                crate::capture::models::ContentType::Image => "Image copied to Inbox".to_string(),
+                _ => {
+                    let trimmed = normalized_event.content.trim();
+                    if trimmed.len() > 60 {
+                        format!("{}...", &trimmed[..60])
+                    } else {
+                        trimmed.to_string()
+                    }
+                }
+            };
+
+            let _ = app_handle
+                .notification()
+                .builder()
+                .title(title)
+                .body(body)
+                .show();
+        }
+
         if let Some(toast_win) = app_handle.get_webview_window("capture-toast") {
             let _ = toast_win.show();
         }

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { BoxSelect, LayoutTemplate, Inbox, Clock } from "lucide-react";
+import { BoxSelect, LayoutTemplate, Inbox, Clock, Trash2 } from "lucide-react";
 import { ReactFlow, Background, BackgroundVariant, Node, applyNodeChanges, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceStore } from "../../store/workspaceStore";
 import { ItemNode } from "./nodes/ItemNode";
 
@@ -14,7 +15,7 @@ export function Canvas() {
     workspaces, activeWorkspaceId, activeItems, 
     updateItemPositions, moveItemsToWorkspace,
     setIsDraggingCard, setHoveredWorkspaceId,
-    openTimeline,
+    openTimeline, emptyInbox,
   } = useWorkspaceStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
@@ -156,6 +157,16 @@ export function Canvas() {
     );
   }
 
+  const handleEmptyInbox = async () => {
+    const isConfirmed = await confirm(
+      "Are you sure you want to empty the inbox? All items in the inbox will be permanently deleted.",
+      { title: "Empty Inbox", kind: "warning" }
+    );
+    if (isConfirmed) {
+      await emptyInbox();
+    }
+  };
+
   const title = isInbox ? "Inbox" : activeWorkspace?.name;
   const description = isInbox
     ? "Your Inbox is empty. Captured items will appear here."
@@ -215,6 +226,20 @@ export function Canvas() {
             </button>
           )}
         </div>
+
+        {/* Floating Empty Inbox Trash Bin Button */}
+        {isInbox && activeItems.length > 0 && (
+          <div className="absolute bottom-6 right-6 z-20 pointer-events-auto">
+            <button
+              onClick={handleEmptyInbox}
+              className="flex items-center gap-2 px-3.5 py-2.5 bg-white/95 hover:bg-rose-50 text-gray-600 hover:text-rose-600 border border-gray-200/80 hover:border-rose-200 shadow-md hover:shadow-lg rounded-xl backdrop-blur-md transition-all duration-200 cursor-pointer group"
+              title="Empty Inbox"
+            >
+              <Trash2 size={16} className="text-gray-400 group-hover:text-rose-500 transition-colors" />
+              <span className="text-xs font-semibold tracking-wide">Empty Inbox</span>
+            </button>
+          </div>
+        )}
 
         {/* Empty State Overlay */}
         {activeItems.length === 0 && (
