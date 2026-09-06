@@ -567,6 +567,35 @@ fn recalculate_workspace_suggested_memberships(
     )
 }
 
+#[tauri::command]
+fn bulk_assign_inbox_items_to_workspace(
+    item_ids: Vec<String>,
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::models::Item>, String> {
+    let mut conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::bulk_assign_inbox_items_to_workspace(&mut conn, &item_ids, workspace_id)
+}
+
+#[tauri::command]
+fn bulk_dismiss_inbox_suggestions(
+    item_ids: Vec<String>,
+    workspace_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::bulk_dismiss_inbox_suggestions(&mut conn, &item_ids, workspace_id.as_deref())
+}
+
+#[tauri::command]
+fn bulk_archive_or_clear_inbox_items(
+    item_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let mut conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::db::operations::bulk_archive_or_clear_inbox_items(&mut conn, &item_ids)
+}
+
 // ---------------------------------------------------------------------------
 // Context Timeline commands
 // ---------------------------------------------------------------------------
@@ -1058,9 +1087,13 @@ pub fn run() {
             get_inbox_item_state,
             transition_inbox_item_state,
             list_inbox_item_states,
-            // Inbox Attention Engine (Day 12)
+            // Inbox Attention Engine
             evaluate_inbox_item_attention,
-            evaluate_inbox_attention_batch
+            evaluate_inbox_attention_batch,
+            // Multi-Select Bulk Inbox Operations
+            bulk_assign_inbox_items_to_workspace,
+            bulk_dismiss_inbox_suggestions,
+            bulk_archive_or_clear_inbox_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

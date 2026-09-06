@@ -10,6 +10,7 @@ import {
   Search,
   RefreshCw,
   X,
+  CheckSquare,
 } from 'lucide-react';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { Item, Workspace } from '../../services/db';
@@ -22,6 +23,7 @@ import {
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { InboxSection } from './InboxSection';
 import { InboxItemCard } from './InboxItemCard';
+import { BulkActionsBar } from './BulkActionsBar';
 
 interface InboxViewProps {
   items: Item[];
@@ -45,11 +47,20 @@ export function InboxView({
     inboxStateMap,
     candidateItemMap,
     isLoading,
+    isBatchProcessing,
+    selectedItemIds,
+    isMultiSelectActive,
     setViewMode,
     setSortOrder,
     setSearchQuery,
     setSelectedSectionFilter,
     fetchInboxAnalysis,
+    selectAllItems,
+    clearSelection,
+    setMultiSelectActive,
+    bulkAssignToWorkspace,
+    bulkDismissSuggestions,
+    bulkArchiveOrClear,
   } = useInboxStore();
 
   const { emptyInbox } = useWorkspaceStore();
@@ -128,6 +139,28 @@ export function InboxView({
     );
     if (isConfirmed) {
       await emptyInbox();
+    }
+  };
+
+  const handleSelectAll = () => {
+    selectAllItems(filteredDerivedItems.map((d) => d.item.id));
+  };
+
+  const handleBulkAssign = async (workspaceId: string) => {
+    await bulkAssignToWorkspace(workspaceId);
+  };
+
+  const handleBulkDismiss = async () => {
+    await bulkDismissSuggestions();
+  };
+
+  const handleBulkClear = async () => {
+    const isConfirmed = await confirm(
+      `Are you sure you want to clear ${selectedItemIds.length} item(s) from the Inbox?`,
+      { title: 'Clear Selected Items', kind: 'warning' }
+    );
+    if (isConfirmed) {
+      await bulkArchiveOrClear();
     }
   };
 
@@ -241,6 +274,27 @@ export function InboxView({
                 <span>Canvas</span>
               </button>
             </div>
+
+            {/* Multi-Select Toggle */}
+            {items.length > 0 && (
+              <button
+                onClick={() => setMultiSelectActive(!isMultiSelectActive)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 border rounded-lg text-[12px] font-medium shadow-2xs transition-colors cursor-pointer ${
+                  isMultiSelectActive || selectedItemIds.length > 0
+                    ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                    : 'bg-white hover:bg-gray-50 text-gray-700 border-black/6'
+                }`}
+                title="Toggle Multi-Select Mode"
+              >
+                <CheckSquare size={13} className={isMultiSelectActive ? 'text-indigo-600' : 'text-gray-400'} />
+                <span>Select</span>
+                {selectedItemIds.length > 0 && (
+                  <span className="ml-0.5 bg-indigo-600 text-white text-[10px] font-bold px-1.5 py-0.2 rounded-full">
+                    {selectedItemIds.length}
+                  </span>
+                )}
+              </button>
+            )}
 
             {/* Sort Order Toggle */}
             <button
@@ -436,6 +490,19 @@ export function InboxView({
           </div>
         )}
       </div>
+
+      {/* Floating Multi-Select Bulk Actions Bar */}
+      <BulkActionsBar
+        selectedCount={selectedItemIds.length}
+        totalCount={filteredDerivedItems.length}
+        workspaces={workspaces}
+        isProcessing={isBatchProcessing}
+        onSelectAll={handleSelectAll}
+        onClearSelection={clearSelection}
+        onBulkAssign={handleBulkAssign}
+        onBulkDismiss={handleBulkDismiss}
+        onBulkClear={handleBulkClear}
+      />
     </div>
   );
 }

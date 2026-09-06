@@ -7,6 +7,7 @@ import {
   ContextCandidate,
   CandidateWithItems,
 } from '../services/db';
+import { useWorkspaceStore } from './workspaceStore';
 
 export type InboxSectionKey =
   | 'needs_attention'
@@ -44,6 +45,10 @@ interface InboxStoreState {
   isLoading: boolean;
   isBatchProcessing: boolean;
   
+  // Multi-Select
+  selectedItemIds: string[];
+  isMultiSelectActive: boolean;
+
   // Actions
   setViewMode: (mode: InboxViewMode) => void;
   setSortOrder: (order: InboxSortOrder) => void;
@@ -52,11 +57,23 @@ interface InboxStoreState {
   toggleSection: (section: InboxSectionKey) => void;
   setSectionCollapsed: (section: InboxSectionKey, collapsed: boolean) => void;
   
+  // Multi-Select Actions
+  toggleSelectItem: (itemId: string) => void;
+  selectItems: (itemIds: string[]) => void;
+  deselectItems: (itemIds: string[]) => void;
+  selectAllItems: (itemIds: string[]) => void;
+  clearSelection: () => void;
+  setMultiSelectActive: (active: boolean) => void;
+
   fetchInboxAnalysis: (items: Item[]) => Promise<void>;
   acceptItemSuggestion: (itemId: string, workspaceId: string) => Promise<void>;
   dismissItemSuggestion: (itemId: string, workspaceId?: string) => Promise<void>;
   markItemUnderstood: (itemId: string, reason?: string) => Promise<void>;
   acceptAllHighConfidenceSuggestions: (items: Item[]) => Promise<number>;
+  
+  bulkAssignToWorkspace: (workspaceId: string) => Promise<void>;
+  bulkDismissSuggestions: (workspaceId?: string) => Promise<void>;
+  bulkArchiveOrClear: () => Promise<number>;
 }
 
 export function deriveItemSection(
@@ -132,6 +149,8 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   candidateItemMap: {},
   isLoading: false,
   isBatchProcessing: false,
+  selectedItemIds: [],
+  isMultiSelectActive: false,
 
   setViewMode: (mode) => set({ viewMode: mode }),
   setSortOrder: (order) => set({ sortOrder: order }),
@@ -152,6 +171,52 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
         ...s.collapsedSections,
         [section]: collapsed,
       },
+    })),
+
+  toggleSelectItem: (itemId: string) =>
+    set((s) => {
+      const exists = s.selectedItemIds.includes(itemId);
+      const next = exists
+        ? s.selectedItemIds.filter((id) => id !== itemId)
+        : [...s.selectedItemIds, itemId];
+      return {
+        selectedItemIds: next,
+        isMultiSelectActive: next.length > 0 ? true : s.isMultiSelectActive,
+      };
+    }),
+
+  selectItems: (itemIds: string[]) =>
+    set((s) => {
+      const setIds = new Set([...s.selectedItemIds, ...itemIds]);
+      return {
+        selectedItemIds: Array.from(setIds),
+        isMultiSelectActive: true,
+      };
+    }),
+
+  deselectItems: (itemIds: string[]) =>
+    set((s) => {
+      const setIds = new Set(itemIds);
+      return {
+        selectedItemIds: s.selectedItemIds.filter((id) => !setIds.has(id)),
+      };
+    }),
+
+  selectAllItems: (itemIds: string[]) =>
+    set({
+      selectedItemIds: [...itemIds],
+      isMultiSelectActive: itemIds.length > 0,
+    }),
+
+  clearSelection: () =>
+    set({
+      selectedItemIds: [],
+    }),
+
+  setMultiSelectActive: (active: boolean) =>
+    set((s) => ({
+      isMultiSelectActive: active,
+      selectedItemIds: active ? s.selectedItemIds : [],
     })),
 
   fetchInboxAnalysis: async (items: Item[]) => {
@@ -318,5 +383,91 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
       set({ isBatchProcessing: false });
     }
     return count;
+  },
+
+  bulkAssignToWorkspace: async (workspaceId: string) => {
+    const { selectedItemIds } = get();
+    if (selectedItemIds.length === 0) return;
+
+    set({ isBatchProcessing: true });
+    try {
+      // 1. Transactional bulk assign on backend
+      await db.bulkAssignInboxItemsToWorkspace(selectedItemIds, workspaceId);
+
+      // 2. Remove assigned items from activeItems in workspaceStore
+      const currentActive = useWorkspaceStore.getState().activeItems;
+      const filtered = currentActive.filter((item) => !selectedItemIds.includes(item.id));
+      const removedCount = currentActive.length - filtered.length;
+
+      useWorkspaceStore.setState((s) => ({
+        activeItems: filtered,
+        inboxCount: Math.max(0, s.inboxCount - removedCount),
+      }));
+
+      // 3. Clear selection
+      set({ selectedItemIds: [] });
+    } catch (err) {
+      console.error('Failed to bulk assign items:', err);
+      throw err;
+    } finally {
+      set({ isBatchProcessing: false });
+    }
+  },
+
+  bulkDismissSuggestions: async (workspaceId?: string) => {
+    const { selectedItemIds } = get();
+    if (selectedItemIds.length === 0) return;
+
+    set({ isBatchProcessing: true });
+    try {
+      await db.bulkDismissInboxSuggestions(selectedItemIds, workspaceId);
+
+      // Update local inbox state cache to 'understood'
+      const stateMap = { ...get().inboxStateMap };
+      const now = new Date().toISOString();
+      for (const id of selectedItemIds) {
+        stateMap[id] = {
+          item_id: id,
+          state: 'understood',
+          previous_state: stateMap[id]?.state,
+          reason: 'Bulk dismissed suggestions',
+          created_at: stateMap[id]?.created_at || now,
+          updated_at: now,
+        };
+      }
+      set({ inboxStateMap: stateMap, selectedItemIds: [] });
+    } catch (err) {
+      console.error('Failed to bulk dismiss suggestions:', err);
+      throw err;
+    } finally {
+      set({ isBatchProcessing: false });
+    }
+  },
+
+  bulkArchiveOrClear: async () => {
+    const { selectedItemIds } = get();
+    if (selectedItemIds.length === 0) return 0;
+
+    set({ isBatchProcessing: true });
+    try {
+      const deletedCount = await db.bulkArchiveOrClearInboxItems(selectedItemIds);
+
+      // Remove deleted items from activeItems in workspaceStore
+      const currentActive = useWorkspaceStore.getState().activeItems;
+      const filtered = currentActive.filter((item) => !selectedItemIds.includes(item.id));
+
+      useWorkspaceStore.setState((s) => ({
+        activeItems: filtered,
+        inboxCount: Math.max(0, s.inboxCount - deletedCount),
+      }));
+
+      set({ selectedItemIds: [] });
+      return deletedCount;
+    } catch (err) {
+      console.error('Failed to bulk clear items:', err);
+      throw err;
+    } finally {
+      set({ isBatchProcessing: false });
+    }
   },
 }));

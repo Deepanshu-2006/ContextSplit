@@ -15,6 +15,8 @@ import {
   ExternalLink,
   GripVertical,
   FolderPlus,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import { db, Workspace } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
@@ -38,9 +40,16 @@ export function InboxItemCard({
   showSectionBadge = false,
 }: InboxItemCardProps) {
   const { item, section, attention, candidateInfo } = derived;
-  const { dismissItemSuggestion } = useInboxStore();
+  const {
+    dismissItemSuggestion,
+    selectedItemIds,
+    toggleSelectItem,
+    isMultiSelectActive,
+  } = useInboxStore();
   const { reviewCandidate } = useDiscoveryStore();
   const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
+
+  const isSelected = selectedItemIds.includes(item.id);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [quickMenuOpen, setQuickMenuOpen] = useState(false);
@@ -220,8 +229,18 @@ export function InboxItemCard({
         setIsDraggingCard(false);
         setHoveredWorkspaceId(null);
       }}
+      onClick={(e) => {
+        if (e.shiftKey || e.metaKey || e.ctrlKey || isMultiSelectActive) {
+          const target = e.target as HTMLElement;
+          if (!target.closest('button') && !target.closest('a') && !target.closest('input')) {
+            toggleSelectItem(item.id);
+          }
+        }
+      }}
       className={`group bg-white rounded-xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md ${
-        section === 'needs_attention'
+        isSelected
+          ? 'ring-2 ring-indigo-600 border-indigo-400 bg-indigo-50/15 shadow-sm'
+          : section === 'needs_attention'
           ? 'border-amber-200/90 hover:border-amber-400/80 bg-linear-to-b from-amber-50/20 to-white'
           : section === 'new_candidates'
           ? 'border-cyan-200/90 hover:border-cyan-400/80 bg-linear-to-b from-cyan-50/20 to-white'
@@ -232,12 +251,33 @@ export function InboxItemCard({
     >
       {/* Top Card Header */}
       <div className="flex items-center justify-between px-3.5 pt-3 pb-2 border-b border-black/3">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelectItem(item.id);
+            }}
+            className={`p-0.5 rounded transition-all cursor-pointer ${
+              isSelected
+                ? 'text-indigo-600 opacity-100'
+                : isMultiSelectActive
+                ? 'text-gray-400 hover:text-gray-700 opacity-100'
+                : 'text-gray-300 opacity-0 group-hover:opacity-100 hover:text-gray-600'
+            }`}
+            title={isSelected ? 'Deselect item' : 'Select item'}
+          >
+            {isSelected ? (
+              <CheckSquare size={14} className="text-indigo-600 fill-indigo-50" />
+            ) : (
+              <Square size={14} />
+            )}
+          </button>
           <div className="cursor-grab active:cursor-grabbing text-gray-300 group-hover:text-gray-500 transition-colors">
             <GripVertical size={13} />
           </div>
           {getItemIcon()}
-          <span className="text-[12px] font-medium text-gray-700 truncate max-w-[130px]">
+          <span className="text-[12px] font-medium text-gray-700 truncate max-w-[120px]">
             {item.title || item.item_type.toUpperCase()}
           </span>
         </div>

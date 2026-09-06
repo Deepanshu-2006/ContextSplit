@@ -867,7 +867,7 @@ export const db = {
       stateFilter: stateFilter ?? null,
     }),
 
-  // Inbox Attention Engine (Day 12)
+  // Inbox Attention Engine
   evaluateInboxItemAttention: (itemId: string, config?: AttentionConfig) =>
     invoke<ItemAttention>("evaluate_inbox_item_attention", {
       itemId,
@@ -878,6 +878,25 @@ export const db = {
     invoke<ItemAttention[]>("evaluate_inbox_attention_batch", {
       config: config ?? null,
     }),
+
+  // Multi-Select Bulk Inbox Operations
+  bulkAssignInboxItemsToWorkspace: (itemIds: string[], workspaceId: string) =>
+    invoke<Item[]>("bulk_assign_inbox_items_to_workspace", {
+      itemIds,
+      workspaceId,
+    }),
+
+  bulkDismissInboxSuggestions: (itemIds: string[], workspaceId?: string) =>
+    invoke<void>("bulk_dismiss_inbox_suggestions", {
+      itemIds,
+      workspaceId: workspaceId ?? null,
+    }),
+
+  bulkArchiveOrClearInboxItems: (itemIds: string[]) =>
+    invoke<number>("bulk_archive_or_clear_inbox_items", {
+      itemIds,
+    }),
 };
+
 
 
