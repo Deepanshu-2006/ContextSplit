@@ -1292,6 +1292,291 @@ pub fn delete_inbox_item_state(conn: &Connection, item_id: &str) -> Result<()> {
     Ok(())
 }
 
+// ===========================================================================
+// Multi-Select Bulk Inbox Operations with Atomic Transaction Support
+// ===========================================================================
+
+/// Atomically assigns multiple inbox items to a destination workspace.
+/// Uses a SQLite transaction ensuring all-or-nothing execution.
+/// Creates confirmed ContextMemberships, transitions InboxItemState to Organized,
+/// records user action ContextSignals, preserves capture metadata, and keeps ItemRelationships intact.
+pub fn bulk_assign_inbox_items_to_workspace(
+    conn: &mut Connection,
+    item_ids: &[String],
+    workspace_id: &str,
+) -> Result<Vec<super::models::Item>, String> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to begin bulk assignment transaction: {}", e))?;
+
+    // 1. Verify destination workspace exists
+    {
+        let mut check_ws = tx
+            .prepare("SELECT id FROM workspaces WHERE id = ?1")
+            .map_err(|e| format!("Failed to prepare workspace check: {}", e))?;
+        let exists = check_ws
+            .exists(params![workspace_id])
+            .map_err(|e| format!("Failed to verify workspace '{}': {}", workspace_id, e))?;
+        if !exists {
+            return Err(format!("Destination workspace '{}' does not exist", workspace_id));
+        }
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut old_workspaces: Vec<String> = Vec::new();
+
+    // 2. Validate all items exist before applying mutations
+    for item_id in item_ids {
+        let mut check_item = tx
+            .prepare("SELECT id, workspace_id FROM items WHERE id = ?1")
+            .map_err(|e| format!("Failed to prepare item check: {}", e))?;
+        let mut rows = check_item
+            .query(params![item_id])
+            .map_err(|e| format!("Failed to query item '{}': {}", item_id, e))?;
+
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| format!("Error inspecting item '{}': {}", item_id, e))?
+        {
+            let old_ws: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+            if let Some(ows) = old_ws {
+                if ows != workspace_id && !old_workspaces.contains(&ows) {
+                    old_workspaces.push(ows);
+                }
+            }
+        } else {
+            return Err(format!("Item '{}' does not exist", item_id));
+        }
+    }
+
+    // 3. Update items, memberships, and states atomically
+    for item_id in item_ids {
+        // Update item workspace_id while preserving all metadata, content, and original timestamps
+        let rows_affected = tx
+            .execute(
+                "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
+                params![workspace_id, now, item_id],
+            )
+            .map_err(|e| format!("Failed to update item '{}': {}", item_id, e))?;
+
+        if rows_affected == 0 {
+            return Err(format!("Item '{}' not found during update", item_id));
+        }
+
+        // Create or update confirmed ContextMembership
+        let mem_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'confirmed', 1.0, 'user', ?4, ?4)
+             ON CONFLICT(item_id, workspace_id) DO UPDATE SET
+                membership_type = 'confirmed',
+                confidence = 1.0,
+                source = 'user',
+                updated_at = excluded.updated_at",
+            params![mem_id, item_id, workspace_id, now],
+        )
+        .map_err(|e| format!("Failed to create confirmed membership for item '{}': {}", item_id, e))?;
+
+        // Update InboxItemState to Organized
+        tx.execute(
+            "INSERT INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at)
+             VALUES (?1, 'organized', NULL, ?2, ?3, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET
+                previous_state = state,
+                state = 'organized',
+                reason = ?2,
+                updated_at = ?3",
+            params![item_id, format!("Bulk assigned to workspace '{}'", workspace_id), now],
+        )
+        .map_err(|e| format!("Failed to update inbox state for item '{}': {}", item_id, e))?;
+
+        // Clean up old workspace memberships if moved from another workspace
+        for old_ws in &old_workspaces {
+            tx.execute(
+                "DELETE FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+                params![item_id, old_ws],
+            )
+            .map_err(|e| format!("Failed to clean up old membership for item '{}': {}", item_id, e))?;
+        }
+    }
+
+    // 4. Record user action context signals for feedback learning
+    let bulk_sig_id = Uuid::new_v4().to_string();
+    let bulk_payload = serde_json::json!({
+        "action": "bulk_assigned_to_workspace",
+        "workspace_id": workspace_id,
+        "item_ids": item_ids,
+        "item_count": item_ids.len(),
+        "created_at": now
+    })
+    .to_string();
+
+    tx.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, NULL, 'user_action', NULL, ?3, ?4, ?4)",
+        params![bulk_sig_id, workspace_id, bulk_payload, now],
+    )
+    .map_err(|e| format!("Failed to record bulk signal: {}", e))?;
+
+    for item_id in item_ids {
+        let item_sig_id = Uuid::new_v4().to_string();
+        let item_payload = serde_json::json!({
+            "action": "context_assigned",
+            "workspace_id": workspace_id,
+            "item_id": item_id,
+            "created_at": now
+        })
+        .to_string();
+
+        tx.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'user_action', NULL, ?4, ?5, ?5)",
+            params![item_sig_id, workspace_id, item_id, item_payload, now],
+        )
+        .map_err(|e| format!("Failed to record item signal for '{}': {}", item_id, e))?;
+    }
+
+    // 5. Touch workspace activity timestamp
+    tx.execute(
+        "UPDATE workspaces SET last_activity_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, workspace_id],
+    )
+    .map_err(|e| format!("Failed to update workspace activity: {}", e))?;
+
+    // 6. Commit transaction atomically
+    tx.commit()
+        .map_err(|e| format!("Failed to commit bulk assignment transaction: {}", e))?;
+
+    // 7. Recalculate profiles and suggestions after successful transaction commit
+    let _ = recalculate_workspace_profile(conn, workspace_id);
+    for old_ws in &old_workspaces {
+        let _ = recalculate_workspace_profile(conn, old_ws);
+    }
+    let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(
+        conn,
+        workspace_id,
+        None,
+    );
+
+    // 8. Return updated items
+    let mut updated_items = Vec::new();
+    for id in item_ids {
+        if let Ok(item) = get_item(conn, id) {
+            updated_items.push(item);
+        }
+    }
+
+    Ok(updated_items)
+}
+
+/// Atomically dismisses suggestions for multiple inbox items in a transaction.
+pub fn bulk_dismiss_inbox_suggestions(
+    conn: &mut Connection,
+    item_ids: &[String],
+    workspace_id: Option<&str>,
+) -> Result<(), String> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to begin bulk dismiss transaction: {}", e))?;
+    let now = Utc::now().to_rfc3339();
+
+    for item_id in item_ids {
+        if let Some(ws_id) = workspace_id {
+            let mem_id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'dismissed', 0.0, 'user', ?4, ?4)
+                 ON CONFLICT(item_id, workspace_id) DO UPDATE SET
+                    membership_type = 'dismissed',
+                    confidence = 0.0,
+                    source = 'user',
+                    updated_at = excluded.updated_at",
+                params![mem_id, item_id, ws_id, now],
+            )
+            .map_err(|e| format!("Failed to dismiss membership for '{}': {}", item_id, e))?;
+        }
+
+        // Transition inbox state to 'understood'
+        tx.execute(
+            "INSERT INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at)
+             VALUES (?1, 'understood', NULL, ?2, ?3, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET
+                previous_state = state,
+                state = 'understood',
+                reason = ?2,
+                updated_at = ?3",
+            params![item_id, "Bulk dismissed suggestion", now],
+        )
+        .map_err(|e| format!("Failed to update inbox state for '{}': {}", item_id, e))?;
+
+        // Record dismissal feedback signal
+        let sig_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "item_id": item_id,
+            "workspace_id": workspace_id,
+            "action": "bulk_suggestion_dismissed",
+            "created_at": now
+        })
+        .to_string();
+
+        tx.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'membership_dismissed', NULL, ?4, ?5, ?5)",
+            params![sig_id, workspace_id, item_id, payload, now],
+        )
+        .map_err(|e| format!("Failed to record dismissal signal for '{}': {}", item_id, e))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit bulk dismiss transaction: {}", e))?;
+    Ok(())
+}
+
+/// Atomically archives/clears multiple selected items from the inbox in a transaction.
+pub fn bulk_archive_or_clear_inbox_items(
+    conn: &mut Connection,
+    item_ids: &[String],
+) -> Result<usize, String> {
+    if item_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Failed to begin bulk clear transaction: {}", e))?;
+    let mut deleted_count = 0;
+
+    for item_id in item_ids {
+        // Delete inbox item (only if workspace_id IS NULL / in inbox)
+        let count = tx
+            .execute(
+                "DELETE FROM items WHERE id = ?1 AND workspace_id IS NULL",
+                params![item_id],
+            )
+            .map_err(|e| format!("Failed to delete inbox item '{}': {}", item_id, e))?;
+
+        if count > 0 {
+            deleted_count += count;
+            let _ = tx.execute(
+                "DELETE FROM inbox_item_states WHERE item_id = ?1",
+                params![item_id],
+            );
+        }
+    }
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit bulk clear transaction: {}", e))?;
+    Ok(deleted_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1848,5 +2133,187 @@ mod tests {
         let returned_state = get_inbox_item_state(&conn, &item.id).unwrap().unwrap();
         assert_eq!(returned_state.state, InboxState::New);
         assert_eq!(returned_state.previous_state, Some(InboxState::Organized));
+    }
+
+    #[test]
+    fn test_bulk_assign_inbox_items_success() {
+        let mut conn = setup_db();
+        let ws = create_workspace(&conn, "Product Roadmap").unwrap();
+
+        // 1. Create 3 inbox items with specific capture metadata
+        let meta1 = serde_json::json!({"app_name": "Slack", "source": "chat", "custom_tag": "v1"}).to_string();
+        let item1 = create_item(&conn, None, None, "text", "Feature spec 1", Some("Spec 1"), &meta1).unwrap();
+        
+        let meta2 = serde_json::json!({"app_name": "Chrome", "source": "browser", "custom_tag": "v2"}).to_string();
+        let item2 = create_item(&conn, None, None, "url", "https://example.com/spec", Some("Web Spec"), &meta2).unwrap();
+        
+        let meta3 = serde_json::json!({"app_name": "Terminal", "source": "cli"}).to_string();
+        let item3 = create_item(&conn, None, None, "text", "Deploy script", Some("Script"), &meta3).unwrap();
+
+        // 2. Establish an item relationship between item 1 and item 2
+        create_item_relationship(&conn, &item1.id, &item2.id, "same_session", 0.95, Some("{}")).unwrap();
+        
+        // 3. Establish a pre-existing signal
+        let pre_sig_payload = serde_json::json!({"event": "captured"}).to_string();
+        crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item1.id),
+            "capture_event",
+            None,
+            &pre_sig_payload
+        ).unwrap();
+
+        let item_ids = vec![item1.id.clone(), item2.id.clone(), item3.id.clone()];
+
+        // 4. Perform bulk assignment to workspace
+        let assigned = bulk_assign_inbox_items_to_workspace(&mut conn, &item_ids, &ws.id).unwrap();
+        assert_eq!(assigned.len(), 3);
+
+        // 5. Verify all items are now assigned to the workspace and metadata is fully preserved
+        for item in &assigned {
+            assert_eq!(item.workspace_id.as_deref(), Some(ws.id.as_str()));
+        }
+
+        let refetched1 = get_item(&conn, &item1.id).unwrap();
+        assert_eq!(refetched1.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(refetched1.content, "Feature spec 1");
+        assert_eq!(refetched1.title.as_deref(), Some("Spec 1"));
+        assert_eq!(refetched1.metadata, meta1);
+        assert_eq!(refetched1.created_at, item1.created_at);
+
+        let refetched2 = get_item(&conn, &item2.id).unwrap();
+        assert_eq!(refetched2.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(refetched2.metadata, meta2);
+
+        // 6. Verify confirmed ContextMemberships were created
+        let memberships = list_workspace_memberships(&conn, &ws.id, Some("confirmed")).unwrap();
+        assert_eq!(memberships.len(), 3);
+        for m in &memberships {
+            assert_eq!(m.membership_type, "confirmed");
+            assert_eq!(m.confidence, 1.0);
+            assert_eq!(m.source, "user");
+        }
+
+        // 7. Verify InboxItemStates are transitioned to Organized
+        for id in &item_ids {
+            let state = get_inbox_item_state(&conn, id).unwrap().unwrap();
+            assert_eq!(state.state, InboxState::Organized);
+        }
+
+        // 8. Verify ItemRelationships were preserved
+        let rels = get_item_relationships(&conn, &item1.id).unwrap();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].relationship_type, "same_session");
+
+        // 9. Verify ContextSignals were recorded
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), None).unwrap();
+        assert!(signals.iter().any(|s| s.signal_type == "user_action"));
+    }
+
+    #[test]
+    fn test_bulk_assign_inbox_items_partial_failure_rollback() {
+        let mut conn = setup_db();
+        let ws = create_workspace(&conn, "Design System").unwrap();
+
+        // 1. Create two valid inbox items
+        let item1 = create_item(&conn, None, None, "text", "Valid Item 1", None, "{}").unwrap();
+        let item2 = create_item(&conn, None, None, "text", "Valid Item 2", None, "{}").unwrap();
+
+        // Transition item1 to Understood
+        transition_inbox_item_state(&conn, &item1.id, InboxState::Processing, None).unwrap();
+        transition_inbox_item_state(&conn, &item1.id, InboxState::Understood, Some("Parsed")).unwrap();
+
+        // 2. Attempt bulk assignment with an invalid/non-existent item ID in the middle
+        let mixed_ids = vec![
+            item1.id.clone(),
+            "completely_non_existent_item_id_9999".to_string(),
+            item2.id.clone(),
+        ];
+
+        let result = bulk_assign_inbox_items_to_workspace(&mut conn, &mixed_ids, &ws.id);
+        assert!(result.is_err(), "Bulk assignment must fail if any item is invalid");
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("completely_non_existent_item_id_9999"));
+
+        // 3. Verify complete transaction rollback:
+        // Item 1 must still be in inbox (workspace_id = None)
+        let refetched1 = get_item(&conn, &item1.id).unwrap();
+        assert_eq!(refetched1.workspace_id, None);
+
+        // Item 2 must still be in inbox (workspace_id = None)
+        let refetched2 = get_item(&conn, &item2.id).unwrap();
+        assert_eq!(refetched2.workspace_id, None);
+
+        // Item 1 state must NOT have become Organized, must still be Understood
+        let state1 = get_inbox_item_state(&conn, &item1.id).unwrap().unwrap();
+        assert_eq!(state1.state, InboxState::Understood);
+
+        // Zero confirmed memberships must exist for the workspace
+        let memberships = list_workspace_memberships(&conn, &ws.id, None).unwrap();
+        assert_eq!(memberships.len(), 0);
+
+        // Zero context signals must exist for the workspace
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), None).unwrap();
+        assert_eq!(signals.len(), 0);
+    }
+
+    #[test]
+    fn test_bulk_assign_inbox_items_invalid_workspace_rollback() {
+        let mut conn = setup_db();
+        let item1 = create_item(&conn, None, None, "text", "Item A", None, "{}").unwrap();
+        let item2 = create_item(&conn, None, None, "text", "Item B", None, "{}").unwrap();
+
+        let item_ids = vec![item1.id.clone(), item2.id.clone()];
+        let result = bulk_assign_inbox_items_to_workspace(&mut conn, &item_ids, "non_existent_ws_id");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Destination workspace 'non_existent_ws_id' does not exist"));
+
+        // Items remain unassigned
+        assert_eq!(get_item(&conn, &item1.id).unwrap().workspace_id, None);
+        assert_eq!(get_item(&conn, &item2.id).unwrap().workspace_id, None);
+    }
+
+    #[test]
+    fn test_bulk_dismiss_inbox_suggestions() {
+        let mut conn = setup_db();
+        let ws = create_workspace(&conn, "Marketing").unwrap();
+
+        let item1 = create_item(&conn, None, None, "text", "Ad copy 1", None, "{}").unwrap();
+        let item2 = create_item(&conn, None, None, "text", "Ad copy 2", None, "{}").unwrap();
+
+        let item_ids = vec![item1.id.clone(), item2.id.clone()];
+        bulk_dismiss_inbox_suggestions(&mut conn, &item_ids, Some(&ws.id)).unwrap();
+
+        // States are Understood
+        for id in &item_ids {
+            let state = get_inbox_item_state(&conn, id).unwrap().unwrap();
+            assert_eq!(state.state, InboxState::Understood);
+        }
+
+        // Dismissed memberships exist
+        let memberships = list_workspace_memberships(&conn, &ws.id, Some("dismissed")).unwrap();
+        assert_eq!(memberships.len(), 2);
+    }
+
+    #[test]
+    fn test_bulk_archive_or_clear_inbox_items() {
+        let mut conn = setup_db();
+        let ws = create_workspace(&conn, "Important").unwrap();
+
+        let inbox1 = create_item(&conn, None, None, "text", "Temporary 1", None, "{}").unwrap();
+        let inbox2 = create_item(&conn, None, None, "text", "Temporary 2", None, "{}").unwrap();
+        let ws_item = create_item(&conn, Some(&ws.id), None, "text", "Permanent", None, "{}").unwrap();
+
+        let ids = vec![inbox1.id.clone(), inbox2.id.clone(), ws_item.id.clone()];
+        let cleared_count = bulk_archive_or_clear_inbox_items(&mut conn, &ids).unwrap();
+        assert_eq!(cleared_count, 2);
+
+        // Inbox items are deleted
+        assert!(get_item(&conn, &inbox1.id).is_err());
+        assert!(get_item(&conn, &inbox2.id).is_err());
+
+        // Workspace item is kept safe
+        assert!(get_item(&conn, &ws_item.id).is_ok());
     }
 }
