@@ -4,6 +4,7 @@ import { Handle, Position } from "@xyflow/react";
 import { MoreHorizontal, Inbox, BoxSelect, Search } from "lucide-react";
 import { useWorkspaceStore } from "../../../store/workspaceStore";
 import { ContextInspector } from "../ContextInspector";
+import { ContextBadge } from "../ContextBadge";
 import { db } from "../../../services/db";
 import { ContextSuggestion, ContextSuggestionData } from "./ContextSuggestion";
 
@@ -221,6 +222,15 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
           {icon && <div className="text-gray-400">{icon}</div>}
           {title && <h3 className="text-[12px] font-medium text-gray-700 tracking-tight truncate flex-1">{title}</h3>}
           {!title && <div className="flex-1" />}
+          
+          {itemId && activeWorkspaceId === "inbox" && (
+            <div className="nodrag shrink-0">
+              <ContextBadge
+                itemId={itemId}
+                onOpenInspector={() => setInspectorOpen(true)}
+              />
+            </div>
+          )}
           
           {itemId && (
             <div className="nodrag">

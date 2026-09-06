@@ -23,6 +23,7 @@ import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useDiscoveryStore } from '../../store/discoveryStore';
 import { ContextInspector } from '../workspace/ContextInspector';
+import { ContextBadge } from '../workspace/ContextBadge';
 
 interface InboxItemCardProps {
   derived: DerivedInboxItem;
@@ -228,14 +229,14 @@ export function InboxItemCard({
             <GripVertical size={13} />
           </div>
           {getItemIcon()}
-          <span className="text-[12px] font-medium text-gray-700 truncate max-w-[140px]">
+          <span className="text-[12px] font-medium text-gray-700 truncate max-w-[130px]">
             {item.title || item.item_type.toUpperCase()}
           </span>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
           {appName && (
-            <span className="text-[10px] text-gray-400 bg-gray-100/80 px-1.5 py-0.5 rounded font-medium">
+            <span className="text-[10px] text-gray-400 bg-gray-100/80 px-1.5 py-0.5 rounded font-medium max-w-[70px] truncate">
               {appName}
             </span>
           )}
@@ -258,37 +259,24 @@ export function InboxItemCard({
       <div className="p-3.5 flex-1 flex flex-col gap-2.5">{renderContent()}</div>
 
       {/* Context Status & Rationale Section */}
-      <div className="px-3.5 pb-3 flex flex-col gap-2 border-t border-black/3 pt-2.5 bg-gray-50/40">
-        {/* Section Pill if enabled in chronological view */}
-        {showSectionBadge && (
-          <div className="flex items-center gap-1.5">
-            {section === 'needs_attention' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-100/80 px-2 py-0.5 rounded-full">
-                <AlertTriangle size={10} /> Needs Attention
-              </span>
-            )}
-            {section === 'new_candidates' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-cyan-700 bg-cyan-100/80 px-2 py-0.5 rounded-full">
-                <Layers size={10} /> Candidate Cluster
-              </span>
-            )}
-            {section === 'context_suggestions' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-full">
-                <Sparkles size={10} /> Suggestion
-              </span>
-            )}
-            {section === 'recently_captured' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-sky-700 bg-sky-100/70 px-2 py-0.5 rounded-full">
-                <Clock size={10} /> Recent Capture
-              </span>
-            )}
-            {section === 'already_understood' && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-600 bg-slate-100/80 px-2 py-0.5 rounded-full">
-                <CheckCircle2 size={10} /> Understood
-              </span>
-            )}
-          </div>
-        )}
+      <div className="px-3.5 pb-3 flex flex-col gap-2.5 border-t border-black/3 pt-2.5 bg-gray-50/40">
+        {/* Contextual Badge (Clickable to Inspect ContextExplanation) */}
+        <div className="flex items-center justify-between gap-2">
+          <ContextBadge
+            itemId={item.id}
+            attention={attention}
+            candidateInfo={candidateInfo}
+            workspaces={workspaces}
+            onOpenInspector={() => setInspectorOpen(true)}
+          />
+
+          {/* Section Pill in Chronological stream view if different */}
+          {showSectionBadge && (
+            <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider shrink-0">
+              {section.replace('_', ' ')}
+            </span>
+          )}
+        </div>
 
         {/* 1. Needs Attention Context Banner */}
         {section === 'needs_attention' && (
