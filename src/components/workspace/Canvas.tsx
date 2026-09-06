@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import { BoxSelect, LayoutTemplate, Inbox, Clock, Trash2 } from "lucide-react";
+import { BoxSelect, LayoutTemplate, Inbox, Clock, Trash2, LayoutList } from "lucide-react";
 import { ReactFlow, Background, BackgroundVariant, Node, applyNodeChanges, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceStore } from "../../store/workspaceStore";
+import { useInboxStore } from "../../store/inboxStore";
 import { ItemNode } from "./nodes/ItemNode";
+import { InboxView } from "../inbox/InboxView";
 
 const nodeTypes = {
   itemNode: ItemNode,
@@ -17,6 +19,7 @@ export function Canvas() {
     setIsDraggingCard, setHoveredWorkspaceId,
     openTimeline, emptyInbox,
   } = useWorkspaceStore();
+  const { viewMode, setViewMode } = useInboxStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
 
@@ -137,6 +140,18 @@ export function Canvas() {
     [updateItemPositions, activeWorkspaceId, moveItemsToWorkspace]
   );
 
+  // If viewing Inbox and not in freeform Canvas mode, render the modern Sectioned/Timeline InboxView
+  if (isInbox && viewMode !== 'canvas') {
+    return (
+      <InboxView
+        items={activeItems}
+        workspaces={workspaces}
+        onMoveToWorkspace={(itemId, wsId) => moveItemsToWorkspace([itemId], wsId)}
+        onSelectCanvasView={() => setViewMode('canvas')}
+      />
+    );
+  }
+
   if (!activeWorkspace && !isInbox) {
     return (
       <div 
@@ -167,7 +182,7 @@ export function Canvas() {
     }
   };
 
-  const title = isInbox ? "Inbox" : activeWorkspace?.name;
+  const title = isInbox ? "Inbox (Canvas Mode)" : activeWorkspace?.name;
   const description = isInbox
     ? "Your Inbox is empty. Captured items will appear here."
     : "This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.";
@@ -214,6 +229,17 @@ export function Canvas() {
               {title}
             </h1>
           </div>
+
+          {isInbox && (
+            <button
+              onClick={() => setViewMode('sections')}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/95 hover:bg-white border border-black/10 rounded-lg text-xs font-semibold text-gray-700 hover:text-indigo-600 shadow-sm backdrop-blur-xs transition-all cursor-pointer pointer-events-auto"
+              title="Return to Sectioned Inbox"
+            >
+              <LayoutList size={13} className="text-indigo-600" />
+              <span>Sectioned View</span>
+            </button>
+          )}
 
           {!isInbox && activeWorkspace && (
             <button
