@@ -390,6 +390,138 @@ pub struct ContextOverview {
     pub timeline: ContextTimeline,
 }
 
+/// Day 12: Context-Aware Inbox State Machine states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxState {
+    New,
+    Processing,
+    Understood,
+    Suggested,
+    NeedsReview,
+    Organized,
+    Dismissed,
+}
+
+impl InboxState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InboxState::New => "new",
+            InboxState::Processing => "processing",
+            InboxState::Understood => "understood",
+            InboxState::Suggested => "suggested",
+            InboxState::NeedsReview => "needs_review",
+            InboxState::Organized => "organized",
+            InboxState::Dismissed => "dismissed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "new" => Ok(InboxState::New),
+            "processing" => Ok(InboxState::Processing),
+            "understood" => Ok(InboxState::Understood),
+            "suggested" => Ok(InboxState::Suggested),
+            "needs_review" => Ok(InboxState::NeedsReview),
+            "organized" => Ok(InboxState::Organized),
+            "dismissed" => Ok(InboxState::Dismissed),
+            other => Err(format!("Unknown inbox state: '{}'", other)),
+        }
+    }
+
+    /// Determines if transition from `self` to `target` is valid.
+    pub fn can_transition_to(&self, target: InboxState) -> bool {
+        match (self, target) {
+            // Self-transitions are permitted (idempotent state updates)
+            (a, b) if a == &b => true,
+
+            // From New:
+            // -> Processing (engine starts analysis)
+            // -> Dismissed (user dismisses directly)
+            // -> Organized (user immediately drags/moves to workspace manually)
+            (InboxState::New, InboxState::Processing) => true,
+            (InboxState::New, InboxState::Dismissed) => true,
+            (InboxState::New, InboxState::Organized) => true,
+
+            // From Processing:
+            // -> Understood (analysis succeeds and extract signals/candidates)
+            // -> NeedsReview (processing meets ambiguity or fallback)
+            // -> Dismissed (user dismisses during processing)
+            // -> Organized (user moves manually during processing)
+            (InboxState::Processing, InboxState::Understood) => true,
+            (InboxState::Processing, InboxState::NeedsReview) => true,
+            (InboxState::Processing, InboxState::Dismissed) => true,
+            (InboxState::Processing, InboxState::Organized) => true,
+
+            // From Understood:
+            // -> Suggested (confident workspace candidate identified)
+            // -> NeedsReview (low confidence / multiple ambiguous contexts)
+            // -> Organized (user assigns to workspace)
+            // -> Dismissed (user dismisses)
+            (InboxState::Understood, InboxState::Suggested) => true,
+            (InboxState::Understood, InboxState::NeedsReview) => true,
+            (InboxState::Understood, InboxState::Organized) => true,
+            (InboxState::Understood, InboxState::Dismissed) => true,
+
+            // From Suggested:
+            // -> Organized (user accepts suggestion or assigns to workspace)
+            // -> NeedsReview (suggestion demoted / conflicting signals arrive)
+            // -> Dismissed (user dismisses / rejects suggestion)
+            // -> Understood (suggestion invalidated / recalculated)
+            (InboxState::Suggested, InboxState::Organized) => true,
+            (InboxState::Suggested, InboxState::NeedsReview) => true,
+            (InboxState::Suggested, InboxState::Dismissed) => true,
+            (InboxState::Suggested, InboxState::Understood) => true,
+
+            // From NeedsReview:
+            // -> Suggested (subsequent evidence clarifies target workspace)
+            // -> Organized (user manually resolves review and files item)
+            // -> Dismissed (user rejects/dismisses item)
+            // -> Processing (user triggers re-analysis)
+            (InboxState::NeedsReview, InboxState::Suggested) => true,
+            (InboxState::NeedsReview, InboxState::Organized) => true,
+            (InboxState::NeedsReview, InboxState::Dismissed) => true,
+            (InboxState::NeedsReview, InboxState::Processing) => true,
+
+            // From Dismissed:
+            // -> New (restore/reopen item)
+            // -> NeedsReview (restore into review queue)
+            // -> Organized (user files dismissed item)
+            (InboxState::Dismissed, InboxState::New) => true,
+            (InboxState::Dismissed, InboxState::NeedsReview) => true,
+            (InboxState::Dismissed, InboxState::Organized) => true,
+
+            // From Organized:
+            // -> New (item moved back to Inbox)
+            // -> Understood (item returned to Inbox while retaining context)
+            (InboxState::Organized, InboxState::New) => true,
+            (InboxState::Organized, InboxState::Understood) => true,
+
+            // All other transitions are invalid
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for InboxState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Day 12: Tracks the lifecycle state of an item in the Inbox.
+/// Kept strictly separate from Item data and Workspace membership.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItemState {
+    pub item_id: String,
+    pub state: InboxState,
+    pub previous_state: Option<InboxState>,
+    pub reason: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+
 
 
 

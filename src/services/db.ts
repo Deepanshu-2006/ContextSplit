@@ -22,6 +22,24 @@ export interface Item {
   updated_at: string;
 }
 
+export type InboxState =
+  | "new"
+  | "processing"
+  | "understood"
+  | "suggested"
+  | "needs_review"
+  | "organized"
+  | "dismissed";
+
+export interface InboxItemState {
+  item_id: string;
+  state: InboxState;
+  previous_state?: InboxState | null;
+  reason?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContextSignal {
   id: string;
   workspace_id: string | null;
@@ -789,6 +807,22 @@ export const db = {
 
   isCapturePaused: () =>
     invoke<boolean>("is_capture_paused"),
+
+  // Context-Aware Inbox State Machine (Day 12)
+  getInboxItemState: (itemId: string) =>
+    invoke<InboxItemState | null>("get_inbox_item_state", { itemId }),
+
+  transitionInboxItemState: (itemId: string, targetState: InboxState, reason?: string) =>
+    invoke<InboxItemState>("transition_inbox_item_state", {
+      itemId,
+      targetState,
+      reason: reason ?? null,
+    }),
+
+  listInboxItemStates: (stateFilter?: InboxState) =>
+    invoke<InboxItemState[]>("list_inbox_item_states", {
+      stateFilter: stateFilter ?? null,
+    }),
 };
 
 

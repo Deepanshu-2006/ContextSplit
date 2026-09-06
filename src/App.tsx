@@ -14,6 +14,7 @@ import { CaptureOrb } from "./components/workspace/CaptureOrb";
 import { CaptureToastRenderer } from "./components/workspace/CaptureToastRenderer";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import "./App.css";
 
 function App() {
@@ -33,6 +34,20 @@ function App() {
     if (isNotchTarget || isOrbTarget || isToastTarget) {
       return;
     }
+
+    // Ensure system notification permissions are granted
+    const initNotifications = async () => {
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) {
+          const permission = await requestPermission();
+          granted = permission === 'granted';
+        }
+      } catch (err) {
+        console.warn("Could not request notification permissions:", err);
+      }
+    };
+    initNotifications();
 
     loadWorkspaces();
     checkForCandidates();

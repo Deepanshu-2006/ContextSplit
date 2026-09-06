@@ -707,7 +707,43 @@ fn clear_ai_reasoning_cache(
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Day 12: Context-Aware Inbox State Machine commands
+// ---------------------------------------------------------------------------
 
+#[tauri::command]
+fn get_inbox_item_state(
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<db::models::InboxItemState>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::get_inbox_item_state(&conn, item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn transition_inbox_item_state(
+    item_id: &str,
+    target_state: &str,
+    reason: Option<&str>,
+    state: State<'_, AppState>,
+) -> Result<db::models::InboxItemState, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let parsed_state = db::models::InboxState::from_str(target_state)?;
+    db::operations::transition_inbox_item_state(&conn, item_id, parsed_state, reason)
+}
+
+#[tauri::command]
+fn list_inbox_item_states(
+    state_filter: Option<&str>,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::models::InboxItemState>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let filter = match state_filter {
+        Some(s) if !s.is_empty() => Some(db::models::InboxState::from_str(s)?),
+        _ => None,
+    };
+    db::operations::list_inbox_item_states(&conn, filter).map_err(|e| e.to_string())
+}
 
 // ---------------------------------------------------------------------------
 
@@ -994,7 +1030,11 @@ pub fn run() {
             suggest_candidate_name_ai,
             suggest_item_group_name_ai,
             get_ai_provider_status,
-            clear_ai_reasoning_cache
+            clear_ai_reasoning_cache,
+            // Context-Aware Inbox State Machine (Day 12)
+            get_inbox_item_state,
+            transition_inbox_item_state,
+            list_inbox_item_states
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

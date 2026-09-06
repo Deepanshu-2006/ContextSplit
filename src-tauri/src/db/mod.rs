@@ -347,6 +347,42 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 18;
     }
 
+    if user_version < 19 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS inbox_item_states (
+                item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                previous_state TEXT,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inbox_item_states_state ON inbox_item_states(state)",
+            [],
+        )?;
+
+        // Backfill existing inbox items (items with workspace_id IS NULL or empty or 'inbox')
+        conn.execute(
+            "INSERT OR IGNORE INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at)
+             SELECT 
+                id,
+                'new',
+                NULL,
+                'Migration backfill for existing inbox item',
+                created_at,
+                updated_at
+             FROM items
+             WHERE workspace_id IS NULL OR workspace_id = '' OR workspace_id = 'inbox'",
+            [],
+        )?;
+
+        user_version = 19;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

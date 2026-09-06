@@ -523,7 +523,7 @@ impl CapturePipeline {
             let title = normalized_event.title()
                 .or_else(|| normalized_event.source_metadata.window_title.clone())
                 .or_else(|| normalized_event.source_metadata.process_name.clone())
-                .unwrap_or_else(|| "ContextSplit Capture".to_string());
+                .unwrap_or_else(|| "Captured to Inbox".to_string());
 
             let body = match normalized_event.content_type {
                 crate::capture::models::ContentType::Url => {
@@ -546,12 +546,38 @@ impl CapturePipeline {
                 }
             };
 
+            // Standard plugin dispatch
             let _ = app_handle
                 .notification()
                 .builder()
-                .title(title)
-                .body(body)
+                .title(&title)
+                .body(&body)
                 .show();
+
+            // Native macOS notification banner dispatch (guarantees system banner in dev & production)
+            #[cfg(target_os = "macos")]
+            {
+                let notif_title = title.clone();
+                let notif_body = body.clone();
+                std::thread::spawn(move || {
+                    let sanitize = |s: &str| -> String {
+                        s.replace('\\', "\\\\")
+                         .replace('"', "\\\"")
+                         .replace('\r', " ")
+                         .replace('\n', " ")
+                    };
+                    let clean_title = sanitize(&notif_title);
+                    let clean_body = sanitize(&notif_body);
+                    let script = format!(
+                        "display notification \"{}\" with title \"ContextSplit\" subtitle \"{}\"",
+                        clean_body, clean_title
+                    );
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(script)
+                        .output();
+                });
+            }
         }
 
         if let Some(toast_win) = app_handle.get_webview_window("capture-toast") {
