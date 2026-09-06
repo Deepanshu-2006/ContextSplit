@@ -1,4 +1,4 @@
-use super::models::{Workspace, Session};
+use super::models::{Workspace, Session, InboxState, InboxItemState};
 use chrono::Utc;
 use rusqlite::{params, Connection, Result};
 use uuid::Uuid;
@@ -235,6 +235,25 @@ pub fn create_item(
         rusqlite::params![item.id, "pending", now],
     )?;
 
+    // Day 12: Initialize InboxItemState
+    let is_inbox = match workspace_id {
+        None => true,
+        Some(w) if w.is_empty() || w == "inbox" => true,
+        _ => false,
+    };
+
+    if is_inbox {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at) VALUES (?1, 'new', NULL, 'New capture to inbox', ?2, ?3)",
+            params![item.id, now, now],
+        );
+    } else {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at) VALUES (?1, 'organized', NULL, 'Created directly in workspace', ?2, ?3)",
+            params![item.id, now, now],
+        );
+    }
+
     if let Some(ws_id) = workspace_id {
         if ws_id != "inbox" && !ws_id.is_empty() {
             let _ = touch_workspace_activity(conn, ws_id);
@@ -396,6 +415,32 @@ pub fn move_item(
             let _ = recalculate_workspace_profile(conn, new_ws);
             let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(conn, new_ws, Some(id));
         }
+    }
+
+    // Day 12: Update InboxItemState on move
+    if let Some(new_ws) = workspace_id {
+        if new_ws != "inbox" && !new_ws.is_empty() {
+            let _ = transition_inbox_item_state(
+                conn,
+                id,
+                InboxState::Organized,
+                Some(&format!("User moved item to workspace '{}'", new_ws)),
+            );
+        } else {
+            let _ = transition_inbox_item_state(
+                conn,
+                id,
+                InboxState::New,
+                Some("Item returned to inbox"),
+            );
+        }
+    } else {
+        let _ = transition_inbox_item_state(
+            conn,
+            id,
+            InboxState::New,
+            Some("Item returned to inbox"),
+        );
     }
     
     get_item(conn, id)
@@ -1078,6 +1123,175 @@ pub fn delete_item_workspace_membership(
     Ok(())
 }
 
+// ==========================================
+// Day 12: Context-Aware Inbox State Machine
+// ==========================================
+
+pub fn create_inbox_item_state(
+    conn: &Connection,
+    item_id: &str,
+    initial_state: InboxState,
+    reason: Option<&str>,
+) -> Result<InboxItemState> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at)
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5)
+         ON CONFLICT(item_id) DO UPDATE SET
+            state = excluded.state,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at",
+        params![item_id, initial_state.as_str(), reason, now, now],
+    )?;
+
+    Ok(InboxItemState {
+        item_id: item_id.to_string(),
+        state: initial_state,
+        previous_state: None,
+        reason: reason.map(|r| r.to_string()),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+pub fn get_inbox_item_state(conn: &Connection, item_id: &str) -> Result<Option<InboxItemState>> {
+    let mut stmt = conn.prepare(
+        "SELECT item_id, state, previous_state, reason, created_at, updated_at
+         FROM inbox_item_states WHERE item_id = ?1"
+    )?;
+
+    let mut rows = stmt.query(params![item_id])?;
+    if let Some(row) = rows.next()? {
+        let state_str: String = row.get(1)?;
+        let prev_state_str: Option<String> = row.get(2)?;
+        
+        let state = InboxState::from_str(&state_str).unwrap_or(InboxState::New);
+        let previous_state = prev_state_str.and_then(|s| InboxState::from_str(&s).ok());
+
+        Ok(Some(InboxItemState {
+            item_id: row.get(0)?,
+            state,
+            previous_state,
+            reason: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn transition_inbox_item_state(
+    conn: &Connection,
+    item_id: &str,
+    target_state: InboxState,
+    reason: Option<&str>,
+) -> Result<InboxItemState, String> {
+    let current_state_opt = get_inbox_item_state(conn, item_id)
+        .map_err(|e| format!("Database error fetching inbox item state: {}", e))?;
+
+    let (current_state, created_at) = match current_state_opt {
+        Some(s) => (s.state, s.created_at),
+        None => {
+            let now = Utc::now().to_rfc3339();
+            (InboxState::New, now)
+        }
+    };
+
+    // Validate transition using explicit state machine rules
+    if !current_state.can_transition_to(target_state) {
+        return Err(format!(
+            "Invalid state transition: Cannot transition item '{}' from '{}' to '{}'",
+            item_id,
+            current_state.as_str(),
+            target_state.as_str()
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO inbox_item_states (item_id, state, previous_state, reason, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(item_id) DO UPDATE SET
+            previous_state = ?3,
+            state = ?2,
+            reason = ?4,
+            updated_at = ?6",
+        params![
+            item_id,
+            target_state.as_str(),
+            current_state.as_str(),
+            reason,
+            created_at,
+            now
+        ],
+    ).map_err(|e| format!("Database error updating inbox item state: {}", e))?;
+
+    Ok(InboxItemState {
+        item_id: item_id.to_string(),
+        state: target_state,
+        previous_state: Some(current_state),
+        reason: reason.map(|r| r.to_string()),
+        created_at,
+        updated_at: now,
+    })
+}
+
+pub fn list_inbox_item_states(
+    conn: &Connection,
+    state_filter: Option<InboxState>,
+) -> Result<Vec<InboxItemState>> {
+    let mut states = Vec::new();
+    if let Some(filter) = state_filter {
+        let mut stmt = conn.prepare(
+            "SELECT item_id, state, previous_state, reason, created_at, updated_at
+             FROM inbox_item_states WHERE state = ?1 ORDER BY updated_at DESC"
+        )?;
+        let rows = stmt.query_map(params![filter.as_str()], |row| {
+            let state_str: String = row.get(1)?;
+            let prev_state_str: Option<String> = row.get(2)?;
+            Ok(InboxItemState {
+                item_id: row.get(0)?,
+                state: InboxState::from_str(&state_str).unwrap_or(InboxState::New),
+                previous_state: prev_state_str.and_then(|s| InboxState::from_str(&s).ok()),
+                reason: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        for s in rows {
+            states.push(s?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT item_id, state, previous_state, reason, created_at, updated_at
+             FROM inbox_item_states ORDER BY updated_at DESC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let state_str: String = row.get(1)?;
+            let prev_state_str: Option<String> = row.get(2)?;
+            Ok(InboxItemState {
+                item_id: row.get(0)?,
+                state: InboxState::from_str(&state_str).unwrap_or(InboxState::New),
+                previous_state: prev_state_str.and_then(|s| InboxState::from_str(&s).ok()),
+                reason: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        for s in rows {
+            states.push(s?);
+        }
+    }
+    Ok(states)
+}
+
+#[allow(dead_code)]
+pub fn delete_inbox_item_state(conn: &Connection, item_id: &str) -> Result<()> {
+    conn.execute("DELETE FROM inbox_item_states WHERE item_id = ?1", params![item_id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1522,5 +1736,117 @@ mod tests {
         let ws_unarchived = unarchive_workspace(&conn, &ws.id).unwrap();
         assert_eq!(ws_unarchived.lifecycle_state, "active");
         assert!(ws_unarchived.archived_at.is_none());
+    }
+
+    #[test]
+    fn test_inbox_item_state_crud_and_cascade() {
+        let conn = setup_db();
+        let item = create_item(&conn, None, None, "text", "Inbox Test Item", None, "{}").unwrap();
+
+        // 1. Verify automatic creation of New state on capture to inbox
+        let state = get_inbox_item_state(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(state.item_id, item.id);
+        assert_eq!(state.state, InboxState::New);
+        assert_eq!(state.previous_state, None);
+
+        // 2. Fetch list of states
+        let all_states = list_inbox_item_states(&conn, None).unwrap();
+        assert_eq!(all_states.len(), 1);
+
+        let new_states = list_inbox_item_states(&conn, Some(InboxState::New)).unwrap();
+        assert_eq!(new_states.len(), 1);
+
+        let organized_states = list_inbox_item_states(&conn, Some(InboxState::Organized)).unwrap();
+        assert_eq!(organized_states.len(), 0);
+
+        // 3. Delete item and verify cascade deletion in inbox_item_states
+        delete_item(&conn, &item.id).unwrap();
+        let state_after_delete = get_inbox_item_state(&conn, &item.id).unwrap();
+        assert!(state_after_delete.is_none());
+    }
+
+    #[test]
+    fn test_inbox_item_state_transitions_and_history() {
+        let conn = setup_db();
+        let item = create_item(&conn, None, None, "text", "Design tokens", None, "{}").unwrap();
+
+        // 1. New -> Processing
+        let s_proc = transition_inbox_item_state(
+            &conn,
+            &item.id,
+            InboxState::Processing,
+            Some("Analyzing signals"),
+        ).unwrap();
+        assert_eq!(s_proc.state, InboxState::Processing);
+        assert_eq!(s_proc.previous_state, Some(InboxState::New));
+        assert_eq!(s_proc.reason.as_deref(), Some("Analyzing signals"));
+
+        // 2. Processing -> Understood
+        let s_under = transition_inbox_item_state(
+            &conn,
+            &item.id,
+            InboxState::Understood,
+            Some("Features extracted"),
+        ).unwrap();
+        assert_eq!(s_under.state, InboxState::Understood);
+        assert_eq!(s_under.previous_state, Some(InboxState::Processing));
+
+        // 3. Understood -> Suggested
+        let s_sugg = transition_inbox_item_state(
+            &conn,
+            &item.id,
+            InboxState::Suggested,
+            Some("Workspace match: Design System"),
+        ).unwrap();
+        assert_eq!(s_sugg.state, InboxState::Suggested);
+        assert_eq!(s_sugg.previous_state, Some(InboxState::Understood));
+
+        // 4. Suggested -> Organized (User filing)
+        let ws = create_workspace(&conn, "Design System").unwrap();
+        let s_org = transition_inbox_item_state(
+            &conn,
+            &item.id,
+            InboxState::Organized,
+            Some(&format!("Filed to {}", ws.id)),
+        ).unwrap();
+        assert_eq!(s_org.state, InboxState::Organized);
+        assert_eq!(s_org.previous_state, Some(InboxState::Suggested));
+    }
+
+    #[test]
+    fn test_inbox_item_state_invalid_transitions_rejected() {
+        let conn = setup_db();
+        let item = create_item(&conn, None, None, "text", "Raw item", None, "{}").unwrap();
+
+        // Invalid: New -> Suggested (cannot skip Processing & Understood)
+        let invalid1 = transition_inbox_item_state(&conn, &item.id, InboxState::Suggested, None);
+        assert!(invalid1.is_err());
+        assert!(invalid1.unwrap_err().contains("Invalid state transition"));
+
+        // Invalid: New -> NeedsReview (cannot skip Processing & Understood)
+        let invalid2 = transition_inbox_item_state(&conn, &item.id, InboxState::NeedsReview, None);
+        assert!(invalid2.is_err());
+    }
+
+    #[test]
+    fn test_inbox_move_item_transitions_state() {
+        let conn = setup_db();
+        let item = create_item(&conn, None, None, "text", "Component code", None, "{}").unwrap();
+        let ws = create_workspace(&conn, "Frontend").unwrap();
+
+        let initial_state = get_inbox_item_state(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(initial_state.state, InboxState::New);
+
+        // Move to workspace -> state becomes Organized
+        move_item(&conn, &item.id, Some(&ws.id)).unwrap();
+        let organized_state = get_inbox_item_state(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(organized_state.state, InboxState::Organized);
+        assert_eq!(organized_state.previous_state, Some(InboxState::New));
+
+        // Move back to inbox -> state becomes New
+        move_item(&conn, &item.id, None).unwrap();
+        let returned_state = get_inbox_item_state(&conn, &item.id).unwrap().unwrap();
+        assert_eq!(returned_state.state, InboxState::New);
+        assert_eq!(returned_state.previous_state, Some(InboxState::Organized));
     }
 }
