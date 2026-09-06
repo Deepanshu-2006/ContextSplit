@@ -11,6 +11,7 @@ pub mod temporal;
 pub mod overview;
 pub mod reasoning;
 pub mod inbox_state;
+pub mod attention;
 
 #[cfg(test)]
 pub mod workflow_tests;

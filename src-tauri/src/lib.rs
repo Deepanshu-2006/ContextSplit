@@ -746,6 +746,29 @@ fn list_inbox_item_states(
 }
 
 // ---------------------------------------------------------------------------
+// Day 12: Inbox Attention Engine commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn evaluate_inbox_item_attention(
+    item_id: &str,
+    config: Option<context_engine::attention::AttentionConfig>,
+    state: State<'_, AppState>,
+) -> Result<context_engine::attention::ItemAttention, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::attention::evaluate_inbox_item_attention(&conn, item_id, config.as_ref())
+}
+
+#[tauri::command]
+fn evaluate_inbox_attention_batch(
+    config: Option<context_engine::attention::AttentionConfig>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::attention::ItemAttention>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::attention::evaluate_inbox_attention_batch(&conn, config.as_ref())
+}
+
+// ---------------------------------------------------------------------------
 
 #[tauri::command]
 fn capture_raw_event(payload: capture::RawCapturePayload, app: tauri::AppHandle) -> Result<capture::CaptureResult, String> {
@@ -1034,7 +1057,10 @@ pub fn run() {
             // Context-Aware Inbox State Machine (Day 12)
             get_inbox_item_state,
             transition_inbox_item_state,
-            list_inbox_item_states
+            list_inbox_item_states,
+            // Inbox Attention Engine (Day 12)
+            evaluate_inbox_item_attention,
+            evaluate_inbox_attention_batch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

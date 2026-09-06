@@ -40,6 +40,49 @@ export interface InboxItemState {
   updated_at: string;
 }
 
+export type AttentionLevel = "none" | "low" | "medium" | "high";
+
+export interface AttentionFactors {
+  is_organized: boolean;
+  is_dismissed: boolean;
+  contextual_confidence: number;
+  is_ambiguous: boolean;
+  ambiguity_margin?: number | null;
+  has_new_candidate: boolean;
+  candidate_id?: string | null;
+  candidate_confidence?: number | null;
+  has_suggested_membership: boolean;
+  suggested_workspace_id?: string | null;
+  suggested_workspace_name?: string | null;
+  dismissal_count: number;
+  similar_dismissals_count: number;
+  item_age_hours: number;
+  historical_rejection_penalty: number;
+}
+
+export interface ItemAttention {
+  item_id: string;
+  attention_required: boolean;
+  attention_level: AttentionLevel;
+  reason: string;
+  score: number;
+  factors: AttentionFactors;
+}
+
+export interface AttentionConfig {
+  high_attention_threshold?: number;
+  medium_attention_threshold?: number;
+  low_attention_threshold?: number;
+  ambiguity_threshold?: number;
+  candidate_bonus?: number;
+  suggested_membership_bonus?: number;
+  ambiguity_bonus?: number;
+  dismissal_penalty_per_count?: number;
+  similar_dismissal_penalty?: number;
+  fresh_item_window_hours?: number;
+  stale_item_threshold_days?: number;
+}
+
 export interface ContextSignal {
   id: string;
   workspace_id: string | null;
@@ -822,6 +865,18 @@ export const db = {
   listInboxItemStates: (stateFilter?: InboxState) =>
     invoke<InboxItemState[]>("list_inbox_item_states", {
       stateFilter: stateFilter ?? null,
+    }),
+
+  // Inbox Attention Engine (Day 12)
+  evaluateInboxItemAttention: (itemId: string, config?: AttentionConfig) =>
+    invoke<ItemAttention>("evaluate_inbox_item_attention", {
+      itemId,
+      config: config ?? null,
+    }),
+
+  evaluateInboxAttentionBatch: (config?: AttentionConfig) =>
+    invoke<ItemAttention[]>("evaluate_inbox_attention_batch", {
+      config: config ?? null,
     }),
 };
 
