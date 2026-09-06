@@ -22,6 +22,7 @@ import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useDiscoveryStore } from '../../store/discoveryStore';
 import { ContextInspector } from '../workspace/ContextInspector';
 import { ContextBadge } from '../workspace/ContextBadge';
+import { QuickContextAssignmentMenu } from './QuickContextAssignmentMenu';
 
 interface InboxItemCardProps {
   derived: DerivedInboxItem;
@@ -37,24 +38,22 @@ export function InboxItemCard({
   showSectionBadge = false,
 }: InboxItemCardProps) {
   const { item, section, attention, candidateInfo } = derived;
-  const { acceptItemSuggestion, dismissItemSuggestion } = useInboxStore();
+  const { dismissItemSuggestion } = useInboxStore();
   const { reviewCandidate } = useDiscoveryStore();
   const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const [chooseContextOpen, setChooseContextOpen] = useState(false);
+  const [quickMenuOpen, setQuickMenuOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
-  const [chooseContextPos, setChooseContextPos] = useState<{ top: number; left: number } | null>(null);
+  const [quickMenuPos, setQuickMenuPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
-  const chooseContextBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const chooseContextRef = useRef<HTMLDivElement>(null);
   const [isProcessingAction, setIsProcessingAction] = useState(false);
 
-  // Close menus on click outside
+  // Close options menu on click outside
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
+    function handleClickOutside(event: globalThis.MouseEvent) {
       if (
         menuRef.current &&
         !menuRef.current.contains(event.target as Node) &&
@@ -62,14 +61,6 @@ export function InboxItemCard({
         !menuBtnRef.current.contains(event.target as Node)
       ) {
         setMenuOpen(false);
-      }
-      if (
-        chooseContextRef.current &&
-        !chooseContextRef.current.contains(event.target as Node) &&
-        chooseContextBtnRef.current &&
-        !chooseContextBtnRef.current.contains(event.target as Node)
-      ) {
-        setChooseContextOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -84,25 +75,12 @@ export function InboxItemCard({
     setMenuOpen((v) => !v);
   };
 
-  const openChooseContext = (e: React.MouseEvent) => {
+  const openQuickMenu = (e: React.MouseEvent<HTMLElement>) => {
     e.stopPropagation();
-    if (chooseContextBtnRef.current) {
-      const rect = chooseContextBtnRef.current.getBoundingClientRect();
-      setChooseContextPos({ top: rect.bottom + 6, left: rect.left });
-    }
-    setChooseContextOpen((v) => !v);
-  };
-
-  const handleAccept = async (targetWsId: string) => {
-    try {
-      setIsProcessingAction(true);
-      await acceptItemSuggestion(item.id, targetWsId);
-      onMoveToWorkspace(item.id, targetWsId);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsProcessingAction(false);
-    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    setQuickMenuPos({ top: rect.bottom + 6, left: rect.left });
+    setQuickMenuOpen(true);
+    setMenuOpen(false);
   };
 
   const handleDismiss = async (wsId?: string) => {
@@ -111,35 +89,6 @@ export function InboxItemCard({
       await dismissItemSuggestion(item.id, wsId);
     } catch (e) {
       console.error(e);
-    } finally {
-      setIsProcessingAction(false);
-    }
-  };
-
-  const handleChooseWorkspace = async (chosenWsId: string) => {
-    try {
-      setIsProcessingAction(true);
-      // 1. Create confirmed membership
-      await db.confirmContextMembership(item.id, chosenWsId);
-      // 2. Transition organization state to 'organized'
-      try {
-        await db.transitionInboxItemState(item.id, 'organized', `User manually assigned to context: ${chosenWsId}`);
-      } catch (e) {}
-      // 3. Record user feedback signal
-      try {
-        await db.createContextSignal(
-          chosenWsId,
-          item.id,
-          'user_action',
-          null,
-          JSON.stringify({ action: 'context_chosen_manually', workspace_id: chosenWsId })
-        );
-      } catch (e) {}
-      // 4. Move item to workspace
-      onMoveToWorkspace(item.id, chosenWsId);
-      setChooseContextOpen(false);
-    } catch (err) {
-      console.error('Failed to choose context:', err);
     } finally {
       setIsProcessingAction(false);
     }
@@ -240,9 +189,6 @@ export function InboxItemCard({
   };
 
   const suggestedWsId = attention?.factors?.suggested_workspace_id;
-  const suggestedWsName =
-    attention?.factors?.suggested_workspace_name ||
-    workspaces.find((w) => w.id === suggestedWsId)?.name;
 
   // Evaluate Contextual Action State
   const hasHighConfidenceSuggestion =
@@ -345,19 +291,19 @@ export function InboxItemCard({
         {/* ==================================================================== */}
 
         {/* 1. HIGH-CONFIDENCE SUGGESTED MEMBERSHIP: [Add to Context] */}
-        {hasHighConfidenceSuggestion && suggestedWsId && (
+        {hasHighConfidenceSuggestion && (
           <div className="flex items-center gap-1.5 pt-0.5">
             <button
-              onClick={() => handleAccept(suggestedWsId)}
+              onClick={openQuickMenu}
               disabled={isProcessingAction}
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
-              title={`Add to ${suggestedWsName || 'Context'}`}
+              title="Add to Context"
             >
               <Plus size={13} strokeWidth={2.5} />
               <span>Add to Context</span>
             </button>
             <button
-              onClick={() => handleDismiss(suggestedWsId)}
+              onClick={() => handleDismiss(suggestedWsId || undefined)}
               disabled={isProcessingAction}
               title="Dismiss suggestion"
               className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
@@ -384,10 +330,10 @@ export function InboxItemCard({
         {!hasHighConfidenceSuggestion && !hasCandidate && isUncertain && (
           <div className="flex items-center gap-1.5 pt-0.5 relative">
             <button
-              ref={chooseContextBtnRef}
-              onClick={openChooseContext}
+              onClick={openQuickMenu}
               disabled={isProcessingAction}
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
+              title="Choose Context"
             >
               <FolderPlus size={13} />
               <span>Choose Context</span>
@@ -406,44 +352,6 @@ export function InboxItemCard({
         {/* 4. ITEMS WITH NO MEANINGFUL EVIDENCE: SHOW NO ACTION */}
       </div>
 
-      {/* Floating Choose Context Dropdown */}
-      {chooseContextOpen && chooseContextPos && createPortal(
-        <div
-          ref={chooseContextRef}
-          style={{ top: chooseContextPos.top, left: Math.max(12, chooseContextPos.left) }}
-          className="fixed w-56 bg-white rounded-xl shadow-xl border border-gray-200/90 py-1.5 z-[9999] overflow-hidden"
-        >
-          <div className="px-3 pt-1 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
-            Choose Destination Context
-          </div>
-          {workspaces.map((ws) => (
-            <button
-              key={ws.id}
-              className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-amber-50 hover:text-amber-950 flex items-center gap-2 transition-colors cursor-pointer"
-              onClick={() => handleChooseWorkspace(ws.id)}
-            >
-              <BoxSelect size={13} className="text-amber-600 shrink-0" />
-              <span className="truncate">{ws.name}</span>
-            </button>
-          ))}
-          {workspaces.length === 0 && (
-            <p className="px-3 py-2 text-[11px] text-gray-400">No workspaces available.</p>
-          )}
-          <div className="my-1 border-t border-gray-100" />
-          <button
-            className="w-full text-left px-3 py-1.5 text-[11px] text-indigo-600 hover:bg-indigo-50 flex items-center gap-2 transition-colors cursor-pointer"
-            onClick={() => {
-              setInspectorOpen(true);
-              setChooseContextOpen(false);
-            }}
-          >
-            <Search size={12} />
-            <span>Inspect Evidence</span>
-          </button>
-        </div>,
-        document.body
-      )}
-
       {/* Floating Options Dropdown Menu */}
       {menuOpen && menuPos && createPortal(
         <div
@@ -454,6 +362,13 @@ export function InboxItemCard({
           <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
             Item Actions
           </div>
+          <button
+            className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
+            onClick={openQuickMenu}
+          >
+            <FolderPlus size={13} className="text-indigo-600" />
+            <span>Add to Context...</span>
+          </button>
           <button
             className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
             onClick={() => {
@@ -499,6 +414,20 @@ export function InboxItemCard({
         </div>,
         document.body
       )}
+
+      {/* Quick Context Assignment Menu */}
+      <QuickContextAssignmentMenu
+        itemId={item.id}
+        suggestedWorkspaceId={suggestedWsId}
+        suggestedConfidence={attention?.factors?.contextual_confidence}
+        workspaces={workspaces}
+        isOpen={quickMenuOpen}
+        position={quickMenuPos}
+        onClose={() => setQuickMenuOpen(false)}
+        onAssignSuccess={(wsId) => {
+          onMoveToWorkspace(item.id, wsId);
+        }}
+      />
 
       {/* Context Inspector Modal */}
       {inspectorOpen && (
