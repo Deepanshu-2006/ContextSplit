@@ -6,19 +6,17 @@ import {
   Link2,
   FileCode,
   Sparkles,
-  Check,
+  Plus,
   X,
-  AlertTriangle,
-  Layers,
   Search,
   MoreHorizontal,
   BoxSelect,
   CheckCircle2,
-  Clock,
   ExternalLink,
   GripVertical,
+  FolderPlus,
 } from 'lucide-react';
-import { Workspace } from '../../services/db';
+import { db, Workspace } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useDiscoveryStore } from '../../store/discoveryStore';
@@ -39,18 +37,22 @@ export function InboxItemCard({
   showSectionBadge = false,
 }: InboxItemCardProps) {
   const { item, section, attention, candidateInfo } = derived;
-  const { acceptItemSuggestion, dismissItemSuggestion, markItemUnderstood } = useInboxStore();
+  const { acceptItemSuggestion, dismissItemSuggestion } = useInboxStore();
   const { reviewCandidate } = useDiscoveryStore();
   const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [chooseContextOpen, setChooseContextOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const [chooseContextPos, setChooseContextPos] = useState<{ top: number; left: number } | null>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const chooseContextBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const chooseContextRef = useRef<HTMLDivElement>(null);
   const [isProcessingAction, setIsProcessingAction] = useState(false);
 
-  // Close menu on click outside
+  // Close menus on click outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (
@@ -60,6 +62,14 @@ export function InboxItemCard({
         !menuBtnRef.current.contains(event.target as Node)
       ) {
         setMenuOpen(false);
+      }
+      if (
+        chooseContextRef.current &&
+        !chooseContextRef.current.contains(event.target as Node) &&
+        chooseContextBtnRef.current &&
+        !chooseContextBtnRef.current.contains(event.target as Node)
+      ) {
+        setChooseContextOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -72,6 +82,15 @@ export function InboxItemCard({
       setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
     }
     setMenuOpen((v) => !v);
+  };
+
+  const openChooseContext = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (chooseContextBtnRef.current) {
+      const rect = chooseContextBtnRef.current.getBoundingClientRect();
+      setChooseContextPos({ top: rect.bottom + 6, left: rect.left });
+    }
+    setChooseContextOpen((v) => !v);
   };
 
   const handleAccept = async (targetWsId: string) => {
@@ -92,6 +111,35 @@ export function InboxItemCard({
       await dismissItemSuggestion(item.id, wsId);
     } catch (e) {
       console.error(e);
+    } finally {
+      setIsProcessingAction(false);
+    }
+  };
+
+  const handleChooseWorkspace = async (chosenWsId: string) => {
+    try {
+      setIsProcessingAction(true);
+      // 1. Create confirmed membership
+      await db.confirmContextMembership(item.id, chosenWsId);
+      // 2. Transition organization state to 'organized'
+      try {
+        await db.transitionInboxItemState(item.id, 'organized', `User manually assigned to context: ${chosenWsId}`);
+      } catch (e) {}
+      // 3. Record user feedback signal
+      try {
+        await db.createContextSignal(
+          chosenWsId,
+          item.id,
+          'user_action',
+          null,
+          JSON.stringify({ action: 'context_chosen_manually', workspace_id: chosenWsId })
+        );
+      } catch (e) {}
+      // 4. Move item to workspace
+      onMoveToWorkspace(item.id, chosenWsId);
+      setChooseContextOpen(false);
+    } catch (err) {
+      console.error('Failed to choose context:', err);
     } finally {
       setIsProcessingAction(false);
     }
@@ -195,9 +243,23 @@ export function InboxItemCard({
   const suggestedWsName =
     attention?.factors?.suggested_workspace_name ||
     workspaces.find((w) => w.id === suggestedWsId)?.name;
-  const confidence = attention?.factors?.contextual_confidence
-    ? Math.round(attention.factors.contextual_confidence * 100)
-    : null;
+
+  // Evaluate Contextual Action State
+  const hasHighConfidenceSuggestion =
+    Boolean(
+      (attention?.factors?.has_suggested_membership ||
+        (suggestedWsId != null && (attention?.factors?.contextual_confidence ?? 0) >= 0.70)) &&
+        !attention?.factors?.is_ambiguous
+    );
+
+  const hasCandidate = Boolean(
+    candidateInfo != null || attention?.factors?.has_new_candidate === true
+  );
+
+  const isUncertain = Boolean(
+    attention?.factors?.is_ambiguous === true ||
+      derived.section === 'needs_attention'
+  );
 
   return (
     <div
@@ -258,7 +320,7 @@ export function InboxItemCard({
       {/* Main Content Preview */}
       <div className="p-3.5 flex-1 flex flex-col gap-2.5">{renderContent()}</div>
 
-      {/* Context Status & Rationale Section */}
+      {/* Context Status & Inline Actions Section */}
       <div className="px-3.5 pb-3 flex flex-col gap-2.5 border-t border-black/3 pt-2.5 bg-gray-50/40">
         {/* Contextual Badge (Clickable to Inspect ContextExplanation) */}
         <div className="flex items-center justify-between gap-2">
@@ -278,145 +340,109 @@ export function InboxItemCard({
           )}
         </div>
 
-        {/* 1. Needs Attention Context Banner */}
-        {section === 'needs_attention' && (
-          <div className="flex flex-col gap-2 bg-amber-50/80 border border-amber-200/70 rounded-lg p-2.5">
-            <div className="flex items-start gap-1.5">
-              <AlertTriangle size={13} className="text-amber-600 mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-semibold text-amber-900 leading-tight">
-                  {attention?.factors?.is_ambiguous
-                    ? 'Context Ambiguity Detected'
-                    : 'Attention Required'}
-                </p>
-                <p className="text-[10px] text-amber-700/90 mt-0.5 leading-snug">
-                  {attention?.reason || 'Evaluate or assign to the appropriate workspace.'}
-                </p>
-              </div>
-            </div>
+        {/* ==================================================================== */}
+        {/* INLINE CONTEXTUAL ACTIONS */}
+        {/* ==================================================================== */}
 
-            <div className="flex items-center gap-1.5 mt-0.5">
-              {suggestedWsId && suggestedWsName && (
-                <button
-                  onClick={() => handleAccept(suggestedWsId)}
-                  disabled={isProcessingAction}
-                  className="flex-1 flex items-center justify-center gap-1 px-2 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-medium transition-colors cursor-pointer"
-                >
-                  <Check size={11} />
-                  <span>Assign to {suggestedWsName}</span>
-                </button>
-              )}
-              <button
-                onClick={() => setInspectorOpen(true)}
-                className="px-2 py-1 bg-white hover:bg-amber-100/60 border border-amber-300/80 text-amber-900 rounded text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer"
-              >
-                <Search size={11} />
-                <span>Inspect</span>
-              </button>
-            </div>
+        {/* 1. HIGH-CONFIDENCE SUGGESTED MEMBERSHIP: [Add to Context] */}
+        {hasHighConfidenceSuggestion && suggestedWsId && (
+          <div className="flex items-center gap-1.5 pt-0.5">
+            <button
+              onClick={() => handleAccept(suggestedWsId)}
+              disabled={isProcessingAction}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
+              title={`Add to ${suggestedWsName || 'Context'}`}
+            >
+              <Plus size={13} strokeWidth={2.5} />
+              <span>Add to Context</span>
+            </button>
+            <button
+              onClick={() => handleDismiss(suggestedWsId)}
+              disabled={isProcessingAction}
+              title="Dismiss suggestion"
+              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
+            >
+              <X size={13} />
+            </button>
           </div>
         )}
 
-        {/* 2. New Context Candidates Banner */}
-        {section === 'new_candidates' && candidateInfo && (
-          <div className="flex flex-col gap-2 bg-cyan-50/80 border border-cyan-200/80 rounded-lg p-2.5">
-            <div className="flex items-start gap-1.5">
-              <Layers size={13} className="text-cyan-600 mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-[11px] font-semibold text-cyan-950 leading-tight truncate">
-                  Cluster: {candidateInfo.candidateName}
-                </p>
-                <p className="text-[10px] text-cyan-800/80 mt-0.5">
-                  {Math.round(candidateInfo.confidence * 100)}% cluster coherence
-                </p>
-              </div>
-            </div>
-
+        {/* 2. NEW CONTEXT CANDIDATES: [Review Context] */}
+        {!hasHighConfidenceSuggestion && hasCandidate && candidateInfo && (
+          <div className="pt-0.5">
             <button
               onClick={handleReviewCandidate}
-              className="w-full flex items-center justify-center gap-1 px-2.5 py-1 bg-cyan-600 hover:bg-cyan-700 text-white rounded text-[11px] font-medium transition-colors cursor-pointer"
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
             >
-              <Sparkles size={11} />
-              <span>Review Candidate Cluster</span>
+              <Sparkles size={13} />
+              <span>Review Context</span>
             </button>
           </div>
         )}
 
-        {/* 3. Context Suggestions Banner */}
-        {section === 'context_suggestions' && suggestedWsId && suggestedWsName && (
-          <div className="flex flex-col gap-2 bg-indigo-50/70 border border-indigo-200/70 rounded-lg p-2.5">
-            <div className="flex items-start justify-between gap-1.5">
-              <div className="flex items-start gap-1.5 min-w-0">
-                <Sparkles size={13} className="text-indigo-600 mt-0.5 shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-[11px] font-semibold text-indigo-950 truncate">
-                    Suggests: {suggestedWsName}
-                  </p>
-                  <p className="text-[10px] text-indigo-700/80 line-clamp-1">
-                    {attention?.reason || 'Matching context profile & keywords'}
-                  </p>
-                </div>
-              </div>
-              {confidence !== null && (
-                <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded shrink-0">
-                  {confidence}%
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => handleAccept(suggestedWsId)}
-                disabled={isProcessingAction}
-                className="flex-1 flex items-center justify-center gap-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[11px] font-medium transition-colors cursor-pointer"
-              >
-                <Check size={11} />
-                <span>Move to {suggestedWsName}</span>
-              </button>
-              <button
-                onClick={() => handleDismiss(suggestedWsId)}
-                disabled={isProcessingAction}
-                title="Dismiss suggestion"
-                className="p-1 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded transition-colors cursor-pointer"
-              >
-                <X size={13} />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* 4. Recently Captured Status */}
-        {section === 'recently_captured' && (
-          <div className="flex items-center justify-between text-[11px] text-gray-500 px-1">
-            <span className="flex items-center gap-1.5">
-              <Clock size={12} className="text-sky-500" />
-              <span>Ready for organization</span>
-            </span>
+        {/* 3. UNCERTAIN ITEMS: [Choose Context] */}
+        {!hasHighConfidenceSuggestion && !hasCandidate && isUncertain && (
+          <div className="flex items-center gap-1.5 pt-0.5 relative">
             <button
-              onClick={() => markItemUnderstood(item.id)}
-              className="text-[10px] text-gray-500 hover:text-gray-900 font-medium hover:underline cursor-pointer"
+              ref={chooseContextBtnRef}
+              onClick={openChooseContext}
+              disabled={isProcessingAction}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
             >
-              Mark understood
+              <FolderPlus size={13} />
+              <span>Choose Context</span>
+            </button>
+            <button
+              onClick={() => handleDismiss()}
+              disabled={isProcessingAction}
+              title="Dismiss prompt"
+              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
+            >
+              <X size={13} />
             </button>
           </div>
         )}
 
-        {/* 5. Already Understood Status */}
-        {section === 'already_understood' && (
-          <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
-            <span className="flex items-center gap-1.5">
-              <CheckCircle2 size={12} className="text-emerald-500" />
-              <span>Context Understood</span>
-            </span>
-            <button
-              onClick={() => setInspectorOpen(true)}
-              className="text-[10px] text-slate-400 hover:text-indigo-600 font-medium flex items-center gap-1 cursor-pointer"
-            >
-              <Search size={10} /> Inspect
-            </button>
-          </div>
-        )}
+        {/* 4. ITEMS WITH NO MEANINGFUL EVIDENCE: SHOW NO ACTION */}
       </div>
+
+      {/* Floating Choose Context Dropdown */}
+      {chooseContextOpen && chooseContextPos && createPortal(
+        <div
+          ref={chooseContextRef}
+          style={{ top: chooseContextPos.top, left: Math.max(12, chooseContextPos.left) }}
+          className="fixed w-56 bg-white rounded-xl shadow-xl border border-gray-200/90 py-1.5 z-[9999] overflow-hidden"
+        >
+          <div className="px-3 pt-1 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+            Choose Destination Context
+          </div>
+          {workspaces.map((ws) => (
+            <button
+              key={ws.id}
+              className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-amber-50 hover:text-amber-950 flex items-center gap-2 transition-colors cursor-pointer"
+              onClick={() => handleChooseWorkspace(ws.id)}
+            >
+              <BoxSelect size={13} className="text-amber-600 shrink-0" />
+              <span className="truncate">{ws.name}</span>
+            </button>
+          ))}
+          {workspaces.length === 0 && (
+            <p className="px-3 py-2 text-[11px] text-gray-400">No workspaces available.</p>
+          )}
+          <div className="my-1 border-t border-gray-100" />
+          <button
+            className="w-full text-left px-3 py-1.5 text-[11px] text-indigo-600 hover:bg-indigo-50 flex items-center gap-2 transition-colors cursor-pointer"
+            onClick={() => {
+              setInspectorOpen(true);
+              setChooseContextOpen(false);
+            }}
+          >
+            <Search size={12} />
+            <span>Inspect Evidence</span>
+          </button>
+        </div>,
+        document.body
+      )}
 
       {/* Floating Options Dropdown Menu */}
       {menuOpen && menuPos && createPortal(
@@ -443,8 +469,8 @@ export function InboxItemCard({
             <button
               className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
               onClick={() => {
-                markItemUnderstood(item.id);
-                setMenuOpen(false);
+                db.transitionInboxItemState(item.id, 'understood', 'User marked as understood')
+                  .then(() => setMenuOpen(false));
               }}
             >
               <CheckCircle2 size={13} className="text-emerald-500" />
