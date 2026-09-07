@@ -4,10 +4,10 @@ import {
   Sparkles,
   Layers,
   Clock,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   CheckCheck,
+  Brain,
 } from 'lucide-react';
 import { Workspace } from '../../services/db';
 import { DerivedInboxItem, InboxSectionKey, useInboxStore } from '../../store/inboxStore';
@@ -70,13 +70,13 @@ const SECTION_CONFIG: Record<
     emptyText: 'No recently captured items.',
   },
   already_understood: {
-    title: 'Already Understood',
-    description: 'Items whose contextual relationships have been analyzed and processed',
-    icon: CheckCircle2,
-    accentColor: 'text-slate-500',
-    badgeColor: 'bg-slate-100 text-slate-700 border-slate-200',
-    bgLinear: 'from-slate-500/5 to-transparent',
-    emptyText: 'No items in understood state.',
+    title: 'Understood by ContextSplit',
+    description: 'High-confidence contextual interpretation reached. Items remain in your Inbox until confirmed.',
+    icon: Brain,
+    accentColor: 'text-teal-600',
+    badgeColor: 'bg-teal-50 text-teal-800 border-teal-200',
+    bgLinear: 'from-teal-500/5 to-transparent',
+    emptyText: 'No items currently in understood state.',
   },
 };
 

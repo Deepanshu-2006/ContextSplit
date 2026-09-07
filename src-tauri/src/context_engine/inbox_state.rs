@@ -338,4 +338,50 @@ pub mod tests {
         let all_items = InboxStateMachine::list_by_state(&conn, None).unwrap();
         assert_eq!(all_items.len(), 3);
     }
+
+    #[test]
+    fn test_understood_state_preserves_inbox_and_does_not_confirm_membership() {
+        let conn = setup_test_db();
+        let item = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Understood high confidence documentation draft",
+            Some("Doc Draft"),
+            "{}",
+        )
+        .unwrap();
+
+        // 1. Advance to Processing -> Understood
+        InboxStateMachine::start_processing(&conn, &item.id).unwrap();
+        let understood = InboxStateMachine::mark_understood(
+            &conn,
+            &item.id,
+            Some("ContextSplit reached 96% confidence interpretation"),
+        )
+        .unwrap();
+
+        assert_eq!(understood.state, InboxState::Understood);
+
+        // 2. Invariant Check: Item MUST remain in Inbox (workspace_id is None / inbox)
+        let fresh_item = get_item(&conn, &item.id).unwrap();
+        assert_eq!(
+            fresh_item.workspace_id, None,
+            "Understood item MUST NOT be silently assigned to any workspace"
+        );
+
+        // 3. Invariant Check: No confirmed memberships exist for this item
+        let memberships = crate::db::operations::list_item_memberships(&conn, &item.id).unwrap();
+        assert!(
+            memberships.is_empty() || memberships.iter().all(|m| m.membership_type != "confirmed"),
+            "Understood item MUST NOT have confirmed memberships without explicit user confirmation"
+        );
+
+        // 4. Only explicit user action promotes Understood -> Organized / Confirmed
+        let ws = create_workspace(&conn, "Product Docs").unwrap();
+        let organized = InboxStateMachine::organize_item(&conn, &item.id, &ws.id).unwrap();
+        assert_eq!(organized.state, InboxState::Organized);
+        assert_eq!(organized.previous_state, Some(InboxState::Understood));
+    }
 }

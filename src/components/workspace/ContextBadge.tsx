@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   HelpCircle,
   ChevronRight,
+  Brain,
 } from 'lucide-react';
 import { db, ItemAttention, InboxItemState, Workspace } from '../../services/db';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -14,6 +15,7 @@ import { ContextInspector } from './ContextInspector';
 
 export type ContextBadgeState =
   | 'confirmed'
+  | 'understood'
   | 'suggested'
   | 'candidate'
   | 'uncertain'
@@ -44,30 +46,28 @@ export function getContextBadgeData(
   state: ContextBadgeState;
   label: string;
   tooltip: string;
-  icon: typeof CheckCircle2;
+  icon: typeof CheckCircle2 | typeof Brain;
   classes: {
     badge: string;
     icon: string;
     dot: string;
   };
 } {
-  // 1. CONFIRMED CONTEXT
-  // If item belongs to a workspace directly or state is 'organized'
-  if (
-    workspaceId != null ||
-    inboxState?.state === 'organized' ||
-    attention?.factors?.is_organized
-  ) {
+  const isPhysicallyInWorkspace = workspaceId != null && workspaceId !== 'inbox' && workspaceId !== '';
+  const isOrganized = isPhysicallyInWorkspace || inboxState?.state === 'organized' || attention?.factors?.is_organized;
+
+  // 1. CONFIRMED CONTEXT (Explicit user confirmation or manual filing)
+  if (isOrganized) {
     const ws = workspaces.find((w) => w.id === workspaceId);
     const wsName = ws?.name || 'Workspace';
     return {
       state: 'confirmed',
       label: `${wsName} • Confirmed`,
-      tooltip: `Confirmed membership in ${wsName}. Click to inspect context evidence.`,
+      tooltip: `Confirmed membership in ${wsName}. User explicitly accepted organization.`,
       icon: CheckCircle2,
       classes: {
         badge:
-          'bg-emerald-50 text-emerald-800 border-emerald-200/80 hover:bg-emerald-100 hover:border-emerald-300',
+          'bg-emerald-50 text-emerald-800 border-emerald-200/90 hover:bg-emerald-100 hover:border-emerald-300',
         icon: 'text-emerald-600',
         dot: 'bg-emerald-500',
       },
@@ -96,20 +96,43 @@ export function getContextBadgeData(
     };
   }
 
-  // 3. NEW CONTEXT CANDIDATE
+  // 3. UNDERSTOOD CONTEXT (High-confidence interpretation by ContextSplit, still unassigned in Inbox)
+  const confidence = attention?.factors?.contextual_confidence ?? 0;
+  const isStateUnderstood = inboxState?.state === 'understood';
+  const hasHighConfidenceSuggestion =
+    (attention?.factors?.has_suggested_membership || attention?.factors?.suggested_workspace_id) &&
+    confidence >= 0.70;
+
+  if (isStateUnderstood || (hasHighConfidenceSuggestion && !attention?.factors?.is_ambiguous)) {
+    const targetWsId = attention?.factors?.suggested_workspace_id;
+    const ws = workspaces.find((w) => w.id === targetWsId);
+    const wsName = attention?.factors?.suggested_workspace_name || ws?.name || (candidateInfo ? candidateInfo.candidateName : 'Context');
+
+    return {
+      state: 'understood',
+      label: `${wsName} • Understood`,
+      tooltip: `Understood by ContextSplit: High-confidence contextual interpretation (${wsName}). Unassigned in Inbox until confirmed.`,
+      icon: Brain,
+      classes: {
+        badge:
+          'bg-teal-50 text-teal-900 border-teal-200/90 hover:bg-teal-100 hover:border-teal-300',
+        icon: 'text-teal-600',
+        dot: 'bg-teal-500',
+      },
+    };
+  }
+
+  // 4. NEW CONTEXT CANDIDATE
   // If item belongs to a detected/suggested context candidate cluster
   if (
     candidateInfo != null ||
     attention?.factors?.has_new_candidate
   ) {
     const candName = candidateInfo?.candidateName || 'New Context';
-    const conf = Math.round(
-      (candidateInfo?.confidence || attention?.factors?.candidate_confidence || 0.85) * 100
-    );
     return {
       state: 'candidate',
-      label: `${candName} • ${conf}%`,
-      tooltip: `Member of candidate cluster "${candName}" (${conf}% coherence). Click to inspect.`,
+      label: `${candName} • Candidate`,
+      tooltip: `Member of candidate cluster "${candName}". Click to inspect evidence.`,
       icon: Layers,
       classes: {
         badge:
@@ -120,8 +143,7 @@ export function getContextBadgeData(
     };
   }
 
-  // 4. SUGGESTED CONTEXT
-  // If item has a suggested workspace
+  // 5. SUGGESTED CONTEXT (Emerging / Moderate recommendation)
   if (
     attention?.factors?.has_suggested_membership ||
     (attention?.factors?.suggested_workspace_id != null && attention.factors.suggested_workspace_id !== '') ||
@@ -130,12 +152,11 @@ export function getContextBadgeData(
     const targetWsId = attention?.factors?.suggested_workspace_id;
     const ws = workspaces.find((w) => w.id === targetWsId);
     const wsName = attention?.factors?.suggested_workspace_name || ws?.name || 'Context';
-    const conf = Math.round((attention?.factors?.contextual_confidence || 0.75) * 100);
 
     return {
       state: 'suggested',
-      label: `${wsName} • Suggested ${conf}%`,
-      tooltip: `Suggested for ${wsName} with ${conf}% confidence. Click to inspect explanation.`,
+      label: `${wsName} • Suggested`,
+      tooltip: `Suggested for ${wsName}. Click to inspect explanation or assign.`,
       icon: Sparkles,
       classes: {
         badge:
@@ -146,7 +167,7 @@ export function getContextBadgeData(
     };
   }
 
-  // 5. NO CONTEXT
+  // 6. NO CONTEXT
   // Default fallback for items without strong evidence
   return {
     state: 'no_context',

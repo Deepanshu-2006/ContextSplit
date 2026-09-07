@@ -216,6 +216,12 @@ function InboxItemCardComponent({
       derived.section === 'needs_attention'
   );
 
+  const isUnderstood = Boolean(
+    derived.section === 'already_understood' ||
+      derived.inboxState?.state === 'understood' ||
+      ((attention?.factors?.contextual_confidence ?? 0) >= 0.70 && !attention?.factors?.is_ambiguous)
+  );
+
   return (
     <div
       data-item-id={item.id}
@@ -246,6 +252,8 @@ function InboxItemCardComponent({
           ? 'border-cyan-200/90 hover:border-cyan-400/80 bg-linear-to-b from-cyan-50/20 to-white'
           : section === 'context_suggestions'
           ? 'border-indigo-200/90 hover:border-indigo-400/80 bg-linear-to-b from-indigo-50/15 to-white'
+          : section === 'already_understood'
+          ? 'border-teal-200/90 hover:border-teal-400/80 bg-linear-to-b from-teal-50/15 to-white'
           : 'border-black/6 hover:border-black/15'
       }`}
     >
@@ -411,7 +419,22 @@ function InboxItemCardComponent({
           </div>
         )}
 
-        {/* 4. ITEMS WITH NO MEANINGFUL EVIDENCE: SHOW NO ACTION */}
+        {/* 4. UNDERSTOOD ITEMS: [Add to Context] */}
+        {!hasHighConfidenceSuggestion && !hasCandidate && !isUncertain && isUnderstood && (
+          <div className="flex items-center gap-1.5 pt-0.5">
+            <button
+              onClick={openQuickMenu}
+              disabled={isProcessingAction}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
+              title="Add / Confirm Context"
+            >
+              <Plus size={13} strokeWidth={2.5} />
+              <span>Add to Context</span>
+            </button>
+          </div>
+        )}
+
+        {/* 5. ITEMS WITH NO MEANINGFUL EVIDENCE: SHOW NO ACTION */}
       </div>
 
       {/* Floating Options Dropdown Menu */}
