@@ -24,6 +24,23 @@ export type InboxViewMode = 'sections' | 'grouped' | 'chronological' | 'canvas';
 export type InboxSortOrder = 'newest' | 'oldest';
 export type DatePreset = 'all' | 'today' | '7d' | '30d' | 'custom';
 
+export function isMacPlatform(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    (navigator as any)?.userAgentData?.platform === 'macOS' ||
+    navigator.platform?.toUpperCase().indexOf('MAC') >= 0 ||
+    navigator.userAgent?.toUpperCase().indexOf('MAC') >= 0
+  );
+}
+
+export function getModifierKeyName(): string {
+  return isMacPlatform() ? '⌘' : 'Ctrl';
+}
+
+export function getModifierKeyLongName(): string {
+  return isMacPlatform() ? 'Command' : 'Control';
+}
+
 export interface GroupReasoningState {
   result: ContextReasoningResult | null;
   isLoading: boolean;
@@ -82,6 +99,10 @@ interface InboxStoreState {
   selectedItemIds: string[];
   isMultiSelectActive: boolean;
 
+  // Focused Item for Keyboard Navigation
+  focusedItemId: string | null;
+  isShortcutsModalOpen: boolean;
+
   // Actions
   setViewMode: (mode: InboxViewMode) => void;
   setSortOrder: (order: InboxSortOrder) => void;
@@ -89,6 +110,9 @@ interface InboxStoreState {
   setSelectedSectionFilter: (filter: InboxSectionKey | 'all') => void;
   toggleSection: (section: InboxSectionKey) => void;
   setSectionCollapsed: (section: InboxSectionKey, collapsed: boolean) => void;
+  setFocusedItemId: (id: string | null) => void;
+  setShortcutsModalOpen: (open: boolean) => void;
+  toggleShortcutsModal: () => void;
 
   // Filter Actions
   setFilterWorkspaceId: (workspaceId: string | null) => void;
@@ -221,6 +245,8 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   isBatchProcessing: false,
   selectedItemIds: [],
   isMultiSelectActive: false,
+  focusedItemId: null,
+  isShortcutsModalOpen: false,
 
   setViewMode: (mode) => set({ viewMode: mode }),
   setSortOrder: (order) => {
@@ -254,6 +280,10 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
         [section]: collapsed,
       },
     })),
+
+  setFocusedItemId: (id) => set({ focusedItemId: id }),
+  setShortcutsModalOpen: (open) => set({ isShortcutsModalOpen: open }),
+  toggleShortcutsModal: () => set((s) => ({ isShortcutsModalOpen: !s.isShortcutsModalOpen })),
 
   // Filter Actions
   setFilterWorkspaceId: (workspaceId) => {

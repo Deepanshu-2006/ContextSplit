@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, memo } from 'react';
+import { useState, useRef, useEffect, memo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FileText,
@@ -9,14 +9,12 @@ import {
   Plus,
   X,
   Search,
-  MoreHorizontal,
+  MoreVertical,
+  Check,
   BoxSelect,
   CheckCircle2,
   ExternalLink,
-  GripVertical,
   FolderPlus,
-  CheckSquare,
-  Square,
 } from 'lucide-react';
 import { db, Workspace } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
@@ -45,11 +43,14 @@ function InboxItemCardComponent({
     selectedItemIds,
     toggleSelectItem,
     isMultiSelectActive,
+    focusedItemId,
+    setFocusedItemId,
   } = useInboxStore();
   const { reviewCandidate } = useDiscoveryStore();
   const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
 
   const isSelected = selectedItemIds.includes(item.id);
+  const isFocused = focusedItemId === item.id;
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [quickMenuOpen, setQuickMenuOpen] = useState(false);
@@ -236,6 +237,7 @@ function InboxItemCardComponent({
         setHoveredWorkspaceId(null);
       }}
       onClick={(e) => {
+        setFocusedItemId(item.id);
         if (e.shiftKey || e.metaKey || e.ctrlKey || isMultiSelectActive) {
           const target = e.target as HTMLElement;
           if (!target.closest('button') && !target.closest('a') && !target.closest('input')) {
@@ -243,9 +245,11 @@ function InboxItemCardComponent({
           }
         }
       }}
-      className={`group bg-white rounded-xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md ${
+      className={`group bg-white rounded-xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md cursor-pointer ${
         isSelected
           ? 'ring-2 ring-indigo-600 border-indigo-400 bg-indigo-50/15 shadow-sm'
+          : isFocused
+          ? 'ring-2 ring-indigo-500/80 border-indigo-500 shadow-md ring-offset-1'
           : section === 'needs_attention'
           ? 'border-amber-200/90 hover:border-amber-400/80 bg-linear-to-b from-amber-50/20 to-white'
           : section === 'new_candidates'
@@ -261,82 +265,84 @@ function InboxItemCardComponent({
       <div className="flex items-center justify-between px-3.5 pt-3 pb-2 border-b border-black/3">
         <div className="flex items-center gap-1.5 min-w-0">
           <button
-            type="button"
             onClick={(e) => {
               e.stopPropagation();
               toggleSelectItem(item.id);
             }}
-            className={`p-0.5 rounded transition-all cursor-pointer ${
+            className={`w-4 h-4 rounded border flex items-center justify-center transition-colors cursor-pointer ${
               isSelected
-                ? 'text-indigo-600 opacity-100'
-                : isMultiSelectActive
-                ? 'text-gray-400 hover:text-gray-700 opacity-100'
-                : 'text-gray-300 opacity-0 group-hover:opacity-100 hover:text-gray-600'
+                ? 'bg-indigo-600 border-indigo-600 text-white'
+                : 'border-gray-300 hover:border-gray-500 bg-white'
             }`}
-            title={isSelected ? 'Deselect item' : 'Select item'}
+            title={isSelected ? 'Deselect item' : 'Select item (X)'}
           >
-            {isSelected ? (
-              <CheckSquare size={14} className="text-indigo-600 fill-indigo-50" />
-            ) : (
-              <Square size={14} />
-            )}
+            {isSelected && <Check size={11} strokeWidth={3} />}
           </button>
-          <div className="cursor-grab active:cursor-grabbing text-gray-300 group-hover:text-gray-500 transition-colors">
-            <GripVertical size={13} />
-          </div>
-          {getItemIcon()}
-          <span className="text-[12px] font-medium text-gray-700 truncate max-w-[120px]">
-            {item.title || item.item_type.toUpperCase()}
+
+          <span className="text-gray-400">{getItemIcon()}</span>
+          <span className="text-[11px] font-medium text-gray-500 capitalize truncate">
+            {item.item_type}
           </span>
-        </div>
-
-        <div className="flex items-center gap-1.5 shrink-0">
-          {appName && (
-            <span className="text-[10px] text-gray-400 bg-gray-100/80 px-1.5 py-0.5 rounded font-medium max-w-[70px] truncate">
-              {appName}
-            </span>
-          )}
-          <span className="text-[10px] text-gray-400 font-mono">
-            {getRelativeTime(item.created_at)}
-          </span>
-
-          <button
-            ref={menuBtnRef}
-            onClick={openMenu}
-            className="p-1 rounded hover:bg-black/5 text-gray-400 hover:text-gray-800 transition-colors cursor-pointer"
-            title="Options"
-          >
-            <MoreHorizontal size={13} />
-          </button>
-        </div>
-      </div>
-
-      {/* Main Content Preview */}
-      <div className="p-3.5 flex-1 flex flex-col gap-2.5">{renderContent()}</div>
-
-      {/* Context Status & Inline Actions Section */}
-      <div className="px-3.5 pb-3 flex flex-col gap-2.5 border-t border-black/3 pt-2.5 bg-gray-50/40">
-        {/* Contextual Badge (Clickable to Inspect ContextExplanation) */}
-        <div className="flex items-center justify-between gap-2">
-          <ContextBadge
-            itemId={item.id}
-            attention={attention}
-            candidateInfo={candidateInfo}
-            workspaces={workspaces}
-            onOpenInspector={() => setInspectorOpen(true)}
-          />
-
-          {/* Section Pill in Chronological stream view if different */}
           {showSectionBadge && (
-            <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider shrink-0">
+            <span
+              className={`text-[9px] font-semibold px-1.5 py-0.2 rounded-full border ${
+                section === 'needs_attention'
+                  ? 'bg-amber-50 text-amber-700 border-amber-200'
+                  : section === 'new_candidates'
+                  ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
+                  : section === 'context_suggestions'
+                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                  : section === 'already_understood'
+                  ? 'bg-teal-50 text-teal-700 border-teal-200'
+                  : 'bg-gray-100 text-gray-600 border-gray-200'
+              }`}
+            >
               {section.replace('_', ' ')}
             </span>
           )}
         </div>
 
-        {/* Search Result Relevance / Semantic Match Indicator */}
+        <div className="flex items-center gap-1 text-gray-400">
+          <span className="text-[10px] text-gray-400 font-mono">
+            {getRelativeTime(item.created_at)}
+          </span>
+          <button
+            ref={menuBtnRef}
+            onClick={(e) => {
+              e.stopPropagation();
+              openMenu();
+            }}
+            className="p-1 hover:text-gray-700 hover:bg-black/5 rounded transition-colors cursor-pointer opacity-80 group-hover:opacity-100"
+            title="Item options"
+          >
+            <MoreVertical size={13} />
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="p-3.5 flex-1 flex flex-col gap-2 min-w-0">
+        {/* Title */}
+        {item.title && (
+          <h3 className="text-xs font-semibold text-gray-900 line-clamp-1 group-hover:text-indigo-600 transition-colors">
+            {item.title}
+          </h3>
+        )}
+
+        {/* Content Preview */}
+        {renderContent()}
+
+        {/* Source App / Domain Badge */}
+        {appName && (
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 truncate">
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
+            <span className="truncate">From {appName}</span>
+          </div>
+        )}
+
+        {/* Match Highlight if Search Active */}
         {derived.searchResult && (
-          <div className="flex items-center justify-between gap-2 text-[10px] bg-white border border-black/5 px-2 py-1 rounded-md shadow-2xs">
+          <div className="mt-1 p-1.5 rounded-md bg-gray-50 border border-black/4 flex items-center justify-between text-[10px]">
             {derived.searchResult.semantic_score != null ? (
               <span className="flex items-center gap-1 text-indigo-700 font-medium">
                 <Sparkles size={11} className="text-amber-500" />
@@ -355,6 +361,20 @@ function InboxItemCardComponent({
             )}
           </div>
         )}
+      </div>
+
+      {/* Context Status & Inline Actions Section */}
+      <div className="px-3.5 pb-3 flex flex-col gap-2.5 border-t border-black/3 pt-2.5 bg-gray-50/40">
+        {/* Contextual Badge (Clickable to Inspect ContextExplanation) */}
+        <div className="flex items-center justify-between gap-2">
+          <ContextBadge
+            itemId={item.id}
+            attention={attention}
+            candidateInfo={candidateInfo}
+            workspaces={workspaces}
+            onOpenInspector={() => setInspectorOpen(true)}
+          />
+        </div>
 
         {/* ==================================================================== */}
         {/* INLINE CONTEXTUAL ACTIONS */}
@@ -366,17 +386,22 @@ function InboxItemCardComponent({
             <button
               onClick={openQuickMenu}
               disabled={isProcessingAction}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
-              title="Add to Context"
+              className="flex-1 flex items-center justify-between px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer group/btn"
+              title="Add to Context (A)"
             >
-              <Plus size={13} strokeWidth={2.5} />
-              <span>Add to Context</span>
+              <div className="flex items-center gap-1.5">
+                <Plus size={13} strokeWidth={2.5} />
+                <span>Add to Context</span>
+              </div>
+              <kbd className="text-[9px] font-mono text-indigo-200 bg-indigo-800/50 px-1 py-0.2 rounded border border-indigo-400/30 opacity-80 group-hover/btn:opacity-100">
+                A
+              </kbd>
             </button>
             <button
               onClick={() => handleDismiss(suggestedWsId || undefined)}
               disabled={isProcessingAction}
-              title="Dismiss suggestion"
-              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
+              title="Dismiss suggestion (D)"
+              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer flex items-center gap-1"
             >
               <X size={13} />
             </button>
@@ -388,10 +413,16 @@ function InboxItemCardComponent({
           <div className="pt-0.5">
             <button
               onClick={handleReviewCandidate}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
+              className="w-full flex items-center justify-between px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer group/btn"
+              title="Review Context (R)"
             >
-              <Sparkles size={13} />
-              <span>Review Context</span>
+              <div className="flex items-center gap-1.5">
+                <Sparkles size={13} />
+                <span>Review Context</span>
+              </div>
+              <kbd className="text-[9px] font-mono text-cyan-200 bg-cyan-800/50 px-1 py-0.2 rounded border border-cyan-400/30 opacity-80 group-hover/btn:opacity-100">
+                R
+              </kbd>
             </button>
           </div>
         )}
@@ -411,7 +442,7 @@ function InboxItemCardComponent({
             <button
               onClick={() => handleDismiss()}
               disabled={isProcessingAction}
-              title="Dismiss prompt"
+              title="Dismiss prompt (D)"
               className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
             >
               <X size={13} />

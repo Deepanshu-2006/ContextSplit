@@ -201,11 +201,14 @@ export function InboxItemGroupCard({
               <>
                 <button
                   onClick={handleReview}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
-                  title="Review context candidate"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer group/btn"
+                  title="Review context candidate (R)"
                 >
                   <Sparkles size={13} />
                   <span>Review Context</span>
+                  <kbd className="text-[9px] font-mono text-cyan-200 bg-cyan-800/50 px-1 py-0.2 rounded border border-cyan-400/30 opacity-80 group-hover/btn:opacity-100">
+                    R
+                  </kbd>
                 </button>
 
                 <button
@@ -222,11 +225,14 @@ export function InboxItemGroupCard({
                 <button
                   onClick={handleAddAllToSuggested}
                   disabled={isProcessing}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-                  title={`Add all items to ${group.name}`}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer disabled:opacity-50 group/btn"
+                  title={`Add all items to ${group.name} (A)`}
                 >
                   <CheckCheck size={13} />
                   <span>Add All to Context</span>
+                  <kbd className="text-[9px] font-mono text-indigo-200 bg-indigo-800/50 px-1 py-0.2 rounded border border-indigo-400/30 opacity-80 group-hover/btn:opacity-100">
+                    A
+                  </kbd>
                 </button>
 
                 <button
