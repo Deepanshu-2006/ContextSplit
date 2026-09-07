@@ -326,6 +326,28 @@ export function InboxItemCard({
           )}
         </div>
 
+        {/* Search Result Relevance / Semantic Match Score */}
+        {derived.searchResult && (
+          <div className="flex items-center justify-between gap-2 text-[10px] bg-white border border-black/5 px-2 py-1 rounded-md">
+            {derived.searchResult.semantic_score != null ? (
+              <span className="flex items-center gap-1 text-indigo-700 font-semibold">
+                <Sparkles size={11} className="text-amber-500" />
+                Semantic Match ({Math.round(derived.searchResult.semantic_score * 100)}%)
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-gray-600 font-medium">
+                <Search size={11} className="text-gray-400" />
+                Text Match ({Math.round(derived.searchResult.combined_score * 100)}%)
+              </span>
+            )}
+            {derived.searchResult.match_highlights && derived.searchResult.match_highlights.length > 0 && (
+              <span className="text-[9px] text-gray-400 truncate max-w-[110px]">
+                {derived.searchResult.match_highlights[0]}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* ==================================================================== */}
         {/* INLINE CONTEXTUAL ACTIONS */}
         {/* ==================================================================== */}

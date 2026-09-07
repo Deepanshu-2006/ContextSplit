@@ -26,6 +26,7 @@ import { InboxSection } from './InboxSection';
 import { InboxItemCard } from './InboxItemCard';
 import { InboxItemGroupCard, InboxItemGroup } from './InboxItemGroupCard';
 import { BulkActionsBar } from './BulkActionsBar';
+import { InboxFilterBar } from './InboxFilterBar';
 
 interface InboxViewProps {
   items: Item[];
@@ -47,11 +48,13 @@ export function InboxView({
     selectedSectionFilter,
     attentionMap,
     inboxStateMap,
+    candidateMap,
     candidateItemMap,
     isLoading,
     isBatchProcessing,
     selectedItemIds,
     isMultiSelectActive,
+    searchResults,
     setViewMode,
     setSortOrder,
     setSearchQuery,
@@ -65,6 +68,7 @@ export function InboxView({
     bulkArchiveOrClear,
     assignItemIdsToWorkspace,
     dismissItemIdsSuggestions,
+    resetAllFilters,
   } = useInboxStore();
 
   const { emptyInbox } = useWorkspaceStore();
@@ -76,6 +80,25 @@ export function InboxView({
 
   // Derive logical sections without any item duplication
   const derivedItems: DerivedInboxItem[] = useMemo(() => {
+    if (searchResults !== null) {
+      return searchResults.map((res) => {
+        const item = res.item;
+        const att = attentionMap[item.id];
+        const state = res.inbox_state || inboxStateMap[item.id];
+        const cand = candidateItemMap[item.id];
+        const section = deriveItemSection(item, att, state, cand);
+
+        return {
+          item,
+          section,
+          attention: att,
+          inboxState: state,
+          candidateInfo: cand,
+          searchResult: res,
+        };
+      });
+    }
+
     return items.map((item) => {
       const att = attentionMap[item.id];
       const state = inboxStateMap[item.id];
@@ -90,34 +113,30 @@ export function InboxView({
         candidateInfo: cand,
       };
     });
-  }, [items, attentionMap, inboxStateMap, candidateItemMap]);
-
-  // Apply search query filter
-  const filteredDerivedItems = useMemo(() => {
-    let list = derivedItems;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter(
-        (d) =>
-          (d.item.title && d.item.title.toLowerCase().includes(q)) ||
-          d.item.content.toLowerCase().includes(q) ||
-          (d.candidateInfo && d.candidateInfo.candidateName.toLowerCase().includes(q)) ||
-          (d.attention?.reason && d.attention.reason.toLowerCase().includes(q))
-      );
-    }
-    return list;
-  }, [derivedItems, searchQuery]);
+  }, [items, searchResults, attentionMap, inboxStateMap, candidateItemMap]);
 
   // Chronological sort
   const sortedDerivedItems = useMemo(() => {
-    const list = [...filteredDerivedItems];
-    list.sort((a, b) => {
-      const tA = new Date(a.item.created_at).getTime();
-      const tB = new Date(b.item.created_at).getTime();
-      return sortOrder === 'newest' ? tB - tA : tA - tB;
-    });
+    const list = [...derivedItems];
+    if (searchResults !== null && sortOrder === 'newest') {
+      // If search result active and sort is newest, rank by combined search score
+      list.sort((a, b) => {
+        if (a.searchResult && b.searchResult) {
+          return b.searchResult.combined_score - a.searchResult.combined_score;
+        }
+        const tA = new Date(a.item.created_at).getTime();
+        const tB = new Date(b.item.created_at).getTime();
+        return tB - tA;
+      });
+    } else {
+      list.sort((a, b) => {
+        const tA = new Date(a.item.created_at).getTime();
+        const tB = new Date(b.item.created_at).getTime();
+        return sortOrder === 'newest' ? tB - tA : tA - tB;
+      });
+    }
     return list;
-  }, [filteredDerivedItems, sortOrder]);
+  }, [derivedItems, searchResults, sortOrder]);
 
   // Partition strictly into the 5 logical sections
   const sectionPartitions = useMemo(() => {
@@ -215,7 +234,7 @@ export function InboxView({
   };
 
   const handleSelectAll = () => {
-    selectAllItems(filteredDerivedItems.map((d) => d.item.id));
+    selectAllItems(sortedDerivedItems.map((d) => d.item.id));
   };
 
   const handleBulkAssign = async (workspaceId: string) => {
@@ -289,7 +308,7 @@ export function InboxView({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filter inbox items..."
+                placeholder="Search text, metadata..."
                 className="w-full bg-gray-100/80 hover:bg-gray-100 border border-black/5 rounded-lg py-1.5 pl-8 pr-7 text-[12px] placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-1 focus:ring-black/10 transition-all shadow-2xs"
               />
               {searchQuery && (
@@ -385,10 +404,10 @@ export function InboxView({
             <button
               onClick={() => setSortOrder(sortOrder === 'newest' ? 'oldest' : 'newest')}
               className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-gray-50 text-gray-700 border border-black/6 rounded-lg text-[12px] font-medium shadow-2xs transition-colors cursor-pointer"
-              title={`Sorting: ${sortOrder === 'newest' ? 'Newest First' : 'Oldest First'}`}
+              title={`Sorting: ${sortOrder === 'newest' ? 'Newest / Highest Relevance' : 'Oldest First'}`}
             >
               <ArrowDownUp size={13} className="text-gray-400" />
-              <span>{sortOrder === 'newest' ? 'Newest' : 'Oldest'}</span>
+              <span>{sortOrder === 'newest' ? (searchResults ? 'Top Matches' : 'Newest') : 'Oldest'}</span>
             </button>
 
             {/* Refresh Analysis */}
@@ -415,10 +434,16 @@ export function InboxView({
           </div>
         </div>
 
-        {/* Filter Badges Bar in Sections View */}
+        {/* Multi-Faceted Filter Bar (Workspace, Candidate, Type, Date, State, Semantic Search) */}
+        <InboxFilterBar
+          workspaces={workspaces}
+          candidates={Object.values(candidateMap)}
+        />
+
+        {/* Section Filter Badges Bar in Sections View */}
         <div className="flex items-center gap-2 overflow-x-auto pt-0.5 pb-1 no-scrollbar text-[12px]">
           <span className="text-gray-400 text-[11px] font-medium flex items-center gap-1 shrink-0">
-            <Filter size={11} /> Filter:
+            <Filter size={11} /> Section:
           </span>
 
           <button
@@ -429,7 +454,7 @@ export function InboxView({
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200/80'
             }`}
           >
-            All ({items.length})
+            All ({sortedDerivedItems.length})
           </button>
 
           <button
@@ -500,6 +525,22 @@ export function InboxView({
             <p className="text-[13px] text-gray-500 max-w-sm">
               Copy text, images, URLs, or files to capture items here.
             </p>
+          </div>
+        ) : searchResults !== null && sortedDerivedItems.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center p-8 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center mb-3.5 text-indigo-600">
+              <Search size={24} />
+            </div>
+            <h2 className="text-base font-semibold text-gray-800 mb-1">No Matching Items</h2>
+            <p className="text-[13px] text-gray-500 max-w-sm mb-4">
+              No inbox items match your search query or active filter criteria.
+            </p>
+            <button
+              onClick={resetAllFilters}
+              className="px-3.5 py-1.5 bg-gray-900 hover:bg-gray-800 text-white rounded-lg text-[12px] font-medium transition-colors shadow-2xs cursor-pointer"
+            >
+              Reset All Filters
+            </button>
           </div>
         ) : viewMode === 'sections' ? (
           /* 1. SECTIONS VIEW MODE */
@@ -637,7 +678,7 @@ export function InboxView({
       {/* Floating Multi-Select Bulk Actions Bar */}
       <BulkActionsBar
         selectedCount={selectedItemIds.length}
-        totalCount={filteredDerivedItems.length}
+        totalCount={sortedDerivedItems.length}
         workspaces={workspaces}
         isProcessing={isBatchProcessing}
         onSelectAll={handleSelectAll}

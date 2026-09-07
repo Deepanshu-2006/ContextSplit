@@ -8,6 +8,8 @@ import {
   CandidateWithItems,
   ContextReasoningResult,
   AIContextReasoningResponse,
+  InboxSearchParams,
+  InboxSearchResult,
 } from '../services/db';
 import { useWorkspaceStore } from './workspaceStore';
 
@@ -20,6 +22,7 @@ export type InboxSectionKey =
 
 export type InboxViewMode = 'sections' | 'grouped' | 'chronological' | 'canvas';
 export type InboxSortOrder = 'newest' | 'oldest';
+export type DatePreset = 'all' | 'today' | '7d' | '30d' | 'custom';
 
 export interface GroupReasoningState {
   result: ContextReasoningResult | null;
@@ -40,6 +43,7 @@ export interface DerivedInboxItem {
     confidence: number;
     explanation?: string;
   };
+  searchResult?: InboxSearchResult;
 }
 
 interface InboxStoreState {
@@ -49,6 +53,19 @@ interface InboxStoreState {
   searchQuery: string;
   selectedSectionFilter: InboxSectionKey | 'all';
   
+  // Search & Multi-Filter State
+  filterWorkspaceId: string | null;
+  filterCandidateId: string | null;
+  filterItemType: string | null;
+  filterDatePreset: DatePreset;
+  filterDateFrom: string | null;
+  filterDateTo: string | null;
+  filterInboxState: string | null;
+  isSemanticSearchActive: boolean;
+  isFilterBarOpen: boolean;
+  searchResults: InboxSearchResult[] | null;
+  isSearching: boolean;
+
   // Raw Data Cache
   attentionMap: Record<string, ItemAttention>;
   inboxStateMap: Record<string, InboxItemState>;
@@ -72,6 +89,19 @@ interface InboxStoreState {
   setSelectedSectionFilter: (filter: InboxSectionKey | 'all') => void;
   toggleSection: (section: InboxSectionKey) => void;
   setSectionCollapsed: (section: InboxSectionKey, collapsed: boolean) => void;
+
+  // Filter Actions
+  setFilterWorkspaceId: (workspaceId: string | null) => void;
+  setFilterCandidateId: (candidateId: string | null) => void;
+  setFilterItemType: (itemType: string | null) => void;
+  setFilterDatePreset: (preset: DatePreset, from?: string | null, to?: string | null) => void;
+  setFilterInboxState: (state: string | null) => void;
+  setIsSemanticSearchActive: (active: boolean) => void;
+  setIsFilterBarOpen: (open: boolean) => void;
+  toggleFilterBar: () => void;
+  resetAllFilters: () => void;
+  executeSearch: () => Promise<void>;
+  getActiveFilterCount: () => number;
   
   // Multi-Select Actions
   toggleSelectItem: (itemId: string) => void;
@@ -167,6 +197,19 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   searchQuery: '',
   selectedSectionFilter: 'all',
   
+  // Search & Multi-Filter State
+  filterWorkspaceId: null,
+  filterCandidateId: null,
+  filterItemType: null,
+  filterDatePreset: 'all',
+  filterDateFrom: null,
+  filterDateTo: null,
+  filterInboxState: null,
+  isSemanticSearchActive: false,
+  isFilterBarOpen: false,
+  searchResults: null,
+  isSearching: false,
+  
   attentionMap: {},
   inboxStateMap: {},
   candidateMap: {},
@@ -178,8 +221,14 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   isMultiSelectActive: false,
 
   setViewMode: (mode) => set({ viewMode: mode }),
-  setSortOrder: (order) => set({ sortOrder: order }),
-  setSearchQuery: (query) => set({ searchQuery: query }),
+  setSortOrder: (order) => {
+    set({ sortOrder: order });
+    get().executeSearch();
+  },
+  setSearchQuery: (query) => {
+    set({ searchQuery: query });
+    get().executeSearch();
+  },
   setSelectedSectionFilter: (filter) => set({ selectedSectionFilter: filter }),
   
   toggleSection: (section) =>
@@ -197,6 +246,121 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
         [section]: collapsed,
       },
     })),
+
+  // Filter Actions
+  setFilterWorkspaceId: (workspaceId) => {
+    set({ filterWorkspaceId: workspaceId });
+    get().executeSearch();
+  },
+  setFilterCandidateId: (candidateId) => {
+    set({ filterCandidateId: candidateId });
+    get().executeSearch();
+  },
+  setFilterItemType: (itemType) => {
+    set({ filterItemType: itemType });
+    get().executeSearch();
+  },
+  setFilterDatePreset: (preset, from, to) => {
+    let dateFrom: string | null = null;
+    let dateTo: string | null = null;
+
+    if (preset === 'today') {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      dateFrom = d.toISOString();
+    } else if (preset === '7d') {
+      const d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      dateFrom = d.toISOString();
+    } else if (preset === '30d') {
+      const d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      dateFrom = d.toISOString();
+    } else if (preset === 'custom') {
+      dateFrom = from ?? null;
+      dateTo = to ?? null;
+    }
+
+    set({
+      filterDatePreset: preset,
+      filterDateFrom: dateFrom,
+      filterDateTo: dateTo,
+    });
+    get().executeSearch();
+  },
+  setFilterInboxState: (state) => {
+    set({ filterInboxState: state });
+    get().executeSearch();
+  },
+  setIsSemanticSearchActive: (active) => {
+    set({ isSemanticSearchActive: active });
+    get().executeSearch();
+  },
+  setIsFilterBarOpen: (open) => set({ isFilterBarOpen: open }),
+  toggleFilterBar: () => set((s) => ({ isFilterBarOpen: !s.isFilterBarOpen })),
+  resetAllFilters: () => {
+    set({
+      searchQuery: '',
+      filterWorkspaceId: null,
+      filterCandidateId: null,
+      filterItemType: null,
+      filterDatePreset: 'all',
+      filterDateFrom: null,
+      filterDateTo: null,
+      filterInboxState: null,
+      isSemanticSearchActive: false,
+      searchResults: null,
+      isSearching: false,
+    });
+  },
+  getActiveFilterCount: () => {
+    const s = get();
+    let count = 0;
+    if (s.filterWorkspaceId) count++;
+    if (s.filterCandidateId) count++;
+    if (s.filterItemType) count++;
+    if (s.filterDatePreset !== 'all') count++;
+    if (s.filterInboxState) count++;
+    if (s.isSemanticSearchActive) count++;
+    return count;
+  },
+  executeSearch: async () => {
+    const s = get();
+    const query = s.searchQuery.trim();
+    const hasQuery = query.length > 0;
+    const hasFilter =
+      s.filterWorkspaceId !== null ||
+      s.filterCandidateId !== null ||
+      s.filterItemType !== null ||
+      s.filterDatePreset !== 'all' ||
+      s.filterInboxState !== null ||
+      s.isSemanticSearchActive;
+
+    if (!hasQuery && !hasFilter) {
+      set({ searchResults: null, isSearching: false });
+      return;
+    }
+
+    set({ isSearching: true });
+    try {
+      const params: InboxSearchParams = {
+        query: hasQuery ? query : undefined,
+        workspace_id: s.filterWorkspaceId ?? undefined,
+        candidate_id: s.filterCandidateId ?? undefined,
+        item_type: s.filterItemType ?? undefined,
+        date_from: s.filterDateFrom ?? undefined,
+        date_to: s.filterDateTo ?? undefined,
+        inbox_state: s.filterInboxState ?? undefined,
+        enable_semantic: s.isSemanticSearchActive,
+        min_similarity: s.isSemanticSearchActive ? 0.20 : undefined,
+        sort_by: s.sortOrder === 'oldest' ? 'oldest' : 'newest',
+      };
+
+      const results = await db.searchInboxItems(params);
+      set({ searchResults: results, isSearching: false });
+    } catch (err) {
+      console.error('Failed to execute inbox search:', err);
+      set({ isSearching: false });
+    }
+  },
 
   toggleSelectItem: (itemId: string) =>
     set((s) => {

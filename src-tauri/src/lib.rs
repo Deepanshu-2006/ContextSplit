@@ -3,6 +3,7 @@ mod clipboard;
 mod tray;
 pub mod capture;
 pub mod context_engine;
+pub mod search;
 pub mod semantic;
 
 use std::sync::Mutex;
@@ -832,6 +833,22 @@ fn evaluate_inbox_attention_batch(
 }
 
 // ---------------------------------------------------------------------------
+// Inbox Search Architecture
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn search_inbox_items(
+    params: search::InboxSearchParams,
+    state: State<'_, AppState>,
+) -> Result<Vec<search::InboxSearchResult>, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let semantic_provider = ce.get_semantic_provider();
+    let provider_ref = semantic_provider.as_ref().map(|p| p.as_ref().as_ref());
+    search::search_inbox_items(&conn, &params, provider_ref).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 
 #[tauri::command]
 fn capture_raw_event(payload: capture::RawCapturePayload, app: tauri::AppHandle) -> Result<capture::CaptureResult, String> {
@@ -1129,7 +1146,9 @@ pub fn run() {
             // Multi-Select Bulk Inbox Operations
             bulk_assign_inbox_items_to_workspace,
             bulk_dismiss_inbox_suggestions,
-            bulk_archive_or_clear_inbox_items
+            bulk_archive_or_clear_inbox_items,
+            // Inbox Search Architecture
+            search_inbox_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

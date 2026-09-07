@@ -554,7 +554,7 @@ export interface ContextReasoningResult {
   alternative_interpretations?: AlternativeContextReasoning[];
 }
 
-/** All structured reasons the AI layer can fail. Maps 1-to-1 with Rust AIFailureReason. */
+/** Structured failure category. */
 export type AIFailureReason =
   | 'disabled'
   | 'provider_unavailable'
@@ -578,6 +578,36 @@ export interface AIContextReasoningResponse {
   unavailability_reason: string | null;
   /** Structured failure category. */
   failure_reason: AIFailureReason | null;
+}
+
+// --- Inbox Search Architecture Models ---
+
+export type InboxSearchSort = 'newest' | 'oldest' | 'relevance' | 'title';
+
+export interface InboxSearchParams {
+  query?: string;
+  workspace_id?: string;
+  candidate_id?: string;
+  item_type?: string;
+  date_from?: string;
+  date_to?: string;
+  inbox_state?: string;
+  enable_semantic?: boolean;
+  min_similarity?: number;
+  limit?: number;
+  offset?: number;
+  sort_by?: InboxSearchSort;
+}
+
+export interface InboxSearchResult {
+  item: Item;
+  inbox_state?: InboxItemState | null;
+  matched_candidate_ids: string[];
+  matched_workspace_ids: string[];
+  text_score: number;
+  semantic_score?: number | null;
+  combined_score: number;
+  match_highlights: string[];
 }
 
 export const db = {
@@ -902,6 +932,10 @@ export const db = {
     invoke<number>("bulk_archive_or_clear_inbox_items", {
       itemIds,
     }),
+
+  // Inbox Search Architecture
+  searchInboxItems: (params: InboxSearchParams) =>
+    invoke<InboxSearchResult[]>("search_inbox_items", { params }),
 };
 
 
