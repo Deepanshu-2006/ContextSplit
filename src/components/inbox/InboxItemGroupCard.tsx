@@ -8,9 +8,14 @@ import {
   CheckCheck,
   XCircle,
   Lightbulb,
+  AlertTriangle,
+  CheckCircle2,
+  HelpCircle,
+  RefreshCw,
+  Quote,
 } from 'lucide-react';
 import { Workspace } from '../../services/db';
-import { DerivedInboxItem } from '../../store/inboxStore';
+import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
 import { useDiscoveryStore } from '../../store/discoveryStore';
 import { InboxItemCard } from './InboxItemCard';
 import { QuickContextAssignmentMenu } from './QuickContextAssignmentMenu';
@@ -43,11 +48,43 @@ export function InboxItemGroupCard({
   onBulkDismissGroup,
 }: InboxItemGroupCardProps) {
   const [isExpanded, setIsExpanded] = useState(true);
+  const [showAiReasoning, setShowAiReasoning] = useState(false);
   const [assignmentMenuOpen, setAssignmentMenuOpen] = useState(false);
   const [assignmentMenuPos, setAssignmentMenuPos] = useState<{ top: number; left?: number } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   const { reviewCandidate } = useDiscoveryStore();
+  const { groupReasoningMap, fetchGroupReasoning } = useInboxStore();
+
+  const groupAiState = groupReasoningMap[group.id];
+  const isHighConfidence = group.confidence >= 0.70;
+  const confidencePercent = Math.round(group.confidence * 100);
+  const isCandidate = group.type === 'candidate';
+
+  const handleToggleAiReasoning = async () => {
+    const nextState = !showAiReasoning;
+    setShowAiReasoning(nextState);
+    if (nextState && !groupAiState?.hasRun) {
+      await fetchGroupReasoning(group.id, {
+        candidateId: group.candidateId,
+        itemIds: group.items.map((d) => d.item.id),
+        confidence: group.confidence,
+      });
+    }
+  };
+
+  const handleRefreshAiReasoning = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await fetchGroupReasoning(
+      group.id,
+      {
+        candidateId: group.candidateId,
+        itemIds: group.items.map((d) => d.item.id),
+        confidence: group.confidence,
+      },
+      true // explicit user re-run
+    );
+  };
 
   const handleReview = () => {
     if (group.candidateId) {
@@ -88,8 +125,9 @@ export function InboxItemGroupCard({
     }
   };
 
-  const isCandidate = group.type === 'candidate';
-  const confidencePercent = Math.round(group.confidence * 100);
+  const aiResult = groupAiState?.result;
+  const isAiLoading = groupAiState?.isLoading ?? false;
+  const isAiUnavailable = groupAiState?.isUnavailable ?? false;
 
   return (
     <div
@@ -143,6 +181,22 @@ export function InboxItemGroupCard({
 
           {/* Right: Group Actions */}
           <div className="flex items-center gap-2">
+            {/* AI Insights Toggle Button for High Confidence Groups */}
+            {isHighConfidence && (
+              <button
+                onClick={handleToggleAiReasoning}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all cursor-pointer ${
+                  showAiReasoning
+                    ? 'bg-purple-600 text-white border-purple-700 shadow-2xs'
+                    : 'bg-purple-50 hover:bg-purple-100 text-purple-700 border-purple-200/80'
+                }`}
+                title={showAiReasoning ? 'Hide AI reasoning explanation' : 'View AI context reasoning'}
+              >
+                <Sparkles size={12} className={isAiLoading ? 'animate-spin' : ''} />
+                <span>{showAiReasoning ? 'AI Explanation' : 'Explain with AI'}</span>
+              </button>
+            )}
+
             {isCandidate ? (
               <>
                 <button
@@ -188,11 +242,132 @@ export function InboxItemGroupCard({
           </div>
         </div>
 
-        {/* Strongest Contextual Explanation Callout */}
-        {group.strongestExplanation && (
-          <div className="flex items-start gap-2 px-3 py-2 bg-white/80 rounded-xl border border-black/4 text-[12px] text-gray-600">
-            <Lightbulb size={14} className="text-amber-500 shrink-0 mt-0.5" />
-            <p className="leading-relaxed">{group.strongestExplanation}</p>
+        {/* AI Context Reasoning Card (When Toggled / Expanded) */}
+        {showAiReasoning && (
+          <div className="rounded-xl border border-purple-200/90 bg-purple-50/40 overflow-hidden transition-all">
+            {/* Header */}
+            <div className="flex items-center justify-between px-3.5 py-2 bg-purple-100/60 border-b border-purple-200/80">
+              <div className="flex items-center gap-2">
+                <Sparkles size={13} className="text-purple-600 shrink-0" />
+                <span className="text-[11px] font-semibold text-purple-900 uppercase tracking-wider">
+                  AI Context Explanation
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-purple-600/80 font-medium hidden sm:inline">
+                  Grounded in local capture evidence
+                </span>
+                <button
+                  onClick={handleRefreshAiReasoning}
+                  disabled={isAiLoading}
+                  className="p-1 text-purple-600 hover:text-purple-800 hover:bg-purple-200/60 rounded transition-colors cursor-pointer disabled:opacity-50"
+                  title="Re-run AI context reasoning"
+                >
+                  <RefreshCw size={11} className={isAiLoading ? 'animate-spin' : ''} />
+                </button>
+              </div>
+            </div>
+
+            {/* AI Body */}
+            <div className="p-3.5 space-y-3">
+              {isAiLoading ? (
+                <div className="flex items-center gap-2.5 py-2 text-[12px] text-purple-700">
+                  <RefreshCw size={14} className="animate-spin text-purple-600 shrink-0" />
+                  <span>Analyzing contextual evidence and relationship structure...</span>
+                </div>
+              ) : aiResult ? (
+                <>
+                  {/* Concise AI Explanation */}
+                  <div className="flex items-start gap-2.5">
+                    <Quote size={13} className="text-purple-400 shrink-0 mt-0.5" />
+                    <p className="text-[12.5px] text-gray-800 leading-relaxed font-normal">
+                      {aiResult.explanation}
+                    </p>
+                  </div>
+
+                  {/* Uncertainty Note (if applicable) */}
+                  {aiResult.uncertainty_reason && (
+                    <div className="flex items-start gap-2 px-2.5 py-2 rounded-lg bg-amber-50 border border-amber-200/80 text-[11.5px] text-amber-900">
+                      <AlertTriangle size={13} className="text-amber-600 shrink-0 mt-0.5" />
+                      <p className="leading-snug">
+                        <span className="font-semibold">Uncertainty Note: </span>
+                        {aiResult.uncertainty_reason}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Supporting Evidence References */}
+                  {aiResult.evidence_references && aiResult.evidence_references.length > 0 && (
+                    <div className="pt-1">
+                      <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">
+                        Supporting Evidence
+                      </p>
+                      <div className="space-y-1">
+                        {aiResult.evidence_references.map((ref, idx) => (
+                          <div key={idx} className="flex items-start gap-2 text-[11.5px] text-gray-700">
+                            <CheckCircle2 size={12} className="text-purple-500 shrink-0 mt-0.5" />
+                            <span className="leading-snug">{ref}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Alternative Interpretations (if any) */}
+                  {aiResult.alternative_interpretations && aiResult.alternative_interpretations.length > 0 && (
+                    <div className="border-t border-purple-200/60 pt-2">
+                      <p className="text-[10.5px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                        Alternative Possibilities
+                      </p>
+                      <div className="space-y-1">
+                        {aiResult.alternative_interpretations.map((alt, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-center gap-1.5 text-[11px] text-gray-600 bg-white/70 px-2 py-1 rounded border border-purple-100"
+                          >
+                            <HelpCircle size={11} className="text-gray-400 shrink-0" />
+                            <span className="font-medium text-gray-800">{alt.context_name}</span>
+                            {alt.rationale && <span className="text-gray-400">— {alt.rationale}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : isAiUnavailable ? (
+                /* Fallback to Deterministic Context Explanation */
+                <div className="space-y-2">
+                  <div className="flex items-start gap-2 text-[12px] text-gray-700">
+                    <Lightbulb size={13} className="text-amber-500 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-medium text-gray-800">Deterministic Context Assessment: </span>
+                      <span className="text-gray-600">{group.strongestExplanation || 'Items strongly correlated through contextual signals and co-occurrence.'}</span>
+                    </div>
+                  </div>
+                  <p className="text-[10.5px] text-gray-400 italic">
+                    AI reasoning is currently unavailable or disabled; falling back to deterministic explanation.
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
+
+        {/* Deterministic Strongest Explanation Callout (Default when AI is not open) */}
+        {!showAiReasoning && group.strongestExplanation && (
+          <div className="flex items-start justify-between gap-2 px-3 py-2 bg-white/80 rounded-xl border border-black/4 text-[12px] text-gray-600">
+            <div className="flex items-start gap-2">
+              <Lightbulb size={14} className="text-amber-500 shrink-0 mt-0.5" />
+              <p className="leading-relaxed">{group.strongestExplanation}</p>
+            </div>
+            {isHighConfidence && (
+              <button
+                onClick={handleToggleAiReasoning}
+                className="text-[11px] font-medium text-purple-700 hover:text-purple-900 shrink-0 underline decoration-purple-300 underline-offset-2 cursor-pointer ml-2"
+              >
+                Explain with AI
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -234,3 +409,4 @@ export function InboxItemGroupCard({
     </div>
   );
 }
+

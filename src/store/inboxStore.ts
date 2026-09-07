@@ -6,6 +6,8 @@ import {
   ItemAttention,
   ContextCandidate,
   CandidateWithItems,
+  ContextReasoningResult,
+  AIContextReasoningResponse,
 } from '../services/db';
 import { useWorkspaceStore } from './workspaceStore';
 
@@ -18,6 +20,14 @@ export type InboxSectionKey =
 
 export type InboxViewMode = 'sections' | 'grouped' | 'chronological' | 'canvas';
 export type InboxSortOrder = 'newest' | 'oldest';
+
+export interface GroupReasoningState {
+  result: ContextReasoningResult | null;
+  isLoading: boolean;
+  isUnavailable: boolean;
+  unavailabilityReason?: string | null;
+  hasRun: boolean;
+}
 
 export interface DerivedInboxItem {
   item: Item;
@@ -47,6 +57,7 @@ interface InboxStoreState {
     string,
     { candidateId: string; candidateName: string; confidence: number; explanation?: string }
   >;
+  groupReasoningMap: Record<string, GroupReasoningState>;
   isLoading: boolean;
   isBatchProcessing: boolean;
   
@@ -71,6 +82,11 @@ interface InboxStoreState {
   setMultiSelectActive: (active: boolean) => void;
 
   fetchInboxAnalysis: (items: Item[]) => Promise<void>;
+  fetchGroupReasoning: (
+    groupId: string,
+    params: { candidateId?: string; itemIds: string[]; confidence: number },
+    isUserExplicit?: boolean
+  ) => Promise<void>;
   acceptItemSuggestion: (itemId: string, workspaceId: string) => Promise<void>;
   dismissItemSuggestion: (itemId: string, workspaceId?: string) => Promise<void>;
   markItemUnderstood: (itemId: string, reason?: string) => Promise<void>;
@@ -155,6 +171,7 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   inboxStateMap: {},
   candidateMap: {},
   candidateItemMap: {},
+  groupReasoningMap: {},
   isLoading: false,
   isBatchProcessing: false,
   selectedItemIds: [],
@@ -313,6 +330,99 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
     } catch (err) {
       console.error('Failed to analyze inbox items:', err);
       set({ isLoading: false });
+    }
+  },
+
+  fetchGroupReasoning: async (
+    groupId: string,
+    params: { candidateId?: string; itemIds: string[]; confidence: number },
+    isUserExplicit: boolean = false
+  ) => {
+    const existing = get().groupReasoningMap[groupId];
+    // If cached result exists and call is not user-explicit, return cached result without IPC/AI invocation
+    if (existing?.hasRun && !isUserExplicit) {
+      return;
+    }
+    if (existing?.isLoading) {
+      return;
+    }
+
+    set((s) => ({
+      groupReasoningMap: {
+        ...s.groupReasoningMap,
+        [groupId]: {
+          result: existing?.result || null,
+          isLoading: true,
+          isUnavailable: false,
+          unavailabilityReason: null,
+          hasRun: true,
+        },
+      },
+    }));
+
+    try {
+      let response: AIContextReasoningResponse;
+      if (params.candidateId) {
+        response = await db.analyzeCandidateContextAI(params.candidateId, isUserExplicit);
+      } else if (params.itemIds.length > 0) {
+        response = await db.analyzeItemGroupContextAI(params.itemIds, isUserExplicit);
+      } else {
+        set((s) => ({
+          groupReasoningMap: {
+            ...s.groupReasoningMap,
+            [groupId]: {
+              result: null,
+              isLoading: false,
+              isUnavailable: true,
+              unavailabilityReason: 'No items in group to analyze',
+              hasRun: true,
+            },
+          },
+        }));
+        return;
+      }
+
+      if (response.ai_result) {
+        set((s) => ({
+          groupReasoningMap: {
+            ...s.groupReasoningMap,
+            [groupId]: {
+              result: response.ai_result,
+              isLoading: false,
+              isUnavailable: false,
+              unavailabilityReason: null,
+              hasRun: true,
+            },
+          },
+        }));
+      } else {
+        set((s) => ({
+          groupReasoningMap: {
+            ...s.groupReasoningMap,
+            [groupId]: {
+              result: null,
+              isLoading: false,
+              isUnavailable: true,
+              unavailabilityReason: response.unavailability_reason || 'AI Context Reasoning unavailable',
+              hasRun: true,
+            },
+          },
+        }));
+      }
+    } catch (err: any) {
+      console.warn(`AI reasoning failed for group ${groupId}:`, err);
+      set((s) => ({
+        groupReasoningMap: {
+          ...s.groupReasoningMap,
+          [groupId]: {
+            result: null,
+            isLoading: false,
+            isUnavailable: true,
+            unavailabilityReason: err?.message || 'AI Reasoning request failed',
+            hasRun: true,
+          },
+        },
+      }));
     }
   },
 
