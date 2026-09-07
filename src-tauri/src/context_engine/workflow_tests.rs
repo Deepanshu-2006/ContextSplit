@@ -1679,4 +1679,482 @@ mod tests {
         // Clean up temp database
         let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
+
+    #[test]
+    fn test_day12_intelligent_inbox_integration() {
+        let (mut conn, db_path) = setup_test_db();
+        let engine = create_engine();
+
+        // ===================================================================
+        // Step 1: Start with empty Inbox
+        // ===================================================================
+        let initial_items = operations::list_items(&conn, None).unwrap();
+        assert_eq!(initial_items.len(), 0, "1. Start with empty Inbox (0 items)");
+        let initial_states = operations::list_inbox_item_states(&conn, None).unwrap();
+        assert_eq!(initial_states.len(), 0, "1. Start with 0 inbox item states");
+
+        // ===================================================================
+        // Step 2: Capture unrelated Items (macOS, Windows, Drag/Manual)
+        // ===================================================================
+        let settings = crate::db::settings::get_settings(&conn).unwrap();
+        let mut mac_clipboard = MacOSClipboardAdapter::new().with_privacy_settings(settings.clone());
+        let mut win_clipboard = WindowsClipboardAdapter::new().with_privacy_settings(settings.clone());
+        let pipeline = CapturePipeline::new().without_deduplication();
+
+        // 2a. macOS clipboard capture
+        let mac_event = mac_clipboard
+            .on_clipboard_change(
+                Some("Random grocery list: apples, almond milk, sourdough bread".to_string()),
+                Some("Notes".to_string()),
+                Some("Grocery Notes".to_string()),
+            )
+            .unwrap()
+            .expect("macOS clipboard event created");
+        let item_unrelated_1 = pipeline.process_event_headless(&conn, Some(&engine), mac_event).unwrap().item;
+
+        // 2b. Windows clipboard capture
+        let win_event = win_clipboard
+            .on_clipboard_change(
+                Some("System diagnostic log 0x80070002 file not found error".to_string()),
+                Some("notepad.exe".to_string()),
+                Some("system_log.txt - Notepad".to_string()),
+            )
+            .unwrap()
+            .expect("Windows clipboard event created");
+        let item_unrelated_2 = pipeline.process_event_headless(&conn, Some(&engine), win_event).unwrap().item;
+
+        // 2c. Drag payload capture
+        let drag_normalizer = DragPayloadNormalizer::new();
+        let drag_raw = RawDragPayload {
+            content: Some("Philosophical note: All models are wrong, but some are useful".to_string()),
+            text: Some("Philosophical note: All models are wrong, but some are useful".to_string()),
+            app_name: Some("Obsidian".to_string()),
+            platform: Some(PlatformType::MacOS),
+            ..Default::default()
+        };
+        let drag_event = drag_normalizer.normalize_drag_payload(&drag_raw).unwrap();
+        let item_unrelated_3 = pipeline.process_event_headless(&conn, Some(&engine), drag_event).unwrap().item;
+
+        // Verify initial state for unrelated items
+        for item in [&item_unrelated_1, &item_unrelated_2, &item_unrelated_3] {
+            assert_eq!(item.workspace_id, None, "2. Unrelated item is in Inbox");
+            let state = operations::get_inbox_item_state(&conn, &item.id).unwrap().expect("Inbox state initialized");
+            assert_eq!(state.state, crate::db::models::InboxState::New, "2. Initial inbox state is New");
+        }
+
+        // ===================================================================
+        // Step 3: Capture several Items related to an existing Workspace
+        // ===================================================================
+        let ws_infra = operations::create_workspace(&conn, "DevOps Infrastructure").unwrap();
+
+        // Seed an item in DevOps Infrastructure to establish workspace context profile
+        let seed_k8s = operations::create_item(
+            &conn,
+            Some(&ws_infra.id),
+            None,
+            "url",
+            "https://kubernetes.io/docs/concepts/overview/what-is-kubernetes/",
+            Some("What is Kubernetes?"),
+            r#"{"domain":"kubernetes.io","app_name":"Safari"}"#,
+        ).unwrap();
+        operations::create_or_update_membership(&conn, &seed_k8s.id, &ws_infra.id, "confirmed", 1.0, "user").unwrap();
+        operations::recalculate_workspace_profile(&conn, &ws_infra.id).unwrap();
+
+        // Capture 2 new items related to DevOps Infrastructure
+        let mut k8s_pod_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::Url,
+            "https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/",
+            PlatformType::MacOS,
+        );
+        k8s_pod_event.source_application = Some("Safari".to_string());
+        k8s_pod_event.metadata = json!({
+            "domain": "kubernetes.io",
+            "title": "Configure Probes - Kubernetes"
+        });
+        let item_k8s = pipeline.process_event_headless(&conn, Some(&engine), k8s_pod_event).unwrap().item;
+
+        let mut tf_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::Url,
+            "https://registry.terraform.io/providers/hashicorp/aws/latest/docs",
+            PlatformType::Windows,
+        );
+        tf_event.source_application = Some("msedge.exe".to_string());
+        tf_event.metadata = json!({
+            "domain": "terraform.io",
+            "title": "Terraform AWS Provider"
+        });
+        let item_tf = pipeline.process_event_headless(&conn, Some(&engine), tf_event).unwrap().item;
+
+        // ===================================================================
+        // Step 4: Capture several Items forming a new ContextCandidate
+        // ===================================================================
+        let _session_quantum = engine.get_or_update_active_session(&conn).unwrap();
+
+        let mut q1_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::Url,
+            "https://qiskit.org/documentation/getting_started.html",
+            PlatformType::MacOS,
+        );
+        q1_event.source_application = Some("Safari".to_string());
+        q1_event.metadata = json!({
+            "domain": "qiskit.org",
+            "title": "Qiskit Quantum SDK Getting Started"
+        });
+        let item_q1 = pipeline.process_event_headless(&conn, Some(&engine), q1_event).unwrap().item;
+
+        let mut q2_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::Url,
+            "https://quantum-journal.org/papers/q-2024-fault-tolerant-quantum-circuits",
+            PlatformType::MacOS,
+        );
+        q2_event.source_application = Some("Safari".to_string());
+        q2_event.metadata = json!({
+            "domain": "quantum-journal.org",
+            "title": "Fault Tolerant Quantum Circuits - Quantum Journal"
+        });
+        let item_q2 = pipeline.process_event_headless(&conn, Some(&engine), q2_event).unwrap().item;
+
+        let mut q3_event = CaptureEvent::new(
+            CaptureType::Clipboard,
+            ContentType::Url,
+            "https://qiskit.org/ecosystem/algorithms/shor-algorithm-tutorial",
+            PlatformType::MacOS,
+        );
+        q3_event.source_application = Some("Safari".to_string());
+        q3_event.metadata = json!({
+            "domain": "qiskit.org",
+            "title": "Shor's Algorithm Tutorial - Qiskit"
+        });
+        let item_q3 = pipeline.process_event_headless(&conn, Some(&engine), q3_event).unwrap().item;
+
+        // ===================================================================
+        // Step 5: Verify Inbox states update correctly
+        // ===================================================================
+        // Transition item_k8s through processing -> understood
+        crate::context_engine::inbox_state::InboxStateMachine::start_processing(&conn, &item_k8s.id).unwrap();
+        let proc_state = operations::get_inbox_item_state(&conn, &item_k8s.id).unwrap().unwrap();
+        assert_eq!(proc_state.state, crate::db::models::InboxState::Processing, "5. State transitioned to Processing");
+        assert_eq!(proc_state.previous_state, Some(crate::db::models::InboxState::New));
+
+        crate::context_engine::inbox_state::InboxStateMachine::mark_understood(&conn, &item_k8s.id, Some("High confidence kubernetes domain match")).unwrap();
+        let understood_state = operations::get_inbox_item_state(&conn, &item_k8s.id).unwrap().unwrap();
+        assert_eq!(understood_state.state, crate::db::models::InboxState::Understood, "5. State transitioned to Understood");
+        assert_eq!(understood_state.previous_state, Some(crate::db::models::InboxState::Processing));
+
+        // ===================================================================
+        // Step 6: Verify high-confidence Items become "understood" (NOT silently confirmed)
+        // ===================================================================
+        let k8s_item_check = operations::get_item(&conn, &item_k8s.id).unwrap();
+        assert_eq!(k8s_item_check.workspace_id, None, "6. Understood item is NOT silently assigned to workspace");
+        assert_eq!(understood_state.state, crate::db::models::InboxState::Understood, "6. Item is Understood");
+
+        // ===================================================================
+        // Step 7: Verify suggested memberships appear
+        // ===================================================================
+        operations::create_or_update_membership(&conn, &item_k8s.id, &ws_infra.id, "suggested", 0.94, "context_engine").unwrap();
+        operations::create_or_update_membership(&conn, &item_tf.id, &ws_infra.id, "suggested", 0.88, "context_engine").unwrap();
+        crate::context_engine::inbox_state::InboxStateMachine::mark_suggested(&conn, &item_k8s.id, &ws_infra.id, 0.94, None).unwrap();
+        
+        crate::context_engine::inbox_state::InboxStateMachine::start_processing(&conn, &item_tf.id).unwrap();
+        crate::context_engine::inbox_state::InboxStateMachine::mark_understood(&conn, &item_tf.id, Some("Terraform AWS Provider matched")).unwrap();
+        crate::context_engine::inbox_state::InboxStateMachine::mark_suggested(&conn, &item_tf.id, &ws_infra.id, 0.88, None).unwrap();
+
+        let k8s_memberships = operations::list_item_memberships(&conn, &item_k8s.id).unwrap();
+        assert_eq!(k8s_memberships.len(), 1, "7. Suggested membership created");
+        assert_eq!(k8s_memberships[0].workspace_id, ws_infra.id);
+        assert_eq!(k8s_memberships[0].membership_type, "suggested");
+        assert!(k8s_memberships[0].confidence >= 0.90);
+
+        // ===================================================================
+        // Step 8: Verify uncertain Items require attention
+        // ===================================================================
+        let att_unrelated_1 = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, &item_unrelated_1.id, None).unwrap();
+        assert!(att_unrelated_1.attention_required, "8. Unrelated/unorganized item requires attention");
+
+        let att_k8s = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, &item_k8s.id, None).unwrap();
+        assert!(att_k8s.attention_required, "8. Suggested item requires attention for confirmation");
+        assert_eq!(att_k8s.attention_level, crate::context_engine::attention::AttentionLevel::High);
+        assert!(att_k8s.factors.has_suggested_membership);
+        assert_eq!(att_k8s.factors.suggested_workspace_id, Some(ws_infra.id.clone()));
+
+        // ===================================================================
+        // Step 9: Verify contextual grouping works
+        // ===================================================================
+        let search_grouped = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                workspace_id: Some(ws_infra.id.clone()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        let found_ids: Vec<String> = search_grouped.iter().map(|r| r.item.id.clone()).collect();
+        assert!(found_ids.contains(&item_k8s.id), "9. Context grouping finds suggested k8s item");
+        assert!(found_ids.contains(&item_tf.id), "9. Context grouping finds suggested terraform item");
+
+        // ===================================================================
+        // Step 10: Verify ContextCandidate grouping works
+        // ===================================================================
+        // Link Quantum items with relationships and candidate cluster
+        crate::db::operations::create_item_relationship(&conn, &item_q1.id, &item_q2.id, "temporal_cooccurrence", 0.95, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &item_q1.id, &item_q3.id, "domain_match", 0.98, None).unwrap();
+        crate::db::operations::create_item_relationship(&conn, &item_q2.id, &item_q3.id, "domain_match", 0.90, None).unwrap();
+
+        let cand_quantum = discovery::create_candidate(
+            &conn,
+            0.92,
+            Some("Quantum Computing Research"),
+            "{}",
+        ).unwrap();
+        discovery::add_item_to_candidate(&conn, &cand_quantum.id, &item_q1.id, 0.95).unwrap();
+        discovery::add_item_to_candidate(&conn, &cand_quantum.id, &item_q2.id, 0.92).unwrap();
+        discovery::add_item_to_candidate(&conn, &cand_quantum.id, &item_q3.id, 0.90).unwrap();
+
+        let cand_items = discovery::get_candidate_items(&conn, &cand_quantum.id).unwrap();
+        assert_eq!(cand_items.items.len(), 3, "10. ContextCandidate group contains exactly 3 quantum items");
+
+        let search_cand = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                candidate_id: Some(cand_quantum.id.clone()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert_eq!(search_cand.len(), 3, "10. Searching by candidate_id groups all 3 items");
+
+        // ===================================================================
+        // Step 11: Verify AI explanations appear when enabled
+        // ===================================================================
+        let ai_reasoner = MockAIReasoner::new();
+        let ai_res_enabled = analyze_item_context_ai_graceful(&conn, &item_k8s.id, &ai_reasoner, true);
+        assert!(!ai_res_enabled.ai_unavailable, "11. AI reasoning completes when enabled");
+        assert!(ai_res_enabled.ai_result.is_some(), "11. AI result generated");
+        let ai_result = ai_res_enabled.ai_result.unwrap();
+        assert!(!ai_result.explanation.is_empty(), "11. AI explanation is non-empty");
+
+        // ===================================================================
+        // Step 12: Disable AI and verify deterministic explanations still work
+        // ===================================================================
+        let mut disabled_settings = crate::db::settings::get_settings(&conn).unwrap();
+        disabled_settings.enable_ai_reasoning = false;
+        crate::db::settings::update_settings(&conn, disabled_settings.clone()).unwrap();
+
+        let ai_res_disabled = analyze_item_context_ai_graceful(&conn, &item_k8s.id, &ai_reasoner, true);
+        assert!(ai_res_disabled.ai_unavailable, "12. AI is flagged unavailable when disabled");
+        assert_eq!(ai_res_disabled.failure_reason, Some(AIFailureReason::Disabled));
+
+        // Re-enable AI settings for subsequent steps
+        disabled_settings.enable_ai_reasoning = true;
+        crate::db::settings::update_settings(&conn, disabled_settings).unwrap();
+
+        let det_explanation = crate::context_engine::explanation::explain_context_association(&conn, &item_k8s.id, &ws_infra.id).unwrap();
+        assert!(!det_explanation.summary.is_empty(), "12. Deterministic summary is populated");
+        assert!(!det_explanation.explanations.is_empty(), "12. Deterministic explanations list is populated");
+
+        // ===================================================================
+        // Step 13: Accept a contextual suggestion
+        // ===================================================================
+        let confirmed_mem = operations::confirm_membership(&conn, &item_k8s.id, &ws_infra.id).unwrap();
+        assert_eq!(confirmed_mem.membership_type, "confirmed", "13. Contextual membership confirmed");
+
+        // ===================================================================
+        // Step 14: Verify Item becomes confirmed/organized
+        // ===================================================================
+        // Invariant 1: Item is not deleted
+        let organized_item = operations::get_item(&conn, &item_k8s.id).unwrap();
+        assert_eq!(organized_item.id, item_k8s.id, "14. Item not deleted");
+        // Invariant 2: Metadata intact
+        assert_eq!(organized_item.metadata, item_k8s.metadata, "14. Metadata preserved");
+        // Invariant 3: Accessible through Workspace
+        assert_eq!(organized_item.workspace_id, Some(ws_infra.id.clone()), "14. Item accessible through workspace");
+        // Invariant 4: State is Organized
+        let organized_state = operations::get_inbox_item_state(&conn, &item_k8s.id).unwrap().unwrap();
+        assert_eq!(organized_state.state, crate::db::models::InboxState::Organized, "14. State marked Organized");
+        // Invariant 5: Removed from Needs Attention
+        let att_organized = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, &item_k8s.id, None).unwrap();
+        assert!(!att_organized.attention_required, "14. Organized item removed from Needs Attention");
+        assert_eq!(att_organized.attention_level, crate::context_engine::attention::AttentionLevel::None);
+
+        // ===================================================================
+        // Step 15: Dismiss another suggestion
+        // ===================================================================
+        operations::dismiss_membership(&conn, &item_tf.id, &ws_infra.id).unwrap();
+        crate::context_engine::inbox_state::InboxStateMachine::dismiss_item(&conn, &item_tf.id, Some("User dismissed suggestion")).unwrap();
+
+        // ===================================================================
+        // Step 16: Verify feedback is stored
+        // ===================================================================
+        let dismissed_state = operations::get_inbox_item_state(&conn, &item_tf.id).unwrap().unwrap();
+        assert_eq!(dismissed_state.state, crate::db::models::InboxState::Dismissed, "16. State marked Dismissed");
+
+        let att_dismissed = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, &item_tf.id, None).unwrap();
+        assert!(!att_dismissed.attention_required, "16. Dismissed item requires no attention");
+        assert!(att_dismissed.factors.is_dismissed);
+        assert_eq!(att_dismissed.attention_level, crate::context_engine::attention::AttentionLevel::None);
+
+        let signal_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM context_signals WHERE signal_type = 'membership_dismissed' AND item_id = ?1",
+            rusqlite::params![item_tf.id],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(signal_count >= 1, "16. User feedback signal stored in database");
+
+        // ===================================================================
+        // Step 17: Select multiple Items
+        // ===================================================================
+        let selected_ids = vec![item_q1.id.clone(), item_q2.id.clone(), item_q3.id.clone()];
+        assert_eq!(selected_ids.len(), 3, "17. Selected 3 quantum items");
+
+        // ===================================================================
+        // Step 18: Bulk assign them to a Workspace
+        // ===================================================================
+        let ws_quantum = operations::create_workspace(&conn, "Quantum Computing").unwrap();
+        let bulk_assigned = operations::bulk_assign_inbox_items_to_workspace(&mut conn, &selected_ids, &ws_quantum.id).unwrap();
+        assert_eq!(bulk_assigned.len(), 3, "18. Bulk assigned 3 items");
+
+        for q_id in &selected_ids {
+            let item = operations::get_item(&conn, q_id).unwrap();
+            assert_eq!(item.workspace_id, Some(ws_quantum.id.clone()), "18. Item workspace updated");
+            let state = operations::get_inbox_item_state(&conn, q_id).unwrap().unwrap();
+            assert_eq!(state.state, crate::db::models::InboxState::Organized, "18. Bulk assigned state is Organized");
+            let att = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, q_id, None).unwrap();
+            assert!(!att.attention_required, "18. Bulk assigned items no longer require attention");
+        }
+
+        // ===================================================================
+        // Step 19: Search Inbox
+        // ===================================================================
+        let search_text = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                query: Some("apples".to_string()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert_eq!(search_text.len(), 1, "19. Search finds grocery note");
+        assert_eq!(search_text[0].item.id, item_unrelated_1.id);
+
+        let search_quantum = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                query: Some("Quantum".to_string()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert!(search_quantum.len() >= 2, "19. Search finds quantum items");
+
+        // ===================================================================
+        // Step 20: Filter by context (Workspace filter & Unassigned filter)
+        // ===================================================================
+        let search_ws_quantum = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                workspace_id: Some(ws_quantum.id.clone()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert_eq!(search_ws_quantum.len(), 3, "20. Filter by Quantum workspace returns exactly 3 items");
+
+        let search_unassigned = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                workspace_id: Some("inbox".to_string()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        let unassigned_ids: Vec<String> = search_unassigned.iter().map(|r| r.item.id.clone()).collect();
+        assert!(unassigned_ids.contains(&item_unrelated_1.id), "20. Filter by inbox returns unassigned items");
+        assert!(unassigned_ids.contains(&item_unrelated_2.id));
+        assert!(unassigned_ids.contains(&item_unrelated_3.id));
+        assert!(!unassigned_ids.contains(&item_k8s.id), "20. Organized item is excluded from unassigned filter");
+
+        // ===================================================================
+        // Step 21: Filter by date
+        // ===================================================================
+        let date_from_past = "2020-01-01T00:00:00Z".to_string();
+        let date_to_future = "2030-01-01T00:00:00Z".to_string();
+        let search_date_valid = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                date_from: Some(date_from_past),
+                date_to: Some(date_to_future),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert!(search_date_valid.len() >= 5, "21. Valid date range returns items");
+
+        let search_date_empty = crate::search::search_inbox_items(
+            &conn,
+            &crate::search::InboxSearchParams {
+                date_from: Some("2099-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert_eq!(search_date_empty.len(), 0, "21. Far future date filter returns 0 items");
+
+        // ===================================================================
+        // Step 22: Restart application (Cold restart simulation)
+        // ===================================================================
+        let items_count_pre_restart: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let ws_count_pre_restart: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let states_count_pre_restart: i64 = conn.query_row("SELECT COUNT(*) FROM inbox_item_states", [], |r| r.get(0)).unwrap();
+        let mem_count_pre_restart: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+        let sig_count_pre_restart: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |r| r.get(0)).unwrap();
+
+        drop(conn);
+
+        // Reopen database connection as a fresh application lifecycle
+        let conn_restarted = Connection::open(&db_path).unwrap();
+
+        // ===================================================================
+        // Step 23: Verify all state persists
+        // ===================================================================
+        let items_count_post_restart: i64 = conn_restarted.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let ws_count_post_restart: i64 = conn_restarted.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let states_count_post_restart: i64 = conn_restarted.query_row("SELECT COUNT(*) FROM inbox_item_states", [], |r| r.get(0)).unwrap();
+        let mem_count_post_restart: i64 = conn_restarted.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+        let sig_count_post_restart: i64 = conn_restarted.query_row("SELECT COUNT(*) FROM context_signals", [], |r| r.get(0)).unwrap();
+
+        assert_eq!(items_count_pre_restart, items_count_post_restart, "23. Items count persists");
+        assert_eq!(ws_count_pre_restart, ws_count_post_restart, "23. Workspaces count persists");
+        assert_eq!(states_count_pre_restart, states_count_post_restart, "23. Inbox states count persists");
+        assert_eq!(mem_count_pre_restart, mem_count_post_restart, "23. Context memberships count persists");
+        assert_eq!(sig_count_pre_restart, sig_count_post_restart, "23. Context signals count persists");
+
+        // Verify specific persisted records
+        let reloaded_k8s = operations::get_item(&conn_restarted, &item_k8s.id).unwrap();
+        assert_eq!(reloaded_k8s.workspace_id, Some(ws_infra.id.clone()), "23. Organized workspace assignment persists");
+
+        let reloaded_k8s_state = operations::get_inbox_item_state(&conn_restarted, &item_k8s.id).unwrap().unwrap();
+        assert_eq!(reloaded_k8s_state.state, crate::db::models::InboxState::Organized, "23. Organized state persists");
+
+        let reloaded_tf_state = operations::get_inbox_item_state(&conn_restarted, &item_tf.id).unwrap().unwrap();
+        assert_eq!(reloaded_tf_state.state, crate::db::models::InboxState::Dismissed, "23. Dismissed state persists");
+
+        // Verify search queries work identically on restarted connection
+        let search_post_restart = crate::search::search_inbox_items(
+            &conn_restarted,
+            &crate::search::InboxSearchParams {
+                workspace_id: Some(ws_quantum.id.clone()),
+                ..Default::default()
+            },
+            None,
+        ).unwrap();
+        assert_eq!(search_post_restart.len(), 3, "23. Search queries return persisted results after restart");
+
+        // Clean up temp database directory
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
 }
+
