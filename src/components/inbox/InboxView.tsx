@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Inbox,
   LayoutList,
@@ -12,6 +12,7 @@ import {
   RefreshCw,
   X,
   CheckSquare,
+  Keyboard,
 } from 'lucide-react';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { Item, Workspace } from '../../services/db';
@@ -20,13 +21,17 @@ import {
   deriveItemSection,
   DerivedInboxItem,
   InboxSectionKey,
+  getModifierKeyName,
 } from '../../store/inboxStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
+import { useDiscoveryStore } from '../../store/discoveryStore';
+import { ContextInspector } from '../workspace/ContextInspector';
 import { InboxSection } from './InboxSection';
 import { InboxItemCard } from './InboxItemCard';
 import { InboxItemGroupCard, InboxItemGroup } from './InboxItemGroupCard';
 import { BulkActionsBar } from './BulkActionsBar';
 import { InboxFilterBar } from './InboxFilterBar';
+import { InboxKeyboardShortcutsModal } from './InboxKeyboardShortcutsModal';
 
 interface InboxViewProps {
   items: Item[];
@@ -55,6 +60,8 @@ export function InboxView({
     selectedItemIds,
     isMultiSelectActive,
     searchResults,
+    focusedItemId,
+    isShortcutsModalOpen,
     setViewMode,
     setSortOrder,
     setSearchQuery,
@@ -63,6 +70,12 @@ export function InboxView({
     selectAllItems,
     clearSelection,
     setMultiSelectActive,
+    toggleSelectItem,
+    setFocusedItemId,
+    setShortcutsModalOpen,
+    toggleShortcutsModal,
+    acceptItemSuggestion,
+    dismissItemSuggestion,
     bulkAssignToWorkspace,
     bulkDismissSuggestions,
     bulkArchiveOrClear,
@@ -72,32 +85,10 @@ export function InboxView({
   } = useInboxStore();
 
   const { emptyInbox } = useWorkspaceStore();
+  const { reviewCandidate, candidates } = useDiscoveryStore();
+  const [inspectingItemId, setInspectingItemId] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-
-  // Global Keyboard Shortcuts (⌘K / Ctrl+K or '/' to focus search, Esc to clear)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      } else if (
-        e.key === '/' &&
-        !['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement?.tagName || ''))
-      ) {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-      } else if (e.key === 'Escape' && document.activeElement === searchInputRef.current) {
-        if (searchQuery) {
-          setSearchQuery('');
-        } else {
-          searchInputRef.current?.blur();
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [searchQuery, setSearchQuery]);
+  const modKey = getModifierKeyName();
 
   // Load fresh attention & candidate analysis whenever inbox items change
   useEffect(() => {
@@ -163,6 +154,219 @@ export function InboxView({
     }
     return list;
   }, [derivedItems, searchResults, sortOrder]);
+
+  // Global Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      const isInputFocused =
+        activeEl instanceof HTMLInputElement ||
+        activeEl instanceof HTMLTextAreaElement ||
+        activeEl instanceof HTMLSelectElement ||
+        (activeEl as HTMLElement)?.isContentEditable;
+
+      // 1. Search shortcut (⌘K / Ctrl+K or ⌘F / Ctrl+F) works anywhere
+      if ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'k' || e.key.toLowerCase() === 'f')) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
+      // 2. If typing in a text input, ONLY handle Escape to blur/clear
+      if (isInputFocused) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          if (document.activeElement === searchInputRef.current) {
+            if (searchQuery) {
+              setSearchQuery('');
+            } else {
+              searchInputRef.current?.blur();
+            }
+          } else {
+            (activeEl as HTMLElement)?.blur();
+          }
+        }
+        return; // Do not trigger any shortcuts while typing in a text input!
+      }
+
+      // 3. Quick '/' search trigger when not typing
+      if (e.key === '/') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      // 4. Toggle Shortcuts Modal ('?' or Shift+'/')
+      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        toggleShortcutsModal();
+        return;
+      }
+
+      // 5. Escape: close modals / inspector / deselect / blur
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (isShortcutsModalOpen) {
+          setShortcutsModalOpen(false);
+          return;
+        }
+        if (inspectingItemId) {
+          setInspectingItemId(null);
+          return;
+        }
+        if (selectedItemIds.length > 0) {
+          clearSelection();
+          return;
+        }
+        if (focusedItemId) {
+          setFocusedItemId(null);
+          return;
+        }
+        if (searchQuery) {
+          setSearchQuery('');
+          return;
+        }
+      }
+
+      // 6. Select All Items (⌘A / Ctrl+A)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        if (sortedDerivedItems.length > 0) {
+          selectAllItems(sortedDerivedItems.map((d) => d.item.id));
+        }
+        return;
+      }
+
+      // 7. Navigation: Down / Next item (J or ArrowDown)
+      if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (sortedDerivedItems.length === 0) return;
+        const currentIndex = sortedDerivedItems.findIndex((d) => d.item.id === focusedItemId);
+        const nextIndex = currentIndex === -1 ? 0 : Math.min(currentIndex + 1, sortedDerivedItems.length - 1);
+        const nextId = sortedDerivedItems[nextIndex].item.id;
+        setFocusedItemId(nextId);
+
+        // Auto scroll into view smoothly
+        const el = document.querySelector(`[data-item-id="${nextId}"]`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        return;
+      }
+
+      // 8. Navigation: Up / Prev item (K or ArrowUp)
+      if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (sortedDerivedItems.length === 0) return;
+        const currentIndex = sortedDerivedItems.findIndex((d) => d.item.id === focusedItemId);
+        const prevIndex = currentIndex === -1 ? 0 : Math.max(currentIndex - 1, 0);
+        const prevId = sortedDerivedItems[prevIndex].item.id;
+        setFocusedItemId(prevId);
+
+        // Auto scroll into view smoothly
+        const el = document.querySelector(`[data-item-id="${prevId}"]`);
+        el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        return;
+      }
+
+      // 9. Selection toggle: X or Space
+      if (e.key === 'x' || e.key === ' ') {
+        e.preventDefault();
+        if (focusedItemId) {
+          toggleSelectItem(focusedItemId);
+        } else if (sortedDerivedItems.length > 0) {
+          const firstId = sortedDerivedItems[0].item.id;
+          setFocusedItemId(firstId);
+          toggleSelectItem(firstId);
+        }
+        return;
+      }
+
+      // 10. Accept Suggestion: 'A' or (⌘Enter / Ctrl+Enter)
+      if (e.key.toLowerCase() === 'a' || ((e.metaKey || e.ctrlKey) && e.key === 'Enter')) {
+        e.preventDefault();
+        if (selectedItemIds.length > 0) {
+          // Accept suggestions for all selected items that have a suggested workspace
+          for (const id of selectedItemIds) {
+            const att = attentionMap[id];
+            const targetWsId = att?.factors?.suggested_workspace_id;
+            if (targetWsId) {
+              acceptItemSuggestion(id, targetWsId).catch(console.error);
+            }
+          }
+        } else if (focusedItemId) {
+          const att = attentionMap[focusedItemId];
+          const targetWsId = att?.factors?.suggested_workspace_id;
+          if (targetWsId) {
+            acceptItemSuggestion(focusedItemId, targetWsId).catch(console.error);
+          }
+        }
+        return;
+      }
+
+      // 11. Dismiss Suggestion: 'D' or Backspace
+      if (e.key.toLowerCase() === 'd' || e.key === 'Backspace') {
+        e.preventDefault();
+        if (selectedItemIds.length > 0) {
+          dismissItemIdsSuggestions(selectedItemIds).catch(console.error);
+        } else if (focusedItemId) {
+          const att = attentionMap[focusedItemId];
+          dismissItemSuggestion(focusedItemId, att?.factors?.suggested_workspace_id || undefined).catch(console.error);
+        }
+        return;
+      }
+
+      // 12. Open Item / Inspect Evidence: Enter or 'O'
+      if (e.key === 'Enter' || e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        if (focusedItemId) {
+          setInspectingItemId(focusedItemId);
+        } else if (sortedDerivedItems.length > 0) {
+          setInspectingItemId(sortedDerivedItems[0].item.id);
+        }
+        return;
+      }
+
+      // 13. Open Context Review: 'R' or 'C'
+      if (e.key.toLowerCase() === 'r' || e.key.toLowerCase() === 'c') {
+        e.preventDefault();
+        if (focusedItemId) {
+          const focusedDerived = sortedDerivedItems.find((d) => d.item.id === focusedItemId);
+          if (focusedDerived?.candidateInfo?.candidateId) {
+            reviewCandidate(focusedDerived.candidateInfo.candidateId);
+            return;
+          }
+        }
+        // Fallback to top available candidate
+        if (candidates.length > 0) {
+          reviewCandidate(candidates[0].id);
+        }
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    sortedDerivedItems,
+    focusedItemId,
+    selectedItemIds,
+    attentionMap,
+    searchQuery,
+    isShortcutsModalOpen,
+    inspectingItemId,
+    candidates,
+    setSearchQuery,
+    setFocusedItemId,
+    toggleSelectItem,
+    selectAllItems,
+    clearSelection,
+    acceptItemSuggestion,
+    dismissItemSuggestion,
+    dismissItemIdsSuggestions,
+    reviewCandidate,
+    toggleShortcutsModal,
+    setShortcutsModalOpen,
+  ]);
 
   // Partition strictly into the 5 logical sections
   const sectionPartitions = useMemo(() => {
@@ -349,7 +553,7 @@ export function InboxView({
               ) : (
                 <div className="absolute inset-y-0 right-0 pr-2 flex items-center pointer-events-none">
                   <kbd className="text-[10px] text-gray-400 font-mono bg-white/70 border border-black/8 px-1.5 py-0.5 rounded shadow-2xs">
-                    ⌘K
+                    {modKey}K
                   </kbd>
                 </div>
               )}
@@ -442,6 +646,19 @@ export function InboxView({
             >
               <ArrowDownUp size={13} className="text-gray-400" />
               <span>{sortOrder === 'newest' ? (searchResults ? 'Top Matches' : 'Newest') : 'Oldest'}</span>
+            </button>
+
+            {/* Keyboard Shortcuts Cheatsheet Trigger */}
+            <button
+              onClick={() => setShortcutsModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-gray-50 text-gray-700 border border-black/6 rounded-lg text-[12px] font-medium shadow-2xs transition-colors cursor-pointer"
+              title={`Keyboard Shortcuts (${modKey}?)`}
+            >
+              <Keyboard size={13} className="text-gray-400" />
+              <span className="hidden sm:inline">Shortcuts</span>
+              <kbd className="text-[10px] text-gray-400 font-mono bg-gray-100 border border-black/8 px-1 py-0.2 rounded">
+                ?
+              </kbd>
             </button>
 
             {/* Refresh Analysis */}
@@ -721,6 +938,20 @@ export function InboxView({
         onBulkDismiss={handleBulkDismiss}
         onBulkClear={handleBulkClear}
       />
+
+      {/* Keyboard Shortcuts Help Modal */}
+      <InboxKeyboardShortcutsModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setShortcutsModalOpen(false)}
+      />
+
+      {/* Context Inspector Evidence Modal */}
+      {inspectingItemId && (
+        <ContextInspector
+          itemId={inspectingItemId}
+          onClose={() => setInspectingItemId(null)}
+        />
+      )}
     </div>
   );
 }
