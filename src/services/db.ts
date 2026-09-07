@@ -822,6 +822,12 @@ export const db = {
   analyzeItemContextAI: (itemId: string, isUserExplicit: boolean = false) =>
     invoke<AIContextReasoningResponse>("analyze_item_context_ai", { itemId, isUserExplicit }),
 
+  analyzeCandidateContextAI: (candidateId: string, isUserExplicit: boolean = false) =>
+    invoke<AIContextReasoningResponse>("analyze_candidate_context_ai", { candidateId, isUserExplicit }),
+
+  analyzeItemGroupContextAI: (itemIds: string[], isUserExplicit: boolean = false) =>
+    invoke<AIContextReasoningResponse>("analyze_item_group_context_ai", { itemIds, isUserExplicit }),
+
   getEvidencePackage: (itemId: string) =>
     invoke<EvidencePackage>("get_evidence_package", { itemId }),
 

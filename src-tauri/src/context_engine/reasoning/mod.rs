@@ -17,8 +17,8 @@ pub use models::*;
 pub use traits::AIReasoner;
 pub use mock::{MockAIReasoner, FailingMockAIReasoner};
 pub use builder::{
-    analyze_item_context_ai, analyze_item_context_ai_graceful,
-    build_candidate_evidence_package, build_evidence_package,
+    analyze_candidate_context_ai_graceful, analyze_item_context_ai, analyze_item_context_ai_graceful,
+    analyze_item_group_context_ai_graceful, build_candidate_evidence_package, build_evidence_package,
     build_item_group_evidence_package, suggest_candidate_name_ai, suggest_item_group_name_ai,
     EvidencePackageBuilder,
 };

@@ -966,3 +966,201 @@ pub fn analyze_item_context_ai_graceful(
         failure_reason: None,
     }
 }
+
+/// Graceful AI analysis for a ContextCandidate cluster.
+pub fn analyze_candidate_context_ai_graceful(
+    conn: &Connection,
+    candidate_id: &str,
+    reasoner: &dyn AIReasoner,
+    is_user_explicit: bool,
+) -> AIContextReasoningResponse {
+    let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
+    if !settings.enable_ai_reasoning {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::Disabled.to_string()),
+            failure_reason: Some(AIFailureReason::Disabled),
+        };
+    }
+
+    if !reasoner.is_available() {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::ProviderUnavailable.to_string()),
+            failure_reason: Some(AIFailureReason::ProviderUnavailable),
+        };
+    }
+
+    let package = match build_candidate_evidence_package(conn, candidate_id) {
+        Ok(p) => p,
+        Err(build_err) => {
+            let reason = if build_err.to_lowercase().contains("disabled") {
+                AIFailureReason::Disabled
+            } else {
+                AIFailureReason::EvidenceUnavailable
+            };
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}: {}", reason, build_err)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    let package_hash = crate::context_engine::reasoning::cache::hash_evidence_package(&package, None);
+    if let Ok(Some(cached_result)) = crate::context_engine::reasoning::cache::get_cached_reasoning(conn, &package_hash, None) {
+        return AIContextReasoningResponse {
+            ai_result: Some(cached_result),
+            ai_unavailable: false,
+            unavailability_reason: None,
+            failure_reason: None,
+        };
+    }
+
+    let gating_decision = crate::context_engine::reasoning::gating::evaluate_gating(&package, &settings, is_user_explicit);
+    if !gating_decision.should_invoke {
+        let reason = AIFailureReason::Gated(gating_decision.reason.clone());
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(reason.to_string()),
+            failure_reason: Some(reason),
+        };
+    }
+
+    let reasoning_result = match reasoner.analyze_context(&package) {
+        Ok(r) => {
+            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, candidate_id, None, &r, None);
+            r
+        },
+        Err(ai_err) => {
+            let reason = AIFailureReason::from_reasoning_error(&ai_err);
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}", reason)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    if let Err(validation_err) = super::validator::validate_explanation_grounding(&reasoning_result, &package) {
+        let reason = AIFailureReason::MalformedResponse;
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(format!("{}: {}", reason, validation_err)),
+            failure_reason: Some(reason),
+        };
+    }
+
+    AIContextReasoningResponse {
+        ai_result: Some(reasoning_result),
+        ai_unavailable: false,
+        unavailability_reason: None,
+        failure_reason: None,
+    }
+}
+
+/// Graceful AI analysis for an arbitrary group of items.
+pub fn analyze_item_group_context_ai_graceful(
+    conn: &Connection,
+    item_ids: &[String],
+    reasoner: &dyn AIReasoner,
+    is_user_explicit: bool,
+) -> AIContextReasoningResponse {
+    let settings = crate::db::settings::get_settings(conn).unwrap_or_default();
+    if !settings.enable_ai_reasoning {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::Disabled.to_string()),
+            failure_reason: Some(AIFailureReason::Disabled),
+        };
+    }
+
+    if !reasoner.is_available() {
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(AIFailureReason::ProviderUnavailable.to_string()),
+            failure_reason: Some(AIFailureReason::ProviderUnavailable),
+        };
+    }
+
+    let package = match build_item_group_evidence_package(conn, item_ids) {
+        Ok(p) => p,
+        Err(build_err) => {
+            let reason = if build_err.to_lowercase().contains("disabled") {
+                AIFailureReason::Disabled
+            } else {
+                AIFailureReason::EvidenceUnavailable
+            };
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}: {}", reason, build_err)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    let package_hash = crate::context_engine::reasoning::cache::hash_evidence_package(&package, None);
+    if let Ok(Some(cached_result)) = crate::context_engine::reasoning::cache::get_cached_reasoning(conn, &package_hash, None) {
+        return AIContextReasoningResponse {
+            ai_result: Some(cached_result),
+            ai_unavailable: false,
+            unavailability_reason: None,
+            failure_reason: None,
+        };
+    }
+
+    let gating_decision = crate::context_engine::reasoning::gating::evaluate_gating(&package, &settings, is_user_explicit);
+    if !gating_decision.should_invoke {
+        let reason = AIFailureReason::Gated(gating_decision.reason.clone());
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(reason.to_string()),
+            failure_reason: Some(reason),
+        };
+    }
+
+    let first_id = item_ids.first().map(|s| s.as_str()).unwrap_or("group");
+    let reasoning_result = match reasoner.analyze_context(&package) {
+        Ok(r) => {
+            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, first_id, None, &r, None);
+            r
+        },
+        Err(ai_err) => {
+            let reason = AIFailureReason::from_reasoning_error(&ai_err);
+            return AIContextReasoningResponse {
+                ai_result: None,
+                ai_unavailable: true,
+                unavailability_reason: Some(format!("{}", reason)),
+                failure_reason: Some(reason),
+            };
+        }
+    };
+
+    if let Err(validation_err) = super::validator::validate_explanation_grounding(&reasoning_result, &package) {
+        let reason = AIFailureReason::MalformedResponse;
+        return AIContextReasoningResponse {
+            ai_result: None,
+            ai_unavailable: true,
+            unavailability_reason: Some(format!("{}: {}", reason, validation_err)),
+            failure_reason: Some(reason),
+        };
+    }
+
+    AIContextReasoningResponse {
+        ai_result: Some(reasoning_result),
+        ai_unavailable: false,
+        unavailability_reason: None,
+        failure_reason: None,
+    }
+}
+
