@@ -610,21 +610,51 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
       // 1. Confirm membership
       await db.confirmContextMembership(itemId, workspaceId);
 
-      // 2. Transition state to 'organized'
-      try {
-        await db.transitionInboxItemState(itemId, 'organized', `Accepted suggestion for workspace ${workspaceId}`);
-      } catch (e) {}
+      // 2. Update local state map
+      const stateMap = { ...get().inboxStateMap };
+      const now = new Date().toISOString();
+      stateMap[itemId] = {
+        item_id: itemId,
+        state: 'organized',
+        previous_state: stateMap[itemId]?.state,
+        reason: `Accepted suggestion for workspace ${workspaceId}`,
+        created_at: stateMap[itemId]?.created_at || now,
+        updated_at: now,
+      };
 
-      // 3. Emit feedback signal
-      try {
-        await db.createContextSignal(
-          workspaceId,
-          itemId,
-          'user_action',
-          null,
-          JSON.stringify({ action: 'suggestion_accepted', workspace_id: workspaceId })
-        );
-      } catch (e) {}
+      // 3. Update attention map
+      const attentionMap = { ...get().attentionMap };
+      if (attentionMap[itemId]) {
+        attentionMap[itemId] = {
+          ...attentionMap[itemId],
+          attention_required: false,
+          attention_level: 'none',
+          reason: `Item organized in workspace`,
+          factors: {
+            ...attentionMap[itemId].factors,
+            is_organized: true,
+            is_dismissed: false,
+            has_suggested_membership: false,
+          },
+        };
+      }
+
+      // 4. Update workspace store activeItems and inboxCount
+      const currentActive = useWorkspaceStore.getState().activeItems;
+      const filtered = currentActive.filter((item) => item.id !== itemId);
+      const removedCount = currentActive.length - filtered.length;
+
+      useWorkspaceStore.setState((s) => ({
+        activeItems: filtered,
+        inboxCount: Math.max(0, s.inboxCount - removedCount),
+      }));
+
+      // 5. Update local store state and selections
+      set((s) => ({
+        inboxStateMap: stateMap,
+        attentionMap,
+        selectedItemIds: s.selectedItemIds.filter((id) => id !== itemId),
+      }));
     } catch (err) {
       console.error('Failed to accept suggestion:', err);
       throw err;
@@ -717,7 +747,34 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
         inboxCount: Math.max(0, s.inboxCount - removedCount),
       }));
 
+      const stateMap = { ...get().inboxStateMap };
+      const attentionMap = { ...get().attentionMap };
+      const now = new Date().toISOString();
+      for (const id of itemIds) {
+        stateMap[id] = {
+          item_id: id,
+          state: 'organized',
+          previous_state: stateMap[id]?.state,
+          reason: `Bulk assigned to workspace ${workspaceId}`,
+          created_at: stateMap[id]?.created_at || now,
+          updated_at: now,
+        };
+        if (attentionMap[id]) {
+          attentionMap[id] = {
+            ...attentionMap[id],
+            attention_required: false,
+            attention_level: 'none',
+            factors: {
+              ...attentionMap[id].factors,
+              is_organized: true,
+            },
+          };
+        }
+      }
+
       set((s) => ({
+        inboxStateMap: stateMap,
+        attentionMap,
         selectedItemIds: s.selectedItemIds.filter((id) => !itemIds.includes(id)),
       }));
     } catch (err) {

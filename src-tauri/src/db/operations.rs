@@ -1077,7 +1077,53 @@ pub fn confirm_membership(
     item_id: &str,
     workspace_id: &str,
 ) -> Result<super::models::ContextMembership> {
-    create_or_update_membership(conn, item_id, workspace_id, "confirmed", 1.0, "user")
+    let now = Utc::now().to_rfc3339();
+
+    // 1. Create or update confirmed ContextMembership
+    let mem = create_or_update_membership(conn, item_id, workspace_id, "confirmed", 1.0, "user")?;
+
+    // 2. Assign item to workspace while preserving all capture metadata, content, and timestamps
+    let _ = conn.execute(
+        "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![workspace_id, now, item_id],
+    );
+
+    // 3. Mark item organized in inbox_item_states
+    let _ = transition_inbox_item_state(
+        conn,
+        item_id,
+        InboxState::Organized,
+        Some(&format!("Confirmed contextual membership in workspace '{}'", workspace_id)),
+    );
+
+    // 4. Record user action context signal for feedback learning
+    let signal_id = Uuid::new_v4().to_string();
+    let payload = serde_json::json!({
+        "item_id": item_id,
+        "workspace_id": workspace_id,
+        "action": "membership_confirmed",
+        "created_at": now
+    })
+    .to_string();
+
+    let _ = conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'user_action', NULL, ?4, ?5, ?5)",
+        params![signal_id, workspace_id, item_id, payload, now],
+    );
+
+    // 5. Touch workspace activity timestamp
+    let _ = touch_workspace_activity(conn, workspace_id);
+
+    // 6. Recalculate workspace profile and suggested memberships
+    let _ = recalculate_workspace_profile(conn, workspace_id);
+    let _ = crate::context_engine::scoring::recalculate_workspace_suggested_memberships(
+        conn,
+        workspace_id,
+        Some(item_id),
+    );
+
+    Ok(mem)
 }
 
 pub fn dismiss_membership(
@@ -2315,5 +2361,139 @@ mod tests {
 
         // Workspace item is kept safe
         assert!(get_item(&conn, &ws_item.id).is_ok());
+    }
+
+    #[test]
+    fn test_inbox_item_organization_invariants() {
+        let conn = setup_db();
+        let ws = create_workspace(&conn, "Backend Architecture").unwrap();
+
+        let initial_metadata = serde_json::json!({
+            "source_app": "VS Code",
+            "window_title": "architecture.md - ContextSplit",
+            "url": "file:///path/to/architecture.md",
+            "tags": ["rust", "database", "sqlite"]
+        })
+        .to_string();
+
+        // 1. Create item in Inbox
+        let item = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "System architecture notes and memory management guarantees",
+            Some("Database Architecture Notes"),
+            &initial_metadata,
+        )
+        .unwrap();
+
+        let companion_item = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Related SQLite schema documentation",
+            Some("Schema Docs"),
+            "{}",
+        )
+        .unwrap();
+
+        // 2. Establish relationship and initial context signals
+        let _ = create_item_relationship(
+            &conn,
+            &item.id,
+            &companion_item.id,
+            "semantic_similarity",
+            0.88,
+            Some("sqlite_database"),
+        );
+
+        let initial_signal_id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, NULL, ?2, 'capture_signal', NULL, '{\"source\":\"cli\"}', ?3, ?3)",
+            params![initial_signal_id, item.id, now],
+        );
+
+        // 3. Initially item is unassigned and in Inbox
+        assert_eq!(item.workspace_id, None);
+        assert_eq!(list_items(&conn, None).unwrap().iter().filter(|i| i.id == item.id).count(), 1);
+        assert_eq!(list_items(&conn, Some(&ws.id)).unwrap().len(), 0);
+
+        // 4. Confirm contextual membership (user accepts organization)
+        let confirmed_mem = confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        assert_eq!(confirmed_mem.membership_type, "confirmed");
+        assert_eq!(confirmed_mem.confidence, 1.0);
+        assert_eq!(confirmed_mem.source, "user");
+
+        // -------------------------------------------------------------
+        // Invariant 1: Do not delete the Item
+        // -------------------------------------------------------------
+        let organized_item = get_item(&conn, &item.id).expect("Item must not be deleted");
+
+        // -------------------------------------------------------------
+        // Invariant 2: Do not lose capture metadata
+        // -------------------------------------------------------------
+        assert_eq!(organized_item.metadata, initial_metadata, "Capture metadata must be 100% preserved");
+        assert_eq!(organized_item.title.as_deref(), Some("Database Architecture Notes"));
+        assert_eq!(organized_item.item_type, "text");
+
+        // -------------------------------------------------------------
+        // Invariant 3: Mark it organized in state machine
+        // -------------------------------------------------------------
+        let state_record = get_inbox_item_state(&conn, &item.id).unwrap().expect("State record exists");
+        assert_eq!(state_record.state, InboxState::Organized);
+
+        // -------------------------------------------------------------
+        // Invariant 4: Remove it from Needs Attention
+        // -------------------------------------------------------------
+        let attention = crate::context_engine::attention::evaluate_inbox_item_attention(&conn, &item.id, None).unwrap();
+        assert!(!attention.attention_required, "Organized item must NOT require attention");
+        assert_eq!(attention.attention_level, crate::context_engine::attention::AttentionLevel::None);
+        assert!(attention.factors.is_organized, "Factors must reflect organized status");
+
+        // -------------------------------------------------------------
+        // Invariant 5: Preserve relationships and signals
+        // -------------------------------------------------------------
+        let rels = get_item_relationships(&conn, &item.id).unwrap();
+        assert_eq!(rels.len(), 1, "Relationships must be preserved intact");
+        assert!(rels[0].item_a_id == companion_item.id || rels[0].item_b_id == companion_item.id);
+
+        let signals = crate::context_engine::operations::list_context_signals(&conn, None, Some(&item.id)).unwrap();
+        assert!(signals.iter().any(|s| s.signal_type == "capture_signal"), "Initial capture signal preserved");
+        assert!(signals.iter().any(|s| s.signal_type == "user_action"), "Confirmation feedback signal recorded");
+
+        // -------------------------------------------------------------
+        // Invariant 6: Keep it accessible through the Workspace
+        // -------------------------------------------------------------
+        assert_eq!(organized_item.workspace_id.as_deref(), Some(ws.id.as_str()));
+        let ws_items = list_items(&conn, Some(&ws.id)).unwrap();
+        assert_eq!(ws_items.iter().filter(|i| i.id == item.id).count(), 1, "Item must be accessible in workspace item list");
+
+        // -------------------------------------------------------------
+        // Invariant 7: Retain it in searchable history
+        // -------------------------------------------------------------
+        let search_text_params = crate::search::InboxSearchParams {
+            query: Some("Database Architecture".to_string()),
+            ..Default::default()
+        };
+        let search_results = crate::search::search_inbox_items(&conn, &search_text_params, None).unwrap();
+        assert!(search_results.iter().any(|r| r.item.id == item.id), "Organized item must be found in text search");
+
+        let search_ws_params = crate::search::InboxSearchParams {
+            workspace_id: Some(ws.id.clone()),
+            ..Default::default()
+        };
+        let ws_results = crate::search::search_inbox_items(&conn, &search_ws_params, None).unwrap();
+        assert!(ws_results.iter().any(|r| r.item.id == item.id), "Organized item must be found in workspace search filter");
+
+        let search_state_params = crate::search::InboxSearchParams {
+            inbox_state: Some("organized".to_string()),
+            ..Default::default()
+        };
+        let state_results = crate::search::search_inbox_items(&conn, &search_state_params, None).unwrap();
+        assert!(state_results.iter().any(|r| r.item.id == item.id), "Organized item must be found in organized state filter");
     }
 }
