@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react';
 import {
   Inbox,
   LayoutList,
+  Layers,
   Clock,
   LayoutTemplate,
   Trash2,
@@ -23,6 +24,7 @@ import {
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { InboxSection } from './InboxSection';
 import { InboxItemCard } from './InboxItemCard';
+import { InboxItemGroupCard, InboxItemGroup } from './InboxItemGroupCard';
 import { BulkActionsBar } from './BulkActionsBar';
 
 interface InboxViewProps {
@@ -61,6 +63,8 @@ export function InboxView({
     bulkAssignToWorkspace,
     bulkDismissSuggestions,
     bulkArchiveOrClear,
+    assignItemIdsToWorkspace,
+    dismissItemIdsSuggestions,
   } = useInboxStore();
 
   const { emptyInbox } = useWorkspaceStore();
@@ -131,6 +135,74 @@ export function InboxView({
 
     return partitions;
   }, [sortedDerivedItems]);
+
+  // Derive all contextual clusters for the 'grouped' view mode without duplicating any item records
+  const { allGroups, ungroupedItems } = useMemo(() => {
+    const candidateMap: Record<string, DerivedInboxItem[]> = {};
+    const workspaceMap: Record<string, DerivedInboxItem[]> = {};
+    const ungrouped: DerivedInboxItem[] = [];
+
+    for (const d of sortedDerivedItems) {
+      if (d.candidateInfo?.candidateId) {
+        const cId = d.candidateInfo.candidateId;
+        if (!candidateMap[cId]) candidateMap[cId] = [];
+        candidateMap[cId].push(d);
+      } else if (d.attention?.factors?.suggested_workspace_id) {
+        const wsId = d.attention.factors.suggested_workspace_id;
+        if (!workspaceMap[wsId]) workspaceMap[wsId] = [];
+        workspaceMap[wsId].push(d);
+      } else {
+        ungrouped.push(d);
+      }
+    }
+
+    const groups: InboxItemGroup[] = [];
+
+    // 1. Candidate Groups
+    for (const [cId, memberItems] of Object.entries(candidateMap)) {
+      const first = memberItems[0];
+      groups.push({
+        id: `cand-${cId}`,
+        type: 'candidate',
+        name: first.candidateInfo?.candidateName || 'Discovered Context Candidate',
+        itemCount: memberItems.length,
+        confidence: first.candidateInfo?.confidence ?? 0.85,
+        strongestExplanation:
+          first.candidateInfo?.explanation ||
+          'Discovered cluster of items with strong contextual similarity and co-occurrence.',
+        items: memberItems,
+        candidateId: cId,
+      });
+    }
+
+    // 2. Workspace Suggestion Groups (>= 2 items)
+    for (const [wsId, memberItems] of Object.entries(workspaceMap)) {
+      if (memberItems.length >= 2) {
+        const ws = workspaces.find((w) => w.id === wsId);
+        const maxConf = Math.max(
+          ...memberItems.map((m) => m.attention?.factors?.contextual_confidence ?? 0.8)
+        );
+        const bestExplanation =
+          memberItems.find((m) => m.attention?.reason)?.attention?.reason ||
+          `Multiple items suggested for workspace "${ws?.name || 'Workspace'}".`;
+
+        groups.push({
+          id: `ws-${wsId}`,
+          type: 'workspace_suggestion',
+          name: ws?.name || 'Suggested Workspace',
+          itemCount: memberItems.length,
+          confidence: maxConf,
+          strongestExplanation: bestExplanation,
+          items: memberItems,
+          suggestedWorkspaceId: wsId,
+        });
+      } else {
+        ungrouped.push(...memberItems);
+      }
+    }
+
+    return { allGroups: groups, ungroupedItems: ungrouped };
+  }, [sortedDerivedItems, workspaces]);
 
   const handleEmptyInbox = async () => {
     const isConfirmed = await confirm(
@@ -243,6 +315,19 @@ export function InboxView({
               >
                 <LayoutList size={14} />
                 <span>Sections</span>
+              </button>
+
+              <button
+                onClick={() => setViewMode('grouped')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-all cursor-pointer ${
+                  viewMode === 'grouped'
+                    ? 'bg-white text-gray-900 shadow-2xs font-semibold'
+                    : 'hover:text-gray-900'
+                }`}
+                title="Contextual Groups View"
+              >
+                <Layers size={14} />
+                <span>Groups</span>
               </button>
 
               <button
@@ -464,8 +549,66 @@ export function InboxView({
               />
             )}
           </div>
+        ) : viewMode === 'grouped' ? (
+          /* 2. CONTEXTUAL GROUPS VIEW MODE */
+          <div className="flex flex-col gap-6 max-w-7xl mx-auto">
+            <div className="flex items-center justify-between px-1">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-800">
+                  Context Groups & Clusters ({allGroups.length} {allGroups.length === 1 ? 'cluster' : 'clusters'})
+                </h2>
+                <p className="text-[11px] text-gray-400">
+                  Items grouped by context candidate discoveries and workspace recommendations.
+                </p>
+              </div>
+            </div>
+
+            {/* Context Group Cards */}
+            {allGroups.length > 0 ? (
+              <div className="flex flex-col gap-4">
+                {allGroups.map((group) => (
+                  <InboxItemGroupCard
+                    key={group.id}
+                    group={group}
+                    workspaces={workspaces}
+                    onMoveToWorkspace={onMoveToWorkspace}
+                    onBulkAssignGroup={assignItemIdsToWorkspace}
+                    onBulkDismissGroup={dismissItemIdsSuggestions}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="px-6 py-8 border border-dashed border-black/5 rounded-xl text-center bg-gray-50/30">
+                <p className="text-[12px] text-gray-400">No multi-item contextual clusters currently detected.</p>
+              </div>
+            )}
+
+            {/* Ungrouped / Individual Items */}
+            {ungroupedItems.length > 0 && (
+              <div className="flex flex-col gap-3 pt-2">
+                <div className="flex items-center gap-2 px-1">
+                  <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    Individual Items ({ungroupedItems.length})
+                  </h3>
+                  <div className="h-px flex-1 bg-black/5" />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+                  {ungroupedItems.map((derived) => (
+                    <InboxItemCard
+                      key={derived.item.id}
+                      derived={derived}
+                      workspaces={workspaces}
+                      onMoveToWorkspace={onMoveToWorkspace}
+                      showSectionBadge={true}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : (
-          /* 2. CHRONOLOGICAL TIMELINE STREAM VIEW */
+          /* 3. CHRONOLOGICAL TIMELINE STREAM VIEW */
           <div className="max-w-7xl mx-auto flex flex-col gap-4">
             <div className="flex items-center justify-between px-1">
               <p className="text-[12px] font-semibold text-gray-500 uppercase tracking-wider">

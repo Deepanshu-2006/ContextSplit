@@ -1,4 +1,4 @@
-import { MouseEvent, ComponentType } from 'react';
+import { MouseEvent, ComponentType, useMemo } from 'react';
 import {
   AlertTriangle,
   Sparkles,
@@ -12,6 +12,7 @@ import {
 import { Workspace } from '../../services/db';
 import { DerivedInboxItem, InboxSectionKey, useInboxStore } from '../../store/inboxStore';
 import { InboxItemCard } from './InboxItemCard';
+import { InboxItemGroupCard, InboxItemGroup } from './InboxItemGroupCard';
 
 interface InboxSectionProps {
   sectionKey: InboxSectionKey;
@@ -85,8 +86,14 @@ export function InboxSection({
   workspaces,
   onMoveToWorkspace,
 }: InboxSectionProps) {
-  const { collapsedSections, toggleSection, acceptAllHighConfidenceSuggestions, isBatchProcessing } =
-    useInboxStore();
+  const {
+    collapsedSections,
+    toggleSection,
+    acceptAllHighConfidenceSuggestions,
+    assignItemIdsToWorkspace,
+    dismissItemIdsSuggestions,
+    isBatchProcessing,
+  } = useInboxStore();
   const isCollapsed = collapsedSections[sectionKey] ?? false;
   const config = SECTION_CONFIG[sectionKey];
   const IconComponent = config.icon;
@@ -98,6 +105,89 @@ export function InboxSection({
     // Reload items in workspaceStore
     window.dispatchEvent(new CustomEvent('contextsplit://refresh-inbox'));
   };
+
+  // Derive visual contextual clusters without duplicating any item records
+  const { groups, standaloneItems } = useMemo(() => {
+    if (sectionKey === 'new_candidates') {
+      const candidateMap: Record<string, DerivedInboxItem[]> = {};
+      const standalone: DerivedInboxItem[] = [];
+
+      for (const item of items) {
+        const candId = item.candidateInfo?.candidateId;
+        if (candId) {
+          if (!candidateMap[candId]) candidateMap[candId] = [];
+          candidateMap[candId].push(item);
+        } else {
+          standalone.push(item);
+        }
+      }
+
+      const derivedGroups: InboxItemGroup[] = Object.entries(candidateMap).map(
+        ([candId, memberItems]) => {
+          const first = memberItems[0];
+          return {
+            id: `cand-${candId}`,
+            type: 'candidate',
+            name: first.candidateInfo?.candidateName || 'Discovered Context Candidate',
+            itemCount: memberItems.length,
+            confidence: first.candidateInfo?.confidence ?? 0.85,
+            strongestExplanation:
+              first.candidateInfo?.explanation ||
+              'Items discovered together with strong contextual and semantic correlation.',
+            items: memberItems,
+            candidateId: candId,
+          };
+        }
+      );
+
+      return { groups: derivedGroups, standaloneItems: standalone };
+    }
+
+    if (sectionKey === 'context_suggestions') {
+      const wsMap: Record<string, DerivedInboxItem[]> = {};
+      const standalone: DerivedInboxItem[] = [];
+
+      for (const item of items) {
+        const wsId = item.attention?.factors?.suggested_workspace_id;
+        if (wsId) {
+          if (!wsMap[wsId]) wsMap[wsId] = [];
+          wsMap[wsId].push(item);
+        } else {
+          standalone.push(item);
+        }
+      }
+
+      const derivedGroups: InboxItemGroup[] = [];
+      for (const [wsId, memberItems] of Object.entries(wsMap)) {
+        if (memberItems.length >= 2) {
+          const ws = workspaces.find((w) => w.id === wsId);
+          const maxConf = Math.max(
+            ...memberItems.map((m) => m.attention?.factors?.contextual_confidence ?? 0.8)
+          );
+          const bestExplanation =
+            memberItems.find((m) => m.attention?.reason)?.attention?.reason ||
+            `Multiple items have strong affinity with "${ws?.name || 'Workspace'}".`;
+
+          derivedGroups.push({
+            id: `ws-${wsId}`,
+            type: 'workspace_suggestion',
+            name: ws?.name || 'Suggested Workspace',
+            itemCount: memberItems.length,
+            confidence: maxConf,
+            strongestExplanation: bestExplanation,
+            items: memberItems,
+            suggestedWorkspaceId: wsId,
+          });
+        } else {
+          standalone.push(...memberItems);
+        }
+      }
+
+      return { groups: derivedGroups, standaloneItems: standalone };
+    }
+
+    return { groups: [], standaloneItems: items };
+  }, [sectionKey, items, workspaces]);
 
   return (
     <section className="flex flex-col gap-3">
@@ -153,15 +243,32 @@ export function InboxSection({
               <p className="text-[12px] text-gray-400">{config.emptyText}</p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
-              {items.map((derived) => (
-                <InboxItemCard
-                  key={derived.item.id}
-                  derived={derived}
+            <div className="flex flex-col gap-4">
+              {/* Grouped Cluster Cards */}
+              {groups.map((group) => (
+                <InboxItemGroupCard
+                  key={group.id}
+                  group={group}
                   workspaces={workspaces}
                   onMoveToWorkspace={onMoveToWorkspace}
+                  onBulkAssignGroup={assignItemIdsToWorkspace}
+                  onBulkDismissGroup={dismissItemIdsSuggestions}
                 />
               ))}
+
+              {/* Standalone Individual Cards Grid */}
+              {standaloneItems.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
+                  {standaloneItems.map((derived) => (
+                    <InboxItemCard
+                      key={derived.item.id}
+                      derived={derived}
+                      workspaces={workspaces}
+                      onMoveToWorkspace={onMoveToWorkspace}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -169,3 +276,4 @@ export function InboxSection({
     </section>
   );
 }
+

@@ -16,7 +16,7 @@ export type InboxSectionKey =
   | 'recently_captured'
   | 'already_understood';
 
-export type InboxViewMode = 'sections' | 'chronological' | 'canvas';
+export type InboxViewMode = 'sections' | 'grouped' | 'chronological' | 'canvas';
 export type InboxSortOrder = 'newest' | 'oldest';
 
 export interface DerivedInboxItem {
@@ -28,6 +28,7 @@ export interface DerivedInboxItem {
     candidateId: string;
     candidateName: string;
     confidence: number;
+    explanation?: string;
   };
 }
 
@@ -41,7 +42,11 @@ interface InboxStoreState {
   // Raw Data Cache
   attentionMap: Record<string, ItemAttention>;
   inboxStateMap: Record<string, InboxItemState>;
-  candidateItemMap: Record<string, { candidateId: string; candidateName: string; confidence: number }>;
+  candidateMap: Record<string, ContextCandidate>;
+  candidateItemMap: Record<
+    string,
+    { candidateId: string; candidateName: string; confidence: number; explanation?: string }
+  >;
   isLoading: boolean;
   isBatchProcessing: boolean;
   
@@ -74,6 +79,8 @@ interface InboxStoreState {
   bulkAssignToWorkspace: (workspaceId: string) => Promise<void>;
   bulkDismissSuggestions: (workspaceId?: string) => Promise<void>;
   bulkArchiveOrClear: () => Promise<number>;
+  assignItemIdsToWorkspace: (itemIds: string[], workspaceId: string) => Promise<void>;
+  dismissItemIdsSuggestions: (itemIds: string[], workspaceId?: string) => Promise<void>;
 }
 
 export function deriveItemSection(
@@ -146,6 +153,7 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   
   attentionMap: {},
   inboxStateMap: {},
+  candidateMap: {},
   candidateItemMap: {},
   isLoading: false,
   isBatchProcessing: false,
@@ -257,16 +265,35 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
 
       // Fetch member items for active candidates
       const activeCandidates = [...detectedCandidates, ...suggestedCandidates];
-      const newCandidateItemMap: Record<string, { candidateId: string; candidateName: string; confidence: number }> = {};
+      const newCandidateMap: Record<string, ContextCandidate> = {};
+      const newCandidateItemMap: Record<
+        string,
+        { candidateId: string; candidateName: string; confidence: number; explanation?: string }
+      > = {};
+
+      for (const c of activeCandidates) {
+        newCandidateMap[c.id] = c;
+      }
 
       const candidateDetailsPromises = activeCandidates.map(async (c) => {
         try {
+          let explanation: string | undefined;
+          try {
+            const meta = JSON.parse(c.metadata || '{}');
+            if (meta.evidence && meta.evidence.length > 0) {
+              explanation = meta.evidence[0];
+            } else if (meta.strongest_relationships && meta.strongest_relationships.length > 0) {
+              explanation = meta.strongest_relationships[0].description || undefined;
+            }
+          } catch (e) {}
+
           const details: CandidateWithItems = await db.getCandidateItems(c.id);
           for (const member of details.items) {
             newCandidateItemMap[member.item.id] = {
               candidateId: c.id,
               candidateName: c.label || 'Discovered Context',
               confidence: c.confidence,
+              explanation,
             };
           }
         } catch (e) {
@@ -279,6 +306,7 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
       set({
         attentionMap: newAttentionMap,
         inboxStateMap: newStateMap,
+        candidateMap: newCandidateMap,
         candidateItemMap: newCandidateItemMap,
         isLoading: false,
       });
@@ -385,18 +413,14 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
     return count;
   },
 
-  bulkAssignToWorkspace: async (workspaceId: string) => {
-    const { selectedItemIds } = get();
-    if (selectedItemIds.length === 0) return;
-
+  assignItemIdsToWorkspace: async (itemIds: string[], workspaceId: string) => {
+    if (itemIds.length === 0) return;
     set({ isBatchProcessing: true });
     try {
-      // 1. Transactional bulk assign on backend
-      await db.bulkAssignInboxItemsToWorkspace(selectedItemIds, workspaceId);
+      await db.bulkAssignInboxItemsToWorkspace(itemIds, workspaceId);
 
-      // 2. Remove assigned items from activeItems in workspaceStore
       const currentActive = useWorkspaceStore.getState().activeItems;
-      const filtered = currentActive.filter((item) => !selectedItemIds.includes(item.id));
+      const filtered = currentActive.filter((item) => !itemIds.includes(item.id));
       const removedCount = currentActive.length - filtered.length;
 
       useWorkspaceStore.setState((s) => ({
@@ -404,44 +428,57 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
         inboxCount: Math.max(0, s.inboxCount - removedCount),
       }));
 
-      // 3. Clear selection
-      set({ selectedItemIds: [] });
+      set((s) => ({
+        selectedItemIds: s.selectedItemIds.filter((id) => !itemIds.includes(id)),
+      }));
     } catch (err) {
-      console.error('Failed to bulk assign items:', err);
+      console.error('Failed to assign items to workspace:', err);
       throw err;
     } finally {
       set({ isBatchProcessing: false });
     }
   },
 
-  bulkDismissSuggestions: async (workspaceId?: string) => {
-    const { selectedItemIds } = get();
-    if (selectedItemIds.length === 0) return;
-
+  dismissItemIdsSuggestions: async (itemIds: string[], workspaceId?: string) => {
+    if (itemIds.length === 0) return;
     set({ isBatchProcessing: true });
     try {
-      await db.bulkDismissInboxSuggestions(selectedItemIds, workspaceId);
+      await db.bulkDismissInboxSuggestions(itemIds, workspaceId);
 
-      // Update local inbox state cache to 'understood'
       const stateMap = { ...get().inboxStateMap };
       const now = new Date().toISOString();
-      for (const id of selectedItemIds) {
+      for (const id of itemIds) {
         stateMap[id] = {
           item_id: id,
           state: 'understood',
           previous_state: stateMap[id]?.state,
-          reason: 'Bulk dismissed suggestions',
+          reason: 'Dismissed suggestions',
           created_at: stateMap[id]?.created_at || now,
           updated_at: now,
         };
       }
-      set({ inboxStateMap: stateMap, selectedItemIds: [] });
+      set({
+        inboxStateMap: stateMap,
+        selectedItemIds: get().selectedItemIds.filter((id) => !itemIds.includes(id)),
+      });
     } catch (err) {
-      console.error('Failed to bulk dismiss suggestions:', err);
+      console.error('Failed to dismiss suggestions:', err);
       throw err;
     } finally {
       set({ isBatchProcessing: false });
     }
+  },
+
+  bulkAssignToWorkspace: async (workspaceId: string) => {
+    const { selectedItemIds, assignItemIdsToWorkspace } = get();
+    if (selectedItemIds.length === 0) return;
+    await assignItemIdsToWorkspace(selectedItemIds, workspaceId);
+  },
+
+  bulkDismissSuggestions: async (workspaceId?: string) => {
+    const { selectedItemIds, dismissItemIdsSuggestions } = get();
+    if (selectedItemIds.length === 0) return;
+    await dismissItemIdsSuggestions(selectedItemIds, workspaceId);
   },
 
   bulkArchiveOrClear: async () => {
