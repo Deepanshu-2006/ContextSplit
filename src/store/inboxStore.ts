@@ -184,6 +184,8 @@ export function deriveItemSection(
   return 'already_understood';
 }
 
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
 export const useInboxStore = create<InboxStoreState>((set, get) => ({
   viewMode: 'sections',
   sortOrder: 'newest',
@@ -196,7 +198,7 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   },
   searchQuery: '',
   selectedSectionFilter: 'all',
-  
+
   // Search & Multi-Filter State
   filterWorkspaceId: null,
   filterCandidateId: null,
@@ -227,7 +229,13 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
   },
   setSearchQuery: (query) => {
     set({ searchQuery: query });
-    get().executeSearch();
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    // 160ms debounce to keep typing 100% smooth and reduce IPC load for large inboxes
+    searchDebounceTimer = setTimeout(() => {
+      get().executeSearch();
+    }, 160);
   },
   setSelectedSectionFilter: (filter) => set({ selectedSectionFilter: filter }),
   
@@ -249,18 +257,22 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
 
   // Filter Actions
   setFilterWorkspaceId: (workspaceId) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ filterWorkspaceId: workspaceId });
     get().executeSearch();
   },
   setFilterCandidateId: (candidateId) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ filterCandidateId: candidateId });
     get().executeSearch();
   },
   setFilterItemType: (itemType) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ filterItemType: itemType });
     get().executeSearch();
   },
   setFilterDatePreset: (preset, from, to) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     let dateFrom: string | null = null;
     let dateTo: string | null = null;
 
@@ -287,16 +299,19 @@ export const useInboxStore = create<InboxStoreState>((set, get) => ({
     get().executeSearch();
   },
   setFilterInboxState: (state) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ filterInboxState: state });
     get().executeSearch();
   },
   setIsSemanticSearchActive: (active) => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({ isSemanticSearchActive: active });
     get().executeSearch();
   },
   setIsFilterBarOpen: (open) => set({ isFilterBarOpen: open }),
   toggleFilterBar: () => set((s) => ({ isFilterBarOpen: !s.isFilterBarOpen })),
   resetAllFilters: () => {
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
     set({
       searchQuery: '',
       filterWorkspaceId: null,

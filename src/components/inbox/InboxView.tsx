@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   Inbox,
   LayoutList,
@@ -72,6 +72,32 @@ export function InboxView({
   } = useInboxStore();
 
   const { emptyInbox } = useWorkspaceStore();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Global Keyboard Shortcuts (⌘K / Ctrl+K or '/' to focus search, Esc to clear)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      } else if (
+        e.key === '/' &&
+        !['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement?.tagName || ''))
+      ) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (e.key === 'Escape' && document.activeElement === searchInputRef.current) {
+        if (searchQuery) {
+          setSearchQuery('');
+        } else {
+          searchInputRef.current?.blur();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [searchQuery, setSearchQuery]);
 
   // Load fresh attention & candidate analysis whenever inbox items change
   useEffect(() => {
@@ -300,24 +326,32 @@ export function InboxView({
           {/* Right Toolbar Controls */}
           <div className="flex items-center gap-2.5 flex-wrap">
             {/* Search Input Filter */}
-            <div className="relative group w-48 sm:w-56">
+            <div className="relative group w-52 sm:w-64">
               <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-gray-400 group-hover:text-gray-600">
                 <Search size={13} />
               </div>
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search text, metadata..."
-                className="w-full bg-gray-100/80 hover:bg-gray-100 border border-black/5 rounded-lg py-1.5 pl-8 pr-7 text-[12px] placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-1 focus:ring-black/10 transition-all shadow-2xs"
+                placeholder="Search items, titles, metadata..."
+                className="w-full bg-gray-100/80 hover:bg-gray-100 border border-black/5 rounded-lg py-1.5 pl-8 pr-12 text-[12px] placeholder-gray-400 focus:outline-none focus:bg-white focus:ring-1 focus:ring-black/10 transition-all shadow-2xs"
               />
-              {searchQuery && (
+              {searchQuery ? (
                 <button
                   onClick={() => setSearchQuery('')}
                   className="absolute inset-y-0 right-0 pr-2 flex items-center text-gray-400 hover:text-gray-600 cursor-pointer"
+                  title="Clear search query"
                 >
                   <X size={12} />
                 </button>
+              ) : (
+                <div className="absolute inset-y-0 right-0 pr-2 flex items-center pointer-events-none">
+                  <kbd className="text-[10px] text-gray-400 font-mono bg-white/70 border border-black/8 px-1.5 py-0.5 rounded shadow-2xs">
+                    ⌘K
+                  </kbd>
+                </div>
               )}
             </div>
 

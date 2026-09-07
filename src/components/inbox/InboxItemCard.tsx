@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, memo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FileText,
@@ -33,7 +33,7 @@ interface InboxItemCardProps {
   showSectionBadge?: boolean;
 }
 
-export function InboxItemCard({
+function InboxItemCardComponent({
   derived,
   workspaces,
   onMoveToWorkspace,
@@ -326,22 +326,22 @@ export function InboxItemCard({
           )}
         </div>
 
-        {/* Search Result Relevance / Semantic Match Score */}
+        {/* Search Result Relevance / Semantic Match Indicator */}
         {derived.searchResult && (
-          <div className="flex items-center justify-between gap-2 text-[10px] bg-white border border-black/5 px-2 py-1 rounded-md">
+          <div className="flex items-center justify-between gap-2 text-[10px] bg-white border border-black/5 px-2 py-1 rounded-md shadow-2xs">
             {derived.searchResult.semantic_score != null ? (
-              <span className="flex items-center gap-1 text-indigo-700 font-semibold">
+              <span className="flex items-center gap-1 text-indigo-700 font-medium">
                 <Sparkles size={11} className="text-amber-500" />
-                Semantic Match ({Math.round(derived.searchResult.semantic_score * 100)}%)
+                Semantic match
               </span>
             ) : (
-              <span className="flex items-center gap-1 text-gray-600 font-medium">
+              <span className="flex items-center gap-1 text-gray-500 font-medium">
                 <Search size={11} className="text-gray-400" />
-                Text Match ({Math.round(derived.searchResult.combined_score * 100)}%)
+                Keyword match
               </span>
             )}
             {derived.searchResult.match_highlights && derived.searchResult.match_highlights.length > 0 && (
-              <span className="text-[9px] text-gray-400 truncate max-w-[110px]">
+              <span className="text-[9px] text-gray-400 truncate max-w-[120px]" title={derived.searchResult.match_highlights[0]}>
                 {derived.searchResult.match_highlights[0]}
               </span>
             )}
@@ -498,3 +498,5 @@ export function InboxItemCard({
     </div>
   );
 }
+
+export const InboxItemCard = memo(InboxItemCardComponent);
