@@ -13,11 +13,16 @@ pub mod reasoning;
 pub mod inbox_state;
 pub mod attention;
 pub mod evidence;
+pub mod normalization;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
     EvidenceCategory, EvidenceCollectorOptions, EvidenceExplanation, EvidenceProvenance,
     collect_item_evidence,
+};
+pub use normalization::{
+    CategoryNormalizationConfig, EvidenceConflict, EvidenceNormalizer, NormalizedEvidence,
+    NormalizedEvidenceSet, NormalizerConfig,
 };
 
 #[cfg(test)]

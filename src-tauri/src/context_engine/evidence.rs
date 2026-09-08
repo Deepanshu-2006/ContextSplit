@@ -333,6 +333,14 @@ impl ContextEvidence {
         self
     }
 
+    pub fn is_observed(&self) -> bool {
+        self.provenance.is_observed()
+    }
+
+    pub fn is_inferred(&self) -> bool {
+        self.provenance.is_inferred()
+    }
+
     // =========================================================================
     // Standard Observed Evidence Factory Methods
     // =========================================================================
@@ -621,6 +629,37 @@ impl ContextEvidence {
         ev
     }
 
+    /// Observed evidence: direct user dismissal / rejection of a workspace suggestion.
+    pub fn observed_user_dismissal(
+        item_id: impl Into<String>,
+        workspace_id: &str,
+        workspace_name: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Self {
+        let ws_label = workspace_name.unwrap_or("workspace");
+        let expl = EvidenceExplanation::new(
+            "User Dismissal",
+            format!("User dismissed suggestion for {}.", ws_label),
+        );
+        let mut ev = Self::new(
+            EvidenceCategory::UserFeedback,
+            EvidenceProvenance::Observed,
+            1.0,
+            item_id.into(),
+            expl,
+        );
+        ev = ev.with_source_ref(EntityReference::workspace(workspace_id, workspace_name.map(|s| s.to_string())));
+        if let Some(ts) = timestamp {
+            ev.observed_at = ts.to_string();
+        }
+        ev.attributes.insert("feedback_type".to_string(), serde_json::json!("user_dismissal"));
+        ev.attributes.insert("workspace_id".to_string(), serde_json::json!(workspace_id));
+        if let Some(name) = workspace_name {
+            ev.attributes.insert("workspace_name".to_string(), serde_json::json!(name));
+        }
+        ev
+    }
+
     // =========================================================================
     // Standard Inferred Evidence Factory Methods
     // =========================================================================
@@ -873,6 +912,11 @@ impl ContextEvidenceSet {
             }
         }
         summaries
+    }
+
+    /// Normalizes this evidence set using the provided EvidenceNormalizer.
+    pub fn normalize(&self, normalizer: &crate::context_engine::normalization::EvidenceNormalizer) -> crate::context_engine::normalization::NormalizedEvidenceSet {
+        normalizer.normalize(self)
     }
 }
 
