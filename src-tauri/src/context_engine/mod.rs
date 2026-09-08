@@ -12,6 +12,9 @@ pub mod overview;
 pub mod reasoning;
 pub mod inbox_state;
 pub mod attention;
+pub mod evidence;
+
+pub use evidence::{ContextEvidence, ContextEvidenceSet, EvidenceCategory, EvidenceProvenance, EntityReference, EvidenceExplanation};
 
 #[cfg(test)]
 pub mod workflow_tests;

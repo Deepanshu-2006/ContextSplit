@@ -140,6 +140,64 @@ export interface ItemRelationship {
   metadata: string | null;
 }
 
+// --- Unified ContextEvidence Domain Model ---
+
+export type EvidenceCategory =
+  | "source_app"
+  | "source_window"
+  | "browser_domain"
+  | "browser_url"
+  | "capture_method"
+  | "temporal_proximity"
+  | "same_session"
+  | "related_item"
+  | "semantic_similarity"
+  | "workspace_history"
+  | "confirmed_membership"
+  | "user_feedback"
+  | "file_metadata"
+  | "content_type";
+
+export type EvidenceProvenance = "observed" | "inferred";
+
+export type EntityType =
+  | "item"
+  | "session"
+  | "signal"
+  | "workspace"
+  | "candidate"
+  | "relationship"
+  | "external";
+
+export interface EntityReference {
+  entity_type: EntityType;
+  entity_id: string;
+  label?: string | null;
+}
+
+export interface EvidenceExplanation {
+  title: string;
+  description: string;
+  badge?: string | null;
+}
+
+export interface ContextEvidence {
+  id: string;
+  category: EvidenceCategory;
+  provenance: EvidenceProvenance;
+  strength: number;
+  target_item_id: string;
+  source_ref?: EntityReference | null;
+  observed_at: string;
+  explanation: EvidenceExplanation;
+  attributes?: Record<string, any>;
+}
+
+export interface ContextEvidenceSet {
+  target_item_id: string;
+  items: ContextEvidence[];
+}
+
 // --- Context Discovery ---
 
 export type CandidateStatus = "detected" | "suggested" | "accepted" | "dismissed" | "expired";
