@@ -910,7 +910,7 @@ impl Default for EvidenceCollectorOptions {
             include_workspace_profiles: true,
             include_workspace_history: true,
             include_user_feedback: true,
-            temporal_decay: Some(crate::context_engine::temporal::TemporalDecayConfig::default()),
+            temporal_decay: None,
             max_related_items: 50,
         }
     }
@@ -1012,8 +1012,8 @@ impl ContextEvidenceCollector {
             .unwrap_or_default();
 
         let now = Utc::now();
-        let default_decay = crate::context_engine::temporal::TemporalDecayConfig::default();
-        let decay_config = self.options.temporal_decay.as_ref().unwrap_or(&default_decay);
+        let db_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
+        let decay_config = self.options.temporal_decay.as_ref().unwrap_or(&db_decay);
 
         for sig in &signals {
             let sig_ref = EntityReference::signal(&sig.id);
@@ -1046,17 +1046,20 @@ impl ContextEvidenceCollector {
                         }
                     }
                     "url_metadata" => {
-                        if let Some(url) = payload.get("url").and_then(|v| v.as_str()) {
+                        let url_opt = payload.get("url").and_then(|v| v.as_str());
+                        if let Some(url) = url_opt {
                             raw_evidences.push(
                                 ContextEvidence::observed_url(item_id, url, Some(&sig.created_at))
                                     .with_source_ref(sig_ref.clone()),
                             );
-                            if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                                raw_evidences.push(
-                                    ContextEvidence::observed_domain(item_id, domain, Some(url), Some(&sig.created_at))
-                                        .with_source_ref(sig_ref.clone()),
-                                );
-                            } else if let Ok(parsed_url) = url::Url::parse(url) {
+                        }
+                        if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
+                            raw_evidences.push(
+                                ContextEvidence::observed_domain(item_id, domain, url_opt, Some(&sig.created_at))
+                                    .with_source_ref(sig_ref.clone()),
+                            );
+                        } else if let Some(url) = url_opt {
+                            if let Ok(parsed_url) = url::Url::parse(url) {
                                 if let Some(host) = parsed_url.host_str() {
                                     raw_evidences.push(
                                         ContextEvidence::observed_domain(item_id, host, Some(url), Some(&sig.created_at))
@@ -1175,6 +1178,13 @@ impl ContextEvidenceCollector {
                 .and_then(|i| i.workspace_id.as_deref())
                 .and_then(|ws_id| crate::db::operations::get_workspace(conn, ws_id).ok().map(|w| w.name));
 
+            let decay_weight = if let Some(ref other) = other_item {
+                decay_config.compute_weight(&other.created_at, now)
+            } else {
+                1.0
+            };
+            let decayed_strength = rel.strength * decay_weight;
+
             match rel.relationship_type.as_str() {
                 "temporal_proximity" => {
                     let mut delta_secs: i64 = 60;
@@ -1196,16 +1206,16 @@ impl ContextEvidenceCollector {
                         item_id,
                         other_id,
                         delta_secs,
-                        rel.strength,
+                        decayed_strength,
                         Some(&rel.created_at),
                     ));
                 }
                 "semantic_similarity" => {
-                    if rel.strength >= self.options.min_semantic_similarity {
+                    if decayed_strength >= self.options.min_semantic_similarity {
                         raw_evidences.push(ContextEvidence::inferred_semantic_similarity(
                             item_id,
                             other_id,
-                            rel.strength,
+                            decayed_strength,
                             other_title,
                             ws_name.as_deref(),
                             Some(&rel.created_at),
@@ -1217,7 +1227,7 @@ impl ContextEvidenceCollector {
                         item_id,
                         other_id,
                         &rel.relationship_type,
-                        rel.strength,
+                        decayed_strength,
                         other_title,
                         Some(&rel.created_at),
                     ));

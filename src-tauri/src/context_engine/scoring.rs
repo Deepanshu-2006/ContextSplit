@@ -1,54 +1,132 @@
 use rusqlite::Connection;
 use serde::{Serialize, Deserialize};
-use serde_json::Value;
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::context_engine::evidence::{
+    ContextEvidenceCollector, ContextEvidenceSet,
+    EvidenceCategory,
+};
+
+/// Structured contribution of an individual evidence category to the final context score.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvidenceContribution {
+    pub category: String,
+    pub raw_strength: f32,
+    pub weighted_score: f32,
+    pub description: String,
+    pub is_positive: bool,
+}
+
+/// Structured record of contradictory user evidence or lifecycle suppression.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContradictoryEvidence {
+    pub category: String,
+    pub description: String,
+    pub penalty: f32,
+}
+
+/// Comprehensive, structured scoring information for a candidate context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextScoreResult {
+    pub context_id: String,
+    pub context_name: String,
+    pub total_score: f32,
+    pub confidence: f32,
+    pub confidence_band: String,
+    pub evidence_contributions: Vec<EvidenceContribution>,
+    pub strongest_reasons: Vec<String>,
+    pub contradictory_evidence: Vec<ContradictoryEvidence>,
+    pub uncertainty_indicators: Vec<String>,
+}
+
+impl ContextScoreResult {
+    pub fn to_workspace_score(&self) -> WorkspaceScore {
+        WorkspaceScore {
+            workspace_id: self.context_id.clone(),
+            total_score: self.total_score,
+            confidence: self.confidence,
+            confidence_band: self.confidence_band.clone(),
+            reasons: self.strongest_reasons.clone(),
+            score_result: Some(self.clone()),
+        }
+    }
+}
+
+/// Backward-compatible WorkspaceScore model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceScore {
     pub workspace_id: String,
     pub total_score: f32,
     pub confidence: f32,
     pub confidence_band: String,
     pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_result: Option<ContextScoreResult>,
 }
 
-#[derive(Debug, Clone)]
+/// Explicit, modular, and configurable scoring weights for the Context Engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoringWeights {
+    // Confirmed membership
+    pub confirmed_membership_weight: f32,
+
+    // Historical user organization
     pub workspace_history: f32,
+
+    // Graph relationships
+    pub related_item_per_match: f32,
+    pub related_item_max: f32,
+
+    // Semantic similarity
+    pub semantic_similarity_max: f32,
+    pub workspace_profile_similarity_max: f32,
+
+    // Session
+    pub same_session_per_match: f32,
+    pub same_session_max: f32,
+
+    // Weak signals with explicit anti-dominance caps
     pub same_source_app_per_match: f32,
     pub same_source_app_max: f32,
     pub same_domain_per_match: f32,
     pub same_domain_max: f32,
-    pub same_session_per_match: f32,
-    pub same_session_max: f32,
     pub same_content_type_per_match: f32,
     pub same_content_type_max: f32,
-    pub related_item_per_match: f32,
-    pub related_item_max: f32,
-    pub semantic_similarity_max: f32,
-    pub workspace_profile_similarity_max: f32,
+
+    // Contradiction and user feedback penalties
+    pub user_feedback_dismissal_penalty: f32,
+
+    // Anti-dominance cap for isolated weak signals
+    pub weak_signals_isolated_cap: f32,
+
+    // Confidence thresholds
     pub threshold_high: f32,
     pub threshold_medium: f32,
     pub threshold_low: f32,
+
+    // Temporal decay configuration
     pub temporal_decay: crate::context_engine::temporal::TemporalDecayConfig,
 }
 
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
+            confirmed_membership_weight: 1.0,
             workspace_history: 0.4,
-            same_source_app_per_match: 0.05,
-            same_source_app_max: 0.2,
-            same_domain_per_match: 0.1,
-            same_domain_max: 0.3,
-            same_session_per_match: 0.1,
-            same_session_max: 0.3,
-            same_content_type_per_match: 0.02,
-            same_content_type_max: 0.1,
             related_item_per_match: 0.2,
             related_item_max: 0.5,
             semantic_similarity_max: 0.4,
             workspace_profile_similarity_max: 0.45,
+            same_session_per_match: 0.1,
+            same_session_max: 0.3,
+            same_source_app_per_match: 0.05,
+            same_source_app_max: 0.2,
+            same_domain_per_match: 0.1,
+            same_domain_max: 0.3,
+            same_content_type_per_match: 0.02,
+            same_content_type_max: 0.1,
+            user_feedback_dismissal_penalty: 0.50,
+            weak_signals_isolated_cap: 0.24,
             threshold_high: 0.6,
             threshold_medium: 0.4,
             threshold_low: 0.2,
@@ -57,410 +135,493 @@ impl Default for ScoringWeights {
     }
 }
 
-pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore>, String> {
-    let mut weights = ScoringWeights::default();
-    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
-    let now = chrono::Utc::now();
-    
-    let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
-        settings.enable_semantic_suggestions
-    } else { true };
-    
-    // Fetch Target Item
-    let target_item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
-    
-    // Fetch Target Signals
-    let target_signals = crate::context_engine::operations::list_context_signals(conn, None, Some(item_id)).unwrap_or_default();
-    
-    // Fetch All Workspaces
-    let workspaces = crate::db::operations::list_workspaces(conn).map_err(|e| e.to_string())?;
-    if workspaces.is_empty() {
-        return Ok(vec![]);
-    }
-    
-    let mut scores = Vec::new();
-    
-    // Fetch Target Embedding
-    let target_embedding = crate::db::operations::get_item_embedding(conn, item_id).unwrap_or(None);
-    
-    // --- Pre-compute Relationships ---
-    let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
-    let mut ws_relationship_scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    let mut ws_relationship_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut ws_semantic_max: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    
-    for rel in &relationships {
-        let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
-        if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
-            if let Some(ws_id) = other_item.workspace_id {
-                let t_weight = weights.temporal_decay.compute_weight(&other_item.created_at, now) as f32;
-                if rel.relationship_type == "semantic_similarity" {
-                    let current_max = ws_semantic_max.entry(ws_id.clone()).or_insert(0.0);
-                    let decayed = (rel.strength as f32) * t_weight;
-                    if decayed > *current_max {
-                        *current_max = decayed;
-                    }
-                } else {
-                    let decayed_strength = (rel.strength as f32) * t_weight;
-                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += decayed_strength;
-                    *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
-                }
-            }
+/// In-memory contextual representation of a candidate workspace for scoring.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceScoringContext {
+    pub id: String,
+    pub name: String,
+    pub lifecycle_state: String,
+    pub item_ids: Vec<String>,
+    pub item_types: Vec<String>,
+    pub app_names: Vec<String>,
+    pub domains: Vec<String>,
+    pub sessions: Vec<String>,
+    pub profile_embedding: Option<Vec<f32>>,
+    pub profile_provider: Option<String>,
+    pub profile_model: Option<String>,
+}
+
+impl WorkspaceScoringContext {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            lifecycle_state: "active".to_string(),
+            item_ids: Vec::new(),
+            item_types: Vec::new(),
+            app_names: Vec::new(),
+            domains: Vec::new(),
+            sessions: Vec::new(),
+            profile_embedding: None,
+            profile_provider: None,
+            profile_model: None,
         }
     }
-    
-    for ws in workspaces {
-        let mut score = 0.0;
-        let mut reasons = Vec::new();
-        
-        // --- 1. Workspace History ---
-        let mut has_history = false;
-        let mut history_t_weight = 1.0_f32;
-        for sig in &target_signals {
-            if sig.signal_type == "user_action" {
-                if let Ok(payload) = serde_json::from_str::<Value>(&sig.payload) {
-                    if let Some(action) = payload.get("action").and_then(|v| v.as_str()) {
-                        if action == "moved_to_workspace" {
-                            if let Some(dest) = payload.get("destination_workspace").and_then(|v| v.as_str()) {
-                                if dest == ws.id {
-                                    has_history = true;
-                                    history_t_weight = weights.temporal_decay.compute_weight(&sig.created_at, now) as f32;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+
+    pub fn with_lifecycle_state(mut self, state: impl Into<String>) -> Self {
+        self.lifecycle_state = state.into();
+        self
+    }
+}
+
+/// Centralized scoring engine that consumes `ContextEvidence` and applies the deterministic scoring pipeline:
+///
+/// ContextEvidence
+///      ↓
+/// Evidence Normalization
+///      ↓
+/// Evidence Weighting (Configurable ScoringWeights, Anti-Dominance Caps, Contradiction Penalties)
+///      ↓
+/// Context Score (Bounded [0.0, 1.0], Lifecycle Modifiers)
+///      ↓
+/// Confidence (Confidence Bands: High / Medium / Low)
+///      ↓
+/// Explanation (Structured Contributions, Strongest Reasons, Contradictory Evidence, Uncertainty Indicators)
+#[derive(Debug, Clone)]
+pub struct ContextEvidenceScorer {
+    pub weights: ScoringWeights,
+    pub enable_semantic: bool,
+}
+
+impl Default for ContextEvidenceScorer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextEvidenceScorer {
+    pub fn new() -> Self {
+        Self {
+            weights: ScoringWeights::default(),
+            enable_semantic: true,
         }
-        
-        if has_history {
-            score += weights.workspace_history * history_t_weight;
-            reasons.push(format!("User previously organized similar Items into {}", ws.name));
+    }
+
+    pub fn with_weights(weights: ScoringWeights) -> Self {
+        Self {
+            weights,
+            enable_semantic: true,
         }
-        
-        // --- 2. Item Relationships ---
-        if let Some(rel_score) = ws_relationship_scores.get(&ws.id) {
-            if let Some(count) = ws_relationship_counts.get(&ws.id) {
-                let s = (*rel_score * weights.related_item_per_match).min(weights.related_item_max);
-                score += s;
-                reasons.push(format!("{} related Items already belong to {}", count, ws.name));
+    }
+
+    pub fn with_semantic_enabled(mut self, enabled: bool) -> Self {
+        self.enable_semantic = enabled;
+        self
+    }
+
+    /// Evaluates a normalized `ContextEvidenceSet` against a single workspace context.
+    pub fn score_evidence_against_workspace(
+        &self,
+        evidence_set: &ContextEvidenceSet,
+        ws: &WorkspaceScoringContext,
+    ) -> ContextScoreResult {
+        let mut contributions: Vec<EvidenceContribution> = Vec::new();
+        let mut contradictory: Vec<ContradictoryEvidence> = Vec::new();
+        let mut uncertainty: Vec<String> = Vec::new();
+        let mut strongest_reasons: Vec<String> = Vec::new();
+
+        let mut has_strong_signal = false;
+        let mut only_weak_signals = true;
+
+        // ---------------------------------------------------------------------
+        // 1. Confirmed Membership (Observed, Authoritative)
+        // ---------------------------------------------------------------------
+        for ev in evidence_set.by_category(EvidenceCategory::ConfirmedMembership) {
+            let is_match = ev.source_ref.as_ref().map(|r| r.entity_id == ws.id).unwrap_or(false)
+                || ev.attributes.get("workspace_id").and_then(|v| v.as_str()) == Some(&ws.id);
+
+            if is_match {
+                has_strong_signal = true;
+                only_weak_signals = false;
+                let weighted = (self.weights.confirmed_membership_weight * ev.strength as f32).min(1.0);
+                contributions.push(EvidenceContribution {
+                    category: "confirmed_membership".to_string(),
+                    raw_strength: ev.strength as f32,
+                    weighted_score: weighted,
+                    description: format!("Explicit user assignment to {}", ws.name),
+                    is_positive: true,
+                });
+                strongest_reasons.push(format!("Explicit user assignment to {}", ws.name));
             }
-        }
-        
-        // --- 3. Item Relationships Semantic Similarity ---
-        if enable_semantic {
-            if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
-                let s = (*sem_max).min(weights.semantic_similarity_max);
-                score += s;
-                reasons.push(format!("Semantic similarity with {} Items: {:.2}", ws.name, sem_max));
-            }
-        }
-        
-        // --- 4. Workspace Semantic Profile ---
-        if enable_semantic {
-            if let Some(t_emb) = &target_embedding {
-                if let Ok(Some(ws_profile)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
-                    if t_emb.provider == ws_profile.provider && t_emb.model == ws_profile.model {
-                        let sim = crate::semantic::cosine_similarity(&t_emb.embedding, &ws_profile.embedding);
-                        if sim > 0.0 {
-                            let s = sim.min(weights.workspace_profile_similarity_max);
-                            score += s;
-                            reasons.push(format!("Matches {} semantic profile: {:.2}", ws.name, sim));
-                        }
-                    }
-                }
-            }
-        }
-        
-        // --- Prepare for signal comparisons ---
-        let ws_items = crate::db::operations::list_items(conn, Some(&ws.id)).unwrap_or_default();
-        let ws_item_ids: Vec<String> = ws_items.iter().map(|i| i.id.clone()).collect();
-        
-        if !ws_item_ids.is_empty() {
-            // Check Content Type
-            let mut content_type_matches = 0;
-            for i in &ws_items {
-                if i.item_type == target_item.item_type {
-                    content_type_matches += 1;
-                }
-            }
-            if content_type_matches > 0 {
-                let s = (content_type_matches as f32 * weights.same_content_type_per_match).min(weights.same_content_type_max);
-                score += s;
-                // Avoid spamming reasons for content type if it's very minor, but include for accuracy
-                reasons.push(format!("Shares content type with {} items in {}", content_type_matches, ws.name));
-            }
-            
-            // Check Context Signals for the workspace's items
-            let placeholders: String = vec!["?"; ws_item_ids.len()].join(",");
-            let sql = format!("SELECT signal_type, session_id, payload FROM context_signals WHERE item_id IN ({})", placeholders);
-            
-            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            let params = rusqlite::params_from_iter(ws_item_ids.iter());
-            
-            let mut ws_app_names = Vec::new();
-            let mut ws_domains = Vec::new();
-            let mut ws_sessions = Vec::new();
-            
-            let iter = stmt.query_map(params, |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            });
-            
-            if let Ok(iter) = iter {
-                for row_res in iter {
-                    if let Ok((sig_type, session_id, payload_str)) = row_res {
-                        if let Some(s_id) = session_id {
-                            ws_sessions.push(s_id);
-                        }
-                        if sig_type == "active_app" {
-                            if let Ok(payload) = serde_json::from_str::<Value>(&payload_str) {
-                                if let Some(app_name) = payload.get("app_name").and_then(|v| v.as_str()) {
-                                    ws_app_names.push(app_name.to_string());
-                                }
-                            }
-                        } else if sig_type == "url_metadata" {
-                            if let Ok(payload) = serde_json::from_str::<Value>(&payload_str) {
-                                if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                                    ws_domains.push(domain.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Compare Target App
-            for t_sig in &target_signals {
-                if t_sig.signal_type == "active_app" {
-                    if let Ok(payload) = serde_json::from_str::<Value>(&t_sig.payload) {
-                        if let Some(t_app) = payload.get("app_name").and_then(|v| v.as_str()) {
-                            let match_count = ws_app_names.iter().filter(|&a| a == t_app).count();
-                            if match_count > 0 {
-                                let s = (match_count as f32 * weights.same_source_app_per_match).min(weights.same_source_app_max);
-                                score += s;
-                                reasons.push(format!("Same {} source app", t_app));
-                            }
-                        }
-                    }
-                } else if t_sig.signal_type == "url_metadata" {
-                    if let Ok(payload) = serde_json::from_str::<Value>(&t_sig.payload) {
-                        if let Some(t_domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                            let match_count = ws_domains.iter().filter(|&d| d == t_domain).count();
-                            if match_count > 0 {
-                                let s = (match_count as f32 * weights.same_domain_per_match).min(weights.same_domain_max);
-                                score += s;
-                                let display_domain = t_domain.strip_prefix("www.").unwrap_or(t_domain);
-                                let domain_name = display_domain.split('.').next().unwrap_or(t_domain);
-                                // Capitalize the first letter for a nice reason (e.g. figma.com -> Figma)
-                                let mut chars = domain_name.chars();
-                                let mut pretty_domain = match chars.next() {
-                                    None => String::new(),
-                                    Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
-                                };
-                                if pretty_domain.is_empty() {
-                                    pretty_domain = t_domain.to_string();
-                                }
-                                reasons.push(format!("Same {} domain", pretty_domain));
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Check session ID match
-            let mut session_match_count = 0;
-            for t_sig in &target_signals {
-                if let Some(t_session) = &t_sig.session_id {
-                    session_match_count += ws_sessions.iter().filter(|&s| s == t_session).count();
-                }
-            }
-            
-            if session_match_count > 0 {
-                let s = (session_match_count as f32 * weights.same_session_per_match).min(weights.same_session_max);
-                score += s;
-                reasons.push("Same Context Session".to_string());
-            }
-        }
-        
-        // --- Context Lifecycle State Influence ---
-        if ws.lifecycle_state == "archived" {
-            score = 0.0;
-            reasons.push(format!("{} is archived by user; suggestions suppressed", ws.name));
-        } else if ws.lifecycle_state == "dormant" {
-            score *= 0.50;
-            reasons.push(format!("{} is dormant (no recent meaningful activity)", ws.name));
         }
 
-        // Cap at 1.0
-        score = score.min(1.0);
-        
-        let confidence_band = if score >= weights.threshold_high {
+        // ---------------------------------------------------------------------
+        // 2. Workspace History (User Actions with Temporal Decay)
+        // ---------------------------------------------------------------------
+        for ev in evidence_set.by_category(EvidenceCategory::WorkspaceHistory) {
+            let is_match = ev.source_ref.as_ref().map(|r| r.entity_id == ws.id).unwrap_or(false)
+                || ev.attributes.get("workspace_id").and_then(|v| v.as_str()) == Some(&ws.id);
+
+            if is_match {
+                has_strong_signal = true;
+                only_weak_signals = false;
+                let decay_weight = ev.strength as f32;
+                let weighted = self.weights.workspace_history * decay_weight;
+                let reason = format!("User previously organized similar Items into {}", ws.name);
+
+                contributions.push(EvidenceContribution {
+                    category: "workspace_history".to_string(),
+                    raw_strength: decay_weight,
+                    weighted_score: weighted,
+                    description: reason.clone(),
+                    is_positive: true,
+                });
+                strongest_reasons.push(reason);
+                break; // Only apply primary history once
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 3. Item Relationships (Graph Edges & Temporal Proximity)
+        // ---------------------------------------------------------------------
+        let mut rel_score_sum = 0.0_f32;
+        let mut rel_match_count = 0_usize;
+
+        for ev in evidence_set.items.iter().filter(|e| e.category == EvidenceCategory::RelatedItem || e.category == EvidenceCategory::TemporalProximity) {
+            let other_id = ev.attributes.get("other_item_id").and_then(|v| v.as_str())
+                .or_else(|| ev.source_ref.as_ref().map(|r| r.entity_id.as_str()));
+
+            if let Some(oid) = other_id {
+                let belongs_to_ws = ws.item_ids.iter().any(|id| id == oid)
+                    || ev.attributes.get("workspace_id").and_then(|v| v.as_str()) == Some(&ws.id)
+                    || ev.attributes.get("workspace_name").and_then(|v| v.as_str()) == Some(&ws.name);
+
+                if belongs_to_ws {
+                    rel_score_sum += ev.strength as f32;
+                    rel_match_count += 1;
+                }
+            }
+        }
+
+        if rel_match_count > 0 {
+            has_strong_signal = true;
+            only_weak_signals = false;
+            let weighted = (rel_score_sum * self.weights.related_item_per_match).min(self.weights.related_item_max);
+            let reason = format!("{} related Items already belong to {}", rel_match_count, ws.name);
+            contributions.push(EvidenceContribution {
+                category: "related_items".to_string(),
+                raw_strength: (rel_score_sum / rel_match_count as f32).min(1.0),
+                weighted_score: weighted,
+                description: reason.clone(),
+                is_positive: true,
+            });
+            strongest_reasons.push(reason);
+        }
+
+        // ---------------------------------------------------------------------
+        // 4. Semantic Similarity (Item-Item and Workspace Semantic Profile Centroid)
+        // ---------------------------------------------------------------------
+        if self.enable_semantic {
+            let mut max_item_semantic = 0.0_f32;
+            let mut profile_semantic = 0.0_f32;
+
+            for ev in evidence_set.by_category(EvidenceCategory::SemanticSimilarity) {
+                if let Some(prof_sim) = ev.attributes.get("profile_similarity").and_then(|v| v.as_f64()) {
+                    let target_ws_id = ev.attributes.get("workspace_id").and_then(|v| v.as_str())
+                        .or_else(|| ev.source_ref.as_ref().map(|r| r.entity_id.as_str()));
+                    if target_ws_id == Some(&ws.id) && prof_sim as f32 > profile_semantic {
+                        profile_semantic = prof_sim as f32;
+                    }
+                } else {
+                    let other_id = ev.attributes.get("other_item_id").and_then(|v| v.as_str())
+                        .or_else(|| ev.source_ref.as_ref().map(|r| r.entity_id.as_str()));
+                    let belongs_to_ws = if let Some(oid) = other_id {
+                        ws.item_ids.iter().any(|id| id == oid)
+                    } else {
+                        false
+                    } || ev.attributes.get("workspace_id").and_then(|v| v.as_str()) == Some(&ws.id)
+                      || ev.attributes.get("workspace_name").and_then(|v| v.as_str()) == Some(&ws.name);
+
+                    if belongs_to_ws && (ev.strength as f32) > max_item_semantic {
+                        max_item_semantic = ev.strength as f32;
+                    }
+                }
+            }
+
+            if max_item_semantic > 0.0 {
+                has_strong_signal = true;
+                only_weak_signals = false;
+                let weighted = max_item_semantic.min(self.weights.semantic_similarity_max);
+                let reason = format!("Semantic similarity with {} Items: {:.2}", ws.name, max_item_semantic);
+                contributions.push(EvidenceContribution {
+                    category: "semantic_similarity_items".to_string(),
+                    raw_strength: max_item_semantic,
+                    weighted_score: weighted,
+                    description: reason.clone(),
+                    is_positive: true,
+                });
+                strongest_reasons.push(reason);
+            }
+
+            if profile_semantic > 0.0 {
+                has_strong_signal = true;
+                only_weak_signals = false;
+                let weighted = profile_semantic.min(self.weights.workspace_profile_similarity_max);
+                let reason = format!("Matches {} semantic profile: {:.2}", ws.name, profile_semantic);
+                contributions.push(EvidenceContribution {
+                    category: "semantic_profile".to_string(),
+                    raw_strength: profile_semantic,
+                    weighted_score: weighted,
+                    description: reason.clone(),
+                    is_positive: true,
+                });
+                strongest_reasons.push(reason);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 5. Same Session (Observed Co-Session Overlap)
+        // ---------------------------------------------------------------------
+        let mut session_match_count = 0_usize;
+        for ev in evidence_set.by_category(EvidenceCategory::SameSession) {
+            let session_id = ev.attributes.get("session_id").and_then(|v| v.as_str())
+                .or_else(|| ev.source_ref.as_ref().map(|r| r.entity_id.as_str()));
+
+            if let Some(s_id) = session_id {
+                session_match_count += ws.sessions.iter().filter(|&s| s == s_id).count();
+            }
+        }
+
+        if session_match_count > 0 {
+            has_strong_signal = true;
+            only_weak_signals = false;
+            let weighted = (session_match_count as f32 * self.weights.same_session_per_match).min(self.weights.same_session_max);
+            let reason = "Same Context Session".to_string();
+            contributions.push(EvidenceContribution {
+                category: "same_session".to_string(),
+                raw_strength: (session_match_count as f32 / (session_match_count as f32 + 1.0)).min(1.0),
+                weighted_score: weighted,
+                description: reason.clone(),
+                is_positive: true,
+            });
+            strongest_reasons.push(reason);
+        }
+
+        // ---------------------------------------------------------------------
+        // 6. Source Application (Weak Signal with Anti-Dominance Cap)
+        // ---------------------------------------------------------------------
+        let mut app_match_count = 0_usize;
+        let mut matched_app_name: Option<String> = None;
+
+        for ev in evidence_set.by_category(EvidenceCategory::SourceApp) {
+            if let Some(app) = ev.attributes.get("app_name").and_then(|v| v.as_str()) {
+                let matches = ws.app_names.iter().filter(|&a| a == app).count();
+                if matches > 0 {
+                    app_match_count += matches;
+                    if matched_app_name.is_none() {
+                        matched_app_name = Some(app.to_string());
+                    }
+                }
+            }
+        }
+
+        if app_match_count > 0 {
+            let app_str = matched_app_name.unwrap_or_else(|| "Source".to_string());
+            let weighted = (app_match_count as f32 * self.weights.same_source_app_per_match).min(self.weights.same_source_app_max);
+            let reason = format!("Same {} source app", app_str);
+            contributions.push(EvidenceContribution {
+                category: "source_app".to_string(),
+                raw_strength: (app_match_count as f32 * 0.1).min(1.0),
+                weighted_score: weighted,
+                description: reason.clone(),
+                is_positive: true,
+            });
+            strongest_reasons.push(reason);
+        }
+
+        // ---------------------------------------------------------------------
+        // 7. Browser Domain (Weak Signal with Anti-Dominance Cap)
+        // ---------------------------------------------------------------------
+        let mut domain_match_count = 0_usize;
+        let mut matched_domain_pretty: Option<String> = None;
+
+        for ev in evidence_set.by_category(EvidenceCategory::BrowserDomain) {
+            if let Some(domain) = ev.attributes.get("domain").and_then(|v| v.as_str()) {
+                let matches = ws.domains.iter().filter(|&d| d == domain).count();
+                if matches > 0 {
+                    domain_match_count += matches;
+                    if matched_domain_pretty.is_none() {
+                        let display_domain = domain.strip_prefix("www.").unwrap_or(domain);
+                        let domain_name = display_domain.split('.').next().unwrap_or(domain);
+                        let mut chars = domain_name.chars();
+                        let pretty = match chars.next() {
+                            None => String::new(),
+                            Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+                        };
+                        matched_domain_pretty = Some(if pretty.is_empty() { domain.to_string() } else { pretty });
+                    }
+                }
+            }
+        }
+
+        if domain_match_count > 0 {
+            let dom_str = matched_domain_pretty.unwrap_or_else(|| "Web".to_string());
+            let weighted = (domain_match_count as f32 * self.weights.same_domain_per_match).min(self.weights.same_domain_max);
+            let reason = format!("Same {} domain", dom_str);
+            contributions.push(EvidenceContribution {
+                category: "browser_domain".to_string(),
+                raw_strength: (domain_match_count as f32 * 0.2).min(1.0),
+                weighted_score: weighted,
+                description: reason.clone(),
+                is_positive: true,
+            });
+            strongest_reasons.push(reason);
+        }
+
+        // ---------------------------------------------------------------------
+        // 8. Content Type (Minor Signal)
+        // ---------------------------------------------------------------------
+        let mut type_match_count = 0_usize;
+        for ev in evidence_set.by_category(EvidenceCategory::ContentType) {
+            if let Some(c_type) = ev.attributes.get("content_type").and_then(|v| v.as_str()) {
+                let matches = ws.item_types.iter().filter(|&t| t == c_type).count();
+                if matches > 0 {
+                    type_match_count += matches;
+                }
+            }
+        }
+
+        if type_match_count > 0 {
+            let weighted = (type_match_count as f32 * self.weights.same_content_type_per_match).min(self.weights.same_content_type_max);
+            let reason = format!("Shares content type with {} items in {}", type_match_count, ws.name);
+            contributions.push(EvidenceContribution {
+                category: "content_type".to_string(),
+                raw_strength: (type_match_count as f32 * 0.05).min(1.0),
+                weighted_score: weighted,
+                description: reason.clone(),
+                is_positive: true,
+            });
+            strongest_reasons.push(reason);
+        }
+
+        // ---------------------------------------------------------------------
+        // 9. User Feedback (Contradictory / Negative Evidence)
+        // ---------------------------------------------------------------------
+        for ev in evidence_set.by_category(EvidenceCategory::UserFeedback) {
+            let is_match = ev.source_ref.as_ref().map(|r| r.entity_id == ws.id).unwrap_or(false)
+                || ev.attributes.get("workspace_id").and_then(|v| v.as_str()) == Some(&ws.id);
+
+            if is_match {
+                let feedback_type = ev.attributes.get("feedback_type").and_then(|v| v.as_str()).unwrap_or("user_dismissal");
+                let penalty = self.weights.user_feedback_dismissal_penalty;
+                let description = format!("User previously rejected suggestion ({}) for {}", feedback_type, ws.name);
+
+                contradictory.push(ContradictoryEvidence {
+                    category: "user_feedback".to_string(),
+                    description: description.clone(),
+                    penalty,
+                });
+                uncertainty.push(format!("Prior negative user feedback against suggestion for {}", ws.name));
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 10. Anti-Dominance Invariant Enforcement
+        // ---------------------------------------------------------------------
+        // If NO strong signal exists and only weak signals are present, cap total score
+        // so that a single app, domain, content type or recent timestamp cannot dominate.
+        let mut raw_positive_score: f32 = contributions.iter().filter(|c| c.is_positive).map(|c| c.weighted_score).sum();
+
+        if !has_strong_signal && only_weak_signals && raw_positive_score > 0.0 {
+            if raw_positive_score > self.weights.weak_signals_isolated_cap {
+                raw_positive_score = self.weights.weak_signals_isolated_cap;
+            }
+            uncertainty.push("Only weak peripheral signals (application, domain, or content type) detected without session, graph, or semantic backing.".to_string());
+        }
+
+        // Apply contradictory penalties
+        let total_penalty: f32 = contradictory.iter().map(|c| c.penalty).sum();
+        let mut total_score = (raw_positive_score - total_penalty).max(0.0);
+
+        // ---------------------------------------------------------------------
+        // 11. Lifecycle State Modifiers
+        // ---------------------------------------------------------------------
+        if ws.lifecycle_state == "archived" {
+            total_score = 0.0;
+            let reason = format!("{} is archived by user; suggestions suppressed", ws.name);
+            contradictory.push(ContradictoryEvidence {
+                category: "lifecycle_state".to_string(),
+                description: reason.clone(),
+                penalty: 1.0,
+            });
+            strongest_reasons.push(reason);
+        } else if ws.lifecycle_state == "dormant" {
+            total_score *= 0.50;
+            let reason = format!("{} is dormant (no recent meaningful activity)", ws.name);
+            uncertainty.push(format!("{} is dormant; suggestions discounted by 50%", ws.name));
+            strongest_reasons.push(reason);
+        }
+
+        total_score = total_score.clamp(0.0, 1.0);
+
+        // Confidence Band Mapping
+        let confidence_band = if total_score >= self.weights.threshold_high {
             "High"
-        } else if score >= weights.threshold_medium {
+        } else if total_score >= self.weights.threshold_medium {
             "Medium"
         } else {
             "Low"
         };
-        
-        // Add minimal threshold to not spam
-        if score >= weights.threshold_low {
-            scores.push(WorkspaceScore {
-                workspace_id: ws.id.clone(),
-                total_score: score,
-                confidence: score, // UI handles percentage mapping
-                confidence_band: confidence_band.to_string(),
-                reasons,
-            });
+
+        ContextScoreResult {
+            context_id: ws.id.clone(),
+            context_name: ws.name.clone(),
+            total_score,
+            confidence: total_score,
+            confidence_band: confidence_band.to_string(),
+            evidence_contributions: contributions,
+            strongest_reasons,
+            contradictory_evidence: contradictory,
+            uncertainty_indicators: uncertainty,
         }
     }
-    
-    // Sort descending
-    scores.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(Ordering::Equal));
-    
-    Ok(scores)
+
+    /// Evaluates an evidence set against multiple candidate workspaces, sorted descending by score.
+    pub fn score_evidence(
+        &self,
+        evidence_set: &ContextEvidenceSet,
+        workspaces: &[WorkspaceScoringContext],
+    ) -> Vec<ContextScoreResult> {
+        let mut results: Vec<ContextScoreResult> = workspaces
+            .iter()
+            .map(|ws| self.score_evidence_against_workspace(evidence_set, ws))
+            .collect();
+
+        results.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(Ordering::Equal));
+        results
+    }
 }
 
-/// Evaluates a newly captured or unassigned Item against both:
-/// 1. All existing Workspaces
-/// 2. Potential new ContextCandidates
-///
-/// Returns a unified contextual interpretation with explainable reasons.
-/// Does not move or create anything automatically.
-pub fn evaluate_item_context(
-    conn: &Connection,
-    item_id: &str,
-) -> Result<crate::db::models::UnifiedContextInterpretation, String> {
-    let mut weights = ScoringWeights::default();
-    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
-    let now = chrono::Utc::now();
-    
-    let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
-        settings.enable_semantic_suggestions
-    } else { true };
-
-    // 1. Fetch Target Item & Signals
-    let target_item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
-    let target_signals = crate::context_engine::operations::list_context_signals(conn, None, Some(item_id)).unwrap_or_default();
+/// Helper to load workspace scoring contexts from the database.
+pub fn load_workspace_scoring_contexts(conn: &Connection) -> Result<Vec<WorkspaceScoringContext>, String> {
     let workspaces = crate::db::operations::list_workspaces(conn).map_err(|e| e.to_string())?;
-    let target_embedding = crate::db::operations::get_item_embedding(conn, item_id).unwrap_or(None);
-    let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
+    let mut contexts = Vec::new();
 
-    // --- Pre-compute Workspace Relationship Aggregates ---
-    let mut ws_relationship_scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-    let mut ws_relationship_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut ws_semantic_max: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+    for ws in workspaces {
+        let mut ctx = WorkspaceScoringContext::new(&ws.id, &ws.name)
+            .with_lifecycle_state(&ws.lifecycle_state);
 
-    for rel in &relationships {
-        let other_id = if rel.item_a_id == item_id { &rel.item_b_id } else { &rel.item_a_id };
-        if let Ok(other_item) = crate::db::operations::get_item(conn, other_id) {
-            if let Some(ws_id) = other_item.workspace_id {
-                let t_weight = weights.temporal_decay.compute_weight(&other_item.created_at, now) as f32;
-                if rel.relationship_type == "semantic_similarity" {
-                    let current_max = ws_semantic_max.entry(ws_id.clone()).or_insert(0.0);
-                    let decayed = (rel.strength as f32) * t_weight;
-                    if decayed > *current_max {
-                        *current_max = decayed;
-                    }
-                } else {
-                    let decayed_strength = (rel.strength as f32) * t_weight;
-                    *ws_relationship_scores.entry(ws_id.clone()).or_insert(0.0) += decayed_strength;
-                    *ws_relationship_counts.entry(ws_id).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    // --- Evaluate Against Every Existing Workspace ---
-    let mut existing_workspaces = Vec::new();
-
-    for ws in &workspaces {
-        let mut score = 0.0_f32;
-        let mut reasons = Vec::new();
-
-        // 1. Workspace History
-        for sig in &target_signals {
-            if sig.signal_type == "user_action" {
-                if let Ok(payload) = serde_json::from_str::<Value>(&sig.payload) {
-                    if let Some(action) = payload.get("action").and_then(|v| v.as_str()) {
-                        if action == "moved_to_workspace" {
-                            if let Some(dest) = payload.get("destination_workspace").and_then(|v| v.as_str()) {
-                                if dest == ws.id {
-                                    let t_weight = weights.temporal_decay.compute_weight(&sig.created_at, now) as f32;
-                                    score += weights.workspace_history * t_weight;
-                                    if t_weight >= 0.90 {
-                                        reasons.push(format!("Recent user actions associated similar items with {}", ws.name));
-                                    } else {
-                                        reasons.push(format!("Prior user actions associated similar items with {}", ws.name));
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Item Relationships
-        if let Some(rel_score) = ws_relationship_scores.get(&ws.id) {
-            if let Some(count) = ws_relationship_counts.get(&ws.id) {
-                let s = (*rel_score * weights.related_item_per_match).min(weights.related_item_max);
-                score += s;
-                reasons.push(format!("{} related items already belong to {}", count, ws.name));
-            }
-        }
-
-        // 3. Semantic Similarity with Workspace Items
-        if enable_semantic {
-            if let Some(sem_max) = ws_semantic_max.get(&ws.id) {
-                let s = (*sem_max).min(weights.semantic_similarity_max);
-                score += s;
-                reasons.push(format!("Semantic similarity with {} items ({:.0}%)", ws.name, sem_max * 100.0));
-            }
-        }
-
-        // 4. Workspace Semantic Profile (Centroid)
-        if enable_semantic {
-            if let Some(t_emb) = &target_embedding {
-                if let Ok(Some(ws_profile)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
-                    if t_emb.provider == ws_profile.provider && t_emb.model == ws_profile.model {
-                        let sim = crate::semantic::cosine_similarity(&t_emb.embedding, &ws_profile.embedding);
-                        if sim > 0.0 {
-                            let s = sim.min(weights.workspace_profile_similarity_max);
-                            score += s;
-                            reasons.push(format!("Matches {} workspace semantic profile ({:.0}%)", ws.name, sim * 100.0));
-                        }
-                    }
-                }
-            }
-        }
-
-        // 5. App, Domain, Session Signals with Workspace Items
         let ws_items = crate::db::operations::list_items(conn, Some(&ws.id)).unwrap_or_default();
         let ws_item_ids: Vec<String> = ws_items.iter().map(|i| i.id.clone()).collect();
+        ctx.item_types = ws_items.iter().map(|i| i.item_type.clone()).collect();
+        ctx.item_ids = ws_item_ids.clone();
 
         if !ws_item_ids.is_empty() {
-            // Content Type Match
-            let content_type_matches = ws_items.iter().filter(|i| i.item_type == target_item.item_type).count();
-            if content_type_matches > 0 {
-                let s = (content_type_matches as f32 * weights.same_content_type_per_match).min(weights.same_content_type_max);
-                score += s;
-            }
-
             let placeholders: String = vec!["?"; ws_item_ids.len()].join(",");
             let sql = format!("SELECT signal_type, session_id, payload FROM context_signals WHERE item_id IN ({})", placeholders);
 
             if let Ok(mut stmt) = conn.prepare(&sql) {
                 let params = rusqlite::params_from_iter(ws_item_ids.iter());
-                let mut ws_app_names = Vec::new();
-                let mut ws_domains = Vec::new();
-                let mut ws_sessions = Vec::new();
-
                 if let Ok(iter) = stmt.query_map(params, |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -471,76 +632,105 @@ pub fn evaluate_item_context(
                     for row_res in iter.flatten() {
                         let (sig_type, session_id, payload_str) = row_res;
                         if let Some(s_id) = session_id {
-                            ws_sessions.push(s_id);
+                            ctx.sessions.push(s_id);
                         }
                         if sig_type == "active_app" {
-                            if let Ok(payload) = serde_json::from_str::<Value>(&payload_str) {
+                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_str) {
                                 if let Some(app_name) = payload.get("app_name").and_then(|v| v.as_str()) {
-                                    ws_app_names.push(app_name.to_string());
+                                    ctx.app_names.push(app_name.to_string());
                                 }
                             }
                         } else if sig_type == "url_metadata" {
-                            if let Ok(payload) = serde_json::from_str::<Value>(&payload_str) {
+                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_str) {
                                 if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                                    ws_domains.push(domain.to_string());
+                                    ctx.domains.push(domain.to_string());
                                 }
                             }
                         }
                     }
-                }
-
-                // Check active app match
-                for t_sig in &target_signals {
-                    if t_sig.signal_type == "active_app" {
-                        if let Ok(payload) = serde_json::from_str::<Value>(&t_sig.payload) {
-                            if let Some(t_app) = payload.get("app_name").and_then(|v| v.as_str()) {
-                                let match_count = ws_app_names.iter().filter(|&a| a == t_app).count();
-                                if match_count > 0 {
-                                    let s = (match_count as f32 * weights.same_source_app_per_match).min(weights.same_source_app_max);
-                                    score += s;
-                                    reasons.push(format!("Common application '{}'", t_app));
-                                }
-                            }
-                        }
-                    } else if t_sig.signal_type == "url_metadata" {
-                        if let Ok(payload) = serde_json::from_str::<Value>(&t_sig.payload) {
-                            if let Some(t_domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                                let match_count = ws_domains.iter().filter(|&d| d == t_domain).count();
-                                if match_count > 0 {
-                                    let s = (match_count as f32 * weights.same_domain_per_match).min(weights.same_domain_max);
-                                    score += s;
-                                    reasons.push(format!("Common domain '{}'", t_domain));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Check session match
-                let mut session_matches = 0;
-                for t_sig in &target_signals {
-                    if let Some(t_session) = &t_sig.session_id {
-                        session_matches += ws_sessions.iter().filter(|&s| s == t_session).count();
-                    }
-                }
-                if session_matches > 0 {
-                    let s = (session_matches as f32 * weights.same_session_per_match).min(weights.same_session_max);
-                    score += s;
-                    reasons.push("Captured in the same Context Session".to_string());
                 }
             }
         }
 
-        // --- Context Lifecycle State Influence ---
-        if ws.lifecycle_state == "archived" {
-            score = 0.0;
-            reasons.push(format!("{} is archived by user; suggestions suppressed", ws.name));
-        } else if ws.lifecycle_state == "dormant" {
-            score *= 0.50;
-            reasons.push(format!("{} is dormant (no recent meaningful activity)", ws.name));
+        if let Ok(Some(ws_emb)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
+            ctx.profile_embedding = Some(ws_emb.embedding);
+            ctx.profile_provider = Some(ws_emb.provider);
+            ctx.profile_model = Some(ws_emb.model);
         }
 
-        let clamped_score = (score as f64).clamp(0.0, 1.0);
+        contexts.push(ctx);
+    }
+
+    Ok(contexts)
+}
+
+/// Scores an Item across all existing workspaces using the unified `ContextEvidence` pipeline.
+pub fn score_item(conn: &Connection, item_id: &str) -> Result<Vec<WorkspaceScore>, String> {
+    let mut weights = ScoringWeights::default();
+    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
+
+    let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
+        settings.enable_semantic_suggestions
+    } else {
+        true
+    };
+
+    // 1. Gather ContextEvidence via the ContextEvidenceCollector service
+    let evidence_set = ContextEvidenceCollector::new().collect(conn, item_id)?;
+
+    // 2. Load Workspace Contexts
+    let ws_contexts = load_workspace_scoring_contexts(conn)?;
+    if ws_contexts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 3. Execute Unified Context Scoring Pipeline
+    let scorer = ContextEvidenceScorer::with_weights(weights)
+        .with_semantic_enabled(enable_semantic);
+    let results = scorer.score_evidence(&evidence_set, &ws_contexts);
+
+    // 4. Convert and filter by low threshold
+    let mut scores = Vec::new();
+    for res in results {
+        if res.total_score >= scorer.weights.threshold_low {
+            scores.push(res.to_workspace_score());
+        }
+    }
+
+    Ok(scores)
+}
+
+/// Evaluates a newly captured or unassigned Item against existing Workspaces and potential new ContextCandidates.
+///
+/// Returns structured scoring information and unified contextual interpretations with explainable reasons.
+/// Does not move or create anything automatically.
+pub fn evaluate_item_context(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<crate::db::models::UnifiedContextInterpretation, String> {
+    let mut weights = ScoringWeights::default();
+    weights.temporal_decay = crate::context_engine::temporal::get_temporal_decay_config(conn);
+
+    let enable_semantic = if let Ok(settings) = crate::db::settings::get_settings(conn) {
+        settings.enable_semantic_suggestions
+    } else {
+        true
+    };
+
+    // 1. Collect ContextEvidence
+    let evidence_set = ContextEvidenceCollector::new().collect(conn, item_id)?;
+
+    // 2. Load Workspace Scoring Contexts
+    let ws_contexts = load_workspace_scoring_contexts(conn)?;
+
+    // 3. Score against all existing workspaces using pure pipeline
+    let scorer = ContextEvidenceScorer::with_weights(weights)
+        .with_semantic_enabled(enable_semantic);
+    let scored_results = scorer.score_evidence(&evidence_set, &ws_contexts);
+
+    let mut existing_workspaces = Vec::new();
+    for res in scored_results {
+        let clamped_score = (res.total_score as f64).clamp(0.0, 1.0);
         let confidence_band = if clamped_score >= 0.60 {
             "High"
         } else if clamped_score >= 0.35 {
@@ -549,18 +739,18 @@ pub fn evaluate_item_context(
             "Low"
         };
 
-        let contextual_reasons = crate::context_engine::explanation::get_concise_explanations(conn, item_id, &ws.id);
+        let contextual_reasons = crate::context_engine::explanation::get_concise_explanations(conn, item_id, &res.context_id);
         let final_reasons = if !contextual_reasons.is_empty() && clamped_score >= 0.20 {
             contextual_reasons
-        } else if !reasons.is_empty() {
-            reasons
+        } else if !res.strongest_reasons.is_empty() {
+            res.strongest_reasons
         } else {
-            vec![format!("Baseline comparison with minimal contextual overlap with {}.", ws.name)]
+            vec![format!("Baseline comparison with minimal contextual overlap with {}.", res.context_name)]
         };
 
         existing_workspaces.push(crate::db::models::ExistingWorkspaceEvaluation {
-            workspace_id: ws.id.clone(),
-            workspace_name: ws.name.clone(),
+            workspace_id: res.context_id,
+            workspace_name: res.context_name,
             score: clamped_score,
             confidence: clamped_score,
             confidence_percentage: format!("{:.0}%", (clamped_score * 100.0).round()),
@@ -569,13 +759,12 @@ pub fn evaluate_item_context(
         });
     }
 
-    // Rank existing workspaces descending
     existing_workspaces.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
     // --- Evaluate Against Potential New ContextCandidates ---
     let mut potential_new_contexts = Vec::new();
 
-    // 1. Check if the item already belongs to an active detected/suggested candidate
+    // Check if the item already belongs to an active detected/suggested candidate
     let mut candidate_stmt = conn.prepare(
         "SELECT c.id, c.label, c.confidence,
                 (SELECT COUNT(*) FROM context_candidate_items WHERE candidate_id = c.id) as item_count
@@ -601,7 +790,7 @@ pub fn evaluate_item_context(
         let band = if conf >= 0.70 { "High" } else if conf >= 0.40 { "Medium" } else { "Low" };
         let display_label = label.unwrap_or_else(|| "possible new context".to_string());
         potential_new_contexts.push(crate::db::models::PotentialNewContextEvaluation {
-            candidate_id: Some(cand_id.clone()),
+            candidate_id: Some(cand_id),
             label: display_label,
             confidence: conf,
             confidence_percentage: format!("{:.0}%", (conf * 100.0).round()),
@@ -614,8 +803,9 @@ pub fn evaluate_item_context(
         });
     }
 
-    // 2. If not already in an active candidate, evaluate cluster around target item
     if !found_candidate {
+        let target_item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
+        let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
         let all_unassigned = crate::db::operations::list_items(conn, None).unwrap_or_default();
         let mut peer_ids = Vec::new();
 
@@ -649,10 +839,8 @@ pub fn evaluate_item_context(
                 });
             }
         } else {
-            // Single unassigned item: calculate novelty score against existing workspaces
             let max_existing = existing_workspaces.first().map(|w| w.score).unwrap_or(0.0);
             let (conf, reasons) = if max_existing >= 0.60 {
-                // High existing match (e.g. 91% Paris Trip) -> novelty is low (e.g. 3%)
                 let c = ((1.0 - max_existing) * 0.35).clamp(0.01, 0.05);
                 let top_name = &existing_workspaces[0].workspace_name;
                 (c, vec![format!("Strongly matches existing workspace '{}' ({:.0}%); novel context unlikely", top_name, max_existing * 100.0)])
@@ -684,7 +872,6 @@ pub fn evaluate_item_context(
     let top_new = potential_new_contexts.first();
 
     let (primary_interpretation, summary) = if let Some(ws) = top_ws {
-        // Check if top candidate is ambiguous with runner-up
         let is_ambiguous = existing_workspaces.len() > 1
             && (existing_workspaces[0].score - existing_workspaces[1].score).abs() <= 0.12
             && existing_workspaces[1].score >= 0.35;
@@ -743,15 +930,6 @@ pub fn evaluate_item_context(
 }
 
 /// Recalculates confidence for suggested ContextMemberships associated with a workspace.
-/// Triggered when new items are added or moved into the workspace.
-///
-/// Rules:
-/// - Keep calculation deterministic.
-/// - Do NOT silently convert suggested into confirmed membership.
-/// - User-confirmed membership remains authoritative.
-/// - Store the latest confidence in context_memberships.
-/// - Preserve meaningful history when confidence changes (via context_signals).
-/// - Avoid recalculating every item unnecessarily (only targets suggested items and directly related unassigned items).
 pub fn recalculate_workspace_suggested_memberships(
     conn: &Connection,
     workspace_id: &str,
@@ -760,15 +938,12 @@ pub fn recalculate_workspace_suggested_memberships(
     let ws = crate::db::operations::get_workspace(conn, workspace_id)
         .map_err(|e| format!("Workspace '{}' not found: {}", workspace_id, e))?;
 
-    // Archived workspaces are suppressed from automatic suggestion recalculation
     if ws.lifecycle_state == "archived" {
         return Ok(Vec::new());
     }
 
-    // 1. Identify candidate items to recalculate without scanning the entire database:
     let mut target_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // a) Items currently having a 'suggested' membership for this workspace
     if let Ok(mut stmt) = conn.prepare(
         "SELECT item_id FROM context_memberships WHERE workspace_id = ?1 AND membership_type = 'suggested'"
     ) {
@@ -779,7 +954,6 @@ pub fn recalculate_workspace_suggested_memberships(
         }
     }
 
-    // b) If trigger_item_id is provided, also look for unassigned items related to this trigger item
     if let Some(t_id) = trigger_item_id {
         if let Ok(mut rel_stmt) = conn.prepare(
             "SELECT DISTINCT CASE WHEN r.item_a_id = ?1 THEN r.item_b_id ELSE r.item_a_id END as other_id
@@ -804,12 +978,10 @@ pub fn recalculate_workspace_suggested_memberships(
     let mut updated_memberships = Vec::new();
 
     for target_item_id in target_ids {
-        // Exclude trigger_item itself
         if Some(target_item_id.as_str()) == trigger_item_id {
             continue;
         }
 
-        // Never touch confirmed or dismissed memberships (User-confirmed is authoritative)
         let existing_membership = crate::db::operations::get_item_workspace_membership(conn, &target_item_id, workspace_id)
             .ok()
             .flatten();
@@ -820,15 +992,12 @@ pub fn recalculate_workspace_suggested_memberships(
             }
         }
 
-        // Also check if item physically belongs to this or another workspace
         if let Ok(item) = crate::db::operations::get_item(conn, &target_item_id) {
             if item.workspace_id.is_some() && item.workspace_id.as_deref() != Some(workspace_id) {
-                // Item is physically in another workspace and user-assigned; skip
                 continue;
             }
         }
 
-        // Deterministic recalculation
         let scores = score_item(conn, &target_item_id).unwrap_or_default();
         let is_ambiguous = scores.len() > 1
             && (scores[0].confidence - scores[1].confidence).abs() <= 0.12
@@ -840,7 +1009,6 @@ pub fn recalculate_workspace_suggested_memberships(
         let old_confidence = existing_membership.as_ref().map(|m| m.confidence).unwrap_or(0.0);
         let delta = (new_confidence - old_confidence).abs();
 
-        // If changed by >= 1% or new suggested membership qualified (only when unambiguous)
         let should_qualify = if existing_membership.is_some() {
             delta >= 0.01
         } else {
@@ -848,7 +1016,6 @@ pub fn recalculate_workspace_suggested_memberships(
         };
 
         if should_qualify {
-            // NEVER silently convert suggested to confirmed: always keeps "suggested"
             let membership = crate::db::operations::create_or_update_membership(
                 conn,
                 &target_item_id,
@@ -858,7 +1025,6 @@ pub fn recalculate_workspace_suggested_memberships(
                 "context_engine",
             ).map_err(|e| e.to_string())?;
 
-            // Preserve meaningful history when confidence changes
             let payload = serde_json::json!({
                 "action": "membership_confidence_recalculated",
                 "workspace_id": workspace_id,
@@ -892,14 +1058,14 @@ pub fn recalculate_workspace_suggested_memberships(
     Ok(updated_memberships)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
     use crate::db::operations::{create_workspace, create_item};
     use crate::context_engine::operations::create_context_signal;
-    
+    use crate::context_engine::evidence::ContextEvidence;
+
     fn setup_in_memory_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
@@ -966,8 +1132,6 @@ mod tests {
         }).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "url_metadata", None, &payload2).unwrap();
         
-        // score is 0.12, but threshold is 0.3. Wait, we should add history or lower threshold for test.
-        // Let's add history to push it above threshold
         let payload3 = serde_json::json!({
             "action": "moved_to_workspace",
             "destination_workspace": ws.id
@@ -1083,10 +1247,6 @@ mod tests {
         let score_history = scores.iter().find(|s| s.workspace_id == ws_history.id).unwrap();
         let score_semantic = scores.iter().find(|s| s.workspace_id == ws_semantic.id).unwrap();
         
-        // History should give 0.4.
-        // Semantic should be capped at 0.4 (from 0.95). 
-        // Content type match for Semantic Workspace adds 0.02.
-        // Both end up very close. Let's verify reasons.
         assert!(score_semantic.reasons.iter().any(|r| r == "Semantic similarity with AI Workspace Items: 0.95"));
         assert!(score_history.reasons.iter().any(|r| r == "User previously organized similar Items into Manual Workspace"));
     }
@@ -1111,7 +1271,6 @@ mod tests {
         assert_eq!(scores.len(), 1);
         
         let score = &scores[0];
-        // 0.45 from profile similarity max.
         assert!((score.total_score - 0.45).abs() < f32::EPSILON);
         assert!(score.reasons.iter().any(|r| r == "Matches Profile WS semantic profile: 1.00"));
     }
@@ -1128,30 +1287,25 @@ mod tests {
         let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
         
         // High WS: score should be >= 0.6
-        // history (0.4) + relationships (0.2) = 0.6
         let r_high = create_item(&conn, Some(&ws_high.id), None, "text", "rh", None, "{}").unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_high.id, "same_app", 1.0, None).unwrap();
         let payload_high = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_high.id}).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_high).unwrap();
         
         // Medium WS: score should be >= 0.4 and < 0.6
-        // history (0.4) + content_type (0.02) = 0.42
         let _ = create_item(&conn, Some(&ws_med.id), None, "text", "rm", None, "{}").unwrap();
         let payload_med = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_med.id}).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_med).unwrap();
         
         // Low WS: score should be >= 0.2 and < 0.4
-        // relationship (0.2) + content_type (0.02) = 0.22
         let r_low = create_item(&conn, Some(&ws_low.id), None, "text", "rl", None, "{}").unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_low.id, "same_app", 1.0, None).unwrap();
         
         // Filtered WS: score < 0.2
-        // Just content type = 0.02 -> should not be returned
         let _ = create_item(&conn, Some(&ws_filtered.id), None, "text", "rf", None, "{}").unwrap();
         
         let scores = score_item(&conn, &target.id).unwrap();
         
-        // Should only return high, med, low (filtered is below 0.2)
         assert_eq!(scores.len(), 3);
         
         let high_score = scores.iter().find(|s| s.workspace_id == ws_high.id).unwrap();
@@ -1171,16 +1325,13 @@ mod tests {
     fn test_evaluate_item_context_unified_interpretation() {
         let conn = setup_in_memory_db();
 
-        // Workspaces
         let ws_paris = create_workspace(&conn, "Paris Trip").unwrap();
         let ws_portfolio = create_workspace(&conn, "Portfolio").unwrap();
         let ws_college = create_workspace(&conn, "College").unwrap();
 
-        // Add items to Portfolio and College (different apps & content)
         let _port_item = create_item(&conn, Some(&ws_portfolio.id), None, "code", "const x = 42;", Some("Project code"), "{\"app_name\":\"VSCode\"}").unwrap();
         let _coll_item = create_item(&conn, Some(&ws_college.id), None, "pdf", "Calculus notes", Some("Math Lecture"), "{\"app_name\":\"Preview\"}").unwrap();
 
-        // Add items to Paris Trip
         let paris_item1 = create_item(&conn, Some(&ws_paris.id), None, "url", "https://airbnb.com/paris", Some("Paris Hotel"), "{\"app_name\":\"Safari\"}").unwrap();
         let paris_item2 = create_item(&conn, Some(&ws_paris.id), None, "url", "https://booking.com/paris-flights", Some("Paris Flight"), "{\"app_name\":\"Safari\"}").unwrap();
 
@@ -1189,54 +1340,42 @@ mod tests {
         let _ = create_context_signal(&conn, Some(&ws_paris.id), Some(&paris_item2.id), "url_metadata", None, "{\"domain\":\"booking.com\"}").unwrap();
         let _ = create_context_signal(&conn, Some(&ws_paris.id), Some(&paris_item2.id), "active_app", None, "{\"app_name\":\"Safari\"}").unwrap();
 
-        // Target Item: Paris restaurant (in Inbox)
         let target = create_item(&conn, None, None, "url", "https://tripadvisor.com/paris-bistro", Some("Paris restaurant"), "{\"app_name\":\"Safari\"}").unwrap();
         let _ = create_context_signal(&conn, None, Some(&target.id), "active_app", None, "{\"app_name\":\"Safari\"}").unwrap();
         let _ = create_context_signal(&conn, None, Some(&target.id), "url_metadata", None, "{\"domain\":\"tripadvisor.com\"}").unwrap();
 
-        // Historical action: user previously moved similar item to Paris Trip
         let hist_payload = serde_json::json!({
             "action": "moved_to_workspace",
             "destination_workspace": ws_paris.id
         }).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &hist_payload).unwrap();
 
-        // Strong relationship to paris_item1 and paris_item2
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &paris_item1.id, "same_app", 1.0, None).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &paris_item2.id, "same_app", 1.0, None).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &paris_item1.id, "temporal_proximity", 0.9, None).unwrap();
 
-        // Run unified contextual interpretation
         let interpretation = evaluate_item_context(&conn, &target.id).unwrap();
 
-        // 1. Verify ranking across existing workspaces
         assert_eq!(interpretation.existing_workspaces.len(), 3);
         assert_eq!(interpretation.existing_workspaces[0].workspace_name, "Paris Trip");
-        assert!(interpretation.existing_workspaces[0].score >= 0.70, "Paris Trip should have high score (actual: {})", interpretation.existing_workspaces[0].score);
+        assert!(interpretation.existing_workspaces[0].score >= 0.70);
         assert_eq!(interpretation.existing_workspaces[0].confidence_band, "High");
 
-        // Portfolio and College should be ranked much lower
         let portfolio_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_name == "Portfolio").unwrap();
         let college_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_name == "College").unwrap();
         assert!(portfolio_eval.score < 0.20);
         assert!(college_eval.score < 0.20);
 
-        // 2. Potential new context
         assert!(!interpretation.potential_new_contexts.is_empty());
         let new_ctx = &interpretation.potential_new_contexts[0];
         assert_eq!(new_ctx.label, "possible new context");
-        // Because Paris Trip is a strong existing match, new context confidence is low (<= 5%)
-        assert!(new_ctx.confidence <= 0.05, "Novelty should be low when existing workspace match is strong (actual: {})", new_ctx.confidence);
+        assert!(new_ctx.confidence <= 0.05);
 
-        // 3. Explainable reasons are present
         assert!(!interpretation.existing_workspaces[0].reasons.is_empty());
         assert!(!new_ctx.reasons.is_empty());
-
-        // 4. Primary interpretation
         assert_eq!(interpretation.primary_interpretation, "existing_workspace");
         assert!(interpretation.summary.contains("Paris Trip"));
 
-        // 5. Invariant: target item remains unassigned in Inbox, no workspace or candidate created
         let target_after = crate::db::operations::get_item(&conn, &target.id).unwrap();
         assert_eq!(target_after.workspace_id, None);
         assert_eq!(crate::db::operations::list_items(&conn, Some(&ws_paris.id)).unwrap().len(), 2);
@@ -1246,10 +1385,8 @@ mod tests {
     fn test_dynamic_context_membership_confidence_recalculation() {
         let conn = setup_in_memory_db();
 
-        // 1. Create Workspace
         let ws_paris = create_workspace(&conn, "Paris Trip").unwrap();
 
-        // 2. Initial item in Paris Trip
         let initial_item = create_item(
             &conn,
             Some(&ws_paris.id),
@@ -1260,7 +1397,6 @@ mod tests {
             "{\"app_name\":\"Safari\",\"original_url\":\"https://booking.com/paris-hotel\"}",
         ).unwrap();
 
-        // 3. Unassigned Inbox Item: Paris restaurant
         let restaurant = create_item(
             &conn,
             None,
@@ -1271,10 +1407,8 @@ mod tests {
             "{\"app_name\":\"Safari\",\"original_url\":\"https://tripadvisor.com/paris-bistro\"}",
         ).unwrap();
 
-        // Establish initial connection with initial_item
         let _ = crate::db::operations::create_item_relationship(&conn, &restaurant.id, &initial_item.id, "same_app", 1.0, None).unwrap();
 
-        // Initial suggested membership: ~61%
         let initial_membership = crate::db::operations::create_or_update_membership(
             &conn,
             &restaurant.id,
@@ -1286,7 +1420,6 @@ mod tests {
         assert_eq!(initial_membership.confidence, 0.61);
         assert_eq!(initial_membership.membership_type, "suggested");
 
-        // 4. Add additional related Items to Paris Trip
         let flight = create_item(
             &conn,
             Some(&ws_paris.id),
@@ -1309,48 +1442,35 @@ mod tests {
         ).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &restaurant.id, &museum.id, "same_app", 1.0, None).unwrap();
 
-        // History signal: user previously moved items to Paris Trip
         let hist_payload = serde_json::json!({
             "action": "moved_to_workspace",
             "destination_workspace": ws_paris.id
         }).to_string();
         let _ = create_context_signal(&conn, None, Some(&restaurant.id), "user_action", None, &hist_payload).unwrap();
 
-        // 5. Trigger dynamic recalculation
         let updated = recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, Some(&museum.id)).unwrap();
-        assert!(!updated.is_empty(), "Should have updated the suggested membership");
+        assert!(!updated.is_empty());
 
-        // 6. Verify updated membership in DB
         let stored_membership = crate::db::operations::get_item_workspace_membership(&conn, &restaurant.id, &ws_paris.id)
             .unwrap()
             .unwrap();
 
-        // Requirements verification:
-        // a) Confidence increased dynamically (from 61% to high confidence ~89%)
-        assert!(
-            stored_membership.confidence >= 0.80,
-            "Confidence should increase after additional related items (actual: {})",
-            stored_membership.confidence
-        );
+        assert!(stored_membership.confidence >= 0.80);
 
-        // b) Deterministic: recalculating again produces same result
         let rerun = recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, None).unwrap();
-        assert!(rerun.is_empty(), "Rerunning without new changes should not produce delta");
+        assert!(rerun.is_empty());
 
-        // c) Do not silently convert suggested into confirmed membership
         assert_eq!(stored_membership.membership_type, "suggested");
 
-        // d) Physical location remains in Inbox
         let target_item_after = crate::db::operations::get_item(&conn, &restaurant.id).unwrap();
         assert_eq!(target_item_after.workspace_id, None);
 
-        // e) Meaningful history preserved in context_signals
         let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws_paris.id), Some(&restaurant.id)).unwrap();
         let recalc_signals: Vec<_> = signals
             .iter()
             .filter(|s| s.payload.contains("membership_confidence_recalculated"))
             .collect();
-        assert!(!recalc_signals.is_empty(), "Should record confidence update signal in history");
+        assert!(!recalc_signals.is_empty());
 
         let latest_payload: serde_json::Value = serde_json::from_str(&recalc_signals.first().unwrap().payload).unwrap();
         assert!(latest_payload["new_confidence"].as_f64().unwrap() >= 0.80);
@@ -1365,11 +1485,9 @@ mod tests {
         let time_1h_ago = (now - chrono::Duration::hours(1)).to_rfc3339();
         let time_90d_ago = (now - chrono::Duration::days(90)).to_rfc3339();
 
-        // 1. Create two workspaces
         let ws_recent = create_workspace(&conn, "Recent Project").unwrap();
         let ws_old = create_workspace(&conn, "Archived Project").unwrap();
 
-        // 2. Create item in Recent Project (1 hour ago)
         let recent_item = create_item(
             &conn,
             Some(&ws_recent.id),
@@ -1379,10 +1497,8 @@ mod tests {
             Some("Recent Architecture"),
             "{}",
         ).unwrap();
-        // Update its timestamp to 1h ago
         conn.execute("UPDATE items SET created_at = ?1 WHERE id = ?2", rusqlite::params![time_1h_ago, recent_item.id]).unwrap();
 
-        // 3. Create identical item in Archived Project (90 days ago)
         let old_item = create_item(
             &conn,
             Some(&ws_old.id),
@@ -1392,10 +1508,8 @@ mod tests {
             Some("Old Architecture"),
             "{}",
         ).unwrap();
-        // Update its timestamp to 90 days ago
         conn.execute("UPDATE items SET created_at = ?1 WHERE id = ?2", rusqlite::params![time_90d_ago, old_item.id]).unwrap();
 
-        // 4. Target Item in Inbox (current)
         let target = create_item(
             &conn,
             None,
@@ -1406,41 +1520,23 @@ mod tests {
             "{}",
         ).unwrap();
 
-        // 5. Connect target with both items with equal relationship strength (0.90)
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &recent_item.id, "same_topic", 0.90, None).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &old_item.id, "same_topic", 0.90, None).unwrap();
 
-        // 6. Evaluate contextual interpretation
         let interpretation = evaluate_item_context(&conn, &target.id).unwrap();
         let eval_recent = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_recent.id).unwrap();
         let eval_old = interpretation.existing_workspaces.iter().find(|w| w.workspace_id == ws_old.id).unwrap();
 
-        // Requirements verification:
-        // a) Recent activity provides stronger evidence than old activity
-        assert!(
-            eval_recent.score > eval_old.score,
-            "Recent activity ({}) should score higher than old activity ({})",
-            eval_recent.score,
-            eval_old.score
-        );
+        assert!(eval_recent.score > eval_old.score);
+        assert!(eval_old.score > 0.0);
 
-        // b) Historical context remains accessible (decayed to floor, not zeroed out)
-        assert!(
-            eval_old.score > 0.0,
-            "Old activity should not be completely zeroed out (actual: {})",
-            eval_old.score
-        );
-
-        // c) Old Items are NOT deleted
         let old_item_check = crate::db::operations::get_item(&conn, &old_item.id);
-        assert!(old_item_check.is_ok(), "Old item must not be deleted");
+        assert!(old_item_check.is_ok());
 
-        // d) User-confirmed membership remains stable and authoritative
         let confirmed_old_membership = crate::db::operations::get_item_workspace_membership(&conn, &old_item.id, &ws_old.id).unwrap().unwrap();
         assert_eq!(confirmed_old_membership.membership_type, "confirmed");
         assert_eq!(confirmed_old_membership.confidence, 1.0);
 
-        // e) Decay function is configurable: disable decay and verify scores become equal
         let mut no_decay_config = crate::context_engine::temporal::TemporalDecayConfig::default();
         no_decay_config.strategy = "none".to_string();
         crate::context_engine::temporal::update_temporal_decay_config(&conn, &no_decay_config).unwrap();
@@ -1449,71 +1545,223 @@ mod tests {
         let r_no_decay = interp_no_decay.existing_workspaces.iter().find(|w| w.workspace_id == ws_recent.id).unwrap();
         let o_no_decay = interp_no_decay.existing_workspaces.iter().find(|w| w.workspace_id == ws_old.id).unwrap();
 
-        assert!(
-            (r_no_decay.score - o_no_decay.score).abs() < 0.001,
-            "With decay disabled, both workspaces should score identically"
-        );
+        assert!((r_no_decay.score - o_no_decay.score).abs() < 0.001);
     }
 
     #[test]
     fn test_lifecycle_states_influence_contextual_suggestions() {
         let conn = setup_in_memory_db();
 
-        // 1. Create three workspaces with identical items
         let ws_active = create_workspace(&conn, "Active WS").unwrap();
         let ws_dormant = create_workspace(&conn, "Dormant WS").unwrap();
         let ws_archived = create_workspace(&conn, "Archived WS").unwrap();
 
-        // 2. Create identical items in each workspace
         let item_act = create_item(&conn, Some(&ws_active.id), None, "text", "React Hooks", Some("React 1"), "{}").unwrap();
         let item_dor = create_item(&conn, Some(&ws_dormant.id), None, "text", "React Hooks", Some("React 2"), "{}").unwrap();
         let item_arc = create_item(&conn, Some(&ws_archived.id), None, "text", "React Hooks", Some("React 3"), "{}").unwrap();
 
-        // 3. Transition dormant and archived states
         let _ = crate::db::operations::update_workspace_lifecycle_state(&conn, &ws_dormant.id, "dormant").unwrap();
         let _ = crate::db::operations::archive_workspace(&conn, &ws_archived.id).unwrap();
 
-        // 3. Target Item in Inbox
         let target = create_item(&conn, None, None, "text", "React Hooks Tutorial", Some("Target React"), "{}").unwrap();
 
-        // 4. Equal relationship to all three items
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_act.id, "same_topic", 0.90, None).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_dor.id, "same_topic", 0.90, None).unwrap();
         let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &item_arc.id, "same_topic", 0.90, None).unwrap();
 
-        // 5. Evaluate unified context interpretation
         let interp = evaluate_item_context(&conn, &target.id).unwrap();
 
         let eval_active = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_active.id).unwrap();
         let eval_dormant = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_dormant.id).unwrap();
         let eval_archived = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_archived.id).unwrap();
 
-        // Rule verification:
-        // a) Active context receives full suggestion score
         assert!(eval_active.score > 0.0);
-
-        // b) Dormant context receives discounted suggestion score (~50%)
-        assert!(
-            eval_active.score > eval_dormant.score,
-            "Active ({}) should score higher than dormant ({})",
-            eval_active.score,
-            eval_dormant.score
-        );
-        assert!(
-            eval_dormant.score > 0.0,
-            "Dormant context remains available with non-zero score"
-        );
-
-        // c) Archived context is suppressed from suggestions (score == 0.0)
-        assert_eq!(eval_archived.score, 0.0, "Archived context must be suppressed from suggestions");
+        assert!(eval_active.score > eval_dormant.score);
+        assert!(eval_dormant.score > 0.0);
+        assert_eq!(eval_archived.score, 0.0);
         assert!(eval_archived.reasons.iter().any(|r| r.contains("archived by user")));
 
-        // d) Rule: Lifecycle must never override explicit user organization
-        // User moves target item directly to archived workspace: succeeds authoritatively
         let moved = crate::db::operations::move_item(&conn, &target.id, Some(&ws_archived.id)).unwrap();
         assert_eq!(moved.workspace_id.as_deref(), Some(ws_archived.id.as_str()));
         let mem = crate::db::operations::get_item_workspace_membership(&conn, &target.id, &ws_archived.id).unwrap().unwrap();
         assert_eq!(mem.membership_type, "confirmed");
         assert_eq!(mem.confidence, 1.0);
+    }
+
+    // =========================================================================
+    // NEW EXTENSIVE UNIT TESTS FOR CENTRALIZED CONTEXT EVIDENCE SCORING PIPELINE
+    // =========================================================================
+
+    #[test]
+    fn test_pure_pipeline_with_context_evidence_set() {
+        // Pure pipeline execution directly on ContextEvidenceSet without DB queries
+        let mut evidence_set = ContextEvidenceSet::new("target_item_xyz");
+        evidence_set.add(ContextEvidence::inferred_workspace_history("target_item_xyz", "ws_1", "Project Alpha", 1.0, None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity("target_item_xyz", "item_other", 0.85, Some("Alpha Design"), Some("Project Alpha"), None));
+        evidence_set.add(ContextEvidence::observed_app("target_item_xyz", "Figma", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_1", "Project Alpha");
+        ws.app_names.push("Figma".to_string());
+        ws.item_ids.push("item_other".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert_eq!(result.context_id, "ws_1");
+        assert_eq!(result.context_name, "Project Alpha");
+        // history (0.4) + semantic (0.4) + app (0.05) = 0.85 -> clamped to High band
+        assert!(result.total_score >= 0.80, "Total score should reflect weighted evidence contributions (actual: {})", result.total_score);
+        assert_eq!(result.confidence_band, "High");
+        assert_eq!(result.evidence_contributions.len(), 3);
+        assert!(result.contradictory_evidence.is_empty());
+        assert!(!result.strongest_reasons.is_empty());
+    }
+
+    #[test]
+    fn test_anti_dominance_single_source_app_cannot_dominate() {
+        // Invariant: Source application alone must NOT dominate or reach medium/high confidence
+        let mut evidence_set = ContextEvidenceSet::new("target_item_app_only");
+        evidence_set.add(ContextEvidence::observed_app("target_item_app_only", "Google Chrome", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_random", "Random Workspace");
+        // Add 10 items with Google Chrome to test saturation cap
+        for _ in 0..10 {
+            ws.app_names.push("Google Chrome".to_string());
+        }
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        // App alone is capped at same_source_app_max (0.20) and isolated weak signal cap (0.24)
+        assert!(result.total_score <= 0.24, "Single source app must not exceed weak signal cap (actual: {})", result.total_score);
+        assert_eq!(result.confidence_band, "Low", "Single source app must never trigger Medium or High confidence");
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
+    }
+
+    #[test]
+    fn test_anti_dominance_single_domain_cannot_dominate() {
+        // Invariant: Web domain alone must NOT dominate or reach medium/high confidence
+        let mut evidence_set = ContextEvidenceSet::new("target_item_dom_only");
+        evidence_set.add(ContextEvidence::observed_domain("target_item_dom_only", "github.com", None, None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_code", "Code Repository");
+        for _ in 0..10 {
+            ws.domains.push("github.com".to_string());
+        }
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert!(result.total_score <= 0.24, "Single web domain must not exceed weak signal cap (actual: {})", result.total_score);
+        assert_eq!(result.confidence_band, "Low", "Single web domain must never trigger Medium or High confidence");
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
+    }
+
+    #[test]
+    fn test_anti_dominance_multiple_isolated_weak_signals_capped() {
+        // Invariant: Combining multiple weak signals (app + domain + content type) without session/semantic/graph
+        // must still be capped below threshold_medium (0.35)
+        let mut evidence_set = ContextEvidenceSet::new("target_weak_combo");
+        evidence_set.add(ContextEvidence::observed_app("target_weak_combo", "Safari", None));
+        evidence_set.add(ContextEvidence::observed_domain("target_weak_combo", "example.com", None, None));
+        evidence_set.add(ContextEvidence::observed_content_type("target_weak_combo", "url", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_general", "General Workspace");
+        ws.app_names.push("Safari".to_string());
+        ws.domains.push("example.com".to_string());
+        ws.item_types.push("url".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert!(result.total_score <= 0.24, "Isolated weak signals combination must be strictly capped at 0.24 (actual: {})", result.total_score);
+        assert_eq!(result.confidence_band, "Low");
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
+    }
+
+    #[test]
+    fn test_contradictory_user_feedback_reduces_suggestion() {
+        // Invariant: Strong contradictory user evidence (dismissals/rejections) actively penalizes suggestions
+        let mut evidence_set = ContextEvidenceSet::new("target_rejected");
+        // Positive signals
+        evidence_set.add(ContextEvidence::inferred_workspace_history("target_rejected", "ws_dismissed", "Dismissed Project", 1.0, None));
+        // Negative user feedback
+        evidence_set.add(ContextEvidence::observed_user_feedback(
+            "target_rejected",
+            "suggestion_dismissed",
+            Some(crate::context_engine::evidence::EntityReference::workspace("ws_dismissed", Some("Dismissed Project".to_string()))),
+            None,
+        ));
+
+        let ws = WorkspaceScoringContext::new("ws_dismissed", "Dismissed Project");
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        // History gave +0.40, dismissal gave -0.50 -> clamped to 0.0
+        assert_eq!(result.total_score, 0.0, "Contradictory user dismissal must reduce suggestion score to 0.0");
+        assert!(!result.contradictory_evidence.is_empty(), "Contradictory evidence must be populated");
+        assert!(result.contradictory_evidence.iter().any(|c| c.category == "user_feedback"));
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("negative user feedback")));
+    }
+
+    #[test]
+    fn test_structured_scoring_information_fields() {
+        // Invariant: Structured output contains all required fields:
+        // context ID, total score, confidence, evidence contributions, strongest reasons, contradictory evidence, uncertainty indicators
+        let mut evidence_set = ContextEvidenceSet::new("target_structured");
+        evidence_set.add(ContextEvidence::observed_confirmed_membership("target_structured", "ws_auth", Some("Auth WS"), None));
+
+        let ws = WorkspaceScoringContext::new("ws_auth", "Auth WS");
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert_eq!(result.context_id, "ws_auth");
+        assert_eq!(result.context_name, "Auth WS");
+        assert_eq!(result.total_score, 1.0);
+        assert_eq!(result.confidence, 1.0);
+        assert_eq!(result.confidence_band, "High");
+        assert!(!result.evidence_contributions.is_empty());
+        assert_eq!(result.evidence_contributions[0].category, "confirmed_membership");
+        assert_eq!(result.evidence_contributions[0].raw_strength, 1.0);
+        assert_eq!(result.evidence_contributions[0].weighted_score, 1.0);
+        assert!(result.evidence_contributions[0].is_positive);
+        assert!(!result.strongest_reasons.is_empty());
+    }
+
+    #[test]
+    fn test_deterministic_scoring_reproducibility() {
+        // Invariant: Running scorer multiple times produces 100% reproducible identical scores and reasons
+        let mut evidence_set = ContextEvidenceSet::new("target_det");
+        evidence_set.add(ContextEvidence::inferred_workspace_history("target_det", "ws_1", "WS 1", 0.95, None));
+        evidence_set.add(ContextEvidence::observed_app("target_det", "Safari", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_1", "WS 1");
+        ws.app_names.push("Safari".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let res1 = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+        let res2 = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert_eq!(res1, res2, "Scoring results must be 100% deterministic and reproducible");
+    }
+
+    #[test]
+    fn test_zero_mutation_invariant() {
+        let conn = setup_in_memory_db();
+        let ws = create_workspace(&conn, "Untouched Workspace").unwrap();
+        let item = create_item(&conn, None, None, "text", "Unassigned Item", Some("Unassigned"), "{}").unwrap();
+
+        // Run scoring and interpretation
+        let _ = score_item(&conn, &item.id).unwrap();
+        let _ = evaluate_item_context(&conn, &item.id).unwrap();
+
+        // Invariant: Target item remains in Inbox (workspace_id == None), workspace has 0 items
+        let item_after = crate::db::operations::get_item(&conn, &item.id).unwrap();
+        assert_eq!(item_after.workspace_id, None, "Scoring must NEVER automatically assign items");
+
+        let ws_items = crate::db::operations::list_items(&conn, Some(&ws.id)).unwrap();
+        assert_eq!(ws_items.len(), 0, "Scoring must NEVER mutate workspace item memberships");
     }
 }
