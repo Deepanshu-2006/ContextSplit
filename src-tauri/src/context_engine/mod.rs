@@ -14,7 +14,11 @@ pub mod inbox_state;
 pub mod attention;
 pub mod evidence;
 
-pub use evidence::{ContextEvidence, ContextEvidenceSet, EvidenceCategory, EvidenceProvenance, EntityReference, EvidenceExplanation};
+pub use evidence::{
+    ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
+    EvidenceCategory, EvidenceCollectorOptions, EvidenceExplanation, EvidenceProvenance,
+    collect_item_evidence,
+};
 
 #[cfg(test)]
 pub mod workflow_tests;

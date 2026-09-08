@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -877,12 +877,477 @@ impl ContextEvidenceSet {
 }
 
 // =========================================================================
+// Context Evidence Collector Service
+// =========================================================================
+
+/// Configuration options for contextual evidence collection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceCollectorOptions {
+    /// Minimum relationship strength required to include an ItemRelationship (default: 0.30)
+    pub min_relationship_strength: f64,
+    /// Minimum semantic cosine similarity to include item-item semantic evidence (default: 0.40)
+    pub min_semantic_similarity: f64,
+    /// Minimum semantic cosine similarity to include workspace profile evidence (default: 0.30)
+    pub min_workspace_profile_similarity: f64,
+    /// Whether to evaluate workspace semantic profiles (default: true)
+    pub include_workspace_profiles: bool,
+    /// Whether to evaluate workspace history signals with decay (default: true)
+    pub include_workspace_history: bool,
+    /// Whether to evaluate user feedback (dismissals, confirms) (default: true)
+    pub include_user_feedback: bool,
+    /// Optional custom temporal decay configuration (default: standard exponential)
+    pub temporal_decay: Option<crate::context_engine::temporal::TemporalDecayConfig>,
+    /// Limit on number of relationships processed (default: 50)
+    pub max_related_items: usize,
+}
+
+impl Default for EvidenceCollectorOptions {
+    fn default() -> Self {
+        Self {
+            min_relationship_strength: 0.30,
+            min_semantic_similarity: 0.40,
+            min_workspace_profile_similarity: 0.30,
+            include_workspace_profiles: true,
+            include_workspace_history: true,
+            include_user_feedback: true,
+            temporal_decay: Some(crate::context_engine::temporal::TemporalDecayConfig::default()),
+            max_related_items: 50,
+        }
+    }
+}
+
+/// Collector service responsible for gathering normalized contextual evidence for an Item.
+///
+/// CRITICAL ARCHITECTURAL CONSTRAINTS:
+/// 1. READ-ONLY: Never writes or updates any database tables, items, or memberships.
+/// 2. NO SCORING: Does not compute final workspace scores or context decisions.
+/// 3. NO LLM: Purely deterministic local query and normalization.
+/// 4. GRACEFUL DEGRADATION: Missing signals, embeddings, or relationships do not fail the query.
+#[derive(Debug, Clone, Default)]
+pub struct ContextEvidenceCollector {
+    pub options: EvidenceCollectorOptions,
+}
+
+impl ContextEvidenceCollector {
+    pub fn new() -> Self {
+        Self {
+            options: EvidenceCollectorOptions::default(),
+        }
+    }
+
+    pub fn with_options(options: EvidenceCollectorOptions) -> Self {
+        Self { options }
+    }
+
+    /// Gathers all available contextual evidence for the specified item_id.
+    pub fn collect(&self, conn: &rusqlite::Connection, item_id: &str) -> Result<ContextEvidenceSet, String> {
+        let item = crate::db::operations::get_item(conn, item_id)
+            .map_err(|e| format!("Failed to retrieve item '{}': {}", item_id, e))?;
+
+        let mut raw_evidences: Vec<ContextEvidence> = Vec::new();
+
+        // ---------------------------------------------------------------------
+        // 1. Item-Level Metadata & Content Classification (Observed)
+        // ---------------------------------------------------------------------
+        if !item.item_type.is_empty() {
+            raw_evidences.push(ContextEvidence::observed_content_type(
+                item_id,
+                &item.item_type,
+                Some(&item.created_at),
+            ));
+        }
+
+        if let Ok(meta_val) = serde_json::from_str::<serde_json::Value>(&item.metadata) {
+            // URL metadata in item payload
+            if let Some(url) = meta_val.get("url").or_else(|| meta_val.get("source_url")).and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    raw_evidences.push(ContextEvidence::observed_url(item_id, url, Some(&item.created_at)));
+                    if let Some(domain) = meta_val.get("domain").and_then(|v| v.as_str()) {
+                        raw_evidences.push(ContextEvidence::observed_domain(item_id, domain, Some(url), Some(&item.created_at)));
+                    } else if let Ok(parsed_url) = url::Url::parse(url) {
+                        if let Some(host) = parsed_url.host_str() {
+                            raw_evidences.push(ContextEvidence::observed_domain(item_id, host, Some(url), Some(&item.created_at)));
+                        }
+                    }
+                }
+            }
+
+            // File metadata in item payload
+            if let Some(filename) = meta_val.get("filename").or_else(|| meta_val.get("file_name")).and_then(|v| v.as_str()) {
+                let mime = meta_val.get("mime_type").or_else(|| meta_val.get("file_type")).and_then(|v| v.as_str());
+                let size = meta_val.get("file_size").or_else(|| meta_val.get("size")).and_then(|v| v.as_u64()).map(|s| s as usize);
+                raw_evidences.push(ContextEvidence::observed_file_metadata(
+                    item_id,
+                    filename,
+                    mime,
+                    size,
+                    Some(&item.created_at),
+                ));
+            }
+
+            // Capture method in item payload
+            if let Some(method) = meta_val.get("capture_method").or_else(|| meta_val.get("method")).or_else(|| meta_val.get("source")).and_then(|v| v.as_str()) {
+                raw_evidences.push(ContextEvidence::observed_capture_method(
+                    item_id,
+                    method,
+                    Some(&item.created_at),
+                ));
+            }
+
+            // App Name in item payload
+            if let Some(app) = meta_val.get("app_name").or_else(|| meta_val.get("source_app")).and_then(|v| v.as_str()) {
+                raw_evidences.push(ContextEvidence::observed_app(item_id, app, Some(&item.created_at)));
+            }
+
+            // Window Title in item payload
+            if let Some(win) = meta_val.get("window_title").and_then(|v| v.as_str()) {
+                raw_evidences.push(ContextEvidence::observed_window(item_id, win, Some(&item.created_at)));
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 2. ContextSignals Store (Observed facts and user actions)
+        // ---------------------------------------------------------------------
+        let signals = crate::context_engine::operations::list_context_signals(conn, None, Some(item_id))
+            .unwrap_or_default();
+
+        let now = Utc::now();
+        let default_decay = crate::context_engine::temporal::TemporalDecayConfig::default();
+        let decay_config = self.options.temporal_decay.as_ref().unwrap_or(&default_decay);
+
+        for sig in &signals {
+            let sig_ref = EntityReference::signal(&sig.id);
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&sig.payload) {
+                match sig.signal_type.as_str() {
+                    "active_app" => {
+                        if let Some(app) = payload.get("app_name").or_else(|| payload.get("bundle_id")).or_else(|| payload.get("process_name")).and_then(|v| v.as_str()) {
+                            let mut ev = ContextEvidence::observed_app(item_id, app, Some(&sig.created_at))
+                                .with_source_ref(sig_ref.clone());
+                            if let Some(proc) = payload.get("process_name").and_then(|v| v.as_str()) {
+                                ev = ev.with_attribute("process_name", proc);
+                            }
+                            raw_evidences.push(ev);
+                        }
+                        if let Some(win) = payload.get("window_title").and_then(|v| v.as_str()) {
+                            if !win.trim().is_empty() {
+                                raw_evidences.push(
+                                    ContextEvidence::observed_window(item_id, win, Some(&sig.created_at))
+                                        .with_source_ref(sig_ref.clone()),
+                                );
+                            }
+                        }
+                    }
+                    "window_title" => {
+                        if let Some(win) = payload.get("window_title").or_else(|| payload.get("title")).and_then(|v| v.as_str()) {
+                            raw_evidences.push(
+                                ContextEvidence::observed_window(item_id, win, Some(&sig.created_at))
+                                    .with_source_ref(sig_ref.clone()),
+                            );
+                        }
+                    }
+                    "url_metadata" => {
+                        if let Some(url) = payload.get("url").and_then(|v| v.as_str()) {
+                            raw_evidences.push(
+                                ContextEvidence::observed_url(item_id, url, Some(&sig.created_at))
+                                    .with_source_ref(sig_ref.clone()),
+                            );
+                            if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
+                                raw_evidences.push(
+                                    ContextEvidence::observed_domain(item_id, domain, Some(url), Some(&sig.created_at))
+                                        .with_source_ref(sig_ref.clone()),
+                                );
+                            } else if let Ok(parsed_url) = url::Url::parse(url) {
+                                if let Some(host) = parsed_url.host_str() {
+                                    raw_evidences.push(
+                                        ContextEvidence::observed_domain(item_id, host, Some(url), Some(&sig.created_at))
+                                            .with_source_ref(sig_ref.clone()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    "file_metadata" => {
+                        if let Some(filename) = payload.get("filename").or_else(|| payload.get("file_name")).or_else(|| payload.get("name")).and_then(|v| v.as_str()) {
+                            let mime = payload.get("mime_type").and_then(|v| v.as_str());
+                            let size = payload.get("size_bytes").or_else(|| payload.get("size")).and_then(|v| v.as_u64()).map(|s| s as usize);
+                            raw_evidences.push(
+                                ContextEvidence::observed_file_metadata(
+                                    item_id,
+                                    filename,
+                                    mime,
+                                    size,
+                                    Some(&sig.created_at),
+                                )
+                                .with_source_ref(sig_ref.clone()),
+                            );
+                        }
+                    }
+                    "capture_event" => {
+                        if let Some(method) = payload.get("capture_method").or_else(|| payload.get("method")).or_else(|| payload.get("source")).and_then(|v| v.as_str()) {
+                            raw_evidences.push(
+                                ContextEvidence::observed_capture_method(item_id, method, Some(&sig.created_at))
+                                    .with_source_ref(sig_ref.clone()),
+                            );
+                        }
+                    }
+                    "user_action" => {
+                        if self.options.include_workspace_history {
+                            let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("user_action");
+                            let target_ws = payload.get("destination_workspace")
+                                .or_else(|| payload.get("workspace_id"))
+                                .or_else(|| payload.get("suggested_workspace"))
+                                .and_then(|v| v.as_str())
+                                .or(sig.workspace_id.as_deref());
+
+                            if let Some(ws_id) = target_ws {
+                                let ws_name = crate::db::operations::get_workspace(conn, ws_id)
+                                    .map(|w| w.name)
+                                    .unwrap_or_else(|_| "Workspace".to_string());
+                                let (decay_weight, _expl) = decay_config.compute_weight_and_explanation(&sig.created_at, now);
+                                let mut ev = ContextEvidence::inferred_workspace_history(
+                                    item_id,
+                                    ws_id,
+                                    &ws_name,
+                                    decay_weight,
+                                    Some(&sig.created_at),
+                                );
+                                ev = ev.with_attribute("action", action);
+                                raw_evidences.push(ev);
+                            }
+                        }
+                    }
+                    "membership_dismissed" | "suggestion_dismissed" => {
+                        if self.options.include_user_feedback {
+                            let ws_id = payload.get("workspace_id").and_then(|v| v.as_str()).or(sig.workspace_id.as_deref());
+                            let ws_ref = ws_id.map(|w| {
+                                let name = crate::db::operations::get_workspace(conn, w).ok().map(|ws| ws.name);
+                                EntityReference::workspace(w, name)
+                            });
+                            raw_evidences.push(ContextEvidence::observed_user_feedback(
+                                item_id,
+                                &sig.signal_type,
+                                ws_ref,
+                                Some(&sig.created_at),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 3. Activity Sessions (Observed SameSession & Co-Session Count)
+        // ---------------------------------------------------------------------
+        if let Some(ref session_id) = item.session_id {
+            if !session_id.is_empty() {
+                let co_session_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM items WHERE session_id = ?1 AND id != ?2",
+                    rusqlite::params![session_id, item_id],
+                    |row| row.get(0),
+                ).unwrap_or(0);
+
+                let mut ev = ContextEvidence::observed_session(item_id, session_id, Some(&item.created_at));
+                ev = ev.with_attribute("co_session_item_count", co_session_count);
+                raw_evidences.push(ev);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 4. Graph Relationships (Inferred RelatedItem, Temporal, Semantic)
+        // ---------------------------------------------------------------------
+        let relationships = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
+        for rel in relationships.iter().take(self.options.max_related_items) {
+            if rel.strength < self.options.min_relationship_strength {
+                continue;
+            }
+
+            let other_id = if rel.item_a_id == item_id {
+                &rel.item_b_id
+            } else {
+                &rel.item_a_id
+            };
+
+            let other_item = crate::db::operations::get_item(conn, other_id).ok();
+            let other_title = other_item.as_ref().and_then(|i| i.title.as_deref());
+            let ws_name = other_item
+                .as_ref()
+                .and_then(|i| i.workspace_id.as_deref())
+                .and_then(|ws_id| crate::db::operations::get_workspace(conn, ws_id).ok().map(|w| w.name));
+
+            match rel.relationship_type.as_str() {
+                "temporal_proximity" => {
+                    let mut delta_secs: i64 = 60;
+                    if let Some(ref meta_str) = rel.metadata {
+                        if let Ok(meta_val) = serde_json::from_str::<serde_json::Value>(meta_str) {
+                            if let Some(secs) = meta_val.get("delta_secs").and_then(|v| v.as_i64()) {
+                                delta_secs = secs;
+                            }
+                        }
+                    } else if let Some(ref other) = other_item {
+                        if let (Ok(dt1), Ok(dt2)) = (
+                            DateTime::parse_from_rfc3339(&item.created_at),
+                            DateTime::parse_from_rfc3339(&other.created_at),
+                        ) {
+                            delta_secs = dt1.signed_duration_since(dt2).num_seconds().abs();
+                        }
+                    }
+                    raw_evidences.push(ContextEvidence::inferred_temporal_proximity(
+                        item_id,
+                        other_id,
+                        delta_secs,
+                        rel.strength,
+                        Some(&rel.created_at),
+                    ));
+                }
+                "semantic_similarity" => {
+                    if rel.strength >= self.options.min_semantic_similarity {
+                        raw_evidences.push(ContextEvidence::inferred_semantic_similarity(
+                            item_id,
+                            other_id,
+                            rel.strength,
+                            other_title,
+                            ws_name.as_deref(),
+                            Some(&rel.created_at),
+                        ));
+                    }
+                }
+                _ => {
+                    raw_evidences.push(ContextEvidence::inferred_related_item(
+                        item_id,
+                        other_id,
+                        &rel.relationship_type,
+                        rel.strength,
+                        other_title,
+                        Some(&rel.created_at),
+                    ));
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 5. Context Memberships (Observed Confirmed or Feedback)
+        // ---------------------------------------------------------------------
+        let memberships = crate::db::operations::list_item_memberships(conn, item_id).unwrap_or_default();
+        for m in &memberships {
+            let ws_name = crate::db::operations::get_workspace(conn, &m.workspace_id)
+                .ok()
+                .map(|w| w.name);
+            if m.membership_type == "confirmed" {
+                raw_evidences.push(ContextEvidence::observed_confirmed_membership(
+                    item_id,
+                    &m.workspace_id,
+                    ws_name.as_deref(),
+                    Some(&m.created_at),
+                ));
+            } else if m.membership_type == "dismissed" && self.options.include_user_feedback {
+                raw_evidences.push(ContextEvidence::observed_user_feedback(
+                    item_id,
+                    "membership_dismissed",
+                    Some(EntityReference::workspace(&m.workspace_id, ws_name)),
+                    Some(&m.created_at),
+                ));
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 6. Workspace Semantic Profiles (Inferred Cosine Comparison)
+        // ---------------------------------------------------------------------
+        if self.options.include_workspace_profiles {
+            if let Ok(Some(item_emb)) = crate::db::operations::get_item_embedding(conn, item_id) {
+                if let Ok(workspaces) = crate::db::operations::list_workspaces(conn) {
+                    for ws in workspaces {
+                        if let Ok(Some(ws_emb)) = crate::db::operations::get_workspace_embedding(conn, &ws.id) {
+                            if item_emb.provider == ws_emb.provider && item_emb.model == ws_emb.model {
+                                let sim = crate::semantic::cosine_similarity(&item_emb.embedding, &ws_emb.embedding) as f64;
+                                if sim >= self.options.min_workspace_profile_similarity {
+                                    let band = if sim >= 0.80 {
+                                        "Very High"
+                                    } else if sim >= 0.60 {
+                                        "High"
+                                    } else {
+                                        "Moderate"
+                                    };
+                                    let expl = EvidenceExplanation::new(
+                                        format!("{} Profile Alignment", band),
+                                        format!("Semantically aligned with the '{}' workspace profile.", ws.name),
+                                    )
+                                    .with_badge(format!("Profile: {}", band));
+
+                                    let mut ev = ContextEvidence::new(
+                                        EvidenceCategory::SemanticSimilarity,
+                                        EvidenceProvenance::Inferred,
+                                        sim,
+                                        item_id,
+                                        expl,
+                                    )
+                                    .with_source_ref(EntityReference::workspace(&ws.id, Some(ws.name.clone())));
+                                    ev = ev.with_attribute("workspace_id", ws.id.clone());
+                                    ev = ev.with_attribute("workspace_name", ws.name.clone());
+                                    ev = ev.with_attribute("profile_similarity", sim);
+                                    raw_evidences.push(ev);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 7. Deduplication & Normalization
+        // ---------------------------------------------------------------------
+        let mut set = ContextEvidenceSet::new(item_id);
+        let mut seen_keys = HashSet::new();
+
+        for ev in raw_evidences {
+            let key = Self::deduplication_key(&ev);
+            if seen_keys.insert(key) {
+                set.add(ev);
+            }
+        }
+
+        Ok(set)
+    }
+
+    fn deduplication_key(ev: &ContextEvidence) -> String {
+        let source_key = ev.source_ref.as_ref().map(|r| format!("{}:{}", r.entity_type.as_str(), r.entity_id)).unwrap_or_default();
+        let attr_key = match ev.category {
+            EvidenceCategory::SourceApp => ev.attributes.get("app_name").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::SourceWindow => ev.attributes.get("window_title").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::BrowserDomain => ev.attributes.get("domain").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::BrowserUrl => ev.attributes.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::ContentType => ev.attributes.get("content_type").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::CaptureMethod => ev.attributes.get("capture_method").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::FileMetadata => ev.attributes.get("filename").and_then(|v| v.as_str()).unwrap_or(""),
+            EvidenceCategory::WorkspaceHistory => ev.attributes.get("workspace_id").and_then(|v| v.as_str()).unwrap_or(""),
+            _ => "",
+        };
+
+        format!("{}:{}:{}:{}:{}", ev.category.as_str(), ev.provenance.as_str(), ev.target_item_id, source_key, attr_key)
+    }
+}
+
+/// Convenience helper to collect evidence for an item using default collector options.
+pub fn collect_item_evidence(conn: &rusqlite::Connection, item_id: &str) -> Result<ContextEvidenceSet, String> {
+    let collector = ContextEvidenceCollector::new();
+    collector.collect(conn, item_id)
+}
+
+// =========================================================================
 // Unit Tests
 // =========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+
+    fn setup_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
 
     #[test]
     fn test_evidence_strength_clamping() {
@@ -1021,5 +1486,306 @@ mod tests {
         assert_eq!(ev.target_item_id, "item_xyz");
         assert_eq!(ev.category, EvidenceCategory::SourceApp);
         assert_eq!(ev.provenance, EvidenceProvenance::Observed);
+    }
+
+    #[test]
+    fn test_collector_complete_evidence() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Trip to Japan").unwrap();
+        let session = crate::db::operations::create_session(&conn).unwrap();
+
+        // 1. Create Target Item
+        let item_target = crate::db::operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "url",
+            "https://www.japan-guide.com/e/e2164.html",
+            Some("Tokyo Travel Guide"),
+            r#"{"capture_method":"clipboard","source_app":"Google Chrome","domain":"japan-guide.com"}"#,
+        ).unwrap();
+
+        // 2. Create Co-session Item in the same workspace
+        let item_other = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Shinjuku hotel reservation notes",
+            Some("Hotel Notes"),
+            "{}",
+        ).unwrap();
+
+        // 3. Create ContextSignals for Target Item
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_target.id),
+            "active_app",
+            Some(&session.id),
+            r#"{"app_name":"Google Chrome","process_name":"chrome","window_title":"Tokyo Travel Guide - Japan Guide"}"#,
+        ).unwrap();
+
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_target.id),
+            "url_metadata",
+            Some(&session.id),
+            r#"{"url":"https://www.japan-guide.com/e/e2164.html","domain":"japan-guide.com"}"#,
+        ).unwrap();
+
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item_target.id),
+            "user_action",
+            None,
+            &format!(r#"{{"action":"moved_to_workspace","destination_workspace":"{}"}}"#, ws.id),
+        ).unwrap();
+
+        // 4. Create Item Relationships
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &item_target.id,
+            &item_other.id,
+            "temporal_proximity",
+            0.85,
+            Some(r#"{"delta_secs":120}"#),
+        ).unwrap();
+
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &item_target.id,
+            &item_other.id,
+            "semantic_similarity",
+            0.78,
+            None,
+        ).unwrap();
+
+        // 5. Create Confirmed Membership
+        let _ = crate::db::operations::create_or_update_membership(
+            &conn,
+            &item_target.id,
+            &ws.id,
+            "confirmed",
+            1.0,
+            "user",
+        ).unwrap();
+
+        // 6. Create Semantic Embeddings (matching vectors for high cosine similarity)
+        let vec = vec![0.5_f32, 0.5, 0.5, 0.5];
+        let _ = crate::db::operations::save_item_embedding(
+            &conn,
+            &item_target.id,
+            &vec,
+            "local",
+            "all-MiniLM-L6-v2",
+        ).unwrap();
+
+        // Save workspace profile embedding
+        let now_str = Utc::now().to_rfc3339();
+        let bytes: Vec<u8> = vec.iter().flat_map(|f| f.to_ne_bytes()).collect();
+        conn.execute(
+            "INSERT INTO workspace_embeddings (workspace_id, embedding, provider, model, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![ws.id, bytes, "local", "all-MiniLM-L6-v2", now_str],
+        ).unwrap();
+
+        // Run Collector
+        let evidence_set = collect_item_evidence(&conn, &item_target.id).unwrap();
+
+        assert_eq!(evidence_set.target_item_id, item_target.id);
+        assert!(!evidence_set.is_empty(), "Evidence set must not be empty");
+
+        // Verify Observed vs Inferred distinction
+        let observed = evidence_set.observed();
+        let inferred = evidence_set.inferred();
+
+        assert!(!observed.is_empty(), "Should contain observed evidence");
+        assert!(!inferred.is_empty(), "Should contain inferred evidence");
+
+        // Check specific observed categories
+        assert!(!evidence_set.by_category(EvidenceCategory::ContentType).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::SourceApp).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::SourceWindow).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::BrowserDomain).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::BrowserUrl).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::CaptureMethod).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::SameSession).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::ConfirmedMembership).is_empty());
+
+        // Check specific inferred categories
+        assert!(!evidence_set.by_category(EvidenceCategory::TemporalProximity).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::SemanticSimilarity).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::WorkspaceHistory).is_empty());
+
+        // Verify all strengths are strictly between [0.0, 1.0]
+        for ev in &evidence_set.items {
+            assert!(ev.strength >= 0.0 && ev.strength <= 1.0, "Strength out of bounds: {}", ev.strength);
+        }
+
+        // Verify explanations contain no raw floats or vector dumps
+        for expl in evidence_set.summary_explanations() {
+            assert!(!expl.contains("0.78"), "Explanation must not expose raw float: {}", expl);
+            assert!(!expl.contains("["), "Explanation must not expose raw vector: {}", expl);
+        }
+    }
+
+    #[test]
+    fn test_collector_missing_signals() {
+        let conn = setup_test_db();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Notes on meeting with frontend team",
+            Some("Meeting Notes"),
+            "{}",
+        ).unwrap();
+
+        // No signals inserted
+        let result = collect_item_evidence(&conn, &item.id);
+        assert!(result.is_ok(), "Collector must succeed even with no signals");
+        let evidence_set = result.unwrap();
+
+        // Should have ContentType observed
+        assert_eq!(evidence_set.by_category(EvidenceCategory::ContentType).len(), 1);
+        assert_eq!(evidence_set.observed().len(), 1);
+        assert_eq!(evidence_set.inferred().len(), 0);
+    }
+
+    #[test]
+    fn test_collector_missing_semantic_representation() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Design System").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "image",
+            "screenshot_dashboard.png",
+            Some("Dashboard Mockup"),
+            r#"{"filename":"screenshot_dashboard.png","mime_type":"image/png","file_size":2048}"#,
+        ).unwrap();
+
+        // No item embedding or workspace embedding saved
+        let result = collect_item_evidence(&conn, &item.id);
+        assert!(result.is_ok(), "Collector must succeed without semantic embeddings");
+        let evidence_set = result.unwrap();
+
+        // Should have ContentType and FileMetadata observed
+        assert!(!evidence_set.by_category(EvidenceCategory::ContentType).is_empty());
+        assert!(!evidence_set.by_category(EvidenceCategory::FileMetadata).is_empty());
+        assert!(evidence_set.by_category(EvidenceCategory::SemanticSimilarity).is_empty());
+    }
+
+    #[test]
+    fn test_collector_no_session() {
+        let conn = setup_test_db();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Just a standalone snippet",
+            None,
+            "{}",
+        ).unwrap();
+
+        let evidence_set = collect_item_evidence(&conn, &item.id).unwrap();
+        assert!(evidence_set.by_category(EvidenceCategory::SameSession).is_empty());
+    }
+
+    #[test]
+    fn test_collector_no_related_items() {
+        let conn = setup_test_db();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://crates.io",
+            Some("Rust Crates"),
+            "{}",
+        ).unwrap();
+
+        let evidence_set = collect_item_evidence(&conn, &item.id).unwrap();
+        assert!(evidence_set.by_category(EvidenceCategory::RelatedItem).is_empty());
+        assert!(evidence_set.by_category(EvidenceCategory::TemporalProximity).is_empty());
+    }
+
+    #[test]
+    fn test_collector_new_unassigned_item() {
+        let conn = setup_test_db();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Unprocessed inbox item",
+            None,
+            "{}",
+        ).unwrap();
+
+        let evidence_set = collect_item_evidence(&conn, &item.id).unwrap();
+        assert_eq!(evidence_set.target_item_id, item.id);
+        assert_eq!(evidence_set.len(), 1);
+        assert_eq!(evidence_set.items[0].category, EvidenceCategory::ContentType);
+        assert_eq!(evidence_set.items[0].provenance, EvidenceProvenance::Observed);
+    }
+
+    #[test]
+    fn test_collector_read_only_invariant() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Research").unwrap();
+        let session = crate::db::operations::create_session(&conn).unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Research notes on quantum computing",
+            Some("Quantum Notes"),
+            r#"{"capture_method":"manual"}"#,
+        ).unwrap();
+
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item.id),
+            "active_app",
+            Some(&session.id),
+            r#"{"app_name":"Notes"}"#,
+        ).unwrap();
+
+        // Measure counts before collection
+        let item_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let ws_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let signal_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |r| r.get(0)).unwrap();
+        let rel_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM item_relationships", [], |r| r.get(0)).unwrap();
+        let membership_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+        let candidate_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM context_candidates", [], |r| r.get(0)).unwrap();
+
+        // Run collector multiple times
+        let _ = collect_item_evidence(&conn, &item.id).unwrap();
+        let _ = collect_item_evidence(&conn, &item.id).unwrap();
+
+        // Measure counts after collection
+        let item_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let ws_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM workspaces", [], |r| r.get(0)).unwrap();
+        let signal_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM context_signals", [], |r| r.get(0)).unwrap();
+        let rel_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM item_relationships", [], |r| r.get(0)).unwrap();
+        let membership_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM context_memberships", [], |r| r.get(0)).unwrap();
+        let candidate_count_after: i64 = conn.query_row("SELECT COUNT(*) FROM context_candidates", [], |r| r.get(0)).unwrap();
+
+        // Assert strictly zero DB changes (Read-Only invariant)
+        assert_eq!(item_count_before, item_count_after);
+        assert_eq!(ws_count_before, ws_count_after);
+        assert_eq!(signal_count_before, signal_count_after);
+        assert_eq!(rel_count_before, rel_count_after);
+        assert_eq!(membership_count_before, membership_count_after);
+        assert_eq!(candidate_count_before, candidate_count_after);
     }
 }
