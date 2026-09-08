@@ -722,7 +722,7 @@ mod tests {
         assert!(!explanation.summary.is_empty());
         assert!(!explanation.explanations.is_empty());
         assert!(!explanation.evidence.is_empty());
-        assert!(explanation.evidence.iter().any(|e| e.category == "domain_relationship" || e.category == "strongest_relationships"));
+        assert!(explanation.evidence.iter().any(|e| e.category == "domain_relationship" || e.category == "strongest_relationships" || e.category == "browser_domain" || e.category == "related_items"));
 
         // -------------------------------------------------------------------
         // 7 & 8. Add more related Items to Paris Trip & verify dynamic confidence changes

@@ -343,15 +343,36 @@ pub struct ContextTimeline {
     pub chronological_activity: Vec<TimelineEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextEvidenceItem {
     pub category: String,
     pub explanation: String,
     pub weight: f64,
     pub related_item_ids: Vec<String>,
+    #[serde(default = "default_provenance_observed")]
+    pub provenance: String,
+    #[serde(default)]
+    pub raw_strength: f64,
+    #[serde(default = "default_true")]
+    pub is_positive: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn default_provenance_observed() -> String {
+    "observed".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContradictoryEvidenceItem {
+    pub category: String,
+    pub description: String,
+    pub penalty: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextExplanation {
     pub item_id: String,
     pub workspace_id: String,
@@ -359,9 +380,23 @@ pub struct ContextExplanation {
     pub membership_type: String,
     pub confidence: f64,
     pub confidence_percentage: String,
+    #[serde(default)]
+    pub confidence_band: String,
     pub summary: String,
     pub explanations: Vec<String>,
     pub evidence: Vec<ContextEvidenceItem>,
+    #[serde(default)]
+    pub why_reasons: Vec<String>,
+    #[serde(default)]
+    pub uncertainty_reasons: Vec<String>,
+    #[serde(default)]
+    pub supporting_evidence: Vec<ContextEvidenceItem>,
+    #[serde(default)]
+    pub contradictory_evidence: Vec<ContradictoryEvidenceItem>,
+    #[serde(default)]
+    pub observed_evidence: Vec<ContextEvidenceItem>,
+    #[serde(default)]
+    pub inferred_evidence: Vec<ContextEvidenceItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

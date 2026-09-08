@@ -423,6 +423,15 @@ export interface ContextEvidenceItem {
   explanation: string;
   weight: number;
   related_item_ids: string[];
+  provenance?: "observed" | "inferred" | string;
+  raw_strength?: number;
+  is_positive?: boolean;
+}
+
+export interface ContradictoryEvidenceItem {
+  category: string;
+  description: string;
+  penalty: number;
 }
 
 export interface ContextExplanation {
@@ -432,9 +441,16 @@ export interface ContextExplanation {
   membership_type: string;
   confidence: number;
   confidence_percentage: string;
+  confidence_band?: string;
   summary: string;
   explanations: string[];
   evidence: ContextEvidenceItem[];
+  why_reasons?: string[];
+  uncertainty_reasons?: string[];
+  supporting_evidence?: ContextEvidenceItem[];
+  contradictory_evidence?: ContradictoryEvidenceItem[];
+  observed_evidence?: ContextEvidenceItem[];
+  inferred_evidence?: ContextEvidenceItem[];
 }
 
 export interface TemporalDecayConfig {

@@ -1165,17 +1165,25 @@ impl ContextEvidenceCollector {
                     }
                     "membership_dismissed" | "suggestion_dismissed" => {
                         if self.options.include_user_feedback {
-                            let ws_id = payload.get("workspace_id").and_then(|v| v.as_str()).or(sig.workspace_id.as_deref());
+                            let ws_id = payload.get("destination_workspace")
+                                .or_else(|| payload.get("workspace_id"))
+                                .or_else(|| payload.get("suggested_workspace"))
+                                .and_then(|v| v.as_str())
+                                .or(sig.workspace_id.as_deref());
                             let ws_ref = ws_id.map(|w| {
                                 let name = crate::db::operations::get_workspace(conn, w).ok().map(|ws| ws.name);
                                 EntityReference::workspace(w, name)
                             });
-                            raw_evidences.push(ContextEvidence::observed_user_feedback(
+                            let mut ev = ContextEvidence::observed_user_feedback(
                                 item_id,
                                 &sig.signal_type,
                                 ws_ref,
                                 Some(&sig.created_at),
-                            ));
+                            );
+                            if let Some(w) = ws_id {
+                                ev = ev.with_attribute("workspace_id", w);
+                            }
+                            raw_evidences.push(ev);
                         }
                     }
                     _ => {}
