@@ -23,8 +23,43 @@ pub fn hash_evidence_package(package: &EvidencePackage, user_id: Option<&str>) -
     // Clear dynamic timestamp
     normalized.system_metadata.generated_at = String::new();
 
+    // Normalize contextual evidence (clear dynamic UUIDs, dynamic timestamps, and attributes)
+    for ev in &mut normalized.contextual_evidence {
+        ev.id = String::new();
+        ev.observed_at = String::new();
+        ev.attributes.clear();
+    }
+    normalized.contextual_evidence.sort_by(|a, b| {
+        a.category.as_str().cmp(b.category.as_str())
+            .then_with(|| a.provenance.as_str().cmp(b.provenance.as_str()))
+            .then_with(|| a.strength.total_cmp(&b.strength))
+            .then_with(|| a.explanation.title.cmp(&b.explanation.title))
+            .then_with(|| a.explanation.description.cmp(&b.explanation.description))
+            .then_with(|| a.explanation.badge.cmp(&b.explanation.badge))
+            .then_with(|| {
+                let a_ref = a.source_ref.as_ref().map(|r| (r.entity_type.as_str(), r.entity_id.as_str()));
+                let b_ref = b.source_ref.as_ref().map(|r| (r.entity_type.as_str(), r.entity_id.as_str()));
+                a_ref.cmp(&b_ref)
+            })
+    });
+
+    // Normalize temporal context to avoid sub-day jitter in cache keys
+    normalized.temporal_context.age_days = (normalized.temporal_context.age_days * 10.0).round() / 10.0;
+    normalized.temporal_context.recency_decay_weight = (normalized.temporal_context.recency_decay_weight * 100.0).round() / 100.0;
+
+    // Normalize candidate recency scores and evidence factor arrays
+    for cand in &mut normalized.candidate_contexts {
+        cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+        cand.evidence_factors.sort();
+    }
+    for cand in &mut normalized.candidate_new_contexts {
+        cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+        cand.evidence_factors.sort();
+    }
+
     // Sort internal vectors deterministically
     normalized.candidate_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
+    normalized.candidate_new_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
     normalized.relevant_related_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
     normalized.relationships.sort_by(|a, b| {
         a.other_item_id.cmp(&b.other_item_id)
@@ -33,6 +68,11 @@ pub fn hash_evidence_package(package: &EvidencePackage, user_id: Option<&str>) -
     normalized.semantic_similarity_summaries.sort_by(|a, b| a.other_item_id.cmp(&b.other_item_id));
     normalized.relevant_sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     normalized.workspace_semantic_profiles.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+    normalized.contextual_signals.sort_by(|a, b| {
+        a.signal_type.cmp(&b.signal_type)
+            .then_with(|| a.summary.cmp(&b.summary))
+    });
+    normalized.deterministic_assessment.competing_contexts.sort();
 
     let json_bytes = serde_json::to_vec(&normalized).unwrap_or_default();
     let effective_user_id = user_id.unwrap_or(DEFAULT_USER_ID);

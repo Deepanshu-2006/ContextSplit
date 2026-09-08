@@ -245,6 +245,9 @@ impl AIPrivacyBoundary {
             for cand in &mut package.candidate_contexts {
                 cand.name = scrub_private_data(&cand.name);
             }
+            for cand in &mut package.candidate_new_contexts {
+                cand.name = scrub_private_data(&cand.name);
+            }
         }
 
         // 7. Sanitize Semantic Summaries & Workspace Profiles (Never Send Raw Embeddings)
@@ -267,7 +270,44 @@ impl AIPrivacyBoundary {
             }
         }
 
-        // 8. Record Privacy Boundary Stamp
+        // 8. Sanitize Unified ContextEvidence Records
+        package.contextual_evidence.retain(|ev| {
+            if !self.policy.allow_active_app
+                && (ev.category == crate::context_engine::evidence::EvidenceCategory::SourceApp
+                    || ev.category == crate::context_engine::evidence::EvidenceCategory::SourceWindow)
+            {
+                return false;
+            }
+            if !self.policy.allow_browser_domain
+                && (ev.category == crate::context_engine::evidence::EvidenceCategory::BrowserDomain
+                    || ev.category == crate::context_engine::evidence::EvidenceCategory::BrowserUrl)
+            {
+                return false;
+            }
+            if !self.policy.allow_session_tracking
+                && ev.category == crate::context_engine::evidence::EvidenceCategory::SameSession
+            {
+                return false;
+            }
+            true
+        });
+
+        if self.policy.scrub_secrets {
+            for ev in &mut package.contextual_evidence {
+                ev.explanation.title = scrub_private_data(&ev.explanation.title);
+                ev.explanation.description = scrub_private_data(&ev.explanation.description);
+                if let Some(badge) = &mut ev.explanation.badge {
+                    *badge = scrub_private_data(badge);
+                }
+                for val in ev.attributes.values_mut() {
+                    if let Some(s) = val.as_str() {
+                        *val = serde_json::Value::String(scrub_private_data(s));
+                    }
+                }
+            }
+        }
+
+        // 9. Record Privacy Boundary Stamp
         package.system_metadata.privacy_boundary = "ai_privacy_boundary:strict_curated_evidence_only:v1".to_string();
 
         Ok(())

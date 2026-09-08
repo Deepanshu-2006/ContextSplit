@@ -194,6 +194,7 @@ impl EvidencePackageBuilder {
         // -------------------------------------------------------------------
         let evaluation = crate::context_engine::scoring::evaluate_item_context(conn, item_id)?;
         let mut candidate_contexts = Vec::new();
+        let mut candidate_new_contexts = Vec::new();
 
         for ws_eval in evaluation.existing_workspaces {
             if ws_eval.score < self.min_candidate_score && candidate_contexts.len() >= 2 {
@@ -234,12 +235,8 @@ impl EvidencePackageBuilder {
         }
 
         for cand_eval in evaluation.potential_new_contexts {
-            if cand_eval.confidence < self.min_candidate_score && !candidate_contexts.is_empty() {
-                continue;
-            }
-
             let cid = cand_eval.candidate_id.unwrap_or_else(|| format!("cand_{}", cand_eval.label));
-            candidate_contexts.push(CandidateContextEvidence {
+            let new_cand_ev = CandidateContextEvidence {
                 context_id: cid,
                 name: cand_eval.label,
                 context_type: "candidate".to_string(),
@@ -250,7 +247,13 @@ impl EvidencePackageBuilder {
                 evidence_factors: cand_eval.reasons,
                 item_count: cand_eval.item_count,
                 temporal_recency_score: 1.0,
-            });
+            };
+
+            candidate_new_contexts.push(new_cand_ev.clone());
+
+            if cand_eval.confidence >= self.min_candidate_score || candidate_contexts.is_empty() {
+                candidate_contexts.push(new_cand_ev);
+            }
         }
 
         // Deterministic sort: highest score first, then alphabetical context_id
@@ -261,6 +264,13 @@ impl EvidencePackageBuilder {
                 .then_with(|| a.context_id.cmp(&b.context_id))
         });
         candidate_contexts.truncate(self.max_candidate_contexts);
+
+        candidate_new_contexts.sort_by(|a, b| {
+            b.deterministic_score
+                .partial_cmp(&a.deterministic_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.context_id.cmp(&b.context_id))
+        });
 
         // Pre-fetch workspace names map
         let all_workspaces = crate::db::operations::list_workspaces(conn).unwrap_or_default();
@@ -661,7 +671,15 @@ impl EvidencePackageBuilder {
         };
 
         // -------------------------------------------------------------------
-        // 10. System Metadata & Excluded Metrics
+        // 10. Unified ContextEvidence Records (Observed & Inferred)
+        // -------------------------------------------------------------------
+        let evidence_set = crate::context_engine::evidence::ContextEvidenceCollector::new()
+            .collect(conn, item_id)
+            .unwrap_or_else(|_| crate::context_engine::evidence::ContextEvidenceSet::new(item_id));
+        let contextual_evidence = evidence_set.items;
+
+        // -------------------------------------------------------------------
+        // 11. System Metadata & Excluded Metrics
         // -------------------------------------------------------------------
         let included_items = 1 + relevant_related_items.len();
         let total_db_items_excluded = total_db_items.saturating_sub(included_items);
@@ -675,7 +693,9 @@ impl EvidencePackageBuilder {
 
         let mut package = EvidencePackage {
             target_item,
+            contextual_evidence,
             candidate_contexts,
+            candidate_new_contexts,
             relevant_related_items,
             relationships,
             semantic_similarity_summaries,
@@ -744,6 +764,11 @@ impl EvidencePackageBuilder {
                     });
                 }
             }
+
+            // Collect and merge additional contextual evidence for group members
+            if let Ok(other_evidence_set) = crate::context_engine::evidence::ContextEvidenceCollector::new().collect(conn, other_id) {
+                package.contextual_evidence.extend(other_evidence_set.items);
+            }
         }
 
         // Fetch signals for all items in the group
@@ -802,6 +827,11 @@ fn round_to_4_dp(val: f64) -> f64 {
 /// Convenience builder function using default builder parameters.
 pub fn build_evidence_package(conn: &Connection, item_id: &str) -> Result<EvidencePackage, String> {
     EvidencePackageBuilder::default().build(conn, item_id)
+}
+
+/// Convenience builder function alias returning ContextEvidencePackage.
+pub fn build_context_evidence_package(conn: &Connection, item_id: &str) -> Result<EvidencePackage, String> {
+    build_evidence_package(conn, item_id)
 }
 
 /// Convenience builder function for candidate items.
@@ -931,11 +961,7 @@ pub fn analyze_item_context_ai_graceful(
 
     // Step 6: Run AI inference — map every error variant to AIFailureReason.
     let reasoning_result = match reasoner.analyze_context(&package) {
-        Ok(r) => {
-            // Cache successful results
-            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, item_id, None, &r, None);
-            r
-        },
+        Ok(r) => r,
         Err(ai_err) => {
             let reason = AIFailureReason::from_reasoning_error(&ai_err);
             return AIContextReasoningResponse {
@@ -947,7 +973,7 @@ pub fn analyze_item_context_ai_graceful(
         }
     };
 
-    // Step 5: Post-inference validation (grounding check).
+    // Step 7: Post-inference validation (grounding check and schema validation).
     if let Err(validation_err) = super::validator::validate_explanation_grounding(&reasoning_result, &package) {
         let reason = AIFailureReason::MalformedResponse;
         return AIContextReasoningResponse {
@@ -957,6 +983,9 @@ pub fn analyze_item_context_ai_graceful(
             failure_reason: Some(reason),
         };
     }
+
+    // Cache successful, validated results
+    let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, item_id, None, &reasoning_result, None);
 
     // All checks passed — return the successful AI result.
     AIContextReasoningResponse {
@@ -1032,10 +1061,7 @@ pub fn analyze_candidate_context_ai_graceful(
     }
 
     let reasoning_result = match reasoner.analyze_context(&package) {
-        Ok(r) => {
-            let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, candidate_id, None, &r, None);
-            r
-        },
+        Ok(r) => r,
         Err(ai_err) => {
             let reason = AIFailureReason::from_reasoning_error(&ai_err);
             return AIContextReasoningResponse {
@@ -1056,6 +1082,9 @@ pub fn analyze_candidate_context_ai_graceful(
             failure_reason: Some(reason),
         };
     }
+
+    // Cache successful, validated results
+    let _ = crate::context_engine::reasoning::cache::cache_reasoning_result(conn, &package_hash, candidate_id, None, &reasoning_result, None);
 
     AIContextReasoningResponse {
         ai_result: Some(reasoning_result),

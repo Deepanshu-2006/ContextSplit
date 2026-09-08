@@ -18,9 +18,9 @@ pub use traits::AIReasoner;
 pub use mock::{MockAIReasoner, FailingMockAIReasoner};
 pub use builder::{
     analyze_candidate_context_ai_graceful, analyze_item_context_ai, analyze_item_context_ai_graceful,
-    analyze_item_group_context_ai_graceful, build_candidate_evidence_package, build_evidence_package,
-    build_item_group_evidence_package, suggest_candidate_name_ai, suggest_item_group_name_ai,
-    EvidencePackageBuilder,
+    analyze_item_group_context_ai_graceful, build_candidate_evidence_package, build_context_evidence_package,
+    build_evidence_package, build_item_group_evidence_package, suggest_candidate_name_ai,
+    suggest_item_group_name_ai, EvidencePackageBuilder,
 };
 pub use privacy::{AIPrivacyBoundary, AIPrivacyPolicy, AIPrivacyViolation, scrub_private_data};
 pub use validator::{

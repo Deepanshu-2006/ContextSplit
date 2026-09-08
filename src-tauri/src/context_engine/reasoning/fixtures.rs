@@ -3,6 +3,7 @@ use super::models::{
     EvidencePackage, ItemRelationshipEvidence, RelatedItemEvidence, SemanticSimilaritySummary,
     SessionEvidence, TargetItemEvidence, TemporalEvidence, WorkspaceProfileSummary,
 };
+use crate::context_engine::evidence::ContextEvidence;
 
 /// Test fixtures for AI Context Reasoner scenarios.
 /// Provides deterministic, reproducible EvidencePackage structures covering:
@@ -44,6 +45,19 @@ pub fn strong_existing_context_fixture() -> EvidencePackage {
             session_id: Some("sess_travel_booking".to_string()),
             captured_at: "2026-09-04T11:45:00Z".to_string(),
         },
+        contextual_evidence: vec![
+            ContextEvidence::observed_app("item_flight_cdg", "Google Chrome", Some("2026-09-04T11:45:00Z")),
+            ContextEvidence::observed_domain("item_flight_cdg", "airfrance.us", Some("https://airfrance.us"), Some("2026-09-04T11:45:00Z")),
+            ContextEvidence::observed_session("item_flight_cdg", "sess_travel_booking", Some("2026-09-04T11:45:00Z")),
+            ContextEvidence::inferred_semantic_similarity(
+                "item_flight_cdg",
+                "item_hotel_paris",
+                0.88,
+                Some("Hotel Louvre Paris Reservation"),
+                Some("Paris Trip"),
+                Some("2026-09-04T11:45:00Z"),
+            ),
+        ],
         candidate_contexts: vec![
             CandidateContextEvidence {
                 context_id: "ws_paris_trip".to_string(),
@@ -74,6 +88,7 @@ pub fn strong_existing_context_fixture() -> EvidencePackage {
                 temporal_recency_score: 0.85,
             },
         ],
+        candidate_new_contexts: vec![],
         relevant_related_items: vec![
             RelatedItemEvidence {
                 item_id: "item_hotel_paris".to_string(),
@@ -155,6 +170,23 @@ pub fn strong_existing_context_fixture() -> EvidencePackage {
 /// Target item and related items form a cohesive, novel activity cluster
 /// (e.g. "Fitness & Nutrition") with no existing workspace match.
 pub fn strong_new_context_fixture() -> EvidencePackage {
+    let new_cand = CandidateContextEvidence {
+        context_id: "cand_fitness_training".to_string(),
+        name: "Fitness Training".to_string(),
+        context_type: "candidate".to_string(),
+        lifecycle_state: "active".to_string(),
+        deterministic_score: 0.82,
+        deterministic_confidence: 0.82,
+        confidence_band: "High".to_string(),
+        evidence_factors: vec![
+            "Forms a tightly coupled semantic cluster with 4 unassigned workout items.".to_string(),
+            "Shared activity session 'sess_gym_planning'.".to_string(),
+            "Represents a novel topic distinct from all existing workspaces.".to_string(),
+        ],
+        item_count: 4,
+        temporal_recency_score: 1.0,
+    };
+
     EvidencePackage {
         target_item: TargetItemEvidence {
             id: "item_workout_routine".to_string(),
@@ -166,24 +198,20 @@ pub fn strong_new_context_fixture() -> EvidencePackage {
             session_id: Some("sess_gym_planning".to_string()),
             captured_at: "2026-09-04T10:30:00Z".to_string(),
         },
-        candidate_contexts: vec![
-            CandidateContextEvidence {
-                context_id: "cand_fitness_training".to_string(),
-                name: "Fitness Training".to_string(),
-                context_type: "candidate".to_string(),
-                lifecycle_state: "active".to_string(),
-                deterministic_score: 0.82,
-                deterministic_confidence: 0.82,
-                confidence_band: "High".to_string(),
-                evidence_factors: vec![
-                    "Forms a tightly coupled semantic cluster with 4 unassigned workout items.".to_string(),
-                    "Shared activity session 'sess_gym_planning'.".to_string(),
-                    "Represents a novel topic distinct from all existing workspaces.".to_string(),
-                ],
-                item_count: 4,
-                temporal_recency_score: 1.0,
-            },
+        contextual_evidence: vec![
+            ContextEvidence::observed_app("item_workout_routine", "Notes", Some("2026-09-04T10:30:00Z")),
+            ContextEvidence::observed_session("item_workout_routine", "sess_gym_planning", Some("2026-09-04T10:30:00Z")),
+            ContextEvidence::inferred_semantic_similarity(
+                "item_workout_routine",
+                "item_protein_shake",
+                0.78,
+                Some("Post-Workout Whey Protein Recipe"),
+                None,
+                Some("2026-09-04T10:30:00Z"),
+            ),
         ],
+        candidate_contexts: vec![new_cand.clone()],
+        candidate_new_contexts: vec![new_cand],
         relevant_related_items: vec![
             RelatedItemEvidence {
                 item_id: "item_protein_shake".to_string(),
@@ -263,6 +291,11 @@ pub fn ambiguous_context_fixture() -> EvidencePackage {
             session_id: Some("sess_cross_channel".to_string()),
             captured_at: "2026-09-04T09:15:00Z".to_string(),
         },
+        contextual_evidence: vec![
+            ContextEvidence::observed_app("item_eurostar_ticket", "Google Chrome", Some("2026-09-04T09:15:00Z")),
+            ContextEvidence::observed_domain("item_eurostar_ticket", "eurostar.com", Some("https://eurostar.com"), Some("2026-09-04T09:15:00Z")),
+            ContextEvidence::observed_session("item_eurostar_ticket", "sess_cross_channel", Some("2026-09-04T09:15:00Z")),
+        ],
         candidate_contexts: vec![
             CandidateContextEvidence {
                 context_id: "ws_paris_trip".to_string(),
@@ -295,6 +328,7 @@ pub fn ambiguous_context_fixture() -> EvidencePackage {
                 temporal_recency_score: 1.0,
             },
         ],
+        candidate_new_contexts: vec![],
         relevant_related_items: vec![
             RelatedItemEvidence {
                 item_id: "item_london_hotel".to_string(),
@@ -387,7 +421,12 @@ pub fn no_context_fixture() -> EvidencePackage {
             session_id: None,
             captured_at: "2026-09-04T08:00:00Z".to_string(),
         },
+        contextual_evidence: vec![
+            ContextEvidence::observed_app("item_isolated_note", "Notes", Some("2026-09-04T08:00:00Z")),
+            ContextEvidence::observed_content_type("item_isolated_note", "text", Some("2026-09-04T08:00:00Z")),
+        ],
         candidate_contexts: vec![],
+        candidate_new_contexts: vec![],
         relevant_related_items: vec![],
         relationships: vec![],
         semantic_similarity_summaries: vec![],
@@ -428,6 +467,10 @@ pub fn insufficient_evidence_fixture() -> EvidencePackage {
             session_id: None,
             captured_at: "2026-09-04T07:30:00Z".to_string(),
         },
+        contextual_evidence: vec![
+            ContextEvidence::observed_app("item_vague_snippet", "Calendar", Some("2026-09-04T07:30:00Z")),
+            ContextEvidence::observed_content_type("item_vague_snippet", "text", Some("2026-09-04T07:30:00Z")),
+        ],
         candidate_contexts: vec![
             CandidateContextEvidence {
                 context_id: "ws_quarterly_planning".to_string(),
@@ -444,6 +487,7 @@ pub fn insufficient_evidence_fixture() -> EvidencePackage {
                 temporal_recency_score: 0.5,
             },
         ],
+        candidate_new_contexts: vec![],
         relevant_related_items: vec![],
         relationships: vec![],
         semantic_similarity_summaries: vec![],

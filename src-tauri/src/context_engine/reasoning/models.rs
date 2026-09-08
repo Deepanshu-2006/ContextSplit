@@ -1,22 +1,32 @@
+use crate::context_engine::evidence::{ContextEvidence, EvidenceCategory, EvidenceProvenance};
 use serde::{Deserialize, Serialize};
 
-/// Curated, structured evidence compiled by the deterministic Context Engine.
-/// This is the SOLE data structure passed to the AI reasoning layer.
+/// Curated, structured evidence package compiled from the unified ContextEvidence system.
+/// This is the SOLE bounded data structure passed to the AI reasoning layer.
 ///
 /// CRITICAL PRIVACY & ARCHITECTURAL INVARIANTS:
 /// 1. Only contains information strictly necessary for contextual reasoning.
-/// 2. Does NOT send the entire database (filters to top relevant items and signals).
-/// 3. Does NOT include unnecessary private information (scrubs credentials, tokens, passwords).
-/// 4. Does NOT include raw vector embeddings (`Vec<f32>` is completely absent).
-/// 5. Does NOT include internal database IDs, raw rowids, or system process IDs
-///    except for controlled reference IDs (`item_id`, `context_id`).
+/// 2. Built from the unified ContextEvidence system.
+/// 3. Does NOT send the entire database (strictly filtered to top relevant items and signals).
+/// 4. Does NOT include unnecessary private information (scrubs credentials, tokens, passwords).
+/// 5. Does NOT include raw vector embeddings (`Vec<f32>` is completely absent).
+/// 6. Does NOT include internal database rowids or system process IDs except controlled reference IDs.
+/// 7. AI reasoners consume this bounded package without directly querying application storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EvidencePackage {
+pub struct ContextEvidencePackage {
     /// Curated metadata of the target item being reasoned about.
     pub target_item: TargetItemEvidence,
 
+    /// Normalized contextual evidence records from the unified ContextEvidence system.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contextual_evidence: Vec<ContextEvidence>,
+
     /// Candidate contexts (workspaces or detected candidates) evaluated by the deterministic engine.
     pub candidate_contexts: Vec<CandidateContextEvidence>,
+
+    /// Specific candidate new contexts when detected by discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidate_new_contexts: Vec<CandidateContextEvidence>,
 
     /// Top relevant related items that connect to the candidate contexts.
     pub relevant_related_items: Vec<RelatedItemEvidence>,
@@ -47,6 +57,63 @@ pub struct EvidencePackage {
 
     /// Package metadata ensuring reproducibility, versioning, and privacy boundaries.
     pub system_metadata: EvidenceMetadata,
+}
+
+/// Backward-compatible type alias for ContextEvidencePackage.
+pub type EvidencePackage = ContextEvidencePackage;
+
+impl ContextEvidencePackage {
+    /// Returns all candidate contexts representing existing user workspaces.
+    pub fn candidate_existing_contexts(&self) -> Vec<&CandidateContextEvidence> {
+        self.candidate_contexts
+            .iter()
+            .filter(|c| c.context_type == "workspace")
+            .collect()
+    }
+
+    /// Returns all candidate contexts representing potential new context clusters.
+    pub fn candidate_new_contexts(&self) -> Vec<&CandidateContextEvidence> {
+        if !self.candidate_new_contexts.is_empty() {
+            self.candidate_new_contexts.iter().collect()
+        } else {
+            self.candidate_contexts
+                .iter()
+                .filter(|c| c.context_type == "candidate")
+                .collect()
+        }
+    }
+
+    /// Returns all observed empirical facts from the contextual evidence records.
+    pub fn observed_evidence(&self) -> Vec<&ContextEvidence> {
+        self.contextual_evidence
+            .iter()
+            .filter(|e| e.provenance.is_observed())
+            .collect()
+    }
+
+    /// Returns all inferred contextual relationships from the contextual evidence records.
+    pub fn inferred_evidence(&self) -> Vec<&ContextEvidence> {
+        self.contextual_evidence
+            .iter()
+            .filter(|e| e.provenance.is_inferred())
+            .collect()
+    }
+
+    /// Filters contextual evidence by category.
+    pub fn evidence_by_category(&self, category: EvidenceCategory) -> Vec<&ContextEvidence> {
+        self.contextual_evidence
+            .iter()
+            .filter(|e| e.category == category)
+            .collect()
+    }
+
+    /// Filters contextual evidence by provenance.
+    pub fn evidence_by_provenance(&self, provenance: EvidenceProvenance) -> Vec<&ContextEvidence> {
+        self.contextual_evidence
+            .iter()
+            .filter(|e| e.provenance == provenance)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

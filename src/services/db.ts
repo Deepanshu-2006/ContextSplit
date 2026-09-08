@@ -565,9 +565,11 @@ export interface DeterministicEvidenceAssessment {
   assessment_summary: string;
 }
 
-export interface EvidencePackage {
+export interface ContextEvidencePackage {
   target_item: TargetItemEvidence;
+  contextual_evidence?: ContextEvidence[];
   candidate_contexts: CandidateContextEvidence[];
+  candidate_new_contexts?: CandidateContextEvidence[];
   relevant_related_items: RelatedItemEvidence[];
   relationships: ItemRelationshipEvidence[];
   semantic_similarity_summaries: SemanticSimilaritySummary[];
@@ -579,6 +581,8 @@ export interface EvidencePackage {
   deterministic_assessment: DeterministicEvidenceAssessment;
   system_metadata: EvidenceMetadata;
 }
+
+export type EvidencePackage = ContextEvidencePackage;
 
 export interface AlternativeContextReasoning {
   context_id: string;
@@ -918,6 +922,9 @@ export const db = {
 
   getEvidencePackage: (itemId: string) =>
     invoke<EvidencePackage>("get_evidence_package", { itemId }),
+
+  getContextEvidencePackage: (itemId: string) =>
+    invoke<ContextEvidencePackage>("get_context_evidence_package", { itemId }),
 
   getCandidateEvidencePackage: (candidateId: string) =>
     invoke<EvidencePackage>("get_candidate_evidence_package", { candidateId }),

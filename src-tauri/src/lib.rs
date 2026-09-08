@@ -725,6 +725,15 @@ fn get_evidence_package(
 }
 
 #[tauri::command]
+fn get_context_evidence_package(
+    item_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::reasoning::ContextEvidencePackage, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::reasoning::build_context_evidence_package(&conn, item_id)
+}
+
+#[tauri::command]
 fn get_candidate_evidence_package(
     candidate_id: &str,
     state: State<'_, AppState>,
@@ -1131,6 +1140,7 @@ pub fn run() {
             analyze_candidate_context_ai,
             analyze_item_group_context_ai,
             get_evidence_package,
+            get_context_evidence_package,
             get_candidate_evidence_package,
             suggest_candidate_name_ai,
             suggest_item_group_name_ai,
