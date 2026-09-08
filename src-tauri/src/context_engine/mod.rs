@@ -27,6 +27,8 @@ pub use normalization::{
 
 #[cfg(test)]
 pub mod workflow_tests;
+#[cfg(test)]
+pub mod evidence_pipeline_e2e_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
