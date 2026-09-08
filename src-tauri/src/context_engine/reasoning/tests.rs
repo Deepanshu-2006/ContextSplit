@@ -6,9 +6,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::context_engine::reasoning::builder::{
-        analyze_item_context_ai, build_candidate_evidence_package, build_evidence_package,
-        build_item_group_evidence_package, scrub_private_data, suggest_candidate_name_ai,
-        suggest_item_group_name_ai, EvidencePackageBuilder,
+        analyze_item_context_ai, build_candidate_evidence_package, build_context_evidence_package,
+        build_evidence_package, build_item_group_evidence_package, scrub_private_data,
+        suggest_candidate_name_ai, suggest_item_group_name_ai, EvidencePackageBuilder,
     };
     use crate::context_engine::reasoning::fixtures::*;
     use crate::context_engine::reasoning::mock::MockAIReasoner;
@@ -104,7 +104,9 @@ mod tests {
 
         EvidencePackage {
             target_item: dummy_target_item(),
+            contextual_evidence: Vec::new(),
             candidate_contexts: candidates,
+            candidate_new_contexts: Vec::new(),
             relevant_related_items: Vec::new(),
             relationships: Vec::new(),
             semantic_similarity_summaries: Vec::new(),
@@ -1898,7 +1900,13 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
                 session_id: Some("sess_leaked".to_string()),
                 captured_at: "2026-09-04T12:00:00Z".to_string(),
             },
+            contextual_evidence: vec![
+                crate::context_engine::evidence::ContextEvidence::observed_app("target_1", "LeakedApp", None),
+                crate::context_engine::evidence::ContextEvidence::observed_domain("target_1", "leaked.domain.com", None, None),
+                crate::context_engine::evidence::ContextEvidence::observed_session("target_1", "sess_leaked", None),
+            ],
             candidate_contexts: vec![],
+            candidate_new_contexts: vec![],
             relevant_related_items: vec![
                 RelatedItemEvidence {
                     item_id: "rel_1".to_string(),
@@ -3198,5 +3206,193 @@ MIIEowIBAAKCAQEA0m4w4k0+pG7...
         // Alice should hit her cache
         let alice_cached = get_cached_reasoning(&conn, "hash_user", Some("alice")).unwrap();
         assert!(alice_cached.is_some(), "User A should hit own cache");
+    }
+
+    #[test]
+    fn test_context_evidence_package_unified_model_integration() {
+        let (conn, _path) = setup_test_db();
+        let ws = operations::create_workspace(&conn, "Project Apollo").unwrap();
+        let session = operations::create_session(&conn).unwrap();
+
+        let item = operations::create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "url",
+            "https://github.com/nasa/apollo-11",
+            Some("Apollo 11 Source Code"),
+            r#"{"app_name":"Google Chrome","domain":"github.com"}"#,
+        ).unwrap();
+
+        let related_item = operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Lunar module telemetry analysis notes",
+            Some("Telemetry Notes"),
+            "{}",
+        ).unwrap();
+
+        let _ = operations::create_item_relationship(
+            &conn,
+            &item.id,
+            &related_item.id,
+            "semantic_similarity",
+            0.82,
+            None,
+        ).unwrap();
+
+        let _ = crate::context_engine::operations::create_context_signal(
+            &conn,
+            None,
+            Some(&item.id),
+            "active_app",
+            Some(&session.id),
+            r#"{"app_name":"Google Chrome"}"#,
+        ).unwrap();
+
+        let package = build_context_evidence_package(&conn, &item.id).expect("Should build ContextEvidencePackage");
+
+        // Verify structure and contents
+        assert_eq!(package.target_item.id, item.id);
+        assert!(!package.contextual_evidence.is_empty(), "contextual_evidence must be populated");
+
+        // Verify helper methods
+        let observed = package.observed_evidence();
+        let inferred = package.inferred_evidence();
+        assert!(!observed.is_empty(), "Observed evidence must be present");
+        assert!(!inferred.is_empty(), "Inferred evidence must be present");
+
+        let app_ev = package.evidence_by_category(crate::context_engine::evidence::EvidenceCategory::SourceApp);
+        assert!(!app_ev.is_empty(), "SourceApp evidence must be queryable by category");
+
+        let observed_ev = package.evidence_by_provenance(crate::context_engine::evidence::EvidenceProvenance::Observed);
+        assert_eq!(observed.len(), observed_ev.len());
+
+        // Verify candidate contexts
+        let existing = package.candidate_existing_contexts();
+        assert!(!existing.is_empty());
+        assert_eq!(existing[0].context_type, "workspace");
+    }
+
+    #[test]
+    fn test_context_evidence_package_privacy_sanitizes_evidence_records() {
+        let (conn, _path) = setup_test_db();
+        let item = operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Confidential internal doc with secret api_key=sk-ant-api03-secret1234567890abcdef and password=SuperSecretPass123!",
+            Some("Secret Project Token Bearer"),
+            "{}",
+        ).unwrap();
+
+        let package = build_evidence_package(&conn, &item.id).unwrap();
+
+        // 1. Target snippet must be scrubbed
+        assert!(!package.target_item.content_snippet.contains("sk-ant-api03-secret1234567890abcdef"));
+        assert!(!package.target_item.content_snippet.contains("SuperSecretPass123!"));
+
+        // 2. All contextual evidence explanations and attributes must be scrubbed
+        for ev in &package.contextual_evidence {
+            assert!(!ev.explanation.title.contains("sk-ant-api03-secret1234567890abcdef"));
+            assert!(!ev.explanation.description.contains("sk-ant-api03-secret1234567890abcdef"));
+            if let Some(ref badge) = ev.explanation.badge {
+                assert!(!badge.contains("sk-ant-api03-secret1234567890abcdef"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_context_evidence_package_cache_hash_determinism() {
+        let (conn, _path) = setup_test_db();
+        let ws = operations::create_workspace(&conn, "Paris Trip").unwrap();
+        let item1 = operations::create_item(&conn, Some(&ws.id), None, "url", "https://booking.com/hotel", Some("Hotel"), "{}").unwrap();
+        let item2 = operations::create_item(&conn, None, None, "url", "https://booking.com/tickets", Some("Tickets"), r#"{"app_name":"Safari","domain":"booking.com"}"#).unwrap();
+        
+        crate::context_engine::operations::create_context_signal(&conn, None, Some(&item2.id), "active_app", None, r#"{"app_name":"Safari"}"#).unwrap();
+        crate::context_engine::operations::create_context_signal(&conn, None, Some(&item2.id), "url_metadata", None, r#"{"domain":"booking.com"}"#).unwrap();
+        let _ = operations::create_item_relationship(&conn, &item2.id, &item1.id, "same_domain", 0.85, None).unwrap();
+
+        let pkg_a = build_evidence_package(&conn, &item2.id).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let pkg_b = build_evidence_package(&conn, &item2.id).unwrap();
+
+        let hash_a = crate::context_engine::reasoning::cache::hash_evidence_package(&pkg_a, None);
+        let hash_b = crate::context_engine::reasoning::cache::hash_evidence_package(&pkg_b, None);
+
+        if hash_a != hash_b {
+            let mut norm_a = pkg_a.clone();
+            norm_a.system_metadata.generated_at = String::new();
+            for ev in &mut norm_a.contextual_evidence {
+                ev.id = String::new();
+                ev.observed_at = String::new();
+            }
+            norm_a.contextual_evidence.sort_by(|a, b| {
+                a.category.as_str().cmp(b.category.as_str())
+                    .then_with(|| a.provenance.as_str().cmp(b.provenance.as_str()))
+                    .then_with(|| a.strength.total_cmp(&b.strength))
+                    .then_with(|| a.explanation.title.cmp(&b.explanation.title))
+                    .then_with(|| a.explanation.description.cmp(&b.explanation.description))
+            });
+            norm_a.temporal_context.age_days = (norm_a.temporal_context.age_days * 10.0).round() / 10.0;
+            norm_a.temporal_context.recency_decay_weight = (norm_a.temporal_context.recency_decay_weight * 100.0).round() / 100.0;
+            for cand in &mut norm_a.candidate_contexts {
+                cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+            }
+            for cand in &mut norm_a.candidate_new_contexts {
+                cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+            }
+            norm_a.candidate_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
+            norm_a.candidate_new_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
+            norm_a.relevant_related_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+            norm_a.relationships.sort_by(|a, b| {
+                a.other_item_id.cmp(&b.other_item_id)
+                    .then_with(|| a.relationship_type.cmp(&b.relationship_type))
+            });
+            norm_a.semantic_similarity_summaries.sort_by(|a, b| a.other_item_id.cmp(&b.other_item_id));
+            norm_a.relevant_sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+            norm_a.workspace_semantic_profiles.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+
+            let mut norm_b = pkg_b.clone();
+            norm_b.system_metadata.generated_at = String::new();
+            for ev in &mut norm_b.contextual_evidence {
+                ev.id = String::new();
+                ev.observed_at = String::new();
+            }
+            norm_b.contextual_evidence.sort_by(|a, b| {
+                a.category.as_str().cmp(b.category.as_str())
+                    .then_with(|| a.provenance.as_str().cmp(b.provenance.as_str()))
+                    .then_with(|| a.strength.total_cmp(&b.strength))
+                    .then_with(|| a.explanation.title.cmp(&b.explanation.title))
+                    .then_with(|| a.explanation.description.cmp(&b.explanation.description))
+            });
+            norm_b.temporal_context.age_days = (norm_b.temporal_context.age_days * 10.0).round() / 10.0;
+            norm_b.temporal_context.recency_decay_weight = (norm_b.temporal_context.recency_decay_weight * 100.0).round() / 100.0;
+            for cand in &mut norm_b.candidate_contexts {
+                cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+            }
+            for cand in &mut norm_b.candidate_new_contexts {
+                cand.temporal_recency_score = (cand.temporal_recency_score * 100.0).round() / 100.0;
+            }
+            norm_b.candidate_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
+            norm_b.candidate_new_contexts.sort_by(|a, b| a.context_id.cmp(&b.context_id));
+            norm_b.relevant_related_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+            norm_b.relationships.sort_by(|a, b| {
+                a.other_item_id.cmp(&b.other_item_id)
+                    .then_with(|| a.relationship_type.cmp(&b.relationship_type))
+            });
+            norm_b.semantic_similarity_summaries.sort_by(|a, b| a.other_item_id.cmp(&b.other_item_id));
+            norm_b.relevant_sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+            norm_b.workspace_semantic_profiles.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+
+            let json_a = serde_json::to_string_pretty(&norm_a).unwrap();
+            let json_b = serde_json::to_string_pretty(&norm_b).unwrap();
+            eprintln!("NORMALIZED DIFF:\n--- NORM A ---\n{}\n--- NORM B ---\n{}", json_a, json_b);
+        }
+
+        assert_eq!(hash_a, hash_b, "Hash must be identical across consecutive calls");
     }
 }
