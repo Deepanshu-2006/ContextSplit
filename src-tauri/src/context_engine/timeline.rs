@@ -209,25 +209,39 @@ pub fn get_context_timeline(
     }
 
     // 5. Construct Chronological Activity Feed
+    let mut workspace_names = HashMap::new();
+    if let Ok(all_workspaces) = crate::db::operations::list_workspaces(conn) {
+        for w in all_workspaces {
+            workspace_names.insert(w.id, w.name);
+        }
+    }
+
     let mut chronological_activity = Vec::new();
 
-    // A) Item capture events
+    // A) Item capture events (Observed Activity)
     for item in &items {
         let display_title = item.title.clone().unwrap_or_else(|| format!("{} item", item.item_type));
         let src_label = item.app_name.clone().or_else(|| item.domain.clone()).unwrap_or_else(|| "Capture".to_string());
+        let ws_name = item.session_id.as_deref().and_then(|_| Some(ws.name.clone())).unwrap_or_else(|| ws.name.clone());
+
         chronological_activity.push(TimelineEvent {
             id: format!("cap-{}", item.id),
             event_type: "item_captured".to_string(),
             timestamp: item.captured_at.clone(),
-            title: format!("Captured '{}'", display_title),
+            title: display_title,
             description: format!("Type: {} • Source: {}", item.item_type, src_label),
             item_id: Some(item.id.clone()),
             session_id: item.session_id.clone(),
             metadata: serde_json::json!({
+                "kind": "observed_activity",
                 "item_type": item.item_type,
                 "membership_type": item.membership_type,
                 "app_name": item.app_name,
                 "domain": item.domain,
+                "inferred_context": {
+                    "id": ws.id,
+                    "name": ws_name,
+                }
             }),
         });
     }
@@ -326,6 +340,137 @@ pub fn get_context_timeline(
                             "item_b_id": b_id,
                         }),
                     });
+                }
+            }
+        }
+    }
+
+    // E) Context Transitions (Inferred transitions)
+    let mut recorded_transition_ids = HashSet::new();
+
+    // E.1) Persisted transitions for this workspace
+    if let Ok(transitions) = crate::db::operations::list_context_transitions_for_context(conn, workspace_id) {
+        for trans in transitions {
+            recorded_transition_ids.insert(trans.id.clone());
+
+            let from_name = trans.from_context_id.as_deref().and_then(|id| workspace_names.get(id)).cloned();
+            let to_name = trans.to_context_id.as_deref().and_then(|id| workspace_names.get(id)).cloned();
+
+            let target_display = to_name.clone().unwrap_or_else(|| ws.name.clone());
+            let source_display = from_name.clone().unwrap_or_else(|| "Previous Context".to_string());
+
+            let (arrow_title, desc_summary) = match trans.transition_type {
+                crate::db::models::ContextTransitionType::ContextSwitch => (
+                    format!("↳ Switched to {}", target_display),
+                    format!("Context switch inferred from {} with {:.0}% confidence", source_display, trans.confidence * 100.0),
+                ),
+                crate::db::models::ContextTransitionType::ContextReturn => (
+                    format!("↳ Returned to {}", target_display),
+                    format!("Resumed previous activity in {} with {:.0}% confidence", target_display, trans.confidence * 100.0),
+                ),
+                crate::db::models::ContextTransitionType::ContextStart => (
+                    format!("↳ Started {}", target_display),
+                    format!("Initial activity emerged in {} with {:.0}% confidence", target_display, trans.confidence * 100.0),
+                ),
+                crate::db::models::ContextTransitionType::ContextEnd => (
+                    format!("↳ Concluded {}", source_display),
+                    format!("Inactivity gap detected in {} with {:.0}% confidence", source_display, trans.confidence * 100.0),
+                ),
+                crate::db::models::ContextTransitionType::AmbiguousTransition => (
+                    "↳ Ambiguous context transition".to_string(),
+                    format!("Uncertain contextual shift with {:.0}% confidence", trans.confidence * 100.0),
+                ),
+            };
+
+            let mut evidence_list: Vec<String> = Vec::new();
+            if let Ok(meta_json) = serde_json::from_str::<Value>(&trans.metadata) {
+                if let Some(ev_arr) = meta_json.get("evidence").and_then(|v| v.as_array()) {
+                    for ev in ev_arr {
+                        if let Some(s) = ev.as_str() {
+                            evidence_list.push(s.to_string());
+                        }
+                    }
+                }
+            }
+
+            chronological_activity.push(TimelineEvent {
+                id: format!("trans-{}", trans.id),
+                event_type: "context_transition".to_string(),
+                timestamp: trans.detected_at.clone(),
+                title: arrow_title,
+                description: desc_summary,
+                item_id: trans.trigger_item_id.clone(),
+                session_id: trans.session_id.clone(),
+                metadata: serde_json::json!({
+                    "kind": "inferred_transition",
+                    "transition_type": trans.transition_type.as_str(),
+                    "confidence": trans.confidence,
+                    "from_context_id": trans.from_context_id,
+                    "from_context_name": from_name,
+                    "to_context_id": trans.to_context_id,
+                    "to_context_name": to_name,
+                    "evidence": evidence_list,
+                }),
+            });
+        }
+    }
+
+    // E.2) If no persisted transitions exist, dynamically derive segments/transitions
+    if recorded_transition_ids.is_empty() {
+        if let Ok(segments) = crate::context_engine::segments::ContextActivitySegmenter::new().build_segments_for_workspace(conn, workspace_id) {
+            for seg in segments {
+                if let Some(t_in) = seg.transition_in {
+                    if recorded_transition_ids.insert(t_in.id.clone()) {
+                        let from_name = t_in.from_context.as_ref().map(|c| c.name.clone());
+                        let to_name = t_in.to_context.as_ref().map(|c| c.name.clone());
+
+                        let target_display = to_name.clone().unwrap_or_else(|| ws.name.clone());
+                        let source_display = from_name.clone().unwrap_or_else(|| "Previous Context".to_string());
+
+                        let (arrow_title, desc_summary) = match t_in.transition_type {
+                            crate::db::models::ContextTransitionType::ContextSwitch => (
+                                format!("↳ Switched to {}", target_display),
+                                format!("Context switch inferred from {} with {:.0}% confidence", source_display, t_in.confidence * 100.0),
+                            ),
+                            crate::db::models::ContextTransitionType::ContextReturn => (
+                                format!("↳ Returned to {}", target_display),
+                                format!("Resumed previous activity in {} with {:.0}% confidence", target_display, t_in.confidence * 100.0),
+                            ),
+                            crate::db::models::ContextTransitionType::ContextStart => (
+                                format!("↳ Started {}", target_display),
+                                format!("Initial activity emerged in {} with {:.0}% confidence", target_display, t_in.confidence * 100.0),
+                            ),
+                            crate::db::models::ContextTransitionType::ContextEnd => (
+                                format!("↳ Concluded {}", source_display),
+                                format!("Inactivity gap detected in {} with {:.0}% confidence", source_display, t_in.confidence * 100.0),
+                            ),
+                            crate::db::models::ContextTransitionType::AmbiguousTransition => (
+                                "↳ Ambiguous context transition".to_string(),
+                                format!("Uncertain contextual shift with {:.0}% confidence", t_in.confidence * 100.0),
+                            ),
+                        };
+
+                        chronological_activity.push(TimelineEvent {
+                            id: format!("trans-{}", t_in.id),
+                            event_type: "context_transition".to_string(),
+                            timestamp: t_in.timestamp.clone(),
+                            title: arrow_title,
+                            description: desc_summary,
+                            item_id: t_in.trigger_item_id.clone(),
+                            session_id: t_in.session_id.clone(),
+                            metadata: serde_json::json!({
+                                "kind": "inferred_transition",
+                                "transition_type": t_in.transition_type.as_str(),
+                                "confidence": t_in.confidence,
+                                "from_context_id": t_in.from_context.as_ref().map(|c| c.id.clone()),
+                                "from_context_name": from_name,
+                                "to_context_id": t_in.to_context.as_ref().map(|c| c.id.clone()),
+                                "to_context_name": to_name,
+                                "evidence": t_in.evidence,
+                                "duration_since_previous_activity_seconds": t_in.duration_since_previous_activity_seconds,
+                            }),
+                        });
+                    }
                 }
             }
         }
@@ -472,5 +617,47 @@ mod tests {
         // Verify timestamps
         assert!(timeline.first_activity_at.is_some());
         assert!(timeline.latest_activity_at.is_some());
+    }
+
+    #[test]
+    fn test_context_timeline_includes_transitions() {
+        let conn = setup_in_memory_db();
+        let ws_college = create_workspace(&conn, "College").unwrap();
+        let ws_portfolio = create_workspace(&conn, "Portfolio").unwrap();
+        let session = create_session(&conn).unwrap();
+
+        // 1. Create a persisted context switch transition: College -> Portfolio
+        let trans = crate::db::models::ContextTransition {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_context_id: Some(ws_college.id.clone()),
+            to_context_id: Some(ws_portfolio.id.clone()),
+            transition_type: crate::db::models::ContextTransitionType::ContextSwitch,
+            confidence: 0.92,
+            detected_at: "2026-09-10T10:32:00Z".to_string(),
+            session_id: Some(session.id.clone()),
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{\"evidence\":[\"Active app switched to Figma\",\"Semantic match 0.88\"]}".to_string(),
+            created_at: "2026-09-10T10:32:00Z".to_string(),
+        };
+        crate::db::operations::create_context_transition(&conn, &trans).unwrap();
+
+        // 2. Fetch timeline for Portfolio
+        let timeline = get_context_timeline(&conn, &ws_portfolio.id).unwrap();
+
+        let transition_events: Vec<_> = timeline
+            .chronological_activity
+            .iter()
+            .filter(|e| e.event_type == "context_transition")
+            .collect();
+
+        assert_eq!(transition_events.len(), 1);
+        let trans_ev = &transition_events[0];
+        assert_eq!(trans_ev.title, "↳ Switched to Portfolio");
+        assert!(trans_ev.description.contains("92% confidence"));
+        assert_eq!(trans_ev.metadata.get("kind").and_then(|v| v.as_str()), Some("inferred_transition"));
+        assert_eq!(trans_ev.metadata.get("transition_type").and_then(|v| v.as_str()), Some("context_switch"));
+        assert_eq!(trans_ev.metadata.get("from_context_name").and_then(|v| v.as_str()), Some("College"));
+        assert_eq!(trans_ev.metadata.get("to_context_name").and_then(|v| v.as_str()), Some("Portfolio"));
     }
 }

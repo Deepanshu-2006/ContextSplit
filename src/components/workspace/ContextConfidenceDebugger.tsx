@@ -9,9 +9,6 @@ import {
   Database,
   BarChart2,
   CheckCircle2,
-  HelpCircle,
-  Clock,
-  Eye,
   ChevronDown,
   ChevronRight,
   Terminal,
@@ -19,8 +16,6 @@ import {
 import {
   ContextConfidenceDebugTrace,
   CandidateConfidenceDebugItem,
-  RawEvidenceDebugItem,
-  NormalizedEvidenceDebugItem,
 } from "../../services/db";
 
 interface ContextConfidenceDebuggerProps {
