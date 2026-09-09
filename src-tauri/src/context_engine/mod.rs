@@ -20,12 +20,16 @@ pub mod competition;
 pub mod calibration;
 pub mod debugger;
 pub mod transitions;
+pub mod segments;
 
 pub use transitions::{
     format_duration_human, format_transition_summary, record_context_transition, ContextReference,
     ContextReturnDetails, ContextSnapshot, ContextTransition, ContextTransitionBuilder,
     ContextTransitionDetector, ContextTransitionType, DetectedTransition, PendingTransition,
     TransitionEvaluationResult, TransitionStabilityConfig,
+};
+pub use segments::{
+    ContextActivitySegment, ContextActivitySegmenter, SegmentItemReference, SegmentStreamEvent,
 };
 
 pub use evidence::{

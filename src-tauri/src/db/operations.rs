@@ -328,6 +328,30 @@ pub fn list_items(conn: &Connection, workspace_id: Option<&str>) -> Result<Vec<s
     Ok(items)
 }
 
+pub fn list_items_for_session(conn: &Connection, session_id: &str) -> Result<Vec<super::models::Item>> {
+    let mut stmt = conn.prepare("SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at FROM items WHERE session_id = ?1 ORDER BY created_at ASC")?;
+    let item_iter = stmt.query_map(params![session_id], |row| {
+        Ok(super::models::Item {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            session_id: row.get(2)?,
+            item_type: row.get(3)?,
+            content: row.get(4)?,
+            title: row.get(5)?,
+            metadata: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for item in item_iter {
+        items.push(item?);
+    }
+
+    Ok(items)
+}
+
 pub fn update_item(
     conn: &Connection,
     id: &str,
