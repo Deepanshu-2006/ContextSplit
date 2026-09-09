@@ -42,6 +42,7 @@ pub use competition::{
 pub use calibration::{
     CalibrationInput, CalibrationResult, ConfidenceBand, ConfidenceCalibrator,
 };
+pub use crate::db::models::{ContextInterpretationKind, NoContextReason};
 
 #[cfg(test)]
 pub mod workflow_tests;

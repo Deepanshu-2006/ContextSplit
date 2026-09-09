@@ -330,12 +330,36 @@ export interface PotentialNewContextEvaluation {
   reasons: string[];
 }
 
+export type ContextInterpretationKind =
+  | "existing_context"
+  | "new_context_candidate"
+  | "ambiguous"
+  | "no_context";
+
+export type NoContextReason =
+  | "zero_evidence"
+  | "insufficient_evidence"
+  | "weak_evidence"
+  | "conflicting_contexts"
+  | "no_meaningful_relationships"
+  | "low_semantic_relevance"
+  | "insufficient_evidence_diversity";
+
 export interface UnifiedContextInterpretation {
   item_id: string;
   existing_workspaces: ExistingWorkspaceEvaluation[];
   potential_new_contexts: PotentialNewContextEvaluation[];
-  primary_interpretation: "existing_workspace" | "new_context" | "unassigned" | "ambiguous";
+  primary_interpretation:
+    | "existing_context"
+    | "new_context_candidate"
+    | "ambiguous"
+    | "no_context"
+    | "existing_workspace"
+    | "new_context"
+    | "unassigned";
+  interpretation_kind?: ContextInterpretationKind;
   summary: string;
+  no_context_reason?: NoContextReason | null;
 }
 
 export interface TimelineItemSummary {

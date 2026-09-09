@@ -270,14 +270,119 @@ pub struct PotentialNewContextEvaluation {
     pub reasons: Vec<String>,
 }
 
+/// Canonical first-class context evaluation outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextInterpretationKind {
+    /// Strong, reliable alignment to an existing workspace/context
+    ExistingContext,
+    /// Cohesive cluster representing an emerging context candidate
+    NewContextCandidate,
+    /// Competing affinity across multiple candidate contexts without a clear winner
+    Ambiguous,
+    /// Insufficient or weak contextual evidence; item remains unassigned in Inbox
+    NoContext,
+}
+
+impl ContextInterpretationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContextInterpretationKind::ExistingContext => "existing_context",
+            ContextInterpretationKind::NewContextCandidate => "new_context_candidate",
+            ContextInterpretationKind::Ambiguous => "ambiguous",
+            ContextInterpretationKind::NoContext => "no_context",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ContextInterpretationKind::ExistingContext => "Existing Context",
+            ContextInterpretationKind::NewContextCandidate => "New Context Candidate",
+            ContextInterpretationKind::Ambiguous => "Ambiguous",
+            ContextInterpretationKind::NoContext => "No Context",
+        }
+    }
+
+    pub fn from_str_lenient(s: &str) -> Self {
+        match s.to_lowercase().trim() {
+            "existing_context" | "existing_workspace" | "workspace" => ContextInterpretationKind::ExistingContext,
+            "new_context_candidate" | "new_context" | "candidate" => ContextInterpretationKind::NewContextCandidate,
+            "ambiguous" | "competing" | "uncertain" => ContextInterpretationKind::Ambiguous,
+            _ => ContextInterpretationKind::NoContext,
+        }
+    }
+}
+
+/// Explicit condition explaining why an item has no confident context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoContextReason {
+    /// Zero contextual evidence or capture metadata available
+    ZeroEvidence,
+    /// Overall contextual evidence is below minimum required threshold
+    InsufficientEvidence,
+    /// Only isolated weak peripheral signals (app, domain, content type) observed
+    WeakEvidence,
+    /// Strong contradictory evidence or prior user dismissal conflicts with candidate contexts
+    ConflictingContexts,
+    /// Item has no meaningful graph relationships with items in existing workspaces
+    NoMeaningfulRelationships,
+    /// Semantic similarity to workspace contents and profiles is too low
+    LowSemanticRelevance,
+    /// Evidence lacks independent signal categories; cannot reliably infer context without diversity
+    InsufficientEvidenceDiversity,
+}
+
+impl NoContextReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NoContextReason::ZeroEvidence => "zero_evidence",
+            NoContextReason::InsufficientEvidence => "insufficient_evidence",
+            NoContextReason::WeakEvidence => "weak_evidence",
+            NoContextReason::ConflictingContexts => "conflicting_contexts",
+            NoContextReason::NoMeaningfulRelationships => "no_meaningful_relationships",
+            NoContextReason::LowSemanticRelevance => "low_semantic_relevance",
+            NoContextReason::InsufficientEvidenceDiversity => "insufficient_evidence_diversity",
+        }
+    }
+
+    pub fn display_title(&self) -> &'static str {
+        match self {
+            NoContextReason::ZeroEvidence => "Zero Contextual Evidence",
+            NoContextReason::InsufficientEvidence => "Insufficient Evidence",
+            NoContextReason::WeakEvidence => "Weak Peripheral Evidence",
+            NoContextReason::ConflictingContexts => "Conflicting Contexts",
+            NoContextReason::NoMeaningfulRelationships => "No Meaningful Relationships",
+            NoContextReason::LowSemanticRelevance => "Low Semantic Relevance",
+            NoContextReason::InsufficientEvidenceDiversity => "Insufficient Evidence Diversity",
+        }
+    }
+
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            NoContextReason::ZeroEvidence => "No contextual evidence or capture metadata is available for this item.",
+            NoContextReason::InsufficientEvidence => "Available contextual evidence is below minimum required threshold to suggest a workspace.",
+            NoContextReason::WeakEvidence => "Only isolated weak peripheral signals (source application or web domain) were observed without confirming corroboration.",
+            NoContextReason::ConflictingContexts => "Strong contradictory evidence or previous user feedback conflicts with candidate contexts.",
+            NoContextReason::NoMeaningfulRelationships => "Item has no meaningful contextual graph relationships with items in existing workspaces.",
+            NoContextReason::LowSemanticRelevance => "Semantic similarity to workspace contents and profiles is too low for a reliable match.",
+            NoContextReason::InsufficientEvidenceDiversity => "Evidence lacks independent signal categories; cannot reliably infer context without diversity.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedContextInterpretation {
     pub item_id: String,
     pub existing_workspaces: Vec<ExistingWorkspaceEvaluation>,
     pub potential_new_contexts: Vec<PotentialNewContextEvaluation>,
-    /// "existing_workspace" | "new_context" | "unassigned"
+    /// "existing_context" (or legacy "existing_workspace") | "new_context_candidate" (or legacy "new_context") | "ambiguous" | "no_context" (or legacy "unassigned")
     pub primary_interpretation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpretation_kind: Option<ContextInterpretationKind>,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_context_reason: Option<NoContextReason>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

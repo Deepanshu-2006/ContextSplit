@@ -171,8 +171,8 @@ export function getContextBadgeData(
   // Default fallback for items without strong evidence
   return {
     state: 'no_context',
-    label: 'No strong context',
-    tooltip: 'Insufficient contextual evidence. Click to inspect context evaluation.',
+    label: 'No strong context yet',
+    tooltip: 'No confident contextual match yet. Item safely remains unassigned in Inbox.',
     icon: HelpCircle,
     classes: {
       badge:

@@ -316,24 +316,27 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                 {/* Confidence Assessment Banner */}
                 {interpretation && (
                   <div className={`p-3 rounded-lg border text-xs flex flex-col gap-1 ${
-                    interpretation.primary_interpretation === "ambiguous"
+                    interpretation.primary_interpretation === "ambiguous" || interpretation.interpretation_kind === "ambiguous"
                       ? "bg-amber-50 border-amber-200 text-amber-900"
-                      : interpretation.primary_interpretation === "unassigned"
+                      : interpretation.primary_interpretation === "no_context" || interpretation.interpretation_kind === "no_context" || interpretation.primary_interpretation === "unassigned"
                       ? "bg-slate-50 border-slate-200 text-slate-700"
                       : (interpretation.existing_workspaces[0]?.confidence || 0) >= 0.70
                       ? "bg-emerald-50 border-emerald-200 text-emerald-900"
                       : "bg-blue-50 border-blue-200 text-blue-900"
                   }`}>
                     <div className="flex items-center gap-1.5 font-semibold">
-                      {interpretation.primary_interpretation === "ambiguous" ? (
+                      {interpretation.primary_interpretation === "ambiguous" || interpretation.interpretation_kind === "ambiguous" ? (
                         <>
                           <AlertTriangle size={14} className="text-amber-600 shrink-0" />
                           <span>Uncertain Context (Ambiguous)</span>
                         </>
-                      ) : interpretation.primary_interpretation === "unassigned" ? (
+                      ) : interpretation.primary_interpretation === "no_context" || interpretation.interpretation_kind === "no_context" || interpretation.primary_interpretation === "unassigned" ? (
                         <>
                           <HelpCircle size={14} className="text-slate-500 shrink-0" />
-                          <span>No Meaningful Context (Weak Signals)</span>
+                          <span>
+                            No Strong Context Yet
+                            {interpretation.no_context_reason ? ` (${interpretation.no_context_reason.replace(/_/g, " ")})` : ""}
+                          </span>
                         </>
                       ) : (interpretation.existing_workspaces[0]?.confidence || 0) >= 0.70 ? (
                         <>
@@ -348,9 +351,9 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
                       )}
                     </div>
                     <p className="text-[11px] leading-relaxed opacity-90">{interpretation.summary}</p>
-                    {interpretation.primary_interpretation === "ambiguous" && (
-                      <p className="text-[10px] font-medium text-amber-700 mt-0.5">
-                        Item is NOT forced into any workspace. Remains safely in Inbox.
+                    {(interpretation.primary_interpretation === "ambiguous" || interpretation.primary_interpretation === "no_context" || interpretation.primary_interpretation === "unassigned") && (
+                      <p className="text-[10px] font-medium text-slate-500 mt-0.5">
+                        Item is NOT forced into any workspace. Safely remains in Inbox.
                       </p>
                     )}
                   </div>

@@ -248,7 +248,7 @@ export function ContextSuggestion({ suggestion, onAccept, onDismiss }: ContextSu
         <div className="flex items-center gap-1.5 min-w-0">
           <Inbox size={13} className="text-slate-500 shrink-0" />
           <span className="text-slate-700 font-medium text-[12px] truncate">
-            No Meaningful Context
+            No Strong Context Yet
           </span>
         </div>
         <span className="text-slate-600 font-semibold text-[10px] bg-slate-200/70 border border-slate-300/70 px-1.5 py-0.5 rounded-md shrink-0 shadow-2xs">

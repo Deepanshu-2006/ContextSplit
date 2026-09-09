@@ -83,20 +83,30 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
             return;
           }
 
-          if (interpretation.primary_interpretation === "unassigned" || (interpretation.primary_interpretation as string) === "inbox") {
+          if (
+            interpretation.primary_interpretation === "no_context" ||
+            interpretation.interpretation_kind === "no_context" ||
+            interpretation.primary_interpretation === "unassigned" ||
+            (interpretation.primary_interpretation as string) === "inbox"
+          ) {
             // NO CONTEXT: Weak evidence, do NOT force into any workspace
             const topConfidence = interpretation.existing_workspaces[0]?.confidence || 0;
             setSuggestionData({
               tier: "no_context",
               confidence: Math.round(topConfidence * 100),
-              explanation: interpretation.summary || "Insufficient evidence to associate with any workspace.",
-              uncertaintyReason: "Weak evidence (< 25% confidence). Item remains in Inbox.",
+              explanation: interpretation.summary || "No strong contextual match yet. Item safely remains in Inbox.",
+              uncertaintyReason: "Insufficient evidence to reliably associate with a workspace. Item remains in Inbox.",
               reasons: [],
             });
             return;
           }
 
-          if (interpretation.primary_interpretation === "existing_workspace" && interpretation.existing_workspaces.length > 0) {
+          if (
+            (interpretation.primary_interpretation === "existing_workspace" ||
+              interpretation.primary_interpretation === "existing_context" ||
+              interpretation.interpretation_kind === "existing_context") &&
+            interpretation.existing_workspaces.length > 0
+          ) {
             const top = interpretation.existing_workspaces[0];
             const tier = top.confidence >= 0.70 ? "high" : "moderate";
 

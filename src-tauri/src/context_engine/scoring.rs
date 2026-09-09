@@ -1030,7 +1030,7 @@ pub fn evaluate_item_context(
     let scored_results = scorer.score_evidence(&evidence_set, &ws_contexts);
 
     let mut existing_workspaces = Vec::new();
-    for res in scored_results {
+    for res in &scored_results {
         let clamped_score = (res.total_score as f64).clamp(0.0, 1.0);
         let clamped_confidence = (res.confidence as f64).clamp(0.0, 1.0);
 
@@ -1038,18 +1038,18 @@ pub fn evaluate_item_context(
         let final_reasons = if !contextual_reasons.is_empty() && clamped_score >= 0.20 {
             contextual_reasons
         } else if !res.strongest_reasons.is_empty() {
-            res.strongest_reasons
+            res.strongest_reasons.clone()
         } else {
             vec![format!("Baseline comparison with minimal contextual overlap with {}.", res.context_name)]
         };
 
         existing_workspaces.push(crate::db::models::ExistingWorkspaceEvaluation {
-            workspace_id: res.context_id,
-            workspace_name: res.context_name,
+            workspace_id: res.context_id.clone(),
+            workspace_name: res.context_name.clone(),
             score: clamped_score,
             confidence: clamped_confidence,
             confidence_percentage: format!("{:.0}%", (clamped_confidence * 100.0).round()),
-            confidence_band: res.confidence_band,
+            confidence_band: res.confidence_band.clone(),
             reasons: final_reasons,
         });
     }
@@ -1166,7 +1166,10 @@ pub fn evaluate_item_context(
     let top_ws = existing_workspaces.first();
     let top_new = potential_new_contexts.first();
 
-    let (primary_interpretation, summary) = if let Some(ws) = top_ws {
+    let target_rels = crate::db::operations::get_item_relationships(conn, item_id).unwrap_or_default();
+    let meaningful_rels_count = target_rels.iter().filter(|r| r.strength >= 0.30).count();
+
+    let (interpretation_kind, no_context_reason, primary_interpretation, summary) = if let Some(ws) = top_ws {
         let is_ambiguous = existing_workspaces.len() > 1
             && (existing_workspaces[0].score - existing_workspaces[1].score).abs() <= AMBIGUITY_MARGIN as f64
             && existing_workspaces[1].score >= AMBIGUITY_RUNNER_UP_FLOOR as f64;
@@ -1174,44 +1177,47 @@ pub fn evaluate_item_context(
         if is_ambiguous {
             let ws2 = &existing_workspaces[1];
             (
+                crate::db::models::ContextInterpretationKind::Ambiguous,
+                None,
                 "ambiguous".to_string(),
                 format!(
                     "Ambiguous match: competing affinity between '{}' ({}) and '{}' ({}); item remains in Inbox without forced assignment",
                     ws.workspace_name, ws.confidence_percentage, ws2.workspace_name, ws2.confidence_percentage
                 ),
             )
-        } else if ws.confidence >= CONFIDENCE_BAND_MEDIUM as f64 && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence) {
+        } else if ws.confidence >= ConfidenceBand::MEDIUM_THRESHOLD as f64
+            && ws.score >= 0.35
+            && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence)
+        {
             (
-                "existing_workspace".to_string(),
+                crate::db::models::ContextInterpretationKind::ExistingContext,
+                None,
+                "existing_context".to_string(),
                 format!("Strong match to existing workspace '{}' ({})", ws.workspace_name, ws.confidence_percentage),
             )
-        } else if ws.confidence < CONFIDENCE_BAND_LOW as f64 {
+        } else if let Some(new_ctx) = top_new.filter(|n| n.confidence >= ConfidenceBand::HIGH_THRESHOLD as f64) {
             (
-                "unassigned".to_string(),
-                "Weak signals detected; item remains in Inbox".to_string(),
+                crate::db::models::ContextInterpretationKind::NewContextCandidate,
+                None,
+                "new_context_candidate".to_string(),
+                format!("Cohesive new context detected: '{}' ({})", new_ctx.label, new_ctx.confidence_percentage),
             )
-        } else if let Some(new_ctx) = top_new {
-            if new_ctx.confidence >= CONFIDENCE_BAND_HIGH as f64 {
-                (
-                    "new_context".to_string(),
-                    format!("Cohesive new context detected: '{}' ({})", new_ctx.label, new_ctx.confidence_percentage),
-                )
-            } else {
-                (
-                    "unassigned".to_string(),
-                    "Low confidence or ambiguous across workspaces; item remains in Inbox".to_string(),
-                )
-            }
         } else {
+            let (reason, explanation) = diagnose_no_context_reason(&evidence_set, &scored_results, meaningful_rels_count);
             (
-                "unassigned".to_string(),
-                "No decisive contextual match found".to_string(),
+                crate::db::models::ContextInterpretationKind::NoContext,
+                Some(reason),
+                "no_context".to_string(),
+                format!("No strong context yet — {}", explanation),
             )
         }
     } else {
+        let (reason, explanation) = diagnose_no_context_reason(&evidence_set, &scored_results, meaningful_rels_count);
         (
-            "unassigned".to_string(),
-            "No workspaces available for evaluation".to_string(),
+            crate::db::models::ContextInterpretationKind::NoContext,
+            Some(reason),
+            "no_context".to_string(),
+            format!("No strong context yet — {}", explanation),
         )
     };
 
@@ -1220,8 +1226,109 @@ pub fn evaluate_item_context(
         existing_workspaces,
         potential_new_contexts,
         primary_interpretation,
+        interpretation_kind: Some(interpretation_kind),
         summary,
+        no_context_reason,
     })
+}
+
+/// Diagnoses why an Item has no confident context, returning an explicit NoContextReason and detailed explanation.
+pub fn diagnose_no_context_reason(
+    evidence_set: &ContextEvidenceSet,
+    scored_results: &[ContextScoreResult],
+    relationships_count: usize,
+) -> (crate::db::models::NoContextReason, String) {
+    use crate::db::models::NoContextReason;
+    use crate::context_engine::evidence::EvidenceCategory;
+
+    // 1. Zero evidence
+    if evidence_set.items.is_empty() {
+        return (
+            NoContextReason::ZeroEvidence,
+            NoContextReason::ZeroEvidence.explanation().to_string(),
+        );
+    }
+
+    // 2. Conflicting contexts (prior user dismissals or strong contradiction >= 0.50)
+    let has_user_dismissal = evidence_set
+        .items
+        .iter()
+        .any(|e| e.category == EvidenceCategory::UserFeedback);
+    let has_strong_contradiction = scored_results.iter().any(|r| {
+        r.contradiction_report
+            .as_ref()
+            .map_or(0.0, |c| c.contradiction_strength)
+            >= 0.50
+            || (r.total_score == 0.0 && !r.contradictory_evidence.is_empty())
+    });
+
+    if has_user_dismissal || has_strong_contradiction {
+        return (
+            NoContextReason::ConflictingContexts,
+            NoContextReason::ConflictingContexts.explanation().to_string(),
+        );
+    }
+
+    // 3. Insufficient evidence diversity (single group or low diversity score despite multiple items)
+    let diversity = EvidenceDiversityCalculator::calculate_from_evidence_set(evidence_set);
+    if diversity.evidence_quantity >= 2 && diversity.independent_groups_count <= 1 {
+        return (
+            NoContextReason::InsufficientEvidenceDiversity,
+            NoContextReason::InsufficientEvidenceDiversity.explanation().to_string(),
+        );
+    }
+
+    // 4. Isolated weak peripheral evidence (only app/domain/content_type without session/semantic/graph/history)
+    let has_substantive = evidence_set.items.iter().any(|e| {
+        matches!(
+            e.category,
+            EvidenceCategory::ConfirmedMembership
+                | EvidenceCategory::SameSession
+                | EvidenceCategory::WorkspaceHistory
+                | EvidenceCategory::RelatedItem
+                | EvidenceCategory::SemanticSimilarity
+        )
+    });
+
+    if !evidence_set.items.is_empty() && !has_substantive {
+        return (
+            NoContextReason::WeakEvidence,
+            NoContextReason::WeakEvidence.explanation().to_string(),
+        );
+    }
+
+    // 5. Low semantic relevance (semantic similarity was evaluated but below meaningful threshold)
+    let semantic_evidences: Vec<_> = evidence_set
+        .items
+        .iter()
+        .filter(|e| e.category == EvidenceCategory::SemanticSimilarity)
+        .collect();
+    let has_semantic = !semantic_evidences.is_empty();
+    let all_semantic_low = has_semantic && semantic_evidences.iter().all(|e| e.strength < 0.35);
+    if all_semantic_low {
+        return (
+            NoContextReason::LowSemanticRelevance,
+            NoContextReason::LowSemanticRelevance.explanation().to_string(),
+        );
+    }
+
+    // 6. No meaningful relationships (no graph edges with existing workspaces)
+    let has_graph_evidence = evidence_set
+        .items
+        .iter()
+        .any(|e| e.category == EvidenceCategory::RelatedItem);
+    if relationships_count == 0 && !has_graph_evidence && scored_results.iter().all(|r| r.total_score < 0.25) {
+        return (
+            NoContextReason::NoMeaningfulRelationships,
+            NoContextReason::NoMeaningfulRelationships.explanation().to_string(),
+        );
+    }
+
+    // 7. Insufficient evidence (general fallback)
+    (
+        NoContextReason::InsufficientEvidence,
+        NoContextReason::InsufficientEvidence.explanation().to_string(),
+    )
 }
 
 /// Recalculates confidence for suggested ContextMemberships associated with a workspace.
@@ -1671,7 +1778,14 @@ mod tests {
 
         assert!(!interpretation.existing_workspaces[0].reasons.is_empty());
         assert!(!new_ctx.reasons.is_empty());
-        assert_eq!(interpretation.primary_interpretation, "existing_workspace");
+        assert!(
+            interpretation.primary_interpretation == "existing_context"
+                || interpretation.primary_interpretation == "existing_workspace"
+        );
+        assert_eq!(
+            interpretation.interpretation_kind,
+            Some(crate::db::models::ContextInterpretationKind::ExistingContext)
+        );
         assert!(interpretation.summary.contains("Paris Trip"));
 
         let target_after = crate::db::operations::get_item(&conn, &target.id).unwrap();
@@ -2729,5 +2843,159 @@ mod tests {
         assert!(m1.is_none() || m1.unwrap().membership_type != "confirmed");
         let m2 = crate::db::operations::get_item_workspace_membership(&conn, &item.id, &ws2.id).unwrap();
         assert!(m2.is_none() || m2.unwrap().membership_type != "confirmed");
+    }
+
+    #[test]
+    fn test_no_context_zero_evidence_returns_explicit_diagnostic() {
+        use crate::db::models::{ContextInterpretationKind, NoContextReason};
+
+        let conn = setup_in_memory_db();
+        let _ws = crate::db::operations::create_workspace(&conn, "Portfolio").unwrap();
+        let item = crate::db::operations::create_item(&conn, None, None, "", "empty item", None, "{}").unwrap();
+
+        let interp = evaluate_item_context(&conn, &item.id).unwrap();
+
+        assert_eq!(interp.interpretation_kind, Some(ContextInterpretationKind::NoContext));
+        assert_eq!(interp.primary_interpretation, "no_context");
+        assert_eq!(interp.no_context_reason, Some(NoContextReason::ZeroEvidence));
+        assert!(interp.summary.starts_with("No strong context yet"));
+        assert!(interp.summary.contains("No contextual evidence or capture metadata is available"));
+
+        // Direct diagnostics test
+        let empty_set = ContextEvidenceSet::new("empty");
+        let (reason, expl) = diagnose_no_context_reason(&empty_set, &[], 0);
+        assert_eq!(reason, NoContextReason::ZeroEvidence);
+        assert_eq!(reason.as_str(), "zero_evidence");
+        assert!(expl.contains("No contextual evidence"));
+    }
+
+    #[test]
+    fn test_no_context_weak_peripheral_signals_only() {
+        use crate::db::models::{ContextInterpretationKind, NoContextReason};
+
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "General Web").unwrap();
+        let item = crate::db::operations::create_item(&conn, None, None, "url", "https://example.com/page", Some("Example"), "{\"app_name\":\"Safari\"}").unwrap();
+        let _ = create_context_signal(&conn, None, Some(&item.id), "active_app", None, "{\"app_name\":\"Safari\"}").unwrap();
+        let _ = create_context_signal(&conn, None, Some(&item.id), "url_metadata", None, "{\"domain\":\"example.com\"}").unwrap();
+
+        // Workspace has same app
+        let ws_item = crate::db::operations::create_item(&conn, Some(&ws.id), None, "url", "https://other.com", None, "{\"app_name\":\"Safari\"}").unwrap();
+        let _ = create_context_signal(&conn, Some(&ws.id), Some(&ws_item.id), "active_app", None, "{\"app_name\":\"Safari\"}").unwrap();
+
+        let interp = evaluate_item_context(&conn, &item.id).unwrap();
+
+        assert_eq!(interp.interpretation_kind, Some(ContextInterpretationKind::NoContext));
+        assert_eq!(interp.primary_interpretation, "no_context");
+        assert_eq!(interp.no_context_reason, Some(NoContextReason::WeakEvidence));
+        assert!(interp.summary.starts_with("No strong context yet"));
+        assert!(interp.summary.contains("isolated weak peripheral signals"));
+    }
+
+    #[test]
+    fn test_no_context_conflicting_contexts_user_dismissal() {
+        use crate::db::models::{ContextInterpretationKind, NoContextReason};
+
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Dismissed WS").unwrap();
+        let item = crate::db::operations::create_item(&conn, None, None, "text", "doc content", Some("Doc"), "{}").unwrap();
+
+        // History signal points to WS, but user feedback dismisses WS
+        let hist_payload = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws.id}).to_string();
+        let _ = create_context_signal(&conn, None, Some(&item.id), "user_action", None, &hist_payload).unwrap();
+        let dismiss_payload = serde_json::json!({"action": "suggestion_dismissed", "workspace_id": ws.id}).to_string();
+        let _ = create_context_signal(&conn, None, Some(&item.id), "suggestion_dismissed", None, &dismiss_payload).unwrap();
+
+        let interp = evaluate_item_context(&conn, &item.id).unwrap();
+
+        assert_eq!(interp.interpretation_kind, Some(ContextInterpretationKind::NoContext));
+        assert_eq!(interp.no_context_reason, Some(NoContextReason::ConflictingContexts));
+        assert!(interp.summary.starts_with("No strong context yet"));
+        assert!(interp.summary.contains("Strong contradictory evidence") || interp.summary.contains("user dismissal"));
+    }
+
+    #[test]
+    fn test_no_context_no_meaningful_relationships() {
+        use crate::db::models::NoContextReason;
+        use crate::context_engine::evidence::EvidenceCategory;
+
+        let mut evidence_set = ContextEvidenceSet::new("target_no_rels");
+        evidence_set.add(ContextEvidence::new(
+            EvidenceCategory::WorkspaceHistory,
+            crate::context_engine::evidence::EvidenceProvenance::Inferred,
+            0.15,
+            "target_no_rels",
+            crate::context_engine::evidence::EvidenceExplanation::new("Weak history", "Historical correlation"),
+        ));
+
+        let ws = WorkspaceScoringContext::new("ws_isolated", "Isolated Workspace");
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws]);
+
+        let (reason, explanation) = diagnose_no_context_reason(&evidence_set, &results, 0);
+
+        assert_eq!(reason, NoContextReason::NoMeaningfulRelationships);
+        assert!(explanation.contains("Item has no meaningful contextual graph relationships"));
+    }
+
+    #[test]
+    fn test_no_context_low_semantic_relevance() {
+        use crate::db::models::NoContextReason;
+        use crate::context_engine::evidence::EvidenceCategory;
+
+        let mut evidence_set = ContextEvidenceSet::new("target_low_sem");
+        evidence_set.add(ContextEvidence::new(
+            EvidenceCategory::SemanticSimilarity,
+            crate::context_engine::evidence::EvidenceProvenance::Inferred,
+            0.18,
+            "target_low_sem",
+            crate::context_engine::evidence::EvidenceExplanation::new("Low similarity", "Low cosine similarity"),
+        ));
+
+        let ws = WorkspaceScoringContext::new("ws_sem", "Semantic Workspace");
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws]);
+
+        let (reason, explanation) = diagnose_no_context_reason(&evidence_set, &results, 2);
+
+        assert_eq!(reason, NoContextReason::LowSemanticRelevance);
+        assert!(explanation.contains("Semantic similarity to workspace contents and profiles is too low"));
+    }
+
+    #[test]
+    fn test_no_context_insufficient_evidence_diversity() {
+        use crate::db::models::NoContextReason;
+
+        let mut evidence_set = ContextEvidenceSet::new("target_repeated_domain");
+        for i in 1..=5 {
+            evidence_set.add(ContextEvidence::observed_domain("target_repeated_domain", "example.com", Some(&format!("https://example.com/{}", i)), None));
+        }
+
+        let mut ws = WorkspaceScoringContext::new("ws_dev", "Dev Workspace");
+        ws.domains.push("example.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws]);
+
+        let (reason, explanation) = diagnose_no_context_reason(&evidence_set, &results, 0);
+
+        assert_eq!(reason, NoContextReason::InsufficientEvidenceDiversity);
+        assert!(explanation.contains("lacks independent signal categories"));
+    }
+
+    #[test]
+    fn test_first_class_context_interpretation_kinds_matrix() {
+        use crate::db::models::ContextInterpretationKind;
+
+        assert_eq!(ContextInterpretationKind::ExistingContext.as_str(), "existing_context");
+        assert_eq!(ContextInterpretationKind::NewContextCandidate.as_str(), "new_context_candidate");
+        assert_eq!(ContextInterpretationKind::Ambiguous.as_str(), "ambiguous");
+        assert_eq!(ContextInterpretationKind::NoContext.as_str(), "no_context");
+
+        assert_eq!(ContextInterpretationKind::from_str_lenient("existing_workspace"), ContextInterpretationKind::ExistingContext);
+        assert_eq!(ContextInterpretationKind::from_str_lenient("new_context"), ContextInterpretationKind::NewContextCandidate);
+        assert_eq!(ContextInterpretationKind::from_str_lenient("uncertain"), ContextInterpretationKind::Ambiguous);
+        assert_eq!(ContextInterpretationKind::from_str_lenient("unassigned"), ContextInterpretationKind::NoContext);
+        assert_eq!(ContextInterpretationKind::from_str_lenient("none"), ContextInterpretationKind::NoContext);
     }
 }
