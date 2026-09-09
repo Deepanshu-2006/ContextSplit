@@ -14,6 +14,7 @@ pub mod inbox_state;
 pub mod attention;
 pub mod evidence;
 pub mod normalization;
+pub mod diversity;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
@@ -23,6 +24,9 @@ pub use evidence::{
 pub use normalization::{
     CategoryNormalizationConfig, EvidenceConflict, EvidenceNormalizer, NormalizedEvidence,
     NormalizedEvidenceSet, NormalizerConfig,
+};
+pub use diversity::{
+    EvidenceDiversityCalculator, EvidenceDiversityResult, IndependentEvidenceGroup,
 };
 
 #[cfg(test)]

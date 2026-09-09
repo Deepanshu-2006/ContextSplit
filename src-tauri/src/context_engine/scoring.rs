@@ -6,6 +6,9 @@ use crate::context_engine::evidence::{
     ContextEvidenceCollector, ContextEvidenceSet,
     EvidenceCategory,
 };
+use crate::context_engine::diversity::{
+    EvidenceDiversityCalculator, EvidenceDiversityResult,
+};
 
 /// Structured contribution of an individual evidence category to the final context score.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,6 +44,21 @@ pub struct ConfidenceFactors {
     pub ambiguity_penalty: f32,
     /// Evidence volume score (0.0 - 1.0)
     pub evidence_volume_score: f32,
+    /// Total count of positive evidence items (evidence quantity)
+    #[serde(default)]
+    pub evidence_quantity: usize,
+    /// Number of distinct granular categories
+    #[serde(default)]
+    pub evidence_categories_count: usize,
+    /// Number of independent conceptual evidence groups
+    #[serde(default)]
+    pub independent_groups_count: usize,
+    /// Normalized diversity score in [0.0, 1.0]
+    #[serde(default)]
+    pub diversity_score: f32,
+    /// Detailed structured diversity calculation result
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diversity_result: Option<EvidenceDiversityResult>,
 }
 
 /// Comprehensive, structured scoring information for a candidate context.
@@ -696,17 +714,7 @@ impl ContextEvidenceScorer {
 
 /// Maps an evidence category string into an independent conceptual category group for diversity calculations.
 pub fn map_category_group(category: &str) -> &'static str {
-    match category {
-        "confirmed_membership" => "confirmed",
-        "workspace_history" => "history",
-        "related_items" | "temporal_proximity" => "graph",
-        "semantic_similarity_items" | "semantic_profile" => "semantic",
-        "same_session" => "session",
-        "source_app" => "app",
-        "browser_domain" => "domain",
-        "content_type" => "content",
-        _ => "other",
-    }
+    EvidenceDiversityCalculator::map_category_to_group(category).as_str()
 }
 
 /// Category reliability ratings based on verifiability and noise profile.
@@ -730,9 +738,9 @@ pub fn category_reliability(category: &str) -> f32 {
 ///
 /// Factors incorporated:
 /// - Evidence strength (`total_score`)
-/// - Evidence diversity (independent categories: 1 -> 0.35-0.45, 2 -> 0.80, 3+ -> 1.0)
+/// - Evidence diversity & independence (via `EvidenceDiversityCalculator`)
 /// - Category reliability (weighted average reliability score)
-/// - Evidence volume (number of contributing signals: 1 -> 0.70, 2 -> 0.85, 3 -> 0.95, 4+ -> 1.0)
+/// - Evidence volume (number of contributing signals)
 /// - Agreement proportion across alternative candidate contexts
 /// - Ambiguity margin damping (penalizes closely contested top contexts)
 pub fn evaluate_confidence(
@@ -744,16 +752,22 @@ pub fn evaluate_confidence(
 ) -> (f32, String, ConfidenceFactors) {
     // 1. Authoritative explicit confirmed membership is always 100% confident
     if contributions.iter().any(|c| c.category == "confirmed_membership" && c.is_positive && c.weighted_score > 0.0) {
+        let div = EvidenceDiversityCalculator::calculate_from_contributions(contributions);
         return (
             1.0,
             "High".to_string(),
             ConfidenceFactors {
-                diversity_count: 1,
+                diversity_count: div.independent_groups_count.max(1),
                 diversity_multiplier: 1.0,
                 reliability_score: 1.0,
                 agreement_score: 1.0,
                 ambiguity_penalty: 0.0,
                 evidence_volume_score: 1.0,
+                evidence_quantity: div.evidence_quantity,
+                evidence_categories_count: div.evidence_categories_count,
+                independent_groups_count: div.independent_groups_count,
+                diversity_score: 1.0,
+                diversity_result: Some(div),
             },
         );
     }
@@ -774,30 +788,20 @@ pub fn evaluate_confidence(
                 agreement_score: 0.0,
                 ambiguity_penalty: 0.0,
                 evidence_volume_score: 0.0,
+                evidence_quantity: 0,
+                evidence_categories_count: 0,
+                independent_groups_count: 0,
+                diversity_score: 0.0,
+                diversity_result: None,
             },
         );
     }
 
-    // 2. Evidence Diversity (count distinct category groups)
-    let mut groups: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
-    for c in &pos_contribs {
-        groups.insert(map_category_group(&c.category));
-    }
-    let diversity_count = groups.len();
-
-    let diversity_multiplier = match diversity_count {
-        1 => {
-            if groups.contains("semantic") {
-                0.45
-            } else if groups.contains("app") || groups.contains("domain") || groups.contains("content") {
-                0.35
-            } else {
-                0.45
-            }
-        }
-        2 => 0.80,
-        _ => 1.00,
-    };
+    // 2. Evidence Diversity & Independence
+    let diversity_result = EvidenceDiversityCalculator::calculate_from_contributions(contributions);
+    let diversity_count = diversity_result.independent_groups_count;
+    let diversity_multiplier = diversity_result.diversity_multiplier;
+    let diversity_score = diversity_result.diversity_score;
 
     // 3. Category Reliability (weighted by category weighted_score)
     let total_pos_weight: f32 = pos_contribs.iter().map(|c| c.weighted_score).sum();
@@ -858,6 +862,11 @@ pub fn evaluate_confidence(
             agreement_score: agreement,
             ambiguity_penalty,
             evidence_volume_score,
+            evidence_quantity: diversity_result.evidence_quantity,
+            evidence_categories_count: diversity_result.evidence_categories_count,
+            independent_groups_count: diversity_result.independent_groups_count,
+            diversity_score,
+            diversity_result: Some(diversity_result),
         },
     )
 }
@@ -2153,5 +2162,130 @@ mod tests {
             result.confidence
         );
         assert_eq!(result.confidence_band, "Low");
+    }
+
+    #[test]
+    fn test_repeated_correlated_urls_same_domain_bounded_confidence() {
+        // Invariant: Multiple repeated URLs from the same domain increase quantity/affinity,
+        // but because they all belong to a single independent group (WebOrigin),
+        // diversity score and multiplier remain strictly bounded.
+        let mut evidence_set = ContextEvidenceSet::new("target_github_urls");
+        for i in 1..=10 {
+            let mut ev = ContextEvidence::observed_domain(
+                "target_github_urls",
+                "github.com",
+                Some(&format!("https://github.com/rust-lang/rust/pull/{}", 1000 + i)),
+                None,
+            );
+            ev.strength = 1.0;
+            evidence_set.add(ev);
+        }
+
+        let mut ws = WorkspaceScoringContext::new("ws_rust", "Rust Development");
+        ws.domains.push("github.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert!(result.total_score > 0.0, "Total score should have domain score");
+        assert!(
+            result.confidence <= 0.35,
+            "10 URLs from same domain must not inflate confidence beyond 0.35 (actual: {})",
+            result.confidence
+        );
+        assert_ne!(result.confidence_band, "High");
+
+        let factors = result.confidence_factors.expect("confidence factors must be present");
+        assert_eq!(factors.independent_groups_count, 1);
+        assert_eq!(factors.diversity_count, 1);
+        assert!(factors.diversity_multiplier <= 0.35);
+        assert!(factors.diversity_score <= 0.30);
+    }
+
+    #[test]
+    fn test_correlated_peripheral_groups_vs_independent_strong_groups() {
+        // Setup 1: Only correlated/peripheral signals (SourceApp + BrowserDomain)
+        let mut evidence_set_peripheral = ContextEvidenceSet::new("target_peripheral");
+        evidence_set_peripheral.add(ContextEvidence::observed_app("target_peripheral", "Google Chrome", None));
+        evidence_set_peripheral.add(ContextEvidence::observed_domain("target_peripheral", "docs.google.com", None, None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_docs", "Google Docs Project");
+        ws.app_names.push("Google Chrome".to_string());
+        ws.domains.push("docs.google.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result_peripheral = scorer.score_evidence_against_workspace(&evidence_set_peripheral, &ws);
+
+        let factors_p = result_peripheral.confidence_factors.unwrap();
+        assert_eq!(factors_p.independent_groups_count, 2);
+        // 2 peripheral groups yield a conservative 0.50 diversity multiplier
+        assert_eq!(factors_p.diversity_multiplier, 0.50);
+        assert!(
+            result_peripheral.confidence <= 0.35,
+            "Peripheral app+domain signals should have bounded confidence (actual: {})",
+            result_peripheral.confidence
+        );
+
+        // Setup 2: Add independent strong groups (Session + Semantic Centroid Match + History)
+        let mut evidence_set_strong = evidence_set_peripheral.clone();
+        evidence_set_strong.add(ContextEvidence::inferred_workspace_history(
+            "target_peripheral",
+            "ws_docs",
+            "Google Docs Project",
+            1.0,
+            None,
+        ));
+        evidence_set_strong.add(ContextEvidence::observed_session("target_peripheral", "session_active", None));
+        evidence_set_strong.add(ContextEvidence::inferred_semantic_similarity(
+            "target_peripheral",
+            "doc_peer",
+            0.92,
+            Some("Project Specification"),
+            Some("Google Docs Project"),
+            None,
+        ));
+        ws.sessions.push("session_active".to_string());
+        ws.item_ids.push("doc_peer".to_string());
+
+        let result_strong = scorer.score_evidence_against_workspace(&evidence_set_strong, &ws);
+        let factors_s = result_strong.confidence_factors.unwrap();
+        assert!(factors_s.independent_groups_count >= 3);
+        assert_eq!(factors_s.diversity_multiplier, 1.00);
+        assert!(factors_s.diversity_score >= 0.90);
+        assert!(
+            result_strong.confidence >= 0.70,
+            "Independent strong signals must yield high confidence >= 0.70 (actual: {})",
+            result_strong.confidence
+        );
+        assert_eq!(result_strong.confidence_band, "High");
+    }
+
+    #[test]
+    fn test_evidence_diversity_calculator_direct_integration() {
+        let mut contribs = Vec::new();
+        contribs.push(EvidenceContribution {
+            category: "same_session".to_string(),
+            raw_strength: 1.0,
+            weighted_score: 0.3,
+            description: "Session match".to_string(),
+            is_positive: true,
+        });
+        contribs.push(EvidenceContribution {
+            category: "workspace_history".to_string(),
+            raw_strength: 0.8,
+            weighted_score: 0.4,
+            description: "History match".to_string(),
+            is_positive: true,
+        });
+
+        let (conf, band, factors) = evaluate_confidence(&contribs, 0.70, None, None, None);
+        assert_eq!(factors.evidence_quantity, 2);
+        assert_eq!(factors.evidence_categories_count, 2);
+        assert_eq!(factors.independent_groups_count, 2);
+        assert_eq!(factors.diversity_multiplier, 0.85); // 2 strong groups
+        assert_eq!(factors.diversity_score, 0.80);
+        assert!(factors.diversity_result.is_some());
+        assert!(conf >= 0.45);
+        assert_eq!(band, "Medium");
     }
 }
