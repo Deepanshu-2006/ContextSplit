@@ -652,6 +652,7 @@ impl std::fmt::Display for InboxState {
 }
 
 /// Day 12: Tracks the lifecycle state of an item in the Inbox.
+/// Day 12: Tracks the lifecycle state of an item in the Inbox.
 /// Kept strictly separate from Item data and Workspace membership.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxItemState {
@@ -661,6 +662,144 @@ pub struct InboxItemState {
     pub reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Explicit classification of contextual transitions between activity states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTransitionType {
+    /// Clean transition between two distinct confident contexts (e.g. Workspace A -> Workspace B)
+    ContextSwitch,
+    /// Return to a previously active context after an interruption or detour (e.g. Workspace A -> Workspace B -> Workspace A)
+    ContextReturn,
+    /// Initial context emergence or startup of contextual activity (e.g. None -> Workspace A)
+    ContextStart,
+    /// Explicit context conclusion or session completion (e.g. Workspace A -> None)
+    ContextEnd,
+    /// Uncertain context shift, ambiguous split, or competing candidate possibilities
+    AmbiguousTransition,
+}
+
+impl ContextTransitionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContextTransitionType::ContextSwitch => "context_switch",
+            ContextTransitionType::ContextReturn => "context_return",
+            ContextTransitionType::ContextStart => "context_start",
+            ContextTransitionType::ContextEnd => "context_end",
+            ContextTransitionType::AmbiguousTransition => "ambiguous_transition",
+        }
+    }
+
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        let clean = s.trim().to_lowercase().replace('-', "_").replace(' ', "_");
+        match clean.as_str() {
+            "context_switch" | "switch" => Some(ContextTransitionType::ContextSwitch),
+            "context_return" | "return" => Some(ContextTransitionType::ContextReturn),
+            "context_start" | "start" | "begin" => Some(ContextTransitionType::ContextStart),
+            "context_end" | "end" | "conclude" => Some(ContextTransitionType::ContextEnd),
+            "ambiguous_transition" | "ambiguous" | "uncertain" => Some(ContextTransitionType::AmbiguousTransition),
+            _ => None,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ContextTransitionType::ContextSwitch => "Context Switch",
+            ContextTransitionType::ContextReturn => "Return to Context",
+            ContextTransitionType::ContextStart => "Context Start",
+            ContextTransitionType::ContextEnd => "Context End",
+            ContextTransitionType::AmbiguousTransition => "Ambiguous Transition",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            ContextTransitionType::ContextSwitch => "User transitioned work from one context to a different context",
+            ContextTransitionType::ContextReturn => "User returned to a prior context after an interruption or detour",
+            ContextTransitionType::ContextStart => "Initial activity detected for a context",
+            ContextTransitionType::ContextEnd => "Activity concluded for a context",
+            ContextTransitionType::AmbiguousTransition => "Activity transition occurred with ambiguous or competing context assignments",
+        }
+    }
+
+    pub fn is_confident(&self) -> bool {
+        !matches!(self, ContextTransitionType::AmbiguousTransition)
+    }
+}
+
+impl std::fmt::Display for ContextTransitionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Domain model representing a detected contextual transition between states.
+///
+/// Invariant: A transition is purely an activity inference. It must NEVER modify
+/// `Item` or `Workspace` membership.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextTransition {
+    pub id: String,
+    pub from_context_id: Option<String>,
+    pub to_context_id: Option<String>,
+    pub transition_type: ContextTransitionType,
+    pub confidence: f64,
+    pub detected_at: String,
+    pub session_id: Option<String>,
+    pub trigger_item_id: Option<String>,
+    pub trigger_signal_id: Option<String>,
+    pub metadata: String,
+    pub created_at: String,
+}
+
+impl ContextTransition {
+    pub fn new(
+        from_context_id: Option<String>,
+        to_context_id: Option<String>,
+        transition_type: ContextTransitionType,
+        confidence: f64,
+    ) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_context_id,
+            to_context_id,
+            transition_type,
+            confidence: confidence.clamp(0.0, 1.0),
+            detected_at: now.clone(),
+            session_id: None,
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: now,
+        }
+    }
+
+    pub fn with_detected_at(mut self, timestamp: impl Into<String>) -> Self {
+        self.detected_at = timestamp.into();
+        self
+    }
+
+    pub fn with_session(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    pub fn with_trigger_item(mut self, item_id: Option<String>) -> Self {
+        self.trigger_item_id = item_id;
+        self
+    }
+
+    pub fn with_trigger_signal(mut self, signal_id: Option<String>) -> Self {
+        self.trigger_signal_id = signal_id;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: impl Into<String>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
 }
 
 

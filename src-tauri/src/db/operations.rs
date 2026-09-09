@@ -1623,6 +1623,198 @@ pub fn bulk_archive_or_clear_inbox_items(
     Ok(deleted_count)
 }
 
+// =========================================================================
+// Context Transitions CRUD
+// =========================================================================
+
+pub fn create_context_transition(
+    conn: &Connection,
+    transition: &super::models::ContextTransition,
+) -> Result<super::models::ContextTransition> {
+    let trans_type_str = transition.transition_type.as_str();
+    conn.execute(
+        "INSERT INTO context_transitions (
+            id, from_context_id, to_context_id, transition_type, confidence,
+            detected_at, session_id, trigger_item_id, trigger_signal_id, metadata, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            transition.id,
+            transition.from_context_id,
+            transition.to_context_id,
+            trans_type_str,
+            transition.confidence,
+            transition.detected_at,
+            transition.session_id,
+            transition.trigger_item_id,
+            transition.trigger_signal_id,
+            transition.metadata,
+            transition.created_at,
+        ],
+    )?;
+
+    get_context_transition(conn, &transition.id)
+}
+
+pub fn get_context_transition(
+    conn: &Connection,
+    id: &str,
+) -> Result<super::models::ContextTransition> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_context_id, to_context_id, transition_type, confidence,
+                detected_at, session_id, trigger_item_id, trigger_signal_id, metadata, created_at
+         FROM context_transitions WHERE id = ?1",
+    )?;
+
+    stmt.query_row(params![id], |row| {
+        let raw_type: String = row.get(3)?;
+        let transition_type = super::models::ContextTransitionType::from_str_lenient(&raw_type)
+            .unwrap_or(super::models::ContextTransitionType::ContextSwitch);
+
+        Ok(super::models::ContextTransition {
+            id: row.get(0)?,
+            from_context_id: row.get(1)?,
+            to_context_id: row.get(2)?,
+            transition_type,
+            confidence: row.get(4)?,
+            detected_at: row.get(5)?,
+            session_id: row.get(6)?,
+            trigger_item_id: row.get(7)?,
+            trigger_signal_id: row.get(8)?,
+            metadata: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })
+}
+
+pub fn list_context_transitions(
+    conn: &Connection,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<super::models::ContextTransition>> {
+    let limit_val = limit.unwrap_or(100) as i64;
+    let offset_val = offset.unwrap_or(0) as i64;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, from_context_id, to_context_id, transition_type, confidence,
+                detected_at, session_id, trigger_item_id, trigger_signal_id, metadata, created_at
+         FROM context_transitions
+         ORDER BY detected_at DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+
+    let rows = stmt.query_map(params![limit_val, offset_val], |row| {
+        let raw_type: String = row.get(3)?;
+        let transition_type = super::models::ContextTransitionType::from_str_lenient(&raw_type)
+            .unwrap_or(super::models::ContextTransitionType::ContextSwitch);
+
+        Ok(super::models::ContextTransition {
+            id: row.get(0)?,
+            from_context_id: row.get(1)?,
+            to_context_id: row.get(2)?,
+            transition_type,
+            confidence: row.get(4)?,
+            detected_at: row.get(5)?,
+            session_id: row.get(6)?,
+            trigger_item_id: row.get(7)?,
+            trigger_signal_id: row.get(8)?,
+            metadata: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })?;
+
+    let mut transitions = Vec::new();
+    for r in rows {
+        transitions.push(r?);
+    }
+    Ok(transitions)
+}
+
+pub fn list_context_transitions_for_context(
+    conn: &Connection,
+    context_id: &str,
+) -> Result<Vec<super::models::ContextTransition>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_context_id, to_context_id, transition_type, confidence,
+                detected_at, session_id, trigger_item_id, trigger_signal_id, metadata, created_at
+         FROM context_transitions
+         WHERE from_context_id = ?1 OR to_context_id = ?1
+         ORDER BY detected_at DESC",
+    )?;
+
+    let rows = stmt.query_map(params![context_id], |row| {
+        let raw_type: String = row.get(3)?;
+        let transition_type = super::models::ContextTransitionType::from_str_lenient(&raw_type)
+            .unwrap_or(super::models::ContextTransitionType::ContextSwitch);
+
+        Ok(super::models::ContextTransition {
+            id: row.get(0)?,
+            from_context_id: row.get(1)?,
+            to_context_id: row.get(2)?,
+            transition_type,
+            confidence: row.get(4)?,
+            detected_at: row.get(5)?,
+            session_id: row.get(6)?,
+            trigger_item_id: row.get(7)?,
+            trigger_signal_id: row.get(8)?,
+            metadata: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })?;
+
+    let mut transitions = Vec::new();
+    for r in rows {
+        transitions.push(r?);
+    }
+    Ok(transitions)
+}
+
+pub fn list_context_transitions_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<super::models::ContextTransition>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_context_id, to_context_id, transition_type, confidence,
+                detected_at, session_id, trigger_item_id, trigger_signal_id, metadata, created_at
+         FROM context_transitions
+         WHERE session_id = ?1
+         ORDER BY detected_at ASC",
+    )?;
+
+    let rows = stmt.query_map(params![session_id], |row| {
+        let raw_type: String = row.get(3)?;
+        let transition_type = super::models::ContextTransitionType::from_str_lenient(&raw_type)
+            .unwrap_or(super::models::ContextTransitionType::ContextSwitch);
+
+        Ok(super::models::ContextTransition {
+            id: row.get(0)?,
+            from_context_id: row.get(1)?,
+            to_context_id: row.get(2)?,
+            transition_type,
+            confidence: row.get(4)?,
+            detected_at: row.get(5)?,
+            session_id: row.get(6)?,
+            trigger_item_id: row.get(7)?,
+            trigger_signal_id: row.get(8)?,
+            metadata: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })?;
+
+    let mut transitions = Vec::new();
+    for r in rows {
+        transitions.push(r?);
+    }
+    Ok(transitions)
+}
+
+pub fn delete_context_transition(
+    conn: &Connection,
+    id: &str,
+) -> Result<()> {
+    conn.execute("DELETE FROM context_transitions WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2495,5 +2687,99 @@ mod tests {
         };
         let state_results = crate::search::search_inbox_items(&conn, &search_state_params, None).unwrap();
         assert!(state_results.iter().any(|r| r.item.id == item.id), "Organized item must be found in organized state filter");
+    }
+
+    #[test]
+    fn test_context_transition_crud_and_invariants() {
+        let conn = setup_db();
+
+        let ws_a = create_workspace(&conn, "Backend Rust").unwrap();
+        let ws_b = create_workspace(&conn, "Frontend React").unwrap();
+        let session = create_session(&conn).unwrap();
+
+        let item = create_item(&conn, Some(&ws_a.id), Some(&session.id), "code", "fn main() {}", Some("main.rs"), "{}").unwrap();
+        let signal = crate::context_engine::operations::create_context_signal(&conn, Some(&ws_a.id), Some(&item.id), "active_app", Some(&session.id), "{\"app_name\":\"VS Code\"}").unwrap();
+
+        // 1. Create ContextSwitch transition
+        let switch_trans = super::super::models::ContextTransition::new(
+            Some(ws_a.id.clone()),
+            Some(ws_b.id.clone()),
+            super::super::models::ContextTransitionType::ContextSwitch,
+            0.92,
+        )
+        .with_session(Some(session.id.clone()))
+        .with_trigger_item(Some(item.id.clone()))
+        .with_trigger_signal(Some(signal.id.clone()))
+        .with_metadata("{\"reason\":\"User switched active editor to browser\"}");
+
+        let created_switch = create_context_transition(&conn, &switch_trans).unwrap();
+        assert_eq!(created_switch.id, switch_trans.id);
+        assert_eq!(created_switch.transition_type, super::super::models::ContextTransitionType::ContextSwitch);
+        assert_eq!(created_switch.from_context_id.as_deref(), Some(ws_a.id.as_str()));
+        assert_eq!(created_switch.to_context_id.as_deref(), Some(ws_b.id.as_str()));
+        assert_eq!(created_switch.confidence, 0.92);
+        assert_eq!(created_switch.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(created_switch.trigger_item_id.as_deref(), Some(item.id.as_str()));
+        assert_eq!(created_switch.trigger_signal_id.as_deref(), Some(signal.id.as_str()));
+
+        // 2. Create remaining 4 transition types
+        let return_trans = super::super::models::ContextTransition::new(
+            Some(ws_b.id.clone()),
+            Some(ws_a.id.clone()),
+            super::super::models::ContextTransitionType::ContextReturn,
+            0.88,
+        )
+        .with_session(Some(session.id.clone()));
+        let _ = create_context_transition(&conn, &return_trans).unwrap();
+
+        let start_trans = super::super::models::ContextTransition::new(
+            None,
+            Some(ws_a.id.clone()),
+            super::super::models::ContextTransitionType::ContextStart,
+            0.95,
+        );
+        let _ = create_context_transition(&conn, &start_trans).unwrap();
+
+        let end_trans = super::super::models::ContextTransition::new(
+            Some(ws_a.id.clone()),
+            None,
+            super::super::models::ContextTransitionType::ContextEnd,
+            1.0,
+        );
+        let _ = create_context_transition(&conn, &end_trans).unwrap();
+
+        let amb_trans = super::super::models::ContextTransition::new(
+            Some(ws_a.id.clone()),
+            Some(ws_b.id.clone()),
+            super::super::models::ContextTransitionType::AmbiguousTransition,
+            0.45,
+        );
+        let _ = create_context_transition(&conn, &amb_trans).unwrap();
+
+        // 3. List and filter transitions
+        let all_transitions = list_context_transitions(&conn, None, None).unwrap();
+        assert_eq!(all_transitions.len(), 5);
+
+        let ws_a_transitions = list_context_transitions_for_context(&conn, &ws_a.id).unwrap();
+        assert_eq!(ws_a_transitions.len(), 5); // Involved in all 5 (switch, return, start, end, amb)
+
+        let ws_b_transitions = list_context_transitions_for_context(&conn, &ws_b.id).unwrap();
+        assert_eq!(ws_b_transitions.len(), 3); // Involved in switch, return, amb
+
+        let session_transitions = list_context_transitions_for_session(&conn, &session.id).unwrap();
+        assert_eq!(session_transitions.len(), 2); // switch and return
+
+        // 4. Invariant: Creating transitions must NOT modify Item or Workspace memberships
+        let fresh_item = get_item(&conn, &item.id).unwrap();
+        assert_eq!(fresh_item.workspace_id.as_deref(), Some(ws_a.id.as_str()), "Item workspace must remain unchanged");
+        let memberships = list_item_memberships(&conn, &item.id).unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].workspace_id, ws_a.id);
+
+        // 5. Delete transition
+        delete_context_transition(&conn, &switch_trans.id).unwrap();
+        assert!(get_context_transition(&conn, &switch_trans.id).is_err());
+        let remaining = list_context_transitions(&conn, None, None).unwrap();
+        assert_eq!(remaining.len(), 4);
     }
 }

@@ -383,6 +383,51 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 19;
     }
 
+    if user_version < 20 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_transitions (
+                id TEXT PRIMARY KEY,
+                from_context_id TEXT,
+                to_context_id TEXT,
+                transition_type TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                detected_at TEXT NOT NULL,
+                session_id TEXT,
+                trigger_item_id TEXT,
+                trigger_signal_id TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+                FOREIGN KEY(trigger_item_id) REFERENCES items(id) ON DELETE SET NULL,
+                FOREIGN KEY(trigger_signal_id) REFERENCES context_signals(id) ON DELETE SET NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_transitions_detected ON context_transitions(detected_at)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_transitions_type ON context_transitions(transition_type)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_transitions_to_context ON context_transitions(to_context_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_transitions_from_context ON context_transitions(from_context_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_transitions_session ON context_transitions(session_id)",
+            [],
+        )?;
+
+        user_version = 20;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

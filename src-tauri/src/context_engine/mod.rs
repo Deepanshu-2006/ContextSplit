@@ -19,6 +19,12 @@ pub mod contradiction;
 pub mod competition;
 pub mod calibration;
 pub mod debugger;
+pub mod transitions;
+
+pub use transitions::{
+    format_transition_summary, record_context_transition, ContextTransition,
+    ContextTransitionBuilder, ContextTransitionType,
+};
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
