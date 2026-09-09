@@ -397,6 +397,8 @@ pub struct ContextExplanation {
     pub observed_evidence: Vec<ContextEvidenceItem>,
     #[serde(default)]
     pub inferred_evidence: Vec<ContextEvidenceItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguity_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

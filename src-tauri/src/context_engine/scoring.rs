@@ -12,6 +12,10 @@ use crate::context_engine::diversity::{
 use crate::context_engine::contradiction::{
     ContradictionAnalyzer, ContextContradictionReport,
 };
+use crate::context_engine::competition::{
+    AmbiguityState, ContextCandidateSummary, ContextCompetitionAnalysis,
+    ContextCompetitionAnalyzer,
+};
 
 /// Structured contribution of an individual evidence category to the final context score.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,6 +72,15 @@ pub struct ConfidenceFactors {
     /// Total penalty discount deducted from confidence due to contradictions [0.0, 1.0]
     #[serde(default)]
     pub contradiction_penalty: f32,
+    /// Absolute score difference between top candidate and runner-up
+    #[serde(default)]
+    pub score_margin: Option<f32>,
+    /// Relative confidence taking competing candidates into account [0.0, 1.0]
+    #[serde(default)]
+    pub relative_confidence: Option<f32>,
+    /// Explicit ambiguity state classification
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguity_state: Option<AmbiguityState>,
 }
 
 /// Comprehensive, structured scoring information for a candidate context.
@@ -86,6 +99,8 @@ pub struct ContextScoreResult {
     pub confidence_factors: Option<ConfidenceFactors>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contradiction_report: Option<ContextContradictionReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub competition_analysis: Option<ContextCompetitionAnalysis>,
 }
 
 impl ContextScoreResult {
@@ -656,6 +671,14 @@ impl ContextEvidenceScorer {
             uncertainty.push("High affinity score relies on a single evidence category; confidence is limited until corroborated by independent signals.".to_string());
         }
 
+        let competition_analysis = Some(ContextCompetitionAnalyzer::new().analyze_candidates(&[ContextCandidateSummary {
+            context_id: ws.id.clone(),
+            context_name: ws.name.clone(),
+            score: total_score,
+            confidence,
+            confidence_band: confidence_band.clone(),
+        }]));
+
         ContextScoreResult {
             context_id: ws.id.clone(),
             context_name: ws.name.clone(),
@@ -668,12 +691,13 @@ impl ContextEvidenceScorer {
             uncertainty_indicators: uncertainty,
             confidence_factors: Some(confidence_factors),
             contradiction_report: Some(contradiction_report),
+            competition_analysis,
         }
     }
 
     /// Evaluates an evidence set against multiple candidate workspaces, sorted descending by score.
     /// In a second pass, calibrates confidence using candidate margin, runner-up score, agreement across contexts,
-    /// and cross-context contradiction analysis.
+    /// cross-context contradiction analysis, and contextual competition analysis.
     pub fn score_evidence(
         &self,
         evidence_set: &ContextEvidenceSet,
@@ -705,7 +729,10 @@ impl ContextEvidenceScorer {
             &candidate_scores,
         );
 
-        // Second pass: Calibrate confidence with margin, runner-up, agreement, and contradiction analysis
+        // Pre-compute initial competition analysis across candidate scores
+        let initial_competition = ContextCompetitionAnalyzer::new().analyze(&results);
+
+        // Second pass: Calibrate confidence with margin, runner-up, agreement, contradiction, and competition analysis
         for i in 0..num_workspaces {
             let (margin_to_runner_up, runner_up_score, runner_up_name) = if i == 0 {
                 if num_workspaces > 1 {
@@ -750,7 +777,7 @@ impl ContextEvidenceScorer {
                 }
             }
 
-            let (conf, band, factors) = evaluate_confidence_with_contradiction(
+            let (conf, band, mut factors) = evaluate_confidence_with_contradiction(
                 &results[i].evidence_contributions,
                 results[i].total_score,
                 margin_to_runner_up,
@@ -758,6 +785,17 @@ impl ContextEvidenceScorer {
                 agreement_score,
                 c_strength,
                 c_penalty,
+            );
+
+            // Populate competition factors
+            factors.score_margin = margin_to_runner_up;
+            factors.ambiguity_state = Some(initial_competition.ambiguity_state);
+            factors.relative_confidence = Some(
+                ContextCompetitionAnalyzer::calculate_relative_confidence(
+                    results[i].total_score,
+                    runner_up_score.unwrap_or(0.0),
+                    conf,
+                ),
             );
 
             results[i].confidence = conf;
@@ -775,6 +813,12 @@ impl ContextEvidenceScorer {
                     }
                 }
             }
+        }
+
+        // Finalize competition analysis with calibrated candidate results
+        let final_competition = ContextCompetitionAnalyzer::new().analyze(&results);
+        for res in &mut results {
+            res.competition_analysis = Some(final_competition.clone());
         }
 
         results
@@ -853,6 +897,9 @@ pub fn evaluate_confidence_with_contradiction(
                 diversity_result: Some(div),
                 contradiction_strength: 0.0,
                 contradiction_penalty: 0.0,
+                score_margin: None,
+                relative_confidence: Some(1.0),
+                ambiguity_state: Some(AmbiguityState::Clear),
             },
         );
     }
@@ -880,6 +927,9 @@ pub fn evaluate_confidence_with_contradiction(
                 diversity_result: None,
                 contradiction_strength,
                 contradiction_penalty,
+                score_margin: None,
+                relative_confidence: Some(0.0),
+                ambiguity_state: Some(AmbiguityState::Unknown),
             },
         );
     }
@@ -941,6 +991,18 @@ pub fn evaluate_confidence_with_contradiction(
         "Low"
     };
 
+    let ambiguity_state = Some(ContextCompetitionAnalyzer::classify_ambiguity(
+        total_score,
+        runner_up_score.unwrap_or(0.0),
+        clamped_confidence,
+    ));
+
+    let relative_confidence = Some(ContextCompetitionAnalyzer::calculate_relative_confidence(
+        total_score,
+        runner_up_score.unwrap_or(0.0),
+        clamped_confidence,
+    ));
+
     (
         clamped_confidence,
         confidence_band.to_string(),
@@ -958,6 +1020,9 @@ pub fn evaluate_confidence_with_contradiction(
             diversity_result: Some(diversity_result),
             contradiction_strength,
             contradiction_penalty,
+            score_margin: margin_to_runner_up,
+            relative_confidence,
+            ambiguity_state,
         },
     )
 }
@@ -2598,5 +2663,195 @@ mod tests {
 
         // Context B has higher confidence than Context A because Context B has session + semantic alignment
         assert!(res_b.confidence > res_a.confidence, "Context with aligned session and no session contradiction must have higher confidence (B: {}, A: {})", res_b.confidence, res_a.confidence);
+    }
+
+    #[test]
+    fn test_contextual_competition_clear_winner() {
+        // Portfolio: strong evidence across multiple independent groups (history, session, semantic, relationships) -> score ~0.92+
+        // College: weak evidence (domain only) -> score ~0.41
+        // Expected: AmbiguityState::Clear, score_margin ~0.51+
+        let mut evidence_set = ContextEvidenceSet::new("target_comp_clear");
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_comp_clear",
+            "ws_port",
+            "Portfolio",
+            1.0,
+            None,
+        ));
+        evidence_set.add(ContextEvidence::observed_session("target_comp_clear", "sess_port", None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_comp_clear",
+            "item_port",
+            0.92,
+            Some("Portfolio Spec"),
+            Some("Portfolio"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_related_item(
+            "target_comp_clear",
+            "item_rel",
+            "shares_domain",
+            0.90,
+            Some("Related Doc"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::observed_domain("target_comp_clear", "github.com", None, None));
+
+        let mut ws_port = WorkspaceScoringContext::new("ws_port", "Portfolio");
+        ws_port.sessions.push("sess_port".to_string());
+        ws_port.item_ids.push("item_port".to_string());
+        ws_port.item_ids.push("item_rel".to_string());
+
+        let mut ws_col = WorkspaceScoringContext::new("ws_col", "College");
+        ws_col.domains.push("github.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_port, ws_col]);
+
+        assert_eq!(results[0].context_name, "Portfolio");
+        assert_eq!(results[1].context_name, "College");
+
+        let comp = results[0].competition_analysis.as_ref().expect("Competition analysis must be present");
+        assert_eq!(comp.ambiguity_state, AmbiguityState::Clear);
+        assert_eq!(comp.top_context.as_ref().unwrap().context_name, "Portfolio");
+        assert_eq!(comp.second_best_context.as_ref().unwrap().context_name, "College");
+        assert!(comp.score_margin >= 0.30, "Margin must be >= 0.30 for clear winner (got {})", comp.score_margin);
+        assert!(comp.relative_confidence >= 0.40);
+        assert!(comp.explanation.contains("Clear context match for 'Portfolio'"));
+
+        let factors = results[0].confidence_factors.as_ref().unwrap();
+        assert_eq!(factors.ambiguity_state, Some(AmbiguityState::Clear));
+        assert_eq!(factors.score_margin, Some(comp.score_margin));
+    }
+
+    #[test]
+    fn test_contextual_competition_ambiguous_margin() {
+        // Portfolio and College both have strong, competing evidence -> score ~0.72 vs ~0.68
+        // Expected: AmbiguityState::Ambiguous, narrow margin <= 0.15
+        let mut evidence_set = ContextEvidenceSet::new("target_comp_ambig");
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_comp_ambig",
+            "ws_port",
+            "Portfolio",
+            0.90,
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_comp_ambig",
+            "ws_col",
+            "College",
+            0.85,
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_comp_ambig",
+            "doc_port",
+            0.90,
+            Some("Port Doc"),
+            Some("Portfolio"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_comp_ambig",
+            "doc_col",
+            0.85,
+            Some("College Doc"),
+            Some("College"),
+            None,
+        ));
+
+        let mut ws_port = WorkspaceScoringContext::new("ws_port", "Portfolio");
+        ws_port.item_ids.push("doc_port".to_string());
+
+        let mut ws_col = WorkspaceScoringContext::new("ws_col", "College");
+        ws_col.item_ids.push("doc_col".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_port, ws_col]);
+
+        let comp = results[0].competition_analysis.as_ref().expect("Competition analysis must be present");
+        assert_eq!(comp.ambiguity_state, AmbiguityState::Ambiguous);
+        assert!(comp.score_margin <= 0.15, "Margin must be <= 0.15 for ambiguous (got {})", comp.score_margin);
+        assert!(comp.explanation.contains("Ambiguous context assignment"));
+
+        // Both candidates should have uncertainty indicator about ambiguous assignment
+        assert!(results[0].uncertainty_indicators.iter().any(|u| u.contains("Ambiguous") || u.contains("competing")));
+    }
+
+    #[test]
+    fn test_contextual_competition_unknown_weak_evidence() {
+        // Portfolio and College only share weak, peripheral signals -> score ~0.43 vs ~0.41
+        // Expected: AmbiguityState::Unknown
+        let mut evidence_set = ContextEvidenceSet::new("target_comp_unknown");
+        evidence_set.add(ContextEvidence::observed_app("target_comp_unknown", "Chrome", None));
+        evidence_set.add(ContextEvidence::observed_domain("target_comp_unknown", "google.com", None, None));
+
+        let mut ws_port = WorkspaceScoringContext::new("ws_port", "Portfolio");
+        ws_port.app_names.push("Chrome".to_string());
+        ws_port.domains.push("google.com".to_string());
+
+        let mut ws_col = WorkspaceScoringContext::new("ws_col", "College");
+        ws_col.app_names.push("Chrome".to_string());
+        ws_col.domains.push("google.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_port, ws_col]);
+
+        let comp = results[0].competition_analysis.as_ref().expect("Competition analysis must be present");
+        assert_eq!(comp.ambiguity_state, AmbiguityState::Unknown);
+        assert!(comp.explanation.contains("Unknown context assignment"));
+    }
+
+    #[test]
+    fn test_contextual_competition_probable_margin() {
+        // Portfolio has moderate score (~0.65), College has lower score (~0.40) -> margin ~0.25
+        // Expected: AmbiguityState::Probable
+        let mut evidence_set = ContextEvidenceSet::new("target_comp_prob");
+        evidence_set.add(ContextEvidence::observed_session("target_comp_prob", "sess_port", None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_comp_prob",
+            "doc_port",
+            0.80,
+            Some("Port Doc"),
+            Some("Portfolio"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::observed_app("target_comp_prob", "VSCode", None));
+
+        let mut ws_port = WorkspaceScoringContext::new("ws_port", "Portfolio");
+        ws_port.sessions.push("sess_port".to_string());
+        ws_port.item_ids.push("doc_port".to_string());
+
+        let mut ws_col = WorkspaceScoringContext::new("ws_col", "College");
+        ws_col.app_names.push("VSCode".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_port, ws_col]);
+
+        let comp = results[0].competition_analysis.as_ref().expect("Competition analysis must be present");
+        assert_eq!(comp.ambiguity_state, AmbiguityState::Probable);
+        assert!(comp.score_margin >= 0.15);
+        assert!(comp.explanation.contains("Probable context match for 'Portfolio'"));
+    }
+
+    #[test]
+    fn test_contextual_competition_zero_membership_mutation() {
+        let conn = setup_in_memory_db();
+        let ws1 = crate::db::operations::create_workspace(&conn, "Portfolio").unwrap();
+        let ws2 = crate::db::operations::create_workspace(&conn, "College").unwrap();
+        let item = crate::db::operations::create_item(&conn, None, None, "url", "https://example.com", Some("Competition Test Doc"), "{}").unwrap();
+
+        // Run evaluate_item_context
+        let scores = evaluate_item_context(&conn, &item.id).unwrap();
+        assert!(!scores.existing_workspaces.is_empty());
+
+        // Invariant check: Item's workspace membership and item row must NOT be modified
+        let item_check = crate::db::operations::get_item(&conn, &item.id).unwrap();
+        assert_eq!(item_check.workspace_id, None, "Scoring and competition analysis must never mutate item workspace_id");
+
+        let m1 = crate::db::operations::get_item_workspace_membership(&conn, &item.id, &ws1.id).unwrap();
+        assert!(m1.is_none() || m1.unwrap().membership_type != "confirmed");
+        let m2 = crate::db::operations::get_item_workspace_membership(&conn, &item.id, &ws2.id).unwrap();
+        assert!(m2.is_none() || m2.unwrap().membership_type != "confirmed");
     }
 }

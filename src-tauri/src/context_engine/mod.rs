@@ -16,6 +16,7 @@ pub mod evidence;
 pub mod normalization;
 pub mod diversity;
 pub mod contradiction;
+pub mod competition;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
@@ -32,6 +33,10 @@ pub use diversity::{
 pub use contradiction::{
     ContradictionAnalyzer, ContradictionKind, ContextContradictionReport,
     MultiContextContradictionAnalysis,
+};
+pub use competition::{
+    AmbiguityState, ContextCandidateSummary, ContextCompetitionAnalysis,
+    ContextCompetitionAnalyzer,
 };
 
 #[cfg(test)]

@@ -207,6 +207,17 @@ pub fn explain_from_score_result(
         contradictory_evidence,
         observed_evidence,
         inferred_evidence,
+        ambiguity_state: score_result
+            .confidence_factors
+            .as_ref()
+            .and_then(|f| f.ambiguity_state)
+            .map(|s| s.as_str().to_string())
+            .or_else(|| {
+                score_result
+                    .competition_analysis
+                    .as_ref()
+                    .map(|c| c.ambiguity_state.as_str().to_string())
+            }),
     }
 }
 
