@@ -22,9 +22,10 @@ pub mod debugger;
 pub mod transitions;
 
 pub use transitions::{
-    format_transition_summary, record_context_transition, ContextReference, ContextSnapshot,
-    ContextTransition, ContextTransitionBuilder, ContextTransitionDetector, ContextTransitionType,
-    DetectedTransition, PendingTransition, TransitionEvaluationResult, TransitionStabilityConfig,
+    format_duration_human, format_transition_summary, record_context_transition, ContextReference,
+    ContextReturnDetails, ContextSnapshot, ContextTransition, ContextTransitionBuilder,
+    ContextTransitionDetector, ContextTransitionType, DetectedTransition, PendingTransition,
+    TransitionEvaluationResult, TransitionStabilityConfig,
 };
 
 pub use evidence::{

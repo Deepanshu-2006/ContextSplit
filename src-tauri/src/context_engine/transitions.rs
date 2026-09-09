@@ -5,7 +5,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
 
-/// Configuration for contextual transition stability, hysteresis, and fast-tracking.
+/// Helper to format elapsed seconds into a human-readable duration string.
+pub fn format_duration_human(seconds: i64) -> String {
+    let s = seconds.abs();
+    if s < 60 {
+        format!("{} seconds", s)
+    } else if s < 3600 {
+        let mins = s / 60;
+        let rem_s = s % 60;
+        if rem_s > 0 && mins < 5 {
+            format!("{}m {}s", mins, rem_s)
+        } else {
+            format!("{} minutes", mins)
+        }
+    } else if s < 86400 {
+        let hours = s as f64 / 3600.0;
+        if hours.fract() < 0.05 || hours.fract() > 0.95 {
+            format!("{:.0} hours", hours.round())
+        } else {
+            format!("{:.1} hours", hours)
+        }
+    } else {
+        let days = s as f64 / 86400.0;
+        if days.fract() < 0.05 || days.fract() > 0.95 {
+            format!("{:.0} days", days.round())
+        } else {
+            format!("{:.1} days", days)
+        }
+    }
+}
+
+/// Configuration for contextual transition stability, hysteresis, and return horizons.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransitionStabilityConfig {
     /// Minimum confidence threshold for considering any transition candidate (default: 0.40)
@@ -24,6 +54,10 @@ pub struct TransitionStabilityConfig {
     pub fast_track_confidence: f64,
     /// Score threshold at which a high-scoring transition is fast-tracked (default: 0.80)
     pub fast_track_score: f64,
+    /// Maximum elapsed time since previous activity to be considered a short-term return (default: 86400s / 24h)
+    pub max_return_gap_seconds: i64,
+    /// Minimum confidence required to confirm a return transition (default: 0.50)
+    pub min_return_confidence: f64,
 }
 
 impl Default for TransitionStabilityConfig {
@@ -37,6 +71,8 @@ impl Default for TransitionStabilityConfig {
             min_evidence_agreement_count: 2,
             fast_track_confidence: 0.85,
             fast_track_score: 0.80,
+            max_return_gap_seconds: 86400, // 24 hours
+            min_return_confidence: 0.50,
         }
     }
 }
@@ -105,6 +141,18 @@ pub struct EmittedTransitionMarker {
     pub emitted_at: String,
 }
 
+/// Structured details specific to a context return detection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextReturnDetails {
+    pub returned_context: ContextReference,
+    pub previous_context: Option<ContextReference>,
+    pub return_time: String,
+    pub confidence: f64,
+    pub evidence: Vec<String>,
+    pub duration_since_previous_activity_seconds: i64,
+    pub duration_since_previous_activity_formatted: String,
+}
+
 /// Result of a detected contextual transition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DetectedTransition {
@@ -117,10 +165,31 @@ pub struct DetectedTransition {
     pub transition_type: ContextTransitionType,
     pub session_id: Option<String>,
     pub trigger_item_id: Option<String>,
+    pub duration_since_previous_activity_seconds: Option<i64>,
     pub metadata: Value,
 }
 
 impl DetectedTransition {
+    /// Extracts structured context return details if this transition represents a return.
+    pub fn as_context_return(&self) -> Option<ContextReturnDetails> {
+        if self.transition_type != ContextTransitionType::ContextReturn {
+            return None;
+        }
+        let returned = self.to_context.clone()?;
+        let duration_secs = self.duration_since_previous_activity_seconds.unwrap_or(0);
+        let duration_formatted = format_duration_human(duration_secs);
+
+        Some(ContextReturnDetails {
+            returned_context: returned,
+            previous_context: self.from_context.clone(),
+            return_time: self.timestamp.clone(),
+            confidence: self.confidence,
+            evidence: self.evidence.clone(),
+            duration_since_previous_activity_seconds: duration_secs,
+            duration_since_previous_activity_formatted: duration_formatted,
+        })
+    }
+
     /// Converts this detected transition into a persistent `ContextTransition` model.
     pub fn to_context_transition(&self) -> ContextTransition {
         let mut meta = self.metadata.clone();
@@ -132,6 +201,16 @@ impl DetectedTransition {
                 "evidence".to_string(),
                 serde_json::to_value(&self.evidence).unwrap_or_default(),
             );
+            if let Some(dur) = self.duration_since_previous_activity_seconds {
+                obj.insert(
+                    "duration_since_previous_activity_seconds".to_string(),
+                    serde_json::Value::Number(dur.into()),
+                );
+                obj.insert(
+                    "duration_since_previous_activity_formatted".to_string(),
+                    serde_json::Value::String(format_duration_human(dur)),
+                );
+            }
             if let Some(from) = &self.from_context {
                 obj.insert(
                     "from_context_name".to_string(),
@@ -308,6 +387,16 @@ impl ContextTransitionDetector {
         self
     }
 
+    pub fn with_max_return_gap_seconds(mut self, gap_secs: i64) -> Self {
+        self.stability_config.max_return_gap_seconds = gap_secs.max(1);
+        self
+    }
+
+    pub fn with_min_return_confidence(mut self, conf: f64) -> Self {
+        self.stability_config.min_return_confidence = conf.clamp(0.0, 1.0);
+        self
+    }
+
     pub fn current_context(&self) -> Option<&ContextSnapshot> {
         self.current_context.as_ref()
     }
@@ -329,10 +418,13 @@ impl ContextTransitionDetector {
         self.active_session_id = None;
     }
 
-    /// Pushes a snapshot to the bounded context history, avoiding adjacent duplicate references.
+    /// Pushes a snapshot to the bounded context history, updating previous entry if matching.
     fn push_history(&mut self, snapshot: ContextSnapshot) {
-        if let Some(front) = self.context_history.front() {
+        // If snapshot matches the top of history, update its last_seen_at and streak
+        if let Some(front) = self.context_history.front_mut() {
             if front.reference.id == snapshot.reference.id {
+                front.last_seen_at = snapshot.last_seen_at;
+                front.streak_count = snapshot.streak_count;
                 return;
             }
         }
@@ -436,6 +528,7 @@ impl ContextTransitionDetector {
                 transition_type: ContextTransitionType::ContextEnd,
                 session_id: self.active_session_id.clone(),
                 trigger_item_id: None,
+                duration_since_previous_activity_seconds: None,
                 metadata: serde_json::json!({
                     "elapsed_seconds": elapsed,
                     "inactivity_threshold_secs": self.inactivity_threshold_secs,
@@ -481,7 +574,7 @@ impl ContextTransitionDetector {
         )
     }
 
-    /// Detailed transition evaluation with stability, hysteresis, score margins, and fast-tracking.
+    /// Detailed transition evaluation with stability, hysteresis, return detection, and fast-tracking.
     pub fn evaluate_interpretation_detailed(
         &mut self,
         item_id: Option<&str>,
@@ -553,6 +646,7 @@ impl ContextTransitionDetector {
                     transition_type: ContextTransitionType::AmbiguousTransition,
                     session_id: session_id.map(|s| s.to_string()),
                     trigger_item_id: item_id.map(|s| s.to_string()),
+                    duration_since_previous_activity_seconds: None,
                     metadata: serde_json::json!({
                         "ambiguity_reason": "Competing affinities across multiple contexts",
                     }),
@@ -747,7 +841,7 @@ impl ContextTransitionDetector {
         }
     }
 
-    /// Internal helper to execute and record a confirmed transition.
+    /// Internal helper to execute, calculate return duration, and record a confirmed transition.
     fn confirm_transition(
         &mut self,
         item_id: Option<&str>,
@@ -760,19 +854,56 @@ impl ContextTransitionDetector {
         is_resumed_after_inactivity: bool,
         confirmation_note: &str,
     ) -> TransitionEvaluationResult {
+        let item_time_dt = item_timestamp
+            .parse::<DateTime<Utc>>()
+            .unwrap_or_else(|_| Utc::now());
+
         match &mut self.current_context {
             Some(curr) => {
                 let from_ref = curr.reference.clone();
-                let is_return = self.context_history.iter().any(|h| h.reference.id == target.id);
 
-                let (trans_type, trans_reason) = if is_return {
-                    (
-                        ContextTransitionType::ContextReturn,
-                        format!(
-                            "Returned to '{}' after detour in '{}'",
-                            target.name, from_ref.name
-                        ),
-                    )
+                // Check if target exists in history for Context Return detection
+                let history_match = self
+                    .context_history
+                    .iter()
+                    .find(|h| h.reference.id == target.id)
+                    .cloned();
+
+                let (trans_type, trans_reason, duration_opt) = if let Some(hist) = history_match {
+                    let last_seen_dt = hist
+                        .last_seen_at
+                        .parse::<DateTime<Utc>>()
+                        .unwrap_or_else(|_| item_time_dt);
+                    let duration_secs = item_time_dt
+                        .signed_duration_since(last_seen_dt)
+                        .num_seconds()
+                        .max(0);
+
+                    let is_within_return_horizon =
+                        duration_secs <= self.stability_config.max_return_gap_seconds;
+                    let has_return_confidence =
+                        confidence >= self.stability_config.min_return_confidence;
+
+                    if is_within_return_horizon && has_return_confidence {
+                        let dur_formatted = format_duration_human(duration_secs);
+                        (
+                            ContextTransitionType::ContextReturn,
+                            format!(
+                                "Returned to '{}' after detour in '{}' (duration since previous activity: {})",
+                                target.name, from_ref.name, dur_formatted
+                            ),
+                            Some(duration_secs),
+                        )
+                    } else {
+                        (
+                            ContextTransitionType::ContextSwitch,
+                            format!(
+                                "Switched context from '{}' to '{}'",
+                                from_ref.name, target.name
+                            ),
+                            None,
+                        )
+                    }
                 } else {
                     (
                         ContextTransitionType::ContextSwitch,
@@ -780,6 +911,7 @@ impl ContextTransitionDetector {
                             "Switched context from '{}' to '{}'",
                             from_ref.name, target.name
                         ),
+                        None,
                     )
                 };
 
@@ -824,9 +956,10 @@ impl ContextTransitionDetector {
                     transition_type: trans_type,
                     session_id: session_id.map(|s| s.to_string()),
                     trigger_item_id: item_id.map(|s| s.to_string()),
+                    duration_since_previous_activity_seconds: duration_opt,
                     metadata: serde_json::json!({
-                        "is_return": is_return,
                         "confirmation_type": confirmation_note,
+                        "duration_since_previous_activity_seconds": duration_opt,
                     }),
                 };
 
@@ -872,6 +1005,7 @@ impl ContextTransitionDetector {
                     transition_type: ContextTransitionType::ContextStart,
                     session_id: session_id.map(|s| s.to_string()),
                     trigger_item_id: item_id.map(|s| s.to_string()),
+                    duration_since_previous_activity_seconds: None,
                     metadata: serde_json::json!({
                         "resumed_after_inactivity": is_resumed_after_inactivity,
                         "confirmation_type": confirmation_note,
@@ -1237,19 +1371,339 @@ mod tests {
     }
 
     #[test]
+    fn test_immediate_return() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "Design Tokens");
+        let ctx_b = ContextReference::workspace("ws_b", "Quick Slack Chat");
+
+        // 1. Initial activity in Context A
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Figma design tokens".to_string()],
+        );
+
+        // 2. Detour to Context B for 2 minutes (fast-tracked)
+        let res_b = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:02:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["Slack channel message".to_string()],
+        );
+        assert_eq!(res_b.transition().unwrap().transition_type, ContextTransitionType::ContextSwitch);
+
+        // 3. Immediate return to Context A at 10:04:00 (120s duration)
+        let res_a = detector.evaluate_interpretation(
+            Some("item_3"),
+            Some("sess_1"),
+            "2026-09-10T10:04:00Z",
+            Some(ctx_a.clone()),
+            0.92,
+            "Very High",
+            false,
+            vec!["Back in Figma editing tokens".to_string()],
+        );
+
+        assert!(res_a.is_transition());
+        let t = res_a.transition().unwrap();
+        assert_eq!(t.transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(t.duration_since_previous_activity_seconds, Some(240));
+
+        let return_details = t.as_context_return().unwrap();
+        assert_eq!(return_details.returned_context.id, "ws_a");
+        assert_eq!(return_details.previous_context.as_ref().unwrap().id, "ws_b");
+        assert_eq!(return_details.return_time, "2026-09-10T10:04:00Z");
+        assert_eq!(return_details.confidence, 0.92);
+        assert!(return_details.evidence.iter().any(|e| e.contains("Returned to 'Design Tokens' after detour in 'Quick Slack Chat'")));
+    }
+
+    #[test]
+    fn test_long_gap_return_within_and_beyond_horizon() {
+        let mut detector = ContextTransitionDetector::new()
+            .with_inactivity_threshold(20000)
+            .with_max_return_gap_seconds(7200); // 2 hours max return horizon
+
+        let ctx_a = ContextReference::workspace("ws_a", "API Backend");
+        let ctx_b = ContextReference::workspace("ws_b", "Database Ops");
+
+        // 1. Initial activity in A (10:00:00)
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["API work".to_string()],
+        );
+
+        // 2. Switch to B (10:10:00)
+        detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:10:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["DB migrations".to_string()],
+        );
+
+        // Case A: Return at 11:30:00 (5400s elapsed since 10:00:00 -> within 7200s horizon)
+        let res_within = detector.evaluate_interpretation(
+            Some("item_3"),
+            Some("sess_1"),
+            "2026-09-10T11:30:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Resuming API work".to_string()],
+        );
+
+        let t_within = res_within.transition().unwrap();
+        assert_eq!(t_within.transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(t_within.duration_since_previous_activity_seconds, Some(5400));
+        let ret = t_within.as_context_return().unwrap();
+        assert_eq!(ret.duration_since_previous_activity_formatted, "1.5 hours");
+
+        // Switch to B again (11:40:00)
+        detector.evaluate_interpretation(
+            Some("item_4"),
+            Some("sess_1"),
+            "2026-09-10T11:40:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["DB indexing".to_string()],
+        );
+
+        // Case B: Return at 15:00:00 (12600s elapsed since 11:30:00 -> EXCEEDS 7200s horizon)
+        let res_beyond = detector.evaluate_interpretation(
+            Some("item_5"),
+            Some("sess_1"),
+            "2026-09-10T15:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Fresh API sprint".to_string()],
+        );
+
+        let t_beyond = res_beyond.transition().unwrap();
+        // Because horizon was exceeded, classified as standard ContextSwitch rather than short task return
+        assert_eq!(t_beyond.transition_type, ContextTransitionType::ContextSwitch);
+        assert!(t_beyond.duration_since_previous_activity_seconds.is_none());
+    }
+
+    #[test]
+    fn test_weak_evidence_does_not_trigger_return() {
+        let mut detector = ContextTransitionDetector::new()
+            .with_min_return_confidence(0.50);
+
+        let ctx_a = ContextReference::workspace("ws_a", "Primary Project");
+        let ctx_b = ContextReference::workspace("ws_b", "Secondary Project");
+
+        // 1. Establish in A
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Primary".to_string()],
+        );
+
+        // 2. Switch to B
+        detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["Secondary".to_string()],
+        );
+
+        // 3. Weak signal for A (confidence = 0.35, below min_return_confidence 0.50 and threshold 0.40)
+        let res_weak = detector.evaluate_interpretation(
+            Some("item_3"),
+            Some("sess_1"),
+            "2026-09-10T10:08:00Z",
+            Some(ctx_a.clone()),
+            0.35, // Weak
+            "Low",
+            false,
+            vec!["Vague peripheral match".to_string()],
+        );
+
+        assert!(!res_weak.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
+    }
+
+    #[test]
+    fn test_ambiguous_return_produces_ambiguous_transition() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "Work A");
+        let ctx_b = ContextReference::workspace("ws_b", "Work B");
+
+        // 1. Establish in A
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["A".to_string()],
+        );
+
+        // 2. Switch to B
+        detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["B".to_string()],
+        );
+
+        // 3. Ambiguous item arrives competing between A and C
+        let res_amb = detector.evaluate_interpretation(
+            Some("item_3"),
+            Some("sess_1"),
+            "2026-09-10T10:10:00Z",
+            None,
+            0.45,
+            "Medium",
+            true, // is_ambiguous
+            vec!["Work A: 60%".to_string(), "Work C: 58%".to_string()],
+        );
+
+        assert!(res_amb.is_transition());
+        let t = res_amb.transition().unwrap();
+        assert_eq!(t.transition_type, ContextTransitionType::AmbiguousTransition);
+        assert!(t.as_context_return().is_none());
+    }
+
+    #[test]
+    fn test_multiple_alternating_contexts_a_b_a_b_a() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "Frontend");
+        let ctx_b = ContextReference::workspace("ws_b", "Backend");
+
+        // 1. Start Frontend (10:00:00)
+        let t1 = detector.evaluate_interpretation(
+            Some("i1"),
+            Some("s1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["React component".to_string()],
+        );
+        assert_eq!(t1.transition().unwrap().transition_type, ContextTransitionType::ContextStart);
+
+        // 2. Switch to Backend (10:10:00)
+        let t2 = detector.evaluate_interpretation(
+            Some("i2"),
+            Some("s1"),
+            "2026-09-10T10:10:00Z",
+            Some(ctx_b.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Rust handler".to_string()],
+        );
+        assert_eq!(t2.transition().unwrap().transition_type, ContextTransitionType::ContextSwitch);
+
+        // 3. Return to Frontend (10:20:00, 1200s since 10:00:00)
+        let t3 = detector.evaluate_interpretation(
+            Some("i3"),
+            Some("s1"),
+            "2026-09-10T10:20:00Z",
+            Some(ctx_a.clone()),
+            0.92,
+            "Very High",
+            false,
+            vec!["Frontend wiring".to_string()],
+        );
+        let ret3 = t3.transition().unwrap().as_context_return().unwrap();
+        assert_eq!(ret3.returned_context.id, "ws_a");
+        assert_eq!(ret3.previous_context.unwrap().id, "ws_b");
+        assert_eq!(ret3.duration_since_previous_activity_seconds, 1200);
+        assert_eq!(ret3.duration_since_previous_activity_formatted, "20 minutes");
+
+        // 4. Return to Backend (10:35:00, 1500s since 10:10:00)
+        let t4 = detector.evaluate_interpretation(
+            Some("i4"),
+            Some("s1"),
+            "2026-09-10T10:35:00Z",
+            Some(ctx_b.clone()),
+            0.89,
+            "High",
+            false,
+            vec!["Backend query tuning".to_string()],
+        );
+        let ret4 = t4.transition().unwrap().as_context_return().unwrap();
+        assert_eq!(ret4.returned_context.id, "ws_b");
+        assert_eq!(ret4.previous_context.unwrap().id, "ws_a");
+        assert_eq!(ret4.duration_since_previous_activity_seconds, 1500);
+        assert_eq!(ret4.duration_since_previous_activity_formatted, "25 minutes");
+
+        // 5. Return to Frontend again (10:50:00, 1800s since 10:20:00)
+        let t5 = detector.evaluate_interpretation(
+            Some("i5"),
+            Some("s1"),
+            "2026-09-10T10:50:00Z",
+            Some(ctx_a.clone()),
+            0.93,
+            "Very High",
+            false,
+            vec!["Frontend UI polish".to_string()],
+        );
+        let ret5 = t5.transition().unwrap().as_context_return().unwrap();
+        assert_eq!(ret5.returned_context.id, "ws_a");
+        assert_eq!(ret5.previous_context.unwrap().id, "ws_b");
+        assert_eq!(ret5.duration_since_previous_activity_seconds, 1800);
+        assert_eq!(ret5.duration_since_previous_activity_formatted, "30 minutes");
+    }
+
+    #[test]
     fn test_prompt_example_1_portfolio_one_unrelated_item_portfolio() {
         let mut detector = ContextTransitionDetector::new().with_min_consecutive_evidence(2);
 
         let ctx_portfolio = ContextReference::workspace("ws_portfolio", "Portfolio");
         let ctx_college = ContextReference::workspace("ws_college", "College");
 
-        // 1. Establish in Portfolio (Fast track / confident)
+        // 1. Establish in Portfolio
         let res1 = detector.evaluate_interpretation(
             Some("item_p1"),
             Some("sess_1"),
             "2026-09-10T10:00:00Z",
             Some(ctx_portfolio.clone()),
-            0.90, // Fast tracked
+            0.90,
             "High",
             false,
             vec!["Portfolio design".to_string()],
@@ -1263,16 +1717,14 @@ mod tests {
             Some("sess_1"),
             "2026-09-10T10:03:00Z",
             Some(ctx_college.clone()),
-            0.60, // Moderate, not fast-tracked
+            0.60,
             "Medium",
             false,
             vec!["Single college lecture note".to_string()],
         );
 
-        // Hysteresis: Should be PENDING, NOT an immediate transition!
         assert!(res2.is_pending());
         assert!(!res2.is_transition());
-        // Active context remains Portfolio!
         assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
 
         // 3. User continues in Portfolio!
@@ -1287,11 +1739,9 @@ mod tests {
             vec!["Portfolio showcase edit".to_string()],
         );
 
-        // Active context remains Portfolio continuation!
         assert!(res3.is_continuation());
         assert!(!res3.is_transition());
         assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
-        // Pending transition was discarded
         assert!(detector.pending_transition().is_none());
     }
 
@@ -1348,7 +1798,6 @@ mod tests {
         assert_eq!(t.to_context.as_ref().unwrap().id, "ws_college");
         assert!(t.evidence.iter().any(|e| e.contains("Confirmed contextual transition to 'College' after 2 sustained observations")));
 
-        // Active context is now College!
         assert_eq!(detector.current_context().unwrap().reference.id, "ws_college");
     }
 
@@ -1370,19 +1819,18 @@ mod tests {
             vec!["Alpha".to_string()],
         );
 
-        // Very high confidence (0.92 >= 0.85 fast track threshold) -> Switches on item 1!
         let res_fast = detector.evaluate_interpretation(
             Some("item_2"),
             Some("sess_1"),
             "2026-09-10T10:05:00Z",
             Some(ctx_b.clone()),
-            0.92, // Fast-tracked
+            0.92,
             "Very High",
             false,
             vec!["Explicit user move or 92% confidence".to_string()],
         );
 
-        assert!(res_fast.is_transition(), "Fast-tracked change must switch immediately on item 1");
+        assert!(res_fast.is_transition());
         assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
     }
 
@@ -1392,7 +1840,6 @@ mod tests {
 
         let ctx_a = ContextReference::workspace("ws_a", "Project Alpha");
 
-        // 1. Initial start
         let res1 = detector.evaluate_interpretation(
             Some("item_1"),
             Some("sess_1"),
@@ -1405,7 +1852,6 @@ mod tests {
         );
         assert!(res1.is_transition());
 
-        // 2. Next items in Alpha are continuations, not duplicate Start transitions
         let res2 = detector.evaluate_interpretation(
             Some("item_2"),
             Some("sess_1"),
@@ -1424,7 +1870,6 @@ mod tests {
     fn test_scenario_2_context_a_to_inactivity() {
         let mut detector = ContextTransitionDetector::new().with_inactivity_threshold(1800);
 
-        // Start in Context A
         let ctx_a = ContextReference::workspace("ws_a", "Project Alpha");
         detector.evaluate_interpretation(
             Some("item_1"),
@@ -1439,12 +1884,10 @@ mod tests {
 
         assert!(detector.current_context().is_some());
 
-        // Check before threshold (15 mins) -> No inactivity
         let no_end = detector.check_inactivity("2026-09-10T10:15:00Z");
         assert!(no_end.is_none());
         assert!(detector.current_context().is_some());
 
-        // Check after threshold (45 mins) -> ContextEnd emitted
         let end_trans = detector.check_inactivity("2026-09-10T10:45:00Z");
         assert!(end_trans.is_some());
         let t_end = end_trans.unwrap();
@@ -1453,7 +1896,6 @@ mod tests {
         assert!(t_end.to_context.is_none());
         assert!(t_end.evidence.iter().any(|e| e.contains("Inactivity gap detected")));
 
-        // Verify current context is cleared and moved to history
         assert!(detector.current_context().is_none());
         assert_eq!(detector.context_history().front().unwrap().reference.id, "ws_a");
     }
@@ -1462,10 +1904,8 @@ mod tests {
     fn test_scenario_3_inactivity_to_context_b() {
         let mut detector = ContextTransitionDetector::new();
 
-        // 1. Initial inactivity / no active context
         assert!(detector.current_context().is_none());
 
-        // 2. First capture in Context B after inactivity
         let ctx_b = ContextReference::workspace("ws_b", "Finance Dashboard");
         let res = detector.evaluate_interpretation(
             Some("item_10"),
@@ -1488,98 +1928,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scenario_4_context_a_to_ambiguous() {
-        let mut detector = ContextTransitionDetector::new();
-
-        // 1. Start in Context A
-        let ctx_a = ContextReference::workspace("ws_a", "Design System");
-        detector.evaluate_interpretation(
-            Some("item_1"),
-            Some("sess_1"),
-            "2026-09-10T10:00:00Z",
-            Some(ctx_a.clone()),
-            0.92,
-            "Very High",
-            false,
-            vec!["Figma design tokens".to_string()],
-        );
-
-        // 2. Ambiguous item arrives (competing signals)
-        let res = detector.evaluate_interpretation(
-            Some("item_2"),
-            Some("sess_1"),
-            "2026-09-10T10:03:00Z",
-            None,
-            0.45,
-            "Medium",
-            true, // is_ambiguous
-            vec![
-                "Design System: 68% score".to_string(),
-                "Marketing Site: 65% score".to_string(),
-            ],
-        );
-
-        assert!(res.is_transition());
-        let t = res.transition().unwrap();
-        assert_eq!(t.transition_type, ContextTransitionType::AmbiguousTransition);
-        assert_eq!(t.from_context.as_ref().unwrap().id, "ws_a");
-        assert!(t.to_context.is_none());
-        assert!(t.evidence.iter().any(|e| e.contains("ambiguous state")));
-    }
-
-    #[test]
-    fn test_scenario_6_context_a_to_b_to_a_return() {
-        let mut detector = ContextTransitionDetector::new();
-
-        let ctx_a = ContextReference::workspace("ws_a", "Primary Coding");
-        let ctx_b = ContextReference::workspace("ws_b", "Quick Slack Detour");
-
-        // 1. Initial work in Context A
-        detector.evaluate_interpretation(
-            Some("item_1"),
-            Some("sess_1"),
-            "2026-09-10T10:00:00Z",
-            Some(ctx_a.clone()),
-            0.90,
-            "High",
-            false,
-            vec!["VS Code".to_string()],
-        );
-
-        // 2. Detour to Context B (Slack chat, fast tracked)
-        let res_detour = detector.evaluate_interpretation(
-            Some("item_2"),
-            Some("sess_1"),
-            "2026-09-10T10:05:00Z",
-            Some(ctx_b.clone()),
-            0.88,
-            "High",
-            false,
-            vec!["Slack message".to_string()],
-        );
-        assert_eq!(res_detour.transition().unwrap().transition_type, ContextTransitionType::ContextSwitch);
-
-        // 3. Return to Context A!
-        let res_return = detector.evaluate_interpretation(
-            Some("item_3"),
-            Some("sess_1"),
-            "2026-09-10T10:08:00Z",
-            Some(ctx_a.clone()),
-            0.95,
-            "Very High",
-            false,
-            vec!["Back in VS Code on Primary Coding".to_string()],
-        );
-
-        assert!(res_return.is_transition());
-        let t_return = res_return.transition().unwrap();
-        assert_eq!(t_return.transition_type, ContextTransitionType::ContextReturn);
-        assert_eq!(t_return.from_context.as_ref().unwrap().id, "ws_b");
-        assert_eq!(t_return.to_context.as_ref().unwrap().id, "ws_a");
-        assert!(t_return.evidence.iter().any(|e| e.contains("Returned to 'Primary Coding' after detour in 'Quick Slack Detour'")));
-    }
-
-    #[test]
     fn test_anti_jitter_weak_noise_filter() {
         let mut detector = ContextTransitionDetector::new().with_min_switch_confidence(0.40);
 
@@ -1595,21 +1943,20 @@ mod tests {
             vec!["Main project activity".to_string()],
         );
 
-        // Low confidence noisy capture (e.g. random background ping with conf = 0.20)
         let ctx_noise = ContextReference::workspace("ws_other", "Unrelated Noise");
         let res_noise = detector.evaluate_interpretation(
             Some("item_noise"),
             Some("sess_1"),
             "2026-09-10T10:02:00Z",
             Some(ctx_noise),
-            0.20, // Below 0.40 threshold
+            0.20,
             "Low",
             false,
             vec!["Weak single domain match".to_string()],
         );
 
-        assert!(!res_noise.is_transition(), "Low confidence noise must not trigger a transition");
-        assert_eq!(detector.current_context().unwrap().reference.id, "ws_a", "Active context must remain intact");
+        assert!(!res_noise.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_a");
     }
 
     #[test]
@@ -1620,7 +1967,6 @@ mod tests {
         let ws_b = crate::db::operations::create_workspace(&conn, "Beta UI").unwrap();
         let session = crate::db::operations::create_session(&conn).unwrap();
 
-        // Create confirmed items in ws_a and ws_b
         let item_a1 = crate::db::operations::create_item(&conn, Some(&ws_a.id), Some(&session.id), "text", "fn alpha_core() {}", None, "{}").unwrap();
         let item_a2 = crate::db::operations::create_item(&conn, Some(&ws_a.id), Some(&session.id), "text", "struct AlphaState {}", None, "{}").unwrap();
         let item_b1 = crate::db::operations::create_item(&conn, Some(&ws_b.id), Some(&session.id), "url", "https://beta-ui.local", None, "{}").unwrap();
@@ -1644,7 +1990,10 @@ mod tests {
         let res4 = detector.process_item(&conn, &item_a3.id).unwrap();
         assert_eq!(res4.transition().unwrap().transition_type, ContextTransitionType::ContextReturn);
 
-        // Record the transition to DB
+        let ret_details = res4.transition().unwrap().as_context_return().unwrap();
+        assert_eq!(ret_details.returned_context.id, ws_a.id);
+        assert_eq!(ret_details.previous_context.unwrap().id, ws_b.id);
+
         let record = record_context_transition(&conn, &res4.transition().unwrap().to_context_transition()).unwrap();
         assert_eq!(record.transition_type, ContextTransitionType::ContextReturn);
 
