@@ -14,6 +14,14 @@ import {
   Search,
   Activity,
   RefreshCw,
+  CornerDownRight,
+  RotateCcw,
+  PlayCircle,
+  PauseCircle,
+  HelpCircle,
+  ShieldCheck,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { db, ContextTimeline, TimelineEvent, TimelineSession } from '../../services/db';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -23,7 +31,7 @@ export function ContextTimelineDrawer() {
   const [timeline, setTimeline] = useState<ContextTimeline | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeFilter, setActiveFilter] = useState<'all' | 'sessions' | 'items' | 'actions'>('all');
+  const [activeFilter, setActiveFilter] = useState<'all' | 'transitions' | 'items' | 'sessions' | 'actions'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
   const targetWorkspace = workspaces.find((w) => w.id === timelineWorkspaceId);
@@ -66,6 +74,7 @@ export function ContextTimelineDrawer() {
 
     return timeline.chronological_activity.filter((ev) => {
       // Type filter
+      if (activeFilter === 'transitions' && ev.event_type !== 'context_transition') return false;
       if (activeFilter === 'items' && ev.event_type !== 'item_captured') return false;
       if (activeFilter === 'sessions' && !ev.event_type.startsWith('session_')) return false;
       if (activeFilter === 'actions' && ev.event_type !== 'user_action') return false;
@@ -165,20 +174,21 @@ export function ContextTimelineDrawer() {
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder="Search contextual items or actions..."
+              placeholder="Search activity, transitions, or actions..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-slate-50 hover:bg-slate-100/70 focus:bg-white border border-slate-200/70 rounded-md py-1.5 pl-8 pr-3 text-[12px] text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
             />
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             {(
               [
                 { id: 'all', label: 'All Activity' },
+                { id: 'transitions', label: 'Transitions' },
+                { id: 'items', label: 'Observed Items' },
                 { id: 'sessions', label: 'Sessions' },
-                { id: 'items', label: 'Items' },
-                { id: 'actions', label: 'User Actions' },
+                { id: 'actions', label: 'Actions' },
               ] as const
             ).map((filter) => (
               <button
@@ -220,7 +230,7 @@ export function ContextTimelineDrawer() {
               <p className="text-xs text-slate-400 max-w-xs mt-1">
                 {searchQuery
                   ? 'No activity matches your search filter.'
-                  : 'Items and sessions associated with this workspace will appear chronologically here.'}
+                  : 'Items, sessions, and contextual transitions associated with this workspace will appear chronologically here.'}
               </p>
             </div>
           )}
@@ -275,7 +285,7 @@ export function ContextTimelineDrawer() {
 }
 
 // ---------------------------------------------------------------------------
-// Single Event Row
+// Single Event Row Dispatcher
 // ---------------------------------------------------------------------------
 
 function TimelineEventRow({
@@ -285,103 +295,315 @@ function TimelineEventRow({
   event: TimelineEvent;
   session?: TimelineSession;
 }) {
-  const timeFormatted = formatTime(event.timestamp);
+  if (event.event_type === 'context_transition') {
+    return <TimelineTransitionRow event={event} />;
+  }
 
   if (event.event_type === 'item_captured') {
-    const itemType = (event.metadata?.item_type as string) || 'text';
-    const appName = event.metadata?.app_name as string | undefined;
-    const domain = event.metadata?.domain as string | undefined;
-    const membershipType = event.metadata?.membership_type as string | undefined;
-
-    return (
-      <div className="relative group flex items-start gap-3 bg-white p-2.5 rounded-lg border border-slate-100 hover:border-slate-200 shadow-2xs hover:shadow-xs transition-all">
-        {/* Node point on timeline */}
-        <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-indigo-500 ring-4 ring-white" />
-
-        <div className="w-7 h-7 rounded-md bg-indigo-50/70 border border-indigo-100/60 flex items-center justify-center text-indigo-600 shrink-0 mt-0.5">
-          <ItemTypeIcon type={itemType} />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between gap-2">
-            <h4 className="text-[12px] font-medium text-slate-800 truncate">{event.title}</h4>
-            <span className="text-[10px] text-slate-400 shrink-0 font-medium">{timeFormatted}</span>
-          </div>
-
-          <p className="text-[11px] text-slate-500 truncate mt-0.5">{event.description}</p>
-
-          <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-            {(appName || domain) && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-medium bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
-                <Globe size={10} className="text-slate-400" />
-                <span>{appName && domain ? `${appName} (${domain})` : appName || domain}</span>
-              </span>
-            )}
-
-            {membershipType && (
-              <span
-                className={`text-[9px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                  membershipType === 'confirmed'
-                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/50'
-                    : 'bg-amber-50 text-amber-700 border border-amber-200/50'
-                }`}
-              >
-                {membershipType}
-              </span>
-            )}
-
-            {session && (
-              <span className="text-[10px] text-slate-400">
-                • in session #{session.id.slice(0, 6)}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-    );
+    return <TimelineObservedActivityRow event={event} session={session} />;
   }
 
   if (event.event_type.startsWith('session_')) {
-    return (
-      <div className="relative group flex items-start gap-3 bg-gradient-to-r from-blue-50/40 via-indigo-50/30 to-white p-2.5 rounded-lg border border-blue-100/60 transition-all">
-        <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-blue-500 ring-4 ring-white" />
-
-        <div className="w-7 h-7 rounded-md bg-blue-100/60 border border-blue-200/60 flex items-center justify-center text-blue-700 shrink-0 mt-0.5">
-          <Layers size={13} />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between gap-2">
-            <h4 className="text-[12px] font-semibold text-blue-950 truncate">{event.title}</h4>
-            <span className="text-[10px] text-blue-500 shrink-0 font-medium">{timeFormatted}</span>
-          </div>
-          <p className="text-[11px] text-blue-800/80 mt-0.5">{event.description}</p>
-        </div>
-      </div>
-    );
+    return <TimelineSessionRow event={event} />;
   }
 
   if (event.event_type === 'user_action') {
-    return (
-      <div className="relative group flex items-start gap-3 bg-slate-50/80 p-2.5 rounded-lg border border-slate-200/60 shadow-2xs transition-all">
-        <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-slate-500 ring-4 ring-white" />
-
-        <div className="w-7 h-7 rounded-md bg-slate-200/70 border border-slate-300/60 flex items-center justify-center text-slate-700 shrink-0 mt-0.5">
-          <FolderInput size={13} />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between gap-2">
-            <h4 className="text-[12px] font-medium text-slate-900 truncate">{event.title}</h4>
-            <span className="text-[10px] text-slate-400 shrink-0 font-medium">{timeFormatted}</span>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">{event.description}</p>
-        </div>
-      </div>
-    );
+    return <TimelineUserActionRow event={event} />;
   }
 
-  // Relationship formed or default
+  return <TimelineRelationshipRow event={event} />;
+}
+
+// ---------------------------------------------------------------------------
+// 1. Inferred Transition Row
+// ---------------------------------------------------------------------------
+
+function TimelineTransitionRow({ event }: { event: TimelineEvent }) {
+  const [showEvidence, setShowEvidence] = useState(false);
+  const timeFormatted = formatTime(event.timestamp);
+  const transType = (event.metadata?.transition_type as string) || 'context_switch';
+  const confidence = typeof event.metadata?.confidence === 'number' ? event.metadata.confidence : 0.9;
+  const toContextName = (event.metadata?.to_context_name as string) || (event.metadata?.inferred_context as any)?.name;
+  const evidence = Array.isArray(event.metadata?.evidence) ? (event.metadata.evidence as string[]) : [];
+  const durationSince = event.metadata?.duration_since_previous_activity_formatted as string | undefined;
+
+  const targetColor = getContextColor(toContextName);
+
+  const isReturn = transType === 'context_return';
+  const isSwitch = transType === 'context_switch';
+  const isStart = transType === 'context_start';
+  const isEnd = transType === 'context_end';
+
+  const confidencePct = Math.round(confidence * 100);
+
+  return (
+    <div className="relative group my-2 transition-all">
+      {/* Node point on timeline */}
+      <div
+        className={`absolute -left-[27px] top-3.5 w-2.5 h-2.5 rounded-full ring-4 ring-white shadow-2xs ${
+          isReturn
+            ? 'bg-amber-500'
+            : isSwitch
+            ? 'bg-indigo-600'
+            : isStart
+            ? 'bg-emerald-500'
+            : isEnd
+            ? 'bg-slate-400'
+            : 'bg-purple-500'
+        }`}
+      />
+
+      <div
+        className={`p-3 rounded-lg border transition-all ${
+          isReturn
+            ? 'bg-gradient-to-r from-amber-50/70 via-orange-50/40 to-white border-amber-200/80 shadow-2xs'
+            : isSwitch
+            ? 'bg-gradient-to-r from-indigo-50/70 via-blue-50/40 to-white border-indigo-200/80 shadow-2xs'
+            : isStart
+            ? 'bg-gradient-to-r from-emerald-50/70 via-teal-50/40 to-white border-emerald-200/80 shadow-2xs'
+            : isEnd
+            ? 'bg-slate-50 border-slate-200/70'
+            : 'bg-purple-50/60 border-purple-200/70'
+        }`}
+      >
+        <div className="flex items-start gap-2.5">
+          <div
+            className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 mt-0.5 shadow-2xs ${
+              isReturn
+                ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                : isSwitch
+                ? 'bg-indigo-100 text-indigo-700 border border-indigo-200'
+                : isStart
+                ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                : isEnd
+                ? 'bg-slate-200 text-slate-700 border border-slate-300'
+                : 'bg-purple-100 text-purple-700 border border-purple-200'
+            }`}
+          >
+            {isReturn ? (
+              <RotateCcw size={13} />
+            ) : isSwitch ? (
+              <CornerDownRight size={13} />
+            ) : isStart ? (
+              <PlayCircle size={13} />
+            ) : isEnd ? (
+              <PauseCircle size={13} />
+            ) : (
+              <HelpCircle size={13} />
+            )}
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[12px] font-semibold text-slate-900 tracking-tight flex items-center gap-1">
+                  <span>{event.title}</span>
+                </span>
+                <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/80 border border-slate-200/70 text-slate-600 shadow-2xs">
+                  Inferred Transition
+                </span>
+              </div>
+              <span className="text-[10px] text-slate-400 shrink-0 font-mono font-medium">{timeFormatted}</span>
+            </div>
+
+            <p className="text-[11px] text-slate-500 truncate mt-0.5">{event.description}</p>
+
+            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+              <span
+                className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border shadow-2xs ${
+                  confidencePct >= 85
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200/70'
+                    : confidencePct >= 70
+                    ? 'bg-blue-50 text-blue-700 border-blue-200/70'
+                    : 'bg-amber-50 text-amber-700 border-amber-200/70'
+                }`}
+              >
+                <ShieldCheck size={10} />
+                <span>{confidencePct}% confidence</span>
+              </span>
+
+              {toContextName && (
+                <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded border ${targetColor.badge}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${targetColor.dot}`} />
+                  <span>{toContextName}</span>
+                </span>
+              )}
+
+              {durationSince && (
+                <span className="text-[10px] text-amber-700 font-medium">
+                  • after {durationSince}
+                </span>
+              )}
+
+              {evidence.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowEvidence(!showEvidence)}
+                  className="inline-flex items-center gap-1 text-[10px] font-medium text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer ml-auto"
+                >
+                  <span>{showEvidence ? 'Hide' : 'Evidence'} ({evidence.length})</span>
+                  {showEvidence ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                </button>
+              )}
+            </div>
+
+            {/* Evidence Drawer */}
+            {showEvidence && evidence.length > 0 && (
+              <div className="mt-2 p-2 bg-white/95 backdrop-blur-xs rounded-md border border-slate-200/80 space-y-1 animate-in fade-in duration-150 shadow-2xs">
+                <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Inference Signals</p>
+                <ul className="space-y-0.5">
+                  {evidence.map((sig, i) => (
+                    <li key={i} className="text-[11px] text-slate-700 flex items-start gap-1.5">
+                      <span className="text-indigo-500 shrink-0 font-bold">•</span>
+                      <span>{sig}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 2. Observed Activity Row (with Inferred Context Pill)
+// ---------------------------------------------------------------------------
+
+function TimelineObservedActivityRow({
+  event,
+  session,
+}: {
+  event: TimelineEvent;
+  session?: TimelineSession;
+}) {
+  const timeFormatted = formatTime(event.timestamp);
+  const itemType = (event.metadata?.item_type as string) || 'text';
+  const appName = event.metadata?.app_name as string | undefined;
+  const domain = event.metadata?.domain as string | undefined;
+  const membershipType = event.metadata?.membership_type as string | undefined;
+  const inferredContext = event.metadata?.inferred_context as { id: string; name: string } | undefined;
+
+  const ctxColor = getContextColor(inferredContext?.name);
+
+  return (
+    <div className="relative group flex items-start gap-3 bg-white p-3 rounded-lg border border-slate-100 hover:border-slate-200 shadow-2xs hover:shadow-xs transition-all">
+      {/* Node point on timeline */}
+      <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-indigo-500 ring-4 ring-white" />
+
+      <div className="w-7 h-7 rounded-md bg-indigo-50/70 border border-indigo-100/60 flex items-center justify-center text-indigo-600 shrink-0 mt-0.5">
+        <ItemTypeIcon type={itemType} />
+      </div>
+
+      <div className="flex-1 min-w-0">
+        {/* Context & Kind Header */}
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {inferredContext && (
+              <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-md border shadow-2xs ${ctxColor.badge}`}>
+                <span className={`w-2 h-2 rounded-full ${ctxColor.dot}`} />
+                <span>{inferredContext.name}</span>
+              </span>
+            )}
+            <span className="text-[9px] font-medium uppercase tracking-wider text-slate-400 bg-slate-50 border border-slate-200/50 px-1.5 py-0.5 rounded">
+              Observed Activity
+            </span>
+          </div>
+          <span className="text-[10px] text-slate-400 shrink-0 font-mono font-medium">{timeFormatted}</span>
+        </div>
+
+        <h4 className="text-[12px] font-medium text-slate-900 truncate">{event.title}</h4>
+        <p className="text-[11px] text-slate-500 truncate mt-0.5">{event.description}</p>
+
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+          {(appName || domain) && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
+              <Globe size={10} className="text-slate-400" />
+              <span>{appName && domain ? `${appName} (${domain})` : appName || domain}</span>
+            </span>
+          )}
+
+          {membershipType && (
+            <span
+              className={`text-[9px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                membershipType === 'confirmed'
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/50'
+                  : 'bg-amber-50 text-amber-700 border border-amber-200/50'
+              }`}
+            >
+              {membershipType}
+            </span>
+          )}
+
+          {session && (
+            <span className="text-[10px] text-slate-400">
+              • in session #{session.id.slice(0, 6)}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Session Row
+// ---------------------------------------------------------------------------
+
+function TimelineSessionRow({ event }: { event: TimelineEvent }) {
+  const timeFormatted = formatTime(event.timestamp);
+  return (
+    <div className="relative group flex items-start gap-3 bg-gradient-to-r from-blue-50/40 via-indigo-50/30 to-white p-2.5 rounded-lg border border-blue-100/60 transition-all">
+      <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-blue-500 ring-4 ring-white" />
+
+      <div className="w-7 h-7 rounded-md bg-blue-100/60 border border-blue-200/60 flex items-center justify-center text-blue-700 shrink-0 mt-0.5">
+        <Layers size={13} />
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2">
+          <h4 className="text-[12px] font-semibold text-blue-950 truncate">{event.title}</h4>
+          <span className="text-[10px] text-blue-500 shrink-0 font-medium">{timeFormatted}</span>
+        </div>
+        <p className="text-[11px] text-blue-800/80 mt-0.5">{event.description}</p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 4. User Action Row
+// ---------------------------------------------------------------------------
+
+function TimelineUserActionRow({ event }: { event: TimelineEvent }) {
+  const timeFormatted = formatTime(event.timestamp);
+  return (
+    <div className="relative group flex items-start gap-3 bg-slate-50/80 p-2.5 rounded-lg border border-slate-200/60 shadow-2xs transition-all">
+      <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-slate-500 ring-4 ring-white" />
+
+      <div className="w-7 h-7 rounded-md bg-slate-200/70 border border-slate-300/60 flex items-center justify-center text-slate-700 shrink-0 mt-0.5">
+        <FolderInput size={13} />
+      </div>
+
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline justify-between gap-2">
+          <h4 className="text-[12px] font-medium text-slate-900 truncate">{event.title}</h4>
+          <span className="text-[10px] text-slate-400 shrink-0 font-medium">{timeFormatted}</span>
+        </div>
+        <p className="text-[11px] text-slate-500 mt-0.5">{event.description}</p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Relationship Row
+// ---------------------------------------------------------------------------
+
+function TimelineRelationshipRow({ event }: { event: TimelineEvent }) {
+  const timeFormatted = formatTime(event.timestamp);
   return (
     <div className="relative group flex items-start gap-3 bg-white p-2.5 rounded-lg border border-slate-100 transition-all">
       <div className="absolute -left-[27px] top-3.5 w-2 h-2 rounded-full bg-purple-500 ring-4 ring-white" />
@@ -417,6 +639,50 @@ function ItemTypeIcon({ type }: { type: string }) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function getContextColor(name?: string) {
+  if (!name) {
+    return {
+      dot: 'bg-slate-400',
+      badge: 'bg-slate-100 text-slate-700 border-slate-200/60',
+      icon: 'text-slate-600',
+    };
+  }
+  const lower = name.toLowerCase();
+  if (lower.includes('college') || lower.includes('study') || lower.includes('school') || lower.includes('class')) {
+    return {
+      dot: 'bg-emerald-500 ring-2 ring-emerald-200',
+      badge: 'bg-emerald-50 text-emerald-800 border-emerald-200/80',
+      icon: 'text-emerald-600',
+    };
+  }
+  if (lower.includes('portfolio') || lower.includes('dev') || lower.includes('code') || lower.includes('rust')) {
+    return {
+      dot: 'bg-blue-500 ring-2 ring-blue-200',
+      badge: 'bg-blue-50 text-blue-800 border-blue-200/80',
+      icon: 'text-blue-600',
+    };
+  }
+  if (lower.includes('client') || lower.includes('design') || lower.includes('figma') || lower.includes('website')) {
+    return {
+      dot: 'bg-purple-500 ring-2 ring-purple-200',
+      badge: 'bg-purple-50 text-purple-800 border-purple-200/80',
+      icon: 'text-purple-600',
+    };
+  }
+  if (lower.includes('marketing') || lower.includes('personal') || lower.includes('sprint')) {
+    return {
+      dot: 'bg-amber-500 ring-2 ring-amber-200',
+      badge: 'bg-amber-50 text-amber-800 border-amber-200/80',
+      icon: 'text-amber-600',
+    };
+  }
+  return {
+    dot: 'bg-indigo-500 ring-2 ring-indigo-200',
+    badge: 'bg-indigo-50 text-indigo-800 border-indigo-200/80',
+    icon: 'text-indigo-600',
+  };
+}
 
 function formatTime(iso: string): string {
   try {
