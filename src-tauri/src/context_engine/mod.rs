@@ -18,6 +18,7 @@ pub mod diversity;
 pub mod contradiction;
 pub mod competition;
 pub mod calibration;
+pub mod debugger;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
@@ -41,6 +42,12 @@ pub use competition::{
 };
 pub use calibration::{
     CalibrationInput, CalibrationResult, ConfidenceBand, ConfidenceCalibrator,
+};
+pub use debugger::{
+    debug_item_context_confidence, CandidateConfidenceDebugItem, CompetitionDebugInfo,
+    ContradictionDebugItem, ContextConfidenceDebugTrace, EvidenceDiversityDebugInfo,
+    FinalResultDebugInfo, NormalizedEvidenceDebugItem, RawEvidenceDebugItem,
+    ScoreContributionDebugItem,
 };
 pub use crate::db::models::{ContextInterpretationKind, NoContextReason};
 

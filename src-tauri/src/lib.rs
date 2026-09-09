@@ -215,6 +215,15 @@ fn evaluate_item_context(
 }
 
 #[tauri::command]
+fn debug_item_context_confidence(
+    state: State<'_, AppState>,
+    item_id: &str,
+) -> Result<crate::context_engine::debugger::ContextConfidenceDebugTrace, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::debugger::debug_item_context_confidence(&conn, item_id)
+}
+
+#[tauri::command]
 fn get_strongest_relationships(
     item_id: &str,
     limit: usize,
@@ -1091,6 +1100,7 @@ pub fn run() {
             list_context_signals,
             score_item,
             evaluate_item_context,
+            debug_item_context_confidence,
             get_strongest_relationships,
             get_item_semantic_status,
             get_item_embedding_metadata,

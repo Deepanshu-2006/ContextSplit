@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit, AlertTriangle, Sparkles, HelpCircle, WifiOff } from "lucide-react";
-import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata, UnifiedContextInterpretation, ContextReasoningResult } from "../../services/db";
+import { X, Server, Clock, AppWindow, MousePointerClick, Globe, CheckCircle, Network, Search, BrainCircuit, AlertTriangle, Sparkles, HelpCircle, WifiOff, Terminal, LayoutDashboard } from "lucide-react";
+import { db, ContextSignal, Item, WorkspaceScore, ItemRelationship, ItemSemanticStatus, ItemEmbeddingMetadata, UnifiedContextInterpretation, ContextReasoningResult, ContextConfidenceDebugTrace } from "../../services/db";
+import { ContextConfidenceDebugger } from "./ContextConfidenceDebugger";
 
 interface ContextInspectorProps {
   itemId: string;
   onClose: () => void;
+  initialView?: "overview" | "debugger";
 }
 
-export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
+export function ContextInspector({ itemId, onClose, initialView = "overview" }: ContextInspectorProps) {
+  const [activeView, setActiveView] = useState<"overview" | "debugger">(initialView);
   const [item, setItem] = useState<Item | null>(null);
   const [signals, setSignals] = useState<ContextSignal[]>([]);
   const [scores, setScores] = useState<WorkspaceScore[]>([]);
@@ -16,6 +19,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
   const [semanticStatus, setSemanticStatus] = useState<ItemSemanticStatus | null>(null);
   const [embeddingMeta, setEmbeddingMeta] = useState<ItemEmbeddingMetadata | null>(null);
   const [interpretation, setInterpretation] = useState<UnifiedContextInterpretation | null>(null);
+  const [debugTrace, setDebugTrace] = useState<ContextConfidenceDebugTrace | null>(null);
   const [aiResult, setAiResult] = useState<ContextReasoningResult | null>(null);
   const [aiUnavailable, setAiUnavailable] = useState(false);
   const [aiUnavailableReason, setAiUnavailableReason] = useState<string | null>(null);
@@ -26,7 +30,16 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
     async function fetchData() {
       try {
         setLoading(true);
-        const [fetchedItem, fetchedSignals, fetchedScores, fetchedRels, fetchedSemStatus, fetchedEmbMeta, fetchedInterpretation] = await Promise.all([
+        const [
+          fetchedItem,
+          fetchedSignals,
+          fetchedScores,
+          fetchedRels,
+          fetchedSemStatus,
+          fetchedEmbMeta,
+          fetchedInterpretation,
+          fetchedDebugTrace,
+        ] = await Promise.all([
           db.getItem(itemId),
           db.listContextSignals(null, itemId),
           db.scoreItem(itemId),
@@ -34,6 +47,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
           db.getItemSemanticStatus(itemId),
           db.getItemEmbeddingMetadata(itemId),
           db.evaluateItemContext(itemId).catch(() => null),
+          db.debugItemContextConfidence(itemId).catch(() => null),
         ]);
         setItem(fetchedItem);
         setSignals(fetchedSignals);
@@ -42,6 +56,7 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
         setSemanticStatus(fetchedSemStatus);
         setEmbeddingMeta(fetchedEmbMeta);
         setInterpretation(fetchedInterpretation);
+        setDebugTrace(fetchedDebugTrace);
       } catch (err) {
         console.error("Failed to fetch context data", err);
       } finally {
@@ -116,23 +131,59 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden border border-gray-200" onClick={(e) => e.stopPropagation()}>
         
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 bg-gray-50/50">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 tracking-tight flex items-center gap-2">
-              <Search size={18} className="text-blue-500" />
-              Context Inspector
-            </h2>
-            <p className="text-xs text-gray-500 font-mono mt-1">{itemId}</p>
+        <div className="flex flex-wrap items-center justify-between px-5 py-3 border-b border-gray-100 bg-gray-50/50 gap-2">
+          <div className="flex items-center gap-4">
+            <div>
+              <h2 className="text-base font-semibold text-gray-900 tracking-tight flex items-center gap-2">
+                <Search size={16} className="text-blue-500" />
+                Context Inspector
+              </h2>
+              <p className="text-[10px] text-gray-400 font-mono mt-0.5">{itemId}</p>
+            </div>
+
+            {/* View Switcher Tabs */}
+            <div className="flex items-center bg-gray-200/70 p-0.5 rounded-lg text-xs font-medium">
+              <button
+                onClick={() => setActiveView("overview")}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors ${
+                  activeView === "overview"
+                    ? "bg-white text-gray-900 shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                <LayoutDashboard size={13} />
+                Overview
+              </button>
+              <button
+                onClick={() => setActiveView("debugger")}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition-colors ${
+                  activeView === "debugger"
+                    ? "bg-slate-900 text-white shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                <Terminal size={13} className={activeView === "debugger" ? "text-emerald-400" : ""} />
+                Confidence Debugger
+                <span className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                  activeView === "debugger" ? "bg-emerald-950 text-emerald-300" : "bg-gray-300/80 text-gray-700"
+                }`}>DEV</span>
+              </button>
+            </div>
           </div>
+
           <button 
             onClick={onClose}
-            className="p-2 rounded-lg hover:bg-gray-200/50 text-gray-500 transition-colors"
+            className="p-1.5 rounded-lg hover:bg-gray-200/50 text-gray-500 transition-colors"
           >
             <X size={18} />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 bg-gray-50 cursor-default grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="flex-1 overflow-y-auto p-6 bg-gray-50 cursor-default">
+          {activeView === "debugger" ? (
+            <ContextConfidenceDebugger trace={debugTrace} loading={loading} />
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* LEFT COLUMN: OBSERVED FACTS */}
           <div className="space-y-6">
             
@@ -512,6 +563,8 @@ export function ContextInspector({ itemId, onClose }: ContextInspectorProps) {
             </div>
 
           </div>
+          </div>
+          )}
         </div>
       </div>
     </div>,

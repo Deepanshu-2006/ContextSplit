@@ -362,6 +362,112 @@ export interface UnifiedContextInterpretation {
   no_context_reason?: NoContextReason | null;
 }
 
+// --- Context Confidence Debugger ---
+
+export interface RawEvidenceDebugItem {
+  id: string;
+  category: string;
+  provenance: string;
+  raw_strength: number;
+  title: string;
+  description: string;
+  badge?: string | null;
+  attributes: Record<string, unknown>;
+  observed_at: string;
+}
+
+export interface NormalizedEvidenceDebugItem {
+  id: string;
+  category: string;
+  provenance: string;
+  raw_strength: number;
+  normalized_strength: number;
+  effective_weight: number;
+  correlation_group?: string | null;
+  duplicate_count: number;
+  is_capped: boolean;
+  is_conflicting: boolean;
+  normalization_notes: string[];
+}
+
+export interface ScoreContributionDebugItem {
+  category: string;
+  description: string;
+  raw_strength: number;
+  weighted_score: number;
+  percentage_of_score: number;
+  is_positive: boolean;
+}
+
+export interface ContradictionDebugItem {
+  category: string;
+  description: string;
+  penalty: number;
+}
+
+export interface CandidateConfidenceDebugItem {
+  context_id: string;
+  context_name: string;
+  raw_score: number;
+  score_formatted: number;
+  confidence: number;
+  confidence_percentage: string;
+  confidence_band: string;
+  evidence_bullets: string[];
+  contradiction_bullets: string[];
+  score_contributions: ScoreContributionDebugItem[];
+  contradictions: ContradictionDebugItem[];
+  uncertainty_indicators: string[];
+}
+
+export interface CompetitionDebugInfo {
+  top_context_id?: string | null;
+  top_context_name?: string | null;
+  top_score: number;
+  runner_up_context_id?: string | null;
+  runner_up_context_name?: string | null;
+  runner_up_score: number;
+  score_margin: number;
+  relative_confidence: number;
+  ambiguity_state: string;
+  explanation: string;
+}
+
+export interface EvidenceDiversityDebugInfo {
+  evidence_quantity: number;
+  evidence_categories_count: number;
+  independent_groups_count: number;
+  independent_groups: string[];
+  diversity_score: number;
+  diversity_multiplier: number;
+  is_single_group: boolean;
+  explanation: string;
+}
+
+export interface FinalResultDebugInfo {
+  decision: string;
+  title: string;
+  summary: string;
+  primary_context_id?: string | null;
+  primary_context_name?: string | null;
+  confidence_band: string;
+  confidence_percentage: string;
+  no_context_reason?: string | null;
+  no_context_explanation?: string | null;
+}
+
+export interface ContextConfidenceDebugTrace {
+  item_id: string;
+  item_title?: string | null;
+  item_type: string;
+  candidates: CandidateConfidenceDebugItem[];
+  competition?: CompetitionDebugInfo | null;
+  evidence_diversity: EvidenceDiversityDebugInfo;
+  final_result: FinalResultDebugInfo;
+  raw_evidence: RawEvidenceDebugItem[];
+  normalized_evidence: NormalizedEvidenceDebugItem[];
+}
+
 export interface TimelineItemSummary {
   id: string;
   title?: string | null;
@@ -788,6 +894,10 @@ export const db = {
 
   async evaluateItemContext(itemId: string): Promise<UnifiedContextInterpretation> {
     return await invoke("evaluate_item_context", { itemId });
+  },
+
+  async debugItemContextConfidence(itemId: string): Promise<ContextConfidenceDebugTrace> {
+    return await invoke("debug_item_context_confidence", { itemId });
   },
 
   async getStrongestRelationships(itemId: string, limit: number = 5): Promise<ItemRelationship[]> {
