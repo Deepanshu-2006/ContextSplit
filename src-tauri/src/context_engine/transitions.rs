@@ -5,6 +5,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
 
+/// Configuration for contextual transition stability, hysteresis, and fast-tracking.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransitionStabilityConfig {
+    /// Minimum confidence threshold for considering any transition candidate (default: 0.40)
+    pub confidence_threshold: f64,
+    /// Minimum evidence / score strength required (default: 0.35)
+    pub min_evidence_strength: f64,
+    /// Minimum consecutive observations required to confirm a moderate transition (default: 2)
+    pub min_consecutive_evidence: usize,
+    /// Minimum temporal persistence span in seconds for moderate changes (default: 0)
+    pub min_temporal_persistence_secs: i64,
+    /// Meaningful score margin/difference required over competitors (default: 0.15)
+    pub meaningful_score_difference: f64,
+    /// Minimum number of agreeing evidence categories/items (default: 2)
+    pub min_evidence_agreement_count: usize,
+    /// Confidence threshold at which a transition is fast-tracked immediately on item 1 (default: 0.85)
+    pub fast_track_confidence: f64,
+    /// Score threshold at which a high-scoring transition is fast-tracked (default: 0.80)
+    pub fast_track_score: f64,
+}
+
+impl Default for TransitionStabilityConfig {
+    fn default() -> Self {
+        Self {
+            confidence_threshold: 0.40,
+            min_evidence_strength: 0.35,
+            min_consecutive_evidence: 2,
+            min_temporal_persistence_secs: 0,
+            meaningful_score_difference: 0.15,
+            min_evidence_agreement_count: 2,
+            fast_track_confidence: 0.85,
+            fast_track_score: 0.80,
+        }
+    }
+}
+
 /// Reference to a contextual state (either an established Workspace or a detected Candidate).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ContextReference {
@@ -41,6 +77,32 @@ pub struct ContextSnapshot {
     pub last_seen_at: String,
     pub streak_count: usize,
     pub session_id: Option<String>,
+}
+
+/// Provisional context transition under observation awaiting sustained evidence confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PendingTransition {
+    pub target_context: ContextReference,
+    pub confidence: f64,
+    pub confidence_band: String,
+    pub score: f64,
+    pub score_margin: f64,
+    pub evidence: Vec<String>,
+    pub evidence_agreement_count: usize,
+    pub first_observed_at: String,
+    pub last_observed_at: String,
+    pub observation_count: usize,
+    pub initial_trigger_item_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Lightweight marker of the most recently emitted transition to prevent duplicates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmittedTransitionMarker {
+    pub from_context_id: Option<String>,
+    pub to_context_id: Option<String>,
+    pub transition_type: ContextTransitionType,
+    pub emitted_at: String,
 }
 
 /// Result of a detected contextual transition.
@@ -111,7 +173,7 @@ impl DetectedTransition {
 /// Comprehensive result of evaluating an item against the current contextual state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransitionEvaluationResult {
-    /// Meaningful contextual transition detected (Switch, Return, Start, End, Ambiguous).
+    /// Meaningful contextual transition confirmed and detected (Switch, Return, Start, End, Ambiguous).
     Transition(DetectedTransition),
     /// Activity continued within the current context without a state transition (Context A -> Context A continuation).
     Continuation {
@@ -120,6 +182,15 @@ pub enum TransitionEvaluationResult {
         confidence: f64,
         timestamp: String,
         evidence: Vec<String>,
+    },
+    /// Provisional transition observation held in pending state awaiting sustained evidence.
+    Pending {
+        target: ContextReference,
+        observation_count: usize,
+        required_count: usize,
+        confidence: f64,
+        timestamp: String,
+        reason: String,
     },
     /// No confident context or ignored ambient noise (anti-jitter filter).
     NoTransition {
@@ -143,9 +214,13 @@ impl TransitionEvaluationResult {
     pub fn is_continuation(&self) -> bool {
         matches!(self, TransitionEvaluationResult::Continuation { .. })
     }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, TransitionEvaluationResult::Pending { .. })
+    }
 }
 
-/// State-aware detector for meaningful changes between contextual states.
+/// State-aware detector for meaningful changes between contextual states with hysteresis and stability.
 ///
 /// Detects:
 /// 1. Context A -> Context B (`ContextSwitch`)
@@ -160,26 +235,29 @@ impl TransitionEvaluationResult {
 #[derive(Debug, Clone)]
 pub struct ContextTransitionDetector {
     pub inactivity_threshold_secs: i64,
-    pub min_switch_confidence: f64,
     pub history_depth: usize,
+    pub stability_config: TransitionStabilityConfig,
     pub current_context: Option<ContextSnapshot>,
     pub context_history: VecDeque<ContextSnapshot>,
+    pub pending_transition: Option<PendingTransition>,
+    pub last_emitted_transition: Option<EmittedTransitionMarker>,
     pub last_activity_at: Option<String>,
     pub active_session_id: Option<String>,
 }
 
 impl ContextTransitionDetector {
     pub const DEFAULT_INACTIVITY_THRESHOLD_SECS: i64 = 1800; // 30 minutes
-    pub const DEFAULT_MIN_SWITCH_CONFIDENCE: f64 = 0.40; // Medium threshold
     pub const DEFAULT_HISTORY_DEPTH: usize = 5;
 
     pub fn new() -> Self {
         Self {
             inactivity_threshold_secs: Self::DEFAULT_INACTIVITY_THRESHOLD_SECS,
-            min_switch_confidence: Self::DEFAULT_MIN_SWITCH_CONFIDENCE,
             history_depth: Self::DEFAULT_HISTORY_DEPTH,
+            stability_config: TransitionStabilityConfig::default(),
             current_context: None,
             context_history: VecDeque::new(),
+            pending_transition: None,
+            last_emitted_transition: None,
             last_activity_at: None,
             active_session_id: None,
         }
@@ -191,12 +269,42 @@ impl ContextTransitionDetector {
     }
 
     pub fn with_min_switch_confidence(mut self, conf: f64) -> Self {
-        self.min_switch_confidence = conf.clamp(0.0, 1.0);
+        self.stability_config.confidence_threshold = conf.clamp(0.0, 1.0);
         self
     }
 
     pub fn with_history_depth(mut self, depth: usize) -> Self {
         self.history_depth = depth.max(1);
+        self
+    }
+
+    pub fn with_stability_config(mut self, config: TransitionStabilityConfig) -> Self {
+        self.stability_config = config;
+        self
+    }
+
+    pub fn with_min_consecutive_evidence(mut self, count: usize) -> Self {
+        self.stability_config.min_consecutive_evidence = count.max(1);
+        self
+    }
+
+    pub fn with_min_evidence_strength(mut self, strength: f64) -> Self {
+        self.stability_config.min_evidence_strength = strength.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_meaningful_score_difference(mut self, diff: f64) -> Self {
+        self.stability_config.meaningful_score_difference = diff.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_evidence_agreement_count(mut self, count: usize) -> Self {
+        self.stability_config.min_evidence_agreement_count = count.max(1);
+        self
+    }
+
+    pub fn with_fast_track_confidence(mut self, conf: f64) -> Self {
+        self.stability_config.fast_track_confidence = conf.clamp(0.0, 1.0);
         self
     }
 
@@ -208,9 +316,15 @@ impl ContextTransitionDetector {
         &self.context_history
     }
 
+    pub fn pending_transition(&self) -> Option<&PendingTransition> {
+        self.pending_transition.as_ref()
+    }
+
     pub fn reset(&mut self) {
         self.current_context = None;
         self.context_history.clear();
+        self.pending_transition = None;
+        self.last_emitted_transition = None;
         self.last_activity_at = None;
         self.active_session_id = None;
     }
@@ -228,6 +342,55 @@ impl ContextTransitionDetector {
         }
     }
 
+    /// Checks if a transition should be emitted or suppressed as a duplicate.
+    fn record_and_check_duplicate(
+        &mut self,
+        from_id: Option<&str>,
+        to_id: Option<&str>,
+        transition_type: ContextTransitionType,
+        timestamp: &str,
+    ) -> bool {
+        if let Some(last) = &self.last_emitted_transition {
+            if last.from_context_id.as_deref() == from_id
+                && last.to_context_id.as_deref() == to_id
+                && last.transition_type == transition_type
+            {
+                return false; // Duplicate
+            }
+        }
+        self.last_emitted_transition = Some(EmittedTransitionMarker {
+            from_context_id: from_id.map(|s| s.to_string()),
+            to_context_id: to_id.map(|s| s.to_string()),
+            transition_type,
+            emitted_at: timestamp.to_string(),
+        });
+        true
+    }
+
+    /// Determines whether a context candidate qualifies for immediate fast-tracking without waiting for sustained evidence.
+    pub fn is_fast_track(
+        &self,
+        is_user_confirmed: bool,
+        confidence: f64,
+        score: f64,
+        score_margin: f64,
+        evidence_agreement_count: usize,
+    ) -> bool {
+        if is_user_confirmed {
+            return true;
+        }
+        if confidence >= self.stability_config.fast_track_confidence {
+            return true;
+        }
+        if score >= self.stability_config.fast_track_score
+            && score_margin >= self.stability_config.meaningful_score_difference
+            && evidence_agreement_count >= self.stability_config.min_evidence_agreement_count
+        {
+            return true;
+        }
+        false
+    }
+
     /// Checks if the inactivity threshold has elapsed since `last_activity_at`.
     ///
     /// Detects Scenario 2: Context A -> Inactivity (`ContextEnd`).
@@ -243,6 +406,16 @@ impl ContextTransitionDetector {
             let ended = self.current_context.take().unwrap();
             let ref_clone = ended.reference.clone();
             self.push_history(ended);
+            self.pending_transition = None;
+
+            if !self.record_and_check_duplicate(
+                Some(&ref_clone.id),
+                None,
+                ContextTransitionType::ContextEnd,
+                current_time_iso,
+            ) {
+                return None;
+            }
 
             let evidence = vec![
                 format!(
@@ -275,15 +448,7 @@ impl ContextTransitionDetector {
         }
     }
 
-    /// Pure transition evaluation given an item context candidate and metadata.
-    ///
-    /// Evaluates all 6 core transition patterns:
-    /// 1. Context A -> Context B (`ContextSwitch`)
-    /// 2. Context A -> Inactivity (`ContextEnd`)
-    /// 3. Inactivity -> Context B (`ContextStart`)
-    /// 4. Context A -> Ambiguous (`AmbiguousTransition`)
-    /// 5. Context A -> Context A continuation (`Continuation`)
-    /// 6. Context A -> Context B -> Context A return (`ContextReturn`)
+    /// Simplified evaluation method for backward compatibility and testing.
     pub fn evaluate_interpretation(
         &mut self,
         item_id: Option<&str>,
@@ -292,6 +457,43 @@ impl ContextTransitionDetector {
         target_context: Option<ContextReference>,
         confidence: f64,
         confidence_band: &str,
+        is_ambiguous: bool,
+        evidence: Vec<String>,
+    ) -> TransitionEvaluationResult {
+        let is_user_confirmed = confidence >= 0.99;
+        let score = confidence;
+        let score_margin = 0.20;
+        let agreement = evidence.len();
+
+        self.evaluate_interpretation_detailed(
+            item_id,
+            session_id,
+            item_timestamp,
+            target_context,
+            confidence,
+            confidence_band,
+            score,
+            score_margin,
+            agreement,
+            is_user_confirmed,
+            is_ambiguous,
+            evidence,
+        )
+    }
+
+    /// Detailed transition evaluation with stability, hysteresis, score margins, and fast-tracking.
+    pub fn evaluate_interpretation_detailed(
+        &mut self,
+        item_id: Option<&str>,
+        session_id: Option<&str>,
+        item_timestamp: &str,
+        target_context: Option<ContextReference>,
+        confidence: f64,
+        confidence_band: &str,
+        score: f64,
+        score_margin: f64,
+        evidence_agreement_count: usize,
+        is_user_confirmed: bool,
         is_ambiguous: bool,
         evidence: Vec<String>,
     ) -> TransitionEvaluationResult {
@@ -314,6 +516,7 @@ impl ContextTransitionDetector {
         if is_resumed_after_inactivity && self.current_context.is_some() {
             let prior = self.current_context.take().unwrap();
             self.push_history(prior);
+            self.pending_transition = None;
         }
 
         // Scenario 4: Context A -> Ambiguous
@@ -327,6 +530,18 @@ impl ContextTransitionDetector {
                         .to_string(),
                 ];
                 full_evidence.extend(evidence.clone());
+
+                if !self.record_and_check_duplicate(
+                    Some(&from_ref.id),
+                    None,
+                    ContextTransitionType::AmbiguousTransition,
+                    item_timestamp,
+                ) {
+                    return TransitionEvaluationResult::NoTransition {
+                        reason: "Duplicate ambiguous transition suppressed".to_string(),
+                        timestamp: item_timestamp.to_string(),
+                    };
+                }
 
                 let transition = DetectedTransition {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -358,7 +573,7 @@ impl ContextTransitionDetector {
         let target = match target_context {
             Some(t) => t,
             None => {
-                // Scenario: Weak evidence, no context, or noise (anti-jitter filter)
+                // Weak evidence or no context (anti-jitter)
                 return TransitionEvaluationResult::NoTransition {
                     reason: "Insufficient contextual evidence to infer a state transition"
                         .to_string(),
@@ -367,23 +582,25 @@ impl ContextTransitionDetector {
             }
         };
 
-        // Anti-jitter: Ignore switches below minimum confidence threshold
-        if confidence < self.min_switch_confidence {
+        // Anti-jitter: Check minimum confidence threshold
+        if confidence < self.stability_config.confidence_threshold && !is_user_confirmed {
             return TransitionEvaluationResult::NoTransition {
                 reason: format!(
-                    "Context candidate '{}' confidence ({:.0}%) below minimum switch threshold ({:.0}%)",
+                    "Context candidate '{}' confidence ({:.0}%) below minimum threshold ({:.0}%)",
                     target.name,
                     confidence * 100.0,
-                    self.min_switch_confidence * 100.0
+                    self.stability_config.confidence_threshold * 100.0
                 ),
                 timestamp: item_timestamp.to_string(),
             };
         }
 
-        // Evaluate against current active context
-        match &mut self.current_context {
-            Some(curr) if curr.reference.id == target.id => {
-                // Scenario 5: Context A -> Context A continuation
+        // Scenario 5: Continued activity in existing active context
+        if let Some(curr) = &mut self.current_context {
+            if curr.reference.id == target.id {
+                // Active context matched! Discard any temporary pending detour
+                self.pending_transition = None;
+
                 curr.streak_count += 1;
                 curr.last_seen_at = item_timestamp.to_string();
                 curr.confidence = (curr.confidence * 0.7 + confidence * 0.3).clamp(0.0, 1.0);
@@ -396,16 +613,155 @@ impl ContextTransitionDetector {
                 )];
                 cont_evidence.extend(evidence);
 
-                TransitionEvaluationResult::Continuation {
+                return TransitionEvaluationResult::Continuation {
                     context: curr.reference.clone(),
                     streak_count: curr.streak_count,
                     confidence,
                     timestamp: item_timestamp.to_string(),
                     evidence: cont_evidence,
+                };
+            }
+        }
+
+        // Fast-Track Evaluation: does this candidate qualify for immediate transition?
+        let fast_track = self.is_fast_track(
+            is_user_confirmed,
+            confidence,
+            score,
+            score_margin,
+            evidence_agreement_count,
+        );
+
+        // Case A: Fast-tracked context change
+        if fast_track || self.stability_config.min_consecutive_evidence <= 1 {
+            self.pending_transition = None;
+            return self.confirm_transition(
+                item_id,
+                session_id,
+                item_timestamp,
+                target,
+                confidence,
+                confidence_band,
+                evidence,
+                is_resumed_after_inactivity,
+                "Fast-tracked via strong explicit evidence",
+            );
+        }
+
+        // Case B: Moderate unconfirmed change requiring sustained evidence (Hysteresis Buffer)
+        if let Some(ref mut pending) = self.pending_transition {
+            if pending.target_context.id == target.id {
+                // Sustained observation of the same pending target!
+                pending.observation_count += 1;
+                pending.last_observed_at = item_timestamp.to_string();
+                pending.confidence = (pending.confidence + confidence) / 2.0;
+
+                let elapsed_temporal = item_time_dt
+                    .signed_duration_since(
+                        pending
+                            .first_observed_at
+                            .parse::<DateTime<Utc>>()
+                            .unwrap_or_else(|_| Utc::now()),
+                    )
+                    .num_seconds();
+
+                let is_sustained = pending.observation_count
+                    >= self.stability_config.min_consecutive_evidence
+                    || (self.stability_config.min_temporal_persistence_secs > 0
+                        && elapsed_temporal
+                            >= self.stability_config.min_temporal_persistence_secs);
+
+                if is_sustained {
+                    // Sustained threshold reached! Confirm transition!
+                    let final_target = pending.target_context.clone();
+                    let final_conf = pending.confidence;
+                    let final_band = pending.confidence_band.clone();
+                    let count = pending.observation_count;
+                    self.pending_transition = None;
+
+                    let mut sustained_evidence = vec![format!(
+                        "Confirmed contextual transition to '{}' after {} sustained observations (avg confidence {:.0}%)",
+                        final_target.name, count, final_conf * 100.0
+                    )];
+                    sustained_evidence.extend(evidence);
+
+                    return self.confirm_transition(
+                        item_id,
+                        session_id,
+                        item_timestamp,
+                        final_target,
+                        final_conf,
+                        &final_band,
+                        sustained_evidence,
+                        is_resumed_after_inactivity,
+                        "Confirmed after sustained evidence",
+                    );
+                } else {
+                    // Still pending confirmation
+                    self.last_activity_at = Some(item_timestamp.to_string());
+                    return TransitionEvaluationResult::Pending {
+                        target: target.clone(),
+                        observation_count: pending.observation_count,
+                        required_count: self.stability_config.min_consecutive_evidence,
+                        confidence,
+                        timestamp: item_timestamp.to_string(),
+                        reason: format!(
+                            "Observed {}/{} sustained signals for '{}'",
+                            pending.observation_count,
+                            self.stability_config.min_consecutive_evidence,
+                            target.name
+                        ),
+                    };
                 }
             }
+        }
+
+        // New pending candidate observation (observation count = 1)
+        self.pending_transition = Some(PendingTransition {
+            target_context: target.clone(),
+            confidence,
+            confidence_band: confidence_band.to_string(),
+            score,
+            score_margin,
+            evidence: evidence.clone(),
+            evidence_agreement_count,
+            first_observed_at: item_timestamp.to_string(),
+            last_observed_at: item_timestamp.to_string(),
+            observation_count: 1,
+            initial_trigger_item_id: item_id.map(|s| s.to_string()),
+            session_id: session_id.map(|s| s.to_string()),
+        });
+
+        self.last_activity_at = Some(item_timestamp.to_string());
+        TransitionEvaluationResult::Pending {
+            target: target.clone(),
+            observation_count: 1,
+            required_count: self.stability_config.min_consecutive_evidence,
+            confidence,
+            timestamp: item_timestamp.to_string(),
+            reason: format!(
+                "First observation for candidate '{}' ({:.0}% confidence) held in pending state awaiting sustained evidence",
+                target.name,
+                confidence * 100.0
+            ),
+        }
+    }
+
+    /// Internal helper to execute and record a confirmed transition.
+    fn confirm_transition(
+        &mut self,
+        item_id: Option<&str>,
+        session_id: Option<&str>,
+        item_timestamp: &str,
+        target: ContextReference,
+        confidence: f64,
+        confidence_band: &str,
+        evidence: Vec<String>,
+        is_resumed_after_inactivity: bool,
+        confirmation_note: &str,
+    ) -> TransitionEvaluationResult {
+        match &mut self.current_context {
             Some(curr) => {
-                // Different context than active: either Switch (Scenario 1) or Return (Scenario 6)
                 let from_ref = curr.reference.clone();
                 let is_return = self.context_history.iter().any(|h| h.reference.id == target.id);
 
@@ -426,6 +782,18 @@ impl ContextTransitionDetector {
                         ),
                     )
                 };
+
+                if !self.record_and_check_duplicate(
+                    Some(&from_ref.id),
+                    Some(&target.id),
+                    trans_type,
+                    item_timestamp,
+                ) {
+                    return TransitionEvaluationResult::NoTransition {
+                        reason: "Duplicate transition suppressed".to_string(),
+                        timestamp: item_timestamp.to_string(),
+                    };
+                }
 
                 let prior_snapshot = self.current_context.take().unwrap();
                 self.push_history(prior_snapshot);
@@ -458,13 +826,26 @@ impl ContextTransitionDetector {
                     trigger_item_id: item_id.map(|s| s.to_string()),
                     metadata: serde_json::json!({
                         "is_return": is_return,
+                        "confirmation_type": confirmation_note,
                     }),
                 };
 
                 TransitionEvaluationResult::Transition(transition)
             }
             None => {
-                // Scenario 3: Inactivity -> Context B (`ContextStart`)
+                // Inactivity -> Context B (ContextStart)
+                if !self.record_and_check_duplicate(
+                    None,
+                    Some(&target.id),
+                    ContextTransitionType::ContextStart,
+                    item_timestamp,
+                ) {
+                    return TransitionEvaluationResult::NoTransition {
+                        reason: "Duplicate start transition suppressed".to_string(),
+                        timestamp: item_timestamp.to_string(),
+                    };
+                }
+
                 let new_snapshot = ContextSnapshot {
                     reference: target.clone(),
                     confidence,
@@ -493,6 +874,7 @@ impl ContextTransitionDetector {
                     trigger_item_id: item_id.map(|s| s.to_string()),
                     metadata: serde_json::json!({
                         "resumed_after_inactivity": is_resumed_after_inactivity,
+                        "confirmation_type": confirmation_note,
                     }),
                 };
 
@@ -501,10 +883,10 @@ impl ContextTransitionDetector {
         }
     }
 
-    /// Evaluates an item by ID from the database against the current contextual state.
+    /// Evaluates an item by ID from the database against the current contextual state with full stability checks.
     ///
     /// Respects user-confirmed workspace memberships as authoritative ground-truth,
-    /// falls back to Context Engine interpretation scoring, and prevents spurious transitions.
+    /// falls back to Context Engine interpretation scoring, and applies hysteresis to prevent spurious transitions.
     ///
     /// Invariant: Does NOT modify item or workspace memberships.
     pub fn process_item(
@@ -532,13 +914,17 @@ impl ContextTransitionDetector {
                 "User-confirmed item assignment to workspace '{}'",
                 ws.name
             )];
-            return Ok(self.evaluate_interpretation(
+            return Ok(self.evaluate_interpretation_detailed(
                 Some(&item.id),
                 item.session_id.as_deref(),
                 &item.created_at,
                 Some(target_ref),
                 1.0,
                 "Very High",
+                1.0,
+                1.0,
+                3,
+                true, // is_user_confirmed -> fast track
                 false,
                 evidence,
             ));
@@ -550,43 +936,79 @@ impl ContextTransitionDetector {
         let is_ambiguous = interp.interpretation_kind
             == Some(crate::db::models::ContextInterpretationKind::Ambiguous);
 
-        let (target_ref, conf, band, evidence) = if let Some(ws) = interp.existing_workspaces.first()
-        {
-            if ws.confidence >= self.min_switch_confidence && ws.score >= 0.35 {
-                (
-                    Some(ContextReference::workspace(&ws.workspace_id, &ws.workspace_name)),
-                    ws.confidence,
-                    ws.confidence_band.as_str(),
-                    ws.reasons.clone(),
-                )
-            } else {
-                (None, ws.confidence, ws.confidence_band.as_str(), vec![interp.summary.clone()])
-            }
-        } else if let Some(cand) = interp.potential_new_contexts.first() {
-            if cand.confidence >= self.min_switch_confidence {
-                (
-                    Some(ContextReference::candidate(
-                        cand.candidate_id.as_deref().unwrap_or("new_candidate"),
-                        &cand.label,
-                    )),
-                    cand.confidence,
-                    cand.confidence_band.as_str(),
-                    cand.reasons.clone(),
-                )
-            } else {
-                (None, cand.confidence, cand.confidence_band.as_str(), vec![interp.summary.clone()])
-            }
-        } else {
-            (None, 0.0, "Very Low", vec![interp.summary.clone()])
-        };
+        let (target_ref, conf, band, score, margin, agreement, evidence) =
+            if let Some(ws) = interp.existing_workspaces.first() {
+                let s = ws.score;
+                let m = if interp.existing_workspaces.len() > 1 {
+                    (ws.score - interp.existing_workspaces[1].score).abs()
+                } else {
+                    ws.score
+                };
+                let agree = ws.reasons.len();
 
-        Ok(self.evaluate_interpretation(
+                if ws.confidence >= self.stability_config.confidence_threshold
+                    && ws.score >= self.stability_config.min_evidence_strength
+                {
+                    (
+                        Some(ContextReference::workspace(&ws.workspace_id, &ws.workspace_name)),
+                        ws.confidence,
+                        ws.confidence_band.as_str(),
+                        s,
+                        m,
+                        agree,
+                        ws.reasons.clone(),
+                    )
+                } else {
+                    (
+                        None,
+                        ws.confidence,
+                        ws.confidence_band.as_str(),
+                        s,
+                        m,
+                        agree,
+                        vec![interp.summary.clone()],
+                    )
+                }
+            } else if let Some(cand) = interp.potential_new_contexts.first() {
+                if cand.confidence >= self.stability_config.confidence_threshold {
+                    (
+                        Some(ContextReference::candidate(
+                            cand.candidate_id.as_deref().unwrap_or("new_candidate"),
+                            &cand.label,
+                        )),
+                        cand.confidence,
+                        cand.confidence_band.as_str(),
+                        cand.confidence,
+                        0.20,
+                        cand.reasons.len(),
+                        cand.reasons.clone(),
+                    )
+                } else {
+                    (
+                        None,
+                        cand.confidence,
+                        cand.confidence_band.as_str(),
+                        cand.confidence,
+                        0.0,
+                        1,
+                        vec![interp.summary.clone()],
+                    )
+                }
+            } else {
+                (None, 0.0, "Very Low", 0.0, 0.0, 0, vec![interp.summary.clone()])
+            };
+
+        Ok(self.evaluate_interpretation_detailed(
             Some(&item.id),
             item.session_id.as_deref(),
             &item.created_at,
             target_ref,
             conf,
             band,
+            score,
+            margin,
+            agreement,
+            false,
             is_ambiguous,
             evidence,
         ))
@@ -815,11 +1237,162 @@ mod tests {
     }
 
     #[test]
-    fn test_scenario_1_context_switch_a_to_b() {
+    fn test_prompt_example_1_portfolio_one_unrelated_item_portfolio() {
+        let mut detector = ContextTransitionDetector::new().with_min_consecutive_evidence(2);
+
+        let ctx_portfolio = ContextReference::workspace("ws_portfolio", "Portfolio");
+        let ctx_college = ContextReference::workspace("ws_college", "College");
+
+        // 1. Establish in Portfolio (Fast track / confident)
+        let res1 = detector.evaluate_interpretation(
+            Some("item_p1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_portfolio.clone()),
+            0.90, // Fast tracked
+            "High",
+            false,
+            vec!["Portfolio design".to_string()],
+        );
+        assert!(res1.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
+
+        // 2. ONE unrelated item with moderate evidence arrives (College)
+        let res2 = detector.evaluate_interpretation(
+            Some("item_unrelated"),
+            Some("sess_1"),
+            "2026-09-10T10:03:00Z",
+            Some(ctx_college.clone()),
+            0.60, // Moderate, not fast-tracked
+            "Medium",
+            false,
+            vec!["Single college lecture note".to_string()],
+        );
+
+        // Hysteresis: Should be PENDING, NOT an immediate transition!
+        assert!(res2.is_pending());
+        assert!(!res2.is_transition());
+        // Active context remains Portfolio!
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
+
+        // 3. User continues in Portfolio!
+        let res3 = detector.evaluate_interpretation(
+            Some("item_p2"),
+            Some("sess_1"),
+            "2026-09-10T10:06:00Z",
+            Some(ctx_portfolio.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["Portfolio showcase edit".to_string()],
+        );
+
+        // Active context remains Portfolio continuation!
+        assert!(res3.is_continuation());
+        assert!(!res3.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
+        // Pending transition was discarded
+        assert!(detector.pending_transition().is_none());
+    }
+
+    #[test]
+    fn test_prompt_example_2_portfolio_several_strong_college_signals_college() {
+        let mut detector = ContextTransitionDetector::new().with_min_consecutive_evidence(2);
+
+        let ctx_portfolio = ContextReference::workspace("ws_portfolio", "Portfolio");
+        let ctx_college = ContextReference::workspace("ws_college", "College");
+
+        // 1. Establish in Portfolio
+        detector.evaluate_interpretation(
+            Some("item_p1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_portfolio.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Portfolio homepage".to_string()],
+        );
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
+
+        // 2. First strong College signal (moderate/strong, conf: 0.70)
+        let res2 = detector.evaluate_interpretation(
+            Some("item_c1"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_college.clone()),
+            0.70,
+            "High",
+            false,
+            vec!["Assignment 3 submission portal".to_string()],
+        );
+        assert!(res2.is_pending());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_portfolio");
+
+        // 3. Second strong College signal -> Sustained confirmation!
+        let res3 = detector.evaluate_interpretation(
+            Some("item_c2"),
+            Some("sess_1"),
+            "2026-09-10T10:08:00Z",
+            Some(ctx_college.clone()),
+            0.75,
+            "High",
+            false,
+            vec!["Course syllabus pdf".to_string()],
+        );
+
+        assert!(res3.is_transition(), "Second sustained signal must confirm the transition");
+        let t = res3.transition().unwrap();
+        assert_eq!(t.transition_type, ContextTransitionType::ContextSwitch);
+        assert_eq!(t.from_context.as_ref().unwrap().id, "ws_portfolio");
+        assert_eq!(t.to_context.as_ref().unwrap().id, "ws_college");
+        assert!(t.evidence.iter().any(|e| e.contains("Confirmed contextual transition to 'College' after 2 sustained observations")));
+
+        // Active context is now College!
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_college");
+    }
+
+    #[test]
+    fn test_fast_track_explicit_context_change() {
+        let mut detector = ContextTransitionDetector::new().with_min_consecutive_evidence(3);
+
+        let ctx_a = ContextReference::workspace("ws_a", "Project Alpha");
+        let ctx_b = ContextReference::workspace("ws_b", "Project Beta");
+
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["Alpha".to_string()],
+        );
+
+        // Very high confidence (0.92 >= 0.85 fast track threshold) -> Switches on item 1!
+        let res_fast = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.92, // Fast-tracked
+            "Very High",
+            false,
+            vec!["Explicit user move or 92% confidence".to_string()],
+        );
+
+        assert!(res_fast.is_transition(), "Fast-tracked change must switch immediately on item 1");
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
+    }
+
+    #[test]
+    fn test_deduplication_of_transitions() {
         let mut detector = ContextTransitionDetector::new();
 
-        // 1. Start in Context A (Project Alpha)
         let ctx_a = ContextReference::workspace("ws_a", "Project Alpha");
+
+        // 1. Initial start
         let res1 = detector.evaluate_interpretation(
             Some("item_1"),
             Some("sess_1"),
@@ -828,38 +1401,23 @@ mod tests {
             0.90,
             "High",
             false,
-            vec!["Active app VS Code on Alpha codebase".to_string()],
+            vec!["Initial Alpha capture".to_string()],
         );
-
         assert!(res1.is_transition());
-        let t1 = res1.transition().unwrap();
-        assert_eq!(t1.transition_type, ContextTransitionType::ContextStart);
-        assert_eq!(t1.to_context.as_ref().unwrap().id, "ws_a");
 
-        // 2. Switch to Context B (Project Beta)
-        let ctx_b = ContextReference::workspace("ws_b", "Project Beta");
+        // 2. Next items in Alpha are continuations, not duplicate Start transitions
         let res2 = detector.evaluate_interpretation(
             Some("item_2"),
             Some("sess_1"),
-            "2026-09-10T10:05:00Z",
-            Some(ctx_b.clone()),
-            0.88,
+            "2026-09-10T10:02:00Z",
+            Some(ctx_a.clone()),
+            0.90,
             "High",
             false,
-            vec!["Active app Figma for Beta UI design".to_string()],
+            vec!["Second Alpha capture".to_string()],
         );
-
-        assert!(res2.is_transition());
-        let t2 = res2.transition().unwrap();
-        assert_eq!(t2.transition_type, ContextTransitionType::ContextSwitch);
-        assert_eq!(t2.from_context.as_ref().unwrap().id, "ws_a");
-        assert_eq!(t2.to_context.as_ref().unwrap().id, "ws_b");
-        assert_eq!(t2.confidence, 0.88);
-        assert!(t2.evidence.iter().any(|e| e.contains("Switched context from 'Project Alpha' to 'Project Beta'")));
-
-        // Verify history contains Context A
-        assert_eq!(detector.context_history().len(), 1);
-        assert_eq!(detector.context_history().front().unwrap().reference.id, "ws_a");
+        assert!(res2.is_continuation());
+        assert!(!res2.is_transition());
     }
 
     #[test]
@@ -914,7 +1472,7 @@ mod tests {
             Some("sess_2"),
             "2026-09-10T11:00:00Z",
             Some(ctx_b.clone()),
-            0.85,
+            0.88,
             "High",
             false,
             vec!["Browser opened to stripe.com dashboard".to_string()],
@@ -925,7 +1483,7 @@ mod tests {
         assert_eq!(t.transition_type, ContextTransitionType::ContextStart);
         assert!(t.from_context.is_none());
         assert_eq!(t.to_context.as_ref().unwrap().id, "ws_b");
-        assert_eq!(t.confidence, 0.85);
+        assert_eq!(t.confidence, 0.88);
         assert!(t.evidence.iter().any(|e| e.contains("Started activity in 'Finance Dashboard'")));
     }
 
@@ -970,51 +1528,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scenario_5_context_a_continuation_no_spurious_switch() {
-        let mut detector = ContextTransitionDetector::new();
-
-        let ctx_a = ContextReference::workspace("ws_a", "Rust Engine");
-
-        // First item starts context
-        let res1 = detector.evaluate_interpretation(
-            Some("item_1"),
-            Some("sess_1"),
-            "2026-09-10T10:00:00Z",
-            Some(ctx_a.clone()),
-            0.90,
-            "High",
-            false,
-            vec!["Cargo build".to_string()],
-        );
-        assert!(res1.is_transition());
-
-        // Second, third, fourth items in same context -> Continuations!
-        for i in 2..=4 {
-            let res = detector.evaluate_interpretation(
-                Some(&format!("item_{}", i)),
-                Some("sess_1"),
-                &format!("2026-09-10T10:0{}:00Z", i),
-                Some(ctx_a.clone()),
-                0.92,
-                "High",
-                false,
-                vec![format!("Code edit #{}", i)],
-            );
-
-            assert!(res.is_continuation(), "Item {} should be recognized as continuation", i);
-            assert!(!res.is_transition(), "Item {} must NOT produce a false switch transition", i);
-
-            if let TransitionEvaluationResult::Continuation { streak_count, context, .. } = res {
-                assert_eq!(streak_count, i);
-                assert_eq!(context.id, "ws_a");
-            }
-        }
-
-        // Active context streak is now 4
-        assert_eq!(detector.current_context().unwrap().streak_count, 4);
-    }
-
-    #[test]
     fn test_scenario_6_context_a_to_b_to_a_return() {
         let mut detector = ContextTransitionDetector::new();
 
@@ -1033,13 +1546,13 @@ mod tests {
             vec!["VS Code".to_string()],
         );
 
-        // 2. Detour to Context B (Slack chat)
+        // 2. Detour to Context B (Slack chat, fast tracked)
         let res_detour = detector.evaluate_interpretation(
             Some("item_2"),
             Some("sess_1"),
             "2026-09-10T10:05:00Z",
             Some(ctx_b.clone()),
-            0.80,
+            0.88,
             "High",
             false,
             vec!["Slack message".to_string()],
