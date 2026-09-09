@@ -55,6 +55,8 @@ pub use crate::db::models::{ContextInterpretationKind, NoContextReason};
 pub mod workflow_tests;
 #[cfg(test)]
 pub mod evidence_pipeline_e2e_tests;
+#[cfg(test)]
+pub mod adversarial_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
