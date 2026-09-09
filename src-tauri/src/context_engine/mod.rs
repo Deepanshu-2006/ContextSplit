@@ -21,6 +21,7 @@ pub mod calibration;
 pub mod debugger;
 pub mod transitions;
 pub mod segments;
+pub mod summary;
 
 pub use transitions::{
     format_duration_human, format_transition_summary, record_context_transition, ContextReference,
@@ -30,6 +31,10 @@ pub use transitions::{
 };
 pub use segments::{
     ContextActivitySegment, ContextActivitySegmenter, SegmentItemReference, SegmentStreamEvent,
+};
+pub use summary::{
+    format_duration_compact, ContextActivitySummary, ContextActivitySummaryService,
+    ContextSequenceEntry, ContextUsageSummary, LongestSegmentSummary,
 };
 
 pub use evidence::{

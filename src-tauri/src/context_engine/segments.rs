@@ -169,6 +169,15 @@ impl ContextActivitySegmenter {
             detector: ContextTransitionDetector::new(),
         }
     }
+}
+
+impl Default for ContextActivitySegmenter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextActivitySegmenter {
 
     pub fn with_inactivity_threshold(mut self, secs: i64) -> Self {
         self.inactivity_threshold_secs = secs.max(1);
