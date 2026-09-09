@@ -330,7 +330,7 @@ mod tests {
 
         assert_eq!(explanation.workspace_name, "Paris Trip");
         assert!(!explanation.why_reasons.is_empty());
-        assert_eq!(explanation.confidence_band, "High");
+        assert!(explanation.confidence_band == "Very High" || explanation.confidence_band == "High");
         assert!(explanation.confidence >= 0.70);
         assert!(explanation.summary.contains("Paris Trip —"));
 

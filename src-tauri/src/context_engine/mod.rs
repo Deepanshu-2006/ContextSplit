@@ -17,6 +17,7 @@ pub mod normalization;
 pub mod diversity;
 pub mod contradiction;
 pub mod competition;
+pub mod calibration;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
@@ -37,6 +38,9 @@ pub use contradiction::{
 pub use competition::{
     AmbiguityState, ContextCandidateSummary, ContextCompetitionAnalysis,
     ContextCompetitionAnalyzer,
+};
+pub use calibration::{
+    CalibrationInput, CalibrationResult, ConfidenceBand, ConfidenceCalibrator,
 };
 
 #[cfg(test)]

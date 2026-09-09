@@ -16,6 +16,9 @@ use crate::context_engine::competition::{
     AmbiguityState, ContextCandidateSummary, ContextCompetitionAnalysis,
     ContextCompetitionAnalyzer,
 };
+use crate::context_engine::calibration::{
+    CalibrationInput, ConfidenceBand, ConfidenceCalibrator,
+};
 
 /// Structured contribution of an individual evidence category to the final context score.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -81,6 +84,9 @@ pub struct ConfidenceFactors {
     /// Explicit ambiguity state classification
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ambiguity_state: Option<AmbiguityState>,
+    /// Explicit 5-tier calibrated confidence band
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<ConfidenceBand>,
 }
 
 /// Comprehensive, structured scoring information for a candidate context.
@@ -101,6 +107,8 @@ pub struct ContextScoreResult {
     pub contradiction_report: Option<ContextContradictionReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub competition_analysis: Option<ContextCompetitionAnalysis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibrated_band: Option<ConfidenceBand>,
 }
 
 impl ContextScoreResult {
@@ -679,6 +687,8 @@ impl ContextEvidenceScorer {
             confidence_band: confidence_band.clone(),
         }]));
 
+        let cal_band = ConfidenceBand::from_str_lenient(&confidence_band);
+
         ContextScoreResult {
             context_id: ws.id.clone(),
             context_name: ws.name.clone(),
@@ -692,6 +702,7 @@ impl ContextEvidenceScorer {
             confidence_factors: Some(confidence_factors),
             contradiction_report: Some(contradiction_report),
             competition_analysis,
+            calibrated_band: Some(cal_band),
         }
     }
 
@@ -798,10 +809,12 @@ impl ContextEvidenceScorer {
                 ),
             );
 
+            let cal_band = ConfidenceBand::from_str_lenient(&band);
             results[i].confidence = conf;
             results[i].confidence_band = band;
             results[i].confidence_factors = Some(factors);
             results[i].contradiction_report = report;
+            results[i].calibrated_band = Some(cal_band);
 
             if let Some(r_name) = runner_up_name {
                 if let Some(margin) = margin_to_runner_up {
@@ -867,7 +880,7 @@ pub fn evaluate_confidence(
 }
 
 /// Evaluates confidence incorporating evidence diversity, reliability, volume, agreement,
-/// ambiguity margin, and contradictory evidence penalties.
+/// ambiguity margin, and contradictory evidence penalties via the centralized ConfidenceCalibrator.
 pub fn evaluate_confidence_with_contradiction(
     contributions: &[EvidenceContribution],
     total_score: f32,
@@ -877,153 +890,16 @@ pub fn evaluate_confidence_with_contradiction(
     contradiction_strength: f32,
     contradiction_penalty: f32,
 ) -> (f32, String, ConfidenceFactors) {
-    // 1. Authoritative explicit confirmed membership is always 100% confident
-    if contributions.iter().any(|c| c.category == "confirmed_membership" && c.is_positive && c.weighted_score > 0.0) {
-        let div = EvidenceDiversityCalculator::calculate_from_contributions(contributions);
-        return (
-            1.0,
-            "High".to_string(),
-            ConfidenceFactors {
-                diversity_count: div.independent_groups_count.max(1),
-                diversity_multiplier: 1.0,
-                reliability_score: 1.0,
-                agreement_score: 1.0,
-                ambiguity_penalty: 0.0,
-                evidence_volume_score: 1.0,
-                evidence_quantity: div.evidence_quantity,
-                evidence_categories_count: div.evidence_categories_count,
-                independent_groups_count: div.independent_groups_count,
-                diversity_score: 1.0,
-                diversity_result: Some(div),
-                contradiction_strength: 0.0,
-                contradiction_penalty: 0.0,
-                score_margin: None,
-                relative_confidence: Some(1.0),
-                ambiguity_state: Some(AmbiguityState::Clear),
-            },
-        );
-    }
+    let input = CalibrationInput::new(total_score, contributions)
+        .with_competition(margin_to_runner_up, runner_up_score, None)
+        .with_agreement(agreement_score)
+        .with_contradiction(contradiction_strength, contradiction_penalty);
 
-    let pos_contribs: Vec<&EvidenceContribution> = contributions
-        .iter()
-        .filter(|c| c.is_positive && c.weighted_score > 0.0)
-        .collect();
-
-    if pos_contribs.is_empty() || total_score <= 0.0 {
-        return (
-            0.0,
-            "Low".to_string(),
-            ConfidenceFactors {
-                diversity_count: 0,
-                diversity_multiplier: 0.0,
-                reliability_score: 0.0,
-                agreement_score: 0.0,
-                ambiguity_penalty: 0.0,
-                evidence_volume_score: 0.0,
-                evidence_quantity: 0,
-                evidence_categories_count: 0,
-                independent_groups_count: 0,
-                diversity_score: 0.0,
-                diversity_result: None,
-                contradiction_strength,
-                contradiction_penalty,
-                score_margin: None,
-                relative_confidence: Some(0.0),
-                ambiguity_state: Some(AmbiguityState::Unknown),
-            },
-        );
-    }
-
-    // 2. Evidence Diversity & Independence
-    let diversity_result = EvidenceDiversityCalculator::calculate_from_contributions(contributions);
-    let diversity_count = diversity_result.independent_groups_count;
-    let diversity_multiplier = diversity_result.diversity_multiplier;
-    let diversity_score = diversity_result.diversity_score;
-
-    // 3. Category Reliability (weighted by category weighted_score)
-    let total_pos_weight: f32 = pos_contribs.iter().map(|c| c.weighted_score).sum();
-    let reliability_score = if total_pos_weight > 0.0 {
-        pos_contribs
-            .iter()
-            .map(|c| c.weighted_score * category_reliability(&c.category))
-            .sum::<f32>()
-            / total_pos_weight
-    } else {
-        0.50
-    };
-    let reliability_multiplier = 0.60 + (0.40 * reliability_score);
-
-    // 4. Evidence Volume Score
-    let evidence_volume_score = match pos_contribs.len() {
-        0 => 0.0,
-        1 => 0.75,
-        2 => 0.90,
-        _ => 1.00,
-    };
-
-    // 5. Agreement Score
-    let agreement = agreement_score.unwrap_or(1.0).clamp(0.0, 1.0);
-    let agreement_multiplier = 0.70 + (0.30 * agreement);
-
-    // 6. Ambiguity & Contradiction Penalty
-    let ambiguity_penalty = match (margin_to_runner_up, runner_up_score) {
-        (Some(margin), Some(runner_up)) if margin <= AMBIGUITY_MARGIN && runner_up >= AMBIGUITY_RUNNER_UP_FLOOR => {
-            0.35 * (1.0 - (margin / AMBIGUITY_MARGIN).clamp(0.0, 1.0))
-        }
-        _ => 0.0,
-    };
-
-    let total_penalty = ambiguity_penalty.max(contradiction_penalty) + (0.08 * contradiction_strength);
-
-    let base_confidence = total_score
-        * diversity_multiplier
-        * reliability_multiplier
-        * evidence_volume_score
-        * agreement_multiplier;
-
-    let clamped_confidence = (base_confidence - total_penalty).clamp(0.0, 1.0);
-
-    let confidence_band = if clamped_confidence >= CONFIDENCE_BAND_HIGH {
-        "High"
-    } else if clamped_confidence >= CONFIDENCE_BAND_MEDIUM {
-        "Medium"
-    } else {
-        "Low"
-    };
-
-    let ambiguity_state = Some(ContextCompetitionAnalyzer::classify_ambiguity(
-        total_score,
-        runner_up_score.unwrap_or(0.0),
-        clamped_confidence,
-    ));
-
-    let relative_confidence = Some(ContextCompetitionAnalyzer::calculate_relative_confidence(
-        total_score,
-        runner_up_score.unwrap_or(0.0),
-        clamped_confidence,
-    ));
-
+    let result = ConfidenceCalibrator::new().calibrate(&input);
     (
-        clamped_confidence,
-        confidence_band.to_string(),
-        ConfidenceFactors {
-            diversity_count,
-            diversity_multiplier,
-            reliability_score,
-            agreement_score: agreement,
-            ambiguity_penalty,
-            evidence_volume_score,
-            evidence_quantity: diversity_result.evidence_quantity,
-            evidence_categories_count: diversity_result.evidence_categories_count,
-            independent_groups_count: diversity_result.independent_groups_count,
-            diversity_score,
-            diversity_result: Some(diversity_result),
-            contradiction_strength,
-            contradiction_penalty,
-            score_margin: margin_to_runner_up,
-            relative_confidence,
-            ambiguity_state,
-        },
+        result.calibrated_confidence,
+        result.band.display_name().to_string(),
+        result.factors,
     )
 }
 
@@ -1206,7 +1082,7 @@ pub fn evaluate_item_context(
     for c_res in candidate_rows.flatten() {
         found_candidate = true;
         let (cand_id, label, conf, count) = c_res;
-        let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
+        let band = ConfidenceBand::from_f64(conf).display_name();
         let display_label = label.unwrap_or_else(|| "possible new context".to_string());
         potential_new_contexts.push(crate::db::models::PotentialNewContextEvaluation {
             candidate_id: Some(cand_id),
@@ -1243,7 +1119,7 @@ pub fn evaluate_item_context(
             group.extend(peer_ids);
             if let Ok(group_score) = crate::context_engine::discovery::score_candidate_group(conn, &group, None) {
                 let conf = group_score.confidence;
-                let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
+                let band = ConfidenceBand::from_f64(conf).display_name();
                 let group_label = crate::context_engine::discovery::generate_candidate_name(conn, &group)
                     .unwrap_or_else(|_| "possible new context".to_string());
 
@@ -1271,7 +1147,7 @@ pub fn evaluate_item_context(
                 (c, vec!["Does not strongly match existing workspaces; potential starting point for a new context pending further activity".to_string()])
             };
 
-            let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
+            let band = ConfidenceBand::from_f64(conf).display_name();
             potential_new_contexts.push(crate::db::models::PotentialNewContextEvaluation {
                 candidate_id: None,
                 label: "possible new context".to_string(),
@@ -1731,13 +1607,13 @@ mod tests {
         assert_eq!(scores.len(), 3);
         
         let high_score = scores.iter().find(|s| s.workspace_id == ws_high.id).unwrap();
-        assert_eq!(high_score.confidence_band, "High");
+        assert!(high_score.confidence_band == "High" || high_score.confidence_band == "Very High");
         
         let med_score = scores.iter().find(|s| s.workspace_id == ws_med.id).unwrap();
         assert_eq!(med_score.confidence_band, "Medium");
         
         let low_score = scores.iter().find(|s| s.workspace_id == ws_low.id).unwrap();
-        assert_eq!(low_score.confidence_band, "Low");
+        assert!(low_score.confidence_band == "Low" || low_score.confidence_band == "Very Low");
         
         let filtered_score = scores.iter().find(|s| s.workspace_id == ws_filtered.id);
         assert!(filtered_score.is_none());
@@ -1781,7 +1657,7 @@ mod tests {
         assert_eq!(interpretation.existing_workspaces.len(), 3);
         assert_eq!(interpretation.existing_workspaces[0].workspace_name, "Paris Trip");
         assert!(interpretation.existing_workspaces[0].score >= 0.70);
-        assert_eq!(interpretation.existing_workspaces[0].confidence_band, "High");
+        assert!(interpretation.existing_workspaces[0].confidence_band == "Very High" || interpretation.existing_workspaces[0].confidence_band == "High");
 
         let portfolio_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_name == "Portfolio").unwrap();
         let college_eval = interpretation.existing_workspaces.iter().find(|w| w.workspace_name == "College").unwrap();
@@ -2061,7 +1937,7 @@ mod tests {
 
         // App alone is capped at same_source_app_max (0.20) and isolated weak signal cap (0.24)
         assert!(result.total_score <= 0.24, "Single source app must not exceed weak signal cap (actual: {})", result.total_score);
-        assert_eq!(result.confidence_band, "Low", "Single source app must never trigger Medium or High confidence");
+        assert!(result.confidence_band == "Low" || result.confidence_band == "Very Low", "Single source app must never trigger Medium or High confidence");
         assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
     }
 
@@ -2080,7 +1956,7 @@ mod tests {
         let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
 
         assert!(result.total_score <= 0.24, "Single web domain must not exceed weak signal cap (actual: {})", result.total_score);
-        assert_eq!(result.confidence_band, "Low", "Single web domain must never trigger Medium or High confidence");
+        assert!(result.confidence_band == "Low" || result.confidence_band == "Very Low", "Single web domain must never trigger Medium or High confidence");
         assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
     }
 
@@ -2102,7 +1978,7 @@ mod tests {
         let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
 
         assert!(result.total_score <= 0.24, "Isolated weak signals combination must be strictly capped at 0.24 (actual: {})", result.total_score);
-        assert_eq!(result.confidence_band, "Low");
+        assert!(result.confidence_band == "Low" || result.confidence_band == "Very Low");
         assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
     }
 
@@ -2148,7 +2024,7 @@ mod tests {
         assert_eq!(result.context_name, "Auth WS");
         assert_eq!(result.total_score, 1.0);
         assert_eq!(result.confidence, 1.0);
-        assert_eq!(result.confidence_band, "High");
+        assert_eq!(result.confidence_band, "Very High");
         assert!(!result.evidence_contributions.is_empty());
         assert_eq!(result.evidence_contributions[0].category, "confirmed_membership");
         assert_eq!(result.evidence_contributions[0].raw_strength, 1.0);
@@ -2252,7 +2128,7 @@ mod tests {
             "Multiple independent agreeing signals must yield high confidence >= 0.70 (actual: {})",
             result.confidence
         );
-        assert_eq!(result.confidence_band, "High");
+        assert!(result.confidence_band == "High" || result.confidence_band == "Very High");
         let factors = result.confidence_factors.unwrap();
         assert!(factors.diversity_count >= 3);
         assert_eq!(factors.diversity_multiplier, 1.0);
@@ -2318,7 +2194,7 @@ mod tests {
             "Sparse evidence must result in low confidence <= 0.15 (actual: {})",
             result.confidence
         );
-        assert_eq!(result.confidence_band, "Low");
+        assert!(result.confidence_band == "Low" || result.confidence_band == "Very Low");
     }
 
     #[test]
@@ -2414,7 +2290,7 @@ mod tests {
             "Independent strong signals must yield high confidence >= 0.70 (actual: {})",
             result_strong.confidence
         );
-        assert_eq!(result_strong.confidence_band, "High");
+        assert!(result_strong.confidence_band == "High" || result_strong.confidence_band == "Very High");
     }
 
     #[test]
@@ -2582,7 +2458,7 @@ mod tests {
 
         assert_eq!(result.total_score, 0.0);
         assert_eq!(result.confidence, 0.0);
-        assert_eq!(result.confidence_band, "Low");
+        assert_eq!(result.confidence_band, "Very Low");
         assert!(result.contradictory_evidence.iter().any(|c| c.category == "user_feedback"));
         assert!(result.uncertainty_indicators.iter().any(|u| u.contains("Prior negative user feedback") || u.contains("User previously rejected")));
     }

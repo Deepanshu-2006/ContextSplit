@@ -127,12 +127,12 @@ mod tests {
             "Portfolio score must be >= 0.70 (actual: {})",
             port_score.total_score
         );
-        assert_eq!(port_score.confidence_band, "High");
+        assert!(port_score.confidence_band == "Very High" || port_score.confidence_band == "High");
 
         // 5. Verify ContextExplanation
         let explanation = explain_context_association(&conn, &target.id, &ws_portfolio.id).unwrap();
         assert_eq!(explanation.workspace_name, "Portfolio");
-        assert_eq!(explanation.confidence_band, "High");
+        assert!(explanation.confidence_band == "Very High" || explanation.confidence_band == "High");
         assert!(explanation.confidence >= 0.70);
         assert!(explanation.summary.contains("Portfolio —"));
 
@@ -203,10 +203,10 @@ mod tests {
         let scores = score_item(&conn, &travel_item.id).unwrap();
         let college_score = scores.iter().find(|s| s.workspace_id == ws_college.id);
 
-        // College score must either be filtered out (< 0.20) or have Low confidence band
+        // College score must either be filtered out (< 0.20) or have Low/Very Low confidence band
         if let Some(s) = college_score {
             assert!(s.total_score < 0.20, "College score should be < 0.20, got {}", s.total_score);
-            assert_eq!(s.confidence_band, "Low");
+            assert!(s.confidence_band == "Low" || s.confidence_band == "Very Low");
         }
 
         // Full context evaluation
@@ -214,7 +214,7 @@ mod tests {
         let college_eval = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_college.id);
         if let Some(eval) = college_eval {
             assert!(eval.score < 0.20, "College suggestion score must be < 0.20, got {}", eval.score);
-            assert_eq!(eval.confidence_band, "Low");
+            assert!(eval.confidence_band == "Low" || eval.confidence_band == "Very Low");
         }
 
         // Zero-Mutation Invariant
@@ -444,13 +444,13 @@ mod tests {
         let eval = interp.existing_workspaces.iter().find(|w| w.workspace_id == ws_general.id);
 
         if let Some(e) = eval {
-            // Anti-dominance cap ensures isolated app signal is <= 0.24 (Low band)
+            // Anti-dominance cap ensures isolated app signal is <= 0.24 (Low/Very Low band)
             assert!(
                 e.score <= 0.24,
                 "Isolated source app signal must not exceed cap of 0.24 (actual: {})",
                 e.score
             );
-            assert_eq!(e.confidence_band, "Low", "Must never force Medium or High confidence on weak signal");
+            assert!(e.confidence_band == "Low" || e.confidence_band == "Very Low", "Must never force Medium or High confidence on weak signal");
         }
 
         // Verify ContextScoreResult details
@@ -461,7 +461,7 @@ mod tests {
         let result = scorer.score_evidence_against_workspace(&evidence_set, &ws_ctx);
 
         assert!(result.total_score <= 0.24);
-        assert_eq!(result.confidence_band, "Low");
+        assert!(result.confidence_band == "Low" || result.confidence_band == "Very Low");
         assert!(result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
 
         // Zero-Mutation Invariant
@@ -523,7 +523,7 @@ mod tests {
             scorer.weights.weak_signals_isolated_cap,
             score_result.total_score
         );
-        assert_eq!(score_result.confidence_band, "Low");
+        assert!(score_result.confidence_band == "Low" || score_result.confidence_band == "Very Low");
         assert!(score_result.uncertainty_indicators.iter().any(|u| u.contains("weak peripheral signals")));
     }
 }
