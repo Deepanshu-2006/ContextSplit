@@ -15,6 +15,7 @@ pub mod attention;
 pub mod evidence;
 pub mod normalization;
 pub mod diversity;
+pub mod contradiction;
 
 pub use evidence::{
     ContextEvidence, ContextEvidenceCollector, ContextEvidenceSet, EntityReference,
@@ -27,6 +28,10 @@ pub use normalization::{
 };
 pub use diversity::{
     EvidenceDiversityCalculator, EvidenceDiversityResult, IndependentEvidenceGroup,
+};
+pub use contradiction::{
+    ContradictionAnalyzer, ContradictionKind, ContextContradictionReport,
+    MultiContextContradictionAnalysis,
 };
 
 #[cfg(test)]

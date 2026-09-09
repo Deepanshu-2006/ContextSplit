@@ -9,6 +9,9 @@ use crate::context_engine::evidence::{
 use crate::context_engine::diversity::{
     EvidenceDiversityCalculator, EvidenceDiversityResult,
 };
+use crate::context_engine::contradiction::{
+    ContradictionAnalyzer, ContextContradictionReport,
+};
 
 /// Structured contribution of an individual evidence category to the final context score.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,7 +32,7 @@ pub struct ContradictoryEvidence {
 }
 
 /// Diagnostic factors detailing how confidence was calculated from evidence diversity,
-/// reliability, agreement, ambiguity, and evidence volume.
+/// reliability, agreement, ambiguity, evidence volume, and contradiction penalties.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfidenceFactors {
     /// Number of distinct independent evidence categories supporting this context
@@ -59,6 +62,12 @@ pub struct ConfidenceFactors {
     /// Detailed structured diversity calculation result
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diversity_result: Option<EvidenceDiversityResult>,
+    /// Contradiction strength level [0.0, 1.0]
+    #[serde(default)]
+    pub contradiction_strength: f32,
+    /// Total penalty discount deducted from confidence due to contradictions [0.0, 1.0]
+    #[serde(default)]
+    pub contradiction_penalty: f32,
 }
 
 /// Comprehensive, structured scoring information for a candidate context.
@@ -75,6 +84,8 @@ pub struct ContextScoreResult {
     pub uncertainty_indicators: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_factors: Option<ConfidenceFactors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contradiction_report: Option<ContextContradictionReport>,
 }
 
 impl ContextScoreResult {
@@ -609,16 +620,39 @@ impl ContextEvidenceScorer {
 
         total_score = total_score.clamp(0.0, 1.0);
 
+        let contradiction_report = ContradictionAnalyzer::new().analyze_candidate(
+            evidence_set,
+            ws,
+            &[ws.clone()],
+            total_score,
+            &contributions,
+            None,
+        );
+
+        for c in &contradiction_report.contradictory_evidence {
+            if !contradictory.iter().any(|existing| existing.category == c.category && existing.description == c.description) {
+                contradictory.push(c.clone());
+            }
+        }
+
+        if let Some(ref expl) = contradiction_report.contradiction_explanation {
+            if !uncertainty.contains(expl) {
+                uncertainty.push(expl.clone());
+            }
+        }
+
         // Compute Confidence separated from score
-        let (confidence, confidence_band, confidence_factors) = evaluate_confidence(
+        let (confidence, confidence_band, confidence_factors) = evaluate_confidence_with_contradiction(
             &contributions,
             total_score,
             None,
             None,
             None,
+            contradiction_report.contradiction_strength,
+            contradiction_report.confidence_penalty,
         );
 
-        if confidence_factors.diversity_count == 1 && total_score >= 0.40 {
+        if confidence_factors.diversity_count <= 1 && total_score >= 0.40 {
             uncertainty.push("High affinity score relies on a single evidence category; confidence is limited until corroborated by independent signals.".to_string());
         }
 
@@ -633,11 +667,13 @@ impl ContextEvidenceScorer {
             contradictory_evidence: contradictory,
             uncertainty_indicators: uncertainty,
             confidence_factors: Some(confidence_factors),
+            contradiction_report: Some(contradiction_report),
         }
     }
 
     /// Evaluates an evidence set against multiple candidate workspaces, sorted descending by score.
-    /// In a second pass, calibrates confidence using candidate margin, runner-up score, and agreement across contexts.
+    /// In a second pass, calibrates confidence using candidate margin, runner-up score, agreement across contexts,
+    /// and cross-context contradiction analysis.
     pub fn score_evidence(
         &self,
         evidence_set: &ContextEvidenceSet,
@@ -658,7 +694,18 @@ impl ContextEvidenceScorer {
 
         let total_score_sum: f32 = results.iter().map(|r| r.total_score).sum();
 
-        // Second pass: Calibrate confidence with margin, runner-up, and agreement across candidates
+        let candidate_scores: Vec<(String, f32, Vec<EvidenceContribution>)> = results
+            .iter()
+            .map(|r| (r.context_id.clone(), r.total_score, r.evidence_contributions.clone()))
+            .collect();
+
+        let contradiction_analysis = ContradictionAnalyzer::new().analyze_all(
+            evidence_set,
+            workspaces,
+            &candidate_scores,
+        );
+
+        // Second pass: Calibrate confidence with margin, runner-up, agreement, and contradiction analysis
         for i in 0..num_workspaces {
             let (margin_to_runner_up, runner_up_score, runner_up_name) = if i == 0 {
                 if num_workspaces > 1 {
@@ -684,17 +731,39 @@ impl ContextEvidenceScorer {
                 Some(1.0)
             };
 
-            let (conf, band, factors) = evaluate_confidence(
+            let report = contradiction_analysis.reports.get(&results[i].context_id).cloned();
+            let (c_strength, c_penalty) = match &report {
+                Some(rep) => (rep.contradiction_strength, rep.confidence_penalty),
+                None => (0.0, 0.0),
+            };
+
+            if let Some(ref rep) = report {
+                for c in &rep.contradictory_evidence {
+                    if !results[i].contradictory_evidence.iter().any(|existing| existing.category == c.category && existing.description == c.description) {
+                        results[i].contradictory_evidence.push(c.clone());
+                    }
+                }
+                if let Some(ref expl) = rep.contradiction_explanation {
+                    if !results[i].uncertainty_indicators.contains(expl) {
+                        results[i].uncertainty_indicators.push(expl.clone());
+                    }
+                }
+            }
+
+            let (conf, band, factors) = evaluate_confidence_with_contradiction(
                 &results[i].evidence_contributions,
                 results[i].total_score,
                 margin_to_runner_up,
                 runner_up_score,
                 agreement_score,
+                c_strength,
+                c_penalty,
             );
 
             results[i].confidence = conf;
             results[i].confidence_band = band;
             results[i].confidence_factors = Some(factors);
+            results[i].contradiction_report = report;
 
             if let Some(r_name) = runner_up_name {
                 if let Some(margin) = margin_to_runner_up {
@@ -735,20 +804,34 @@ pub fn category_reliability(category: &str) -> f32 {
 }
 
 /// Evaluates confidence as a distinct, principled assessment of conclusion trustworthiness.
-///
-/// Factors incorporated:
-/// - Evidence strength (`total_score`)
-/// - Evidence diversity & independence (via `EvidenceDiversityCalculator`)
-/// - Category reliability (weighted average reliability score)
-/// - Evidence volume (number of contributing signals)
-/// - Agreement proportion across alternative candidate contexts
-/// - Ambiguity margin damping (penalizes closely contested top contexts)
 pub fn evaluate_confidence(
     contributions: &[EvidenceContribution],
     total_score: f32,
     margin_to_runner_up: Option<f32>,
     runner_up_score: Option<f32>,
     agreement_score: Option<f32>,
+) -> (f32, String, ConfidenceFactors) {
+    evaluate_confidence_with_contradiction(
+        contributions,
+        total_score,
+        margin_to_runner_up,
+        runner_up_score,
+        agreement_score,
+        0.0,
+        0.0,
+    )
+}
+
+/// Evaluates confidence incorporating evidence diversity, reliability, volume, agreement,
+/// ambiguity margin, and contradictory evidence penalties.
+pub fn evaluate_confidence_with_contradiction(
+    contributions: &[EvidenceContribution],
+    total_score: f32,
+    margin_to_runner_up: Option<f32>,
+    runner_up_score: Option<f32>,
+    agreement_score: Option<f32>,
+    contradiction_strength: f32,
+    contradiction_penalty: f32,
 ) -> (f32, String, ConfidenceFactors) {
     // 1. Authoritative explicit confirmed membership is always 100% confident
     if contributions.iter().any(|c| c.category == "confirmed_membership" && c.is_positive && c.weighted_score > 0.0) {
@@ -768,6 +851,8 @@ pub fn evaluate_confidence(
                 independent_groups_count: div.independent_groups_count,
                 diversity_score: 1.0,
                 diversity_result: Some(div),
+                contradiction_strength: 0.0,
+                contradiction_penalty: 0.0,
             },
         );
     }
@@ -793,6 +878,8 @@ pub fn evaluate_confidence(
                 independent_groups_count: 0,
                 diversity_score: 0.0,
                 diversity_result: None,
+                contradiction_strength,
+                contradiction_penalty,
             },
         );
     }
@@ -828,7 +915,7 @@ pub fn evaluate_confidence(
     let agreement = agreement_score.unwrap_or(1.0).clamp(0.0, 1.0);
     let agreement_multiplier = 0.70 + (0.30 * agreement);
 
-    // 6. Ambiguity Penalty
+    // 6. Ambiguity & Contradiction Penalty
     let ambiguity_penalty = match (margin_to_runner_up, runner_up_score) {
         (Some(margin), Some(runner_up)) if margin <= AMBIGUITY_MARGIN && runner_up >= AMBIGUITY_RUNNER_UP_FLOOR => {
             0.35 * (1.0 - (margin / AMBIGUITY_MARGIN).clamp(0.0, 1.0))
@@ -836,13 +923,15 @@ pub fn evaluate_confidence(
         _ => 0.0,
     };
 
+    let total_penalty = ambiguity_penalty.max(contradiction_penalty) + (0.08 * contradiction_strength);
+
     let base_confidence = total_score
         * diversity_multiplier
         * reliability_multiplier
         * evidence_volume_score
         * agreement_multiplier;
 
-    let clamped_confidence = (base_confidence - ambiguity_penalty).clamp(0.0, 1.0);
+    let clamped_confidence = (base_confidence - total_penalty).clamp(0.0, 1.0);
 
     let confidence_band = if clamped_confidence >= CONFIDENCE_BAND_HIGH {
         "High"
@@ -867,6 +956,8 @@ pub fn evaluate_confidence(
             independent_groups_count: diversity_result.independent_groups_count,
             diversity_score,
             diversity_result: Some(diversity_result),
+            contradiction_strength,
+            contradiction_penalty,
         },
     )
 }
@@ -1328,6 +1419,7 @@ mod tests {
     use crate::db::operations::{create_workspace, create_item};
     use crate::context_engine::operations::create_context_signal;
     use crate::context_engine::evidence::ContextEvidence;
+    use crate::context_engine::contradiction::ContradictionKind;
 
     fn setup_in_memory_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -2287,5 +2379,224 @@ mod tests {
         assert!(factors.diversity_result.is_some());
         assert!(conf >= 0.45);
         assert_eq!(band, "Medium");
+    }
+
+    #[test]
+    fn test_contradiction_detection_clear_winner() {
+        // Clear winner: Context A has session, semantic, and history evidence; Context B has none.
+        let mut evidence_set = ContextEvidenceSet::new("target_clear_scoring");
+        evidence_set.add(ContextEvidence::observed_session("target_clear_scoring", "sess_a", None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_clear_scoring",
+            "item_a",
+            0.92,
+            Some("Doc A"),
+            Some("Context A"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_clear_scoring",
+            "ws_a",
+            "Context A",
+            1.0,
+            None,
+        ));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+        ws_a.sessions.push("sess_a".to_string());
+        ws_a.item_ids.push("item_a".to_string());
+
+        let ws_b = WorkspaceScoringContext::new("ws_b", "Context B");
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        assert_eq!(results.len(), 2);
+        let top = &results[0];
+        assert_eq!(top.context_id, "ws_a");
+        assert!(top.total_score >= 0.75);
+        assert!(top.confidence >= 0.70);
+        assert_eq!(top.confidence_band, "High");
+
+        let factors = top.confidence_factors.as_ref().unwrap();
+        assert_eq!(factors.contradiction_strength, 0.0);
+        assert_eq!(factors.contradiction_penalty, 0.0);
+    }
+
+    #[test]
+    fn test_contradiction_detection_two_competing_contexts() {
+        // Two competing contexts: Both Context A and Context B have strong evidence with a narrow margin.
+        let mut evidence_set = ContextEvidenceSet::new("target_competing_scoring");
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_competing_scoring",
+            "item_a",
+            0.88,
+            Some("Doc A"),
+            Some("Context A"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_competing_scoring",
+            "item_b",
+            0.86,
+            Some("Doc B"),
+            Some("Context B"),
+            None,
+        ));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+        ws_a.item_ids.push("item_a".to_string());
+
+        let mut ws_b = WorkspaceScoringContext::new("ws_b", "Context B");
+        ws_b.item_ids.push("item_b".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        assert_eq!(results.len(), 2);
+        let top = &results[0];
+        // Invariant: Competing contexts must damp confidence below raw score and below High band
+        assert!(top.confidence < top.total_score);
+        assert!(top.confidence <= 0.45, "Competing candidates must not have high confidence (actual: {})", top.confidence);
+        assert_ne!(top.confidence_band, "High");
+
+        let factors = top.confidence_factors.as_ref().unwrap();
+        assert!(factors.contradiction_strength > 0.0);
+        assert!(top.uncertainty_indicators.iter().any(|u| u.contains("Competing evidence") || u.contains("Ambiguous context assignment")));
+    }
+
+    #[test]
+    fn test_contradiction_detection_semantic_history_conflict() {
+        // Semantic similarity points to Context A while user organization history points to Context B.
+        let mut evidence_set = ContextEvidenceSet::new("target_sem_hist_scoring");
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_sem_hist_scoring",
+            "item_a",
+            0.90,
+            Some("Research Paper"),
+            Some("Context A"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_sem_hist_scoring",
+            "ws_b",
+            "Context B",
+            1.0,
+            None,
+        ));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+        ws_a.item_ids.push("item_a".to_string());
+
+        let ws_b = WorkspaceScoringContext::new("ws_b", "Context B");
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        let res_a = results.iter().find(|r| r.context_id == "ws_a").unwrap();
+        assert!(res_a.contradiction_report.is_some());
+        let rep_a = res_a.contradiction_report.as_ref().unwrap();
+        assert_eq!(rep_a.contradiction_kind, Some(ContradictionKind::SemanticHistoryConflict));
+        assert!(rep_a.contradiction_strength >= 0.70);
+        assert!(res_a.confidence <= 0.45, "Semantic/History conflict must suppress confidence");
+        assert!(res_a.uncertainty_indicators.iter().any(|u| u.contains("Semantic similarity points to 'Context A' while user organization history points to 'Context B'")));
+    }
+
+    #[test]
+    fn test_contradiction_detection_explicit_user_correction() {
+        // Explicit user feedback dismissal against Context A.
+        let mut evidence_set = ContextEvidenceSet::new("target_user_corr_scoring");
+        evidence_set.add(ContextEvidence::observed_app("target_user_corr_scoring", "Safari", None));
+        evidence_set.add(ContextEvidence::observed_user_dismissal("target_user_corr_scoring", "ws_a", Some("Context A"), None));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+        ws_a.app_names.push("Safari".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws_a);
+
+        assert_eq!(result.total_score, 0.0);
+        assert_eq!(result.confidence, 0.0);
+        assert_eq!(result.confidence_band, "Low");
+        assert!(result.contradictory_evidence.iter().any(|c| c.category == "user_feedback"));
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("Prior negative user feedback") || u.contains("User previously rejected")));
+    }
+
+    #[test]
+    fn test_contradiction_detection_weak_discrepancy_retains_high_confidence_when_strong_evidence() {
+        // Context A has strong multi-signal evidence (session + semantic + history),
+        // but shares a minor application (Slack) that also exists in Context B.
+        let mut evidence_set = ContextEvidenceSet::new("target_weak_scoring");
+        evidence_set.add(ContextEvidence::inferred_workspace_history("target_weak_scoring", "ws_a", "Context A", 1.0, None));
+        evidence_set.add(ContextEvidence::observed_session("target_weak_scoring", "sess_a", None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_weak_scoring",
+            "doc_a",
+            0.92,
+            Some("Project Spec"),
+            Some("Context A"),
+            None,
+        ));
+        evidence_set.add(ContextEvidence::observed_app("target_weak_scoring", "Slack", None));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+        ws_a.sessions.push("sess_a".to_string());
+        ws_a.item_ids.push("doc_a".to_string());
+
+        let mut ws_b = WorkspaceScoringContext::new("ws_b", "Context B");
+        ws_b.app_names.push("Slack".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        let top = &results[0];
+        assert_eq!(top.context_id, "ws_a");
+        assert!(top.total_score >= 0.80);
+        // Weak contradiction does NOT destroy confidence when backed by 3 independent strong groups
+        assert!(top.confidence >= 0.65);
+        assert_eq!(top.confidence_band, "High");
+    }
+
+    #[test]
+    fn test_contradiction_prevents_blindly_choosing_highest_raw_score() {
+        // Scenario: Context A has high raw score (0.50) purely from history, but item was captured
+        // in an active session firmly belonging to Context B (score 0.40).
+        let mut evidence_set = ContextEvidenceSet::new("target_session_conflict");
+        evidence_set.add(ContextEvidence::inferred_workspace_history(
+            "target_session_conflict",
+            "ws_a",
+            "Context A",
+            1.0,
+            None,
+        ));
+        evidence_set.add(ContextEvidence::observed_session("target_session_conflict", "sess_b", None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_session_conflict",
+            "item_b",
+            0.85,
+            Some("Doc B"),
+            Some("Context B"),
+            None,
+        ));
+
+        let ws_a = WorkspaceScoringContext::new("ws_a", "Context A");
+
+        let mut ws_b = WorkspaceScoringContext::new("ws_b", "Context B");
+        ws_b.sessions.push("sess_b".to_string());
+        ws_b.item_ids.push("item_b".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        let res_a = results.iter().find(|r| r.context_id == "ws_a").unwrap();
+        let res_b = results.iter().find(|r| r.context_id == "ws_b").unwrap();
+
+        // Context A suffers session conflict contradiction
+        let rep_a = res_a.contradiction_report.as_ref().unwrap();
+        assert_eq!(rep_a.contradiction_kind, Some(ContradictionKind::SessionConflict));
+        assert!(rep_a.contradiction_strength >= 0.80);
+
+        // Context B has higher confidence than Context A because Context B has session + semantic alignment
+        assert!(res_b.confidence > res_a.confidence, "Context with aligned session and no session contradiction must have higher confidence (B: {}, A: {})", res_b.confidence, res_a.confidence);
     }
 }
