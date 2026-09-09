@@ -705,12 +705,12 @@ mod tests {
             &item_bistro.id,
             &ws_paris.id,
             "suggested",
-            paris_eval.score,
+            paris_eval.confidence,
             "context_engine",
         ).unwrap();
 
         assert_eq!(sug_mem.membership_type, "suggested");
-        assert_eq!(sug_mem.confidence, paris_eval.score);
+        assert_eq!(sug_mem.confidence, paris_eval.confidence);
         // Physical location remains Inbox
         assert_eq!(operations::get_item(&conn, &item_bistro.id).unwrap().workspace_id, None);
 

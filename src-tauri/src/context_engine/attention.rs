@@ -196,8 +196,8 @@ pub fn evaluate_inbox_item_attention(
     let mut top_2_ws_name = None;
 
     if let (Some(s1), Some(s2)) = (top_1, top_2) {
-        if s1.confidence >= 0.10 && s2.confidence >= 0.10 {
-            let margin = (s1.confidence - s2.confidence).abs();
+        if s1.total_score >= 0.15 && s2.total_score >= 0.15 {
+            let margin = (s1.total_score - s2.total_score).abs();
             if margin <= config.ambiguity_threshold {
                 is_ambiguous = true;
                 ambiguity_margin = Some(margin);
@@ -310,7 +310,7 @@ pub fn evaluate_inbox_item_attention(
         score += config.suggested_membership_bonus;
     }
     if is_ambiguous {
-        score += config.ambiguity_bonus;
+        score = score.max(0.40) + config.ambiguity_bonus;
     }
 
     // Dismissal penalty damping

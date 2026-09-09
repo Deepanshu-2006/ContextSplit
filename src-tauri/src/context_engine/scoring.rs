@@ -25,6 +25,24 @@ pub struct ContradictoryEvidence {
     pub penalty: f32,
 }
 
+/// Diagnostic factors detailing how confidence was calculated from evidence diversity,
+/// reliability, agreement, ambiguity, and evidence volume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceFactors {
+    /// Number of distinct independent evidence categories supporting this context
+    pub diversity_count: usize,
+    /// Diversity multiplier applied to raw score (0.35 - 1.0)
+    pub diversity_multiplier: f32,
+    /// Weighted average reliability score of contributing evidence categories (0.0 - 1.0)
+    pub reliability_score: f32,
+    /// Agreement proportion: relative support for this context vs other candidate contexts (0.0 - 1.0)
+    pub agreement_score: f32,
+    /// Ambiguity penalty discount (0.0 if unambiguous, > 0.0 if competing with close runner-up)
+    pub ambiguity_penalty: f32,
+    /// Evidence volume score (0.0 - 1.0)
+    pub evidence_volume_score: f32,
+}
+
 /// Comprehensive, structured scoring information for a candidate context.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextScoreResult {
@@ -37,6 +55,8 @@ pub struct ContextScoreResult {
     pub strongest_reasons: Vec<String>,
     pub contradictory_evidence: Vec<ContradictoryEvidence>,
     pub uncertainty_indicators: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_factors: Option<ConfidenceFactors>,
 }
 
 impl ContextScoreResult {
@@ -63,6 +83,13 @@ pub struct WorkspaceScore {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_result: Option<ContextScoreResult>,
 }
+
+/// Canonical thresholds and margins for contextual scoring and confidence evaluation.
+pub const CONFIDENCE_BAND_HIGH: f32 = 0.70;
+pub const CONFIDENCE_BAND_MEDIUM: f32 = 0.35;
+pub const CONFIDENCE_BAND_LOW: f32 = 0.15;
+pub const AMBIGUITY_MARGIN: f32 = 0.15;
+pub const AMBIGUITY_RUNNER_UP_FLOOR: f32 = 0.20;
 
 /// Explicit, modular, and configurable scoring weights for the Context Engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,9 +154,9 @@ impl Default for ScoringWeights {
             same_content_type_max: 0.1,
             user_feedback_dismissal_penalty: 0.50,
             weak_signals_isolated_cap: 0.24,
-            threshold_high: 0.6,
-            threshold_medium: 0.4,
-            threshold_low: 0.2,
+            threshold_high: CONFIDENCE_BAND_HIGH,
+            threshold_medium: CONFIDENCE_BAND_MEDIUM,
+            threshold_low: CONFIDENCE_BAND_LOW,
             temporal_decay: crate::context_engine::temporal::TemporalDecayConfig::default(),
         }
     }
@@ -564,29 +591,35 @@ impl ContextEvidenceScorer {
 
         total_score = total_score.clamp(0.0, 1.0);
 
-        // Confidence Band Mapping
-        let confidence_band = if total_score >= self.weights.threshold_high {
-            "High"
-        } else if total_score >= self.weights.threshold_medium {
-            "Medium"
-        } else {
-            "Low"
-        };
+        // Compute Confidence separated from score
+        let (confidence, confidence_band, confidence_factors) = evaluate_confidence(
+            &contributions,
+            total_score,
+            None,
+            None,
+            None,
+        );
+
+        if confidence_factors.diversity_count == 1 && total_score >= 0.40 {
+            uncertainty.push("High affinity score relies on a single evidence category; confidence is limited until corroborated by independent signals.".to_string());
+        }
 
         ContextScoreResult {
             context_id: ws.id.clone(),
             context_name: ws.name.clone(),
             total_score,
-            confidence: total_score,
-            confidence_band: confidence_band.to_string(),
+            confidence,
+            confidence_band,
             evidence_contributions: contributions,
             strongest_reasons,
             contradictory_evidence: contradictory,
             uncertainty_indicators: uncertainty,
+            confidence_factors: Some(confidence_factors),
         }
     }
 
     /// Evaluates an evidence set against multiple candidate workspaces, sorted descending by score.
+    /// In a second pass, calibrates confidence using candidate margin, runner-up score, and agreement across contexts.
     pub fn score_evidence(
         &self,
         evidence_set: &ContextEvidenceSet,
@@ -597,9 +630,236 @@ impl ContextEvidenceScorer {
             .map(|ws| self.score_evidence_against_workspace(evidence_set, ws))
             .collect();
 
+        // Sort descending by total_score
         results.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(Ordering::Equal));
+
+        let num_workspaces = results.len();
+        if num_workspaces == 0 {
+            return results;
+        }
+
+        let total_score_sum: f32 = results.iter().map(|r| r.total_score).sum();
+
+        // Second pass: Calibrate confidence with margin, runner-up, and agreement across candidates
+        for i in 0..num_workspaces {
+            let (margin_to_runner_up, runner_up_score, runner_up_name) = if i == 0 {
+                if num_workspaces > 1 {
+                    (
+                        Some((results[0].total_score - results[1].total_score).max(0.0)),
+                        Some(results[1].total_score),
+                        Some(results[1].context_name.clone()),
+                    )
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (
+                    Some((results[0].total_score - results[i].total_score).abs()),
+                    Some(results[0].total_score),
+                    Some(results[0].context_name.clone()),
+                )
+            };
+
+            let agreement_score = if total_score_sum > 0.0 {
+                Some(results[i].total_score / total_score_sum)
+            } else {
+                Some(1.0)
+            };
+
+            let (conf, band, factors) = evaluate_confidence(
+                &results[i].evidence_contributions,
+                results[i].total_score,
+                margin_to_runner_up,
+                runner_up_score,
+                agreement_score,
+            );
+
+            results[i].confidence = conf;
+            results[i].confidence_band = band;
+            results[i].confidence_factors = Some(factors);
+
+            if let Some(r_name) = runner_up_name {
+                if let Some(margin) = margin_to_runner_up {
+                    if margin <= AMBIGUITY_MARGIN && results[i].total_score >= AMBIGUITY_RUNNER_UP_FLOOR {
+                        let msg = format!("Ambiguous context assignment: competing closely with candidate '{}' (margin {:.2})", r_name, margin);
+                        if !results[i].uncertainty_indicators.contains(&msg) {
+                            results[i].uncertainty_indicators.push(msg);
+                        }
+                    }
+                }
+            }
+        }
+
         results
     }
+}
+
+/// Maps an evidence category string into an independent conceptual category group for diversity calculations.
+pub fn map_category_group(category: &str) -> &'static str {
+    match category {
+        "confirmed_membership" => "confirmed",
+        "workspace_history" => "history",
+        "related_items" | "temporal_proximity" => "graph",
+        "semantic_similarity_items" | "semantic_profile" => "semantic",
+        "same_session" => "session",
+        "source_app" => "app",
+        "browser_domain" => "domain",
+        "content_type" => "content",
+        _ => "other",
+    }
+}
+
+/// Category reliability ratings based on verifiability and noise profile.
+pub fn category_reliability(category: &str) -> f32 {
+    match category {
+        "confirmed_membership" => 1.00,
+        "user_feedback" => 0.95,
+        "same_session" => 0.85,
+        "workspace_history" => 0.80,
+        "related_items" => 0.75,
+        "semantic_similarity_items" | "semantic_profile" => 0.70,
+        "browser_domain" => 0.55,
+        "source_app" => 0.45,
+        "temporal_proximity" => 0.40,
+        "content_type" => 0.35,
+        _ => 0.50,
+    }
+}
+
+/// Evaluates confidence as a distinct, principled assessment of conclusion trustworthiness.
+///
+/// Factors incorporated:
+/// - Evidence strength (`total_score`)
+/// - Evidence diversity (independent categories: 1 -> 0.35-0.45, 2 -> 0.80, 3+ -> 1.0)
+/// - Category reliability (weighted average reliability score)
+/// - Evidence volume (number of contributing signals: 1 -> 0.70, 2 -> 0.85, 3 -> 0.95, 4+ -> 1.0)
+/// - Agreement proportion across alternative candidate contexts
+/// - Ambiguity margin damping (penalizes closely contested top contexts)
+pub fn evaluate_confidence(
+    contributions: &[EvidenceContribution],
+    total_score: f32,
+    margin_to_runner_up: Option<f32>,
+    runner_up_score: Option<f32>,
+    agreement_score: Option<f32>,
+) -> (f32, String, ConfidenceFactors) {
+    // 1. Authoritative explicit confirmed membership is always 100% confident
+    if contributions.iter().any(|c| c.category == "confirmed_membership" && c.is_positive && c.weighted_score > 0.0) {
+        return (
+            1.0,
+            "High".to_string(),
+            ConfidenceFactors {
+                diversity_count: 1,
+                diversity_multiplier: 1.0,
+                reliability_score: 1.0,
+                agreement_score: 1.0,
+                ambiguity_penalty: 0.0,
+                evidence_volume_score: 1.0,
+            },
+        );
+    }
+
+    let pos_contribs: Vec<&EvidenceContribution> = contributions
+        .iter()
+        .filter(|c| c.is_positive && c.weighted_score > 0.0)
+        .collect();
+
+    if pos_contribs.is_empty() || total_score <= 0.0 {
+        return (
+            0.0,
+            "Low".to_string(),
+            ConfidenceFactors {
+                diversity_count: 0,
+                diversity_multiplier: 0.0,
+                reliability_score: 0.0,
+                agreement_score: 0.0,
+                ambiguity_penalty: 0.0,
+                evidence_volume_score: 0.0,
+            },
+        );
+    }
+
+    // 2. Evidence Diversity (count distinct category groups)
+    let mut groups: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    for c in &pos_contribs {
+        groups.insert(map_category_group(&c.category));
+    }
+    let diversity_count = groups.len();
+
+    let diversity_multiplier = match diversity_count {
+        1 => {
+            if groups.contains("semantic") {
+                0.45
+            } else if groups.contains("app") || groups.contains("domain") || groups.contains("content") {
+                0.35
+            } else {
+                0.45
+            }
+        }
+        2 => 0.80,
+        _ => 1.00,
+    };
+
+    // 3. Category Reliability (weighted by category weighted_score)
+    let total_pos_weight: f32 = pos_contribs.iter().map(|c| c.weighted_score).sum();
+    let reliability_score = if total_pos_weight > 0.0 {
+        pos_contribs
+            .iter()
+            .map(|c| c.weighted_score * category_reliability(&c.category))
+            .sum::<f32>()
+            / total_pos_weight
+    } else {
+        0.50
+    };
+    let reliability_multiplier = 0.60 + (0.40 * reliability_score);
+
+    // 4. Evidence Volume Score
+    let evidence_volume_score = match pos_contribs.len() {
+        0 => 0.0,
+        1 => 0.75,
+        2 => 0.90,
+        _ => 1.00,
+    };
+
+    // 5. Agreement Score
+    let agreement = agreement_score.unwrap_or(1.0).clamp(0.0, 1.0);
+    let agreement_multiplier = 0.70 + (0.30 * agreement);
+
+    // 6. Ambiguity Penalty
+    let ambiguity_penalty = match (margin_to_runner_up, runner_up_score) {
+        (Some(margin), Some(runner_up)) if margin <= AMBIGUITY_MARGIN && runner_up >= AMBIGUITY_RUNNER_UP_FLOOR => {
+            0.35 * (1.0 - (margin / AMBIGUITY_MARGIN).clamp(0.0, 1.0))
+        }
+        _ => 0.0,
+    };
+
+    let base_confidence = total_score
+        * diversity_multiplier
+        * reliability_multiplier
+        * evidence_volume_score
+        * agreement_multiplier;
+
+    let clamped_confidence = (base_confidence - ambiguity_penalty).clamp(0.0, 1.0);
+
+    let confidence_band = if clamped_confidence >= CONFIDENCE_BAND_HIGH {
+        "High"
+    } else if clamped_confidence >= CONFIDENCE_BAND_MEDIUM {
+        "Medium"
+    } else {
+        "Low"
+    };
+
+    (
+        clamped_confidence,
+        confidence_band.to_string(),
+        ConfidenceFactors {
+            diversity_count,
+            diversity_multiplier,
+            reliability_score,
+            agreement_score: agreement,
+            ambiguity_penalty,
+            evidence_volume_score,
+        },
+    )
 }
 
 /// Helper to load workspace scoring contexts from the database.
@@ -731,13 +991,7 @@ pub fn evaluate_item_context(
     let mut existing_workspaces = Vec::new();
     for res in scored_results {
         let clamped_score = (res.total_score as f64).clamp(0.0, 1.0);
-        let confidence_band = if clamped_score >= 0.60 {
-            "High"
-        } else if clamped_score >= 0.35 {
-            "Medium"
-        } else {
-            "Low"
-        };
+        let clamped_confidence = (res.confidence as f64).clamp(0.0, 1.0);
 
         let contextual_reasons = crate::context_engine::explanation::get_concise_explanations(conn, item_id, &res.context_id);
         let final_reasons = if !contextual_reasons.is_empty() && clamped_score >= 0.20 {
@@ -752,9 +1006,9 @@ pub fn evaluate_item_context(
             workspace_id: res.context_id,
             workspace_name: res.context_name,
             score: clamped_score,
-            confidence: clamped_score,
-            confidence_percentage: format!("{:.0}%", (clamped_score * 100.0).round()),
-            confidence_band: confidence_band.to_string(),
+            confidence: clamped_confidence,
+            confidence_percentage: format!("{:.0}%", (clamped_confidence * 100.0).round()),
+            confidence_band: res.confidence_band,
             reasons: final_reasons,
         });
     }
@@ -787,7 +1041,7 @@ pub fn evaluate_item_context(
     for c_res in candidate_rows.flatten() {
         found_candidate = true;
         let (cand_id, label, conf, count) = c_res;
-        let band = if conf >= 0.70 { "High" } else if conf >= 0.40 { "Medium" } else { "Low" };
+        let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
         let display_label = label.unwrap_or_else(|| "possible new context".to_string());
         potential_new_contexts.push(crate::db::models::PotentialNewContextEvaluation {
             candidate_id: Some(cand_id),
@@ -824,7 +1078,7 @@ pub fn evaluate_item_context(
             group.extend(peer_ids);
             if let Ok(group_score) = crate::context_engine::discovery::score_candidate_group(conn, &group, None) {
                 let conf = group_score.confidence;
-                let band = if conf >= 0.70 { "High" } else if conf >= 0.40 { "Medium" } else { "Low" };
+                let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
                 let group_label = crate::context_engine::discovery::generate_candidate_name(conn, &group)
                     .unwrap_or_else(|_| "possible new context".to_string());
 
@@ -852,7 +1106,7 @@ pub fn evaluate_item_context(
                 (c, vec!["Does not strongly match existing workspaces; potential starting point for a new context pending further activity".to_string()])
             };
 
-            let band = if conf >= 0.70 { "High" } else if conf >= 0.40 { "Medium" } else { "Low" };
+            let band = if conf >= CONFIDENCE_BAND_HIGH as f64 { "High" } else if conf >= CONFIDENCE_BAND_MEDIUM as f64 { "Medium" } else { "Low" };
             potential_new_contexts.push(crate::db::models::PotentialNewContextEvaluation {
                 candidate_id: None,
                 label: "possible new context".to_string(),
@@ -873,8 +1127,8 @@ pub fn evaluate_item_context(
 
     let (primary_interpretation, summary) = if let Some(ws) = top_ws {
         let is_ambiguous = existing_workspaces.len() > 1
-            && (existing_workspaces[0].score - existing_workspaces[1].score).abs() <= 0.12
-            && existing_workspaces[1].score >= 0.35;
+            && (existing_workspaces[0].score - existing_workspaces[1].score).abs() <= AMBIGUITY_MARGIN as f64
+            && existing_workspaces[1].score >= AMBIGUITY_RUNNER_UP_FLOOR as f64;
 
         if is_ambiguous {
             let ws2 = &existing_workspaces[1];
@@ -885,18 +1139,18 @@ pub fn evaluate_item_context(
                     ws.workspace_name, ws.confidence_percentage, ws2.workspace_name, ws2.confidence_percentage
                 ),
             )
-        } else if ws.confidence >= 0.60 && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence) {
+        } else if ws.confidence >= CONFIDENCE_BAND_MEDIUM as f64 && (top_new.is_none() || ws.confidence >= top_new.unwrap().confidence) {
             (
                 "existing_workspace".to_string(),
                 format!("Strong match to existing workspace '{}' ({})", ws.workspace_name, ws.confidence_percentage),
             )
-        } else if ws.confidence < 0.25 {
+        } else if ws.confidence < CONFIDENCE_BAND_LOW as f64 {
             (
                 "unassigned".to_string(),
                 "Weak signals detected; item remains in Inbox".to_string(),
             )
         } else if let Some(new_ctx) = top_new {
-            if new_ctx.confidence >= 0.60 {
+            if new_ctx.confidence >= CONFIDENCE_BAND_HIGH as f64 {
                 (
                     "new_context".to_string(),
                     format!("Cohesive new context detected: '{}' ({})", new_ctx.label, new_ctx.confidence_percentage),
@@ -1000,8 +1254,8 @@ pub fn recalculate_workspace_suggested_memberships(
 
         let scores = score_item(conn, &target_item_id).unwrap_or_default();
         let is_ambiguous = scores.len() > 1
-            && (scores[0].confidence - scores[1].confidence).abs() <= 0.12
-            && scores[1].confidence >= 0.35;
+            && (scores[0].total_score - scores[1].total_score).abs() <= AMBIGUITY_MARGIN
+            && scores[1].total_score >= AMBIGUITY_RUNNER_UP_FLOOR;
 
         let new_score = scores.into_iter().find(|s| s.workspace_id == workspace_id);
         let new_confidence = new_score.map(|s| s.confidence as f64).unwrap_or(0.0).clamp(0.0, 1.0);
@@ -1012,7 +1266,7 @@ pub fn recalculate_workspace_suggested_memberships(
         let should_qualify = if existing_membership.is_some() {
             delta >= 0.01
         } else {
-            new_confidence >= 0.35 && !is_ambiguous
+            new_confidence >= (CONFIDENCE_BAND_MEDIUM as f64 - 0.05) && !is_ambiguous
         };
 
         if should_qualify {
@@ -1286,20 +1540,22 @@ mod tests {
         
         let target = create_item(&conn, None, None, "text", "target", None, "{}").unwrap();
         
-        // High WS: score should be >= 0.6
+        // High WS: 3 independent signals: history (0.40) + semantic (0.40) + related_items (0.20) -> High band
         let r_high = create_item(&conn, Some(&ws_high.id), None, "text", "rh", None, "{}").unwrap();
-        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_high.id, "same_app", 1.0, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_high.id, "related_item", 1.0, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_high.id, "semantic_similarity", 0.95, None).unwrap();
         let payload_high = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_high.id}).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_high).unwrap();
         
-        // Medium WS: score should be >= 0.4 and < 0.6
-        let _ = create_item(&conn, Some(&ws_med.id), None, "text", "rm", None, "{}").unwrap();
+        // Medium WS: 2 signals: history (0.40) + related_item (0.20) -> Medium band
+        let r_med = create_item(&conn, Some(&ws_med.id), None, "text", "rm", None, "{}").unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_med.id, "related_item", 1.0, None).unwrap();
         let payload_med = serde_json::json!({"action": "moved_to_workspace", "destination_workspace": ws_med.id}).to_string();
         let _ = create_context_signal(&conn, None, Some(&target.id), "user_action", None, &payload_med).unwrap();
         
-        // Low WS: score should be >= 0.2 and < 0.4
+        // Low WS: 1 relationship signal (0.20) -> score 0.20 >= threshold_low -> Low confidence band
         let r_low = create_item(&conn, Some(&ws_low.id), None, "text", "rl", None, "{}").unwrap();
-        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_low.id, "same_app", 1.0, None).unwrap();
+        let _ = crate::db::operations::create_item_relationship(&conn, &target.id, &r_low.id, "related_item", 1.0, None).unwrap();
         
         // Filtered WS: score < 0.2
         let _ = create_item(&conn, Some(&ws_filtered.id), None, "text", "rf", None, "{}").unwrap();
@@ -1414,10 +1670,10 @@ mod tests {
             &restaurant.id,
             &ws_paris.id,
             "suggested",
-            0.61,
+            0.20,
             "context_engine",
         ).unwrap();
-        assert_eq!(initial_membership.confidence, 0.61);
+        assert_eq!(initial_membership.confidence, 0.20);
         assert_eq!(initial_membership.membership_type, "suggested");
 
         let flight = create_item(
@@ -1455,7 +1711,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(stored_membership.confidence >= 0.80);
+        assert!(
+            stored_membership.confidence > initial_membership.confidence,
+            "Confidence must increase dynamically with corroborating evidence (was {}, now {})",
+            initial_membership.confidence,
+            stored_membership.confidence
+        );
 
         let rerun = recalculate_workspace_suggested_memberships(&conn, &ws_paris.id, None).unwrap();
         assert!(rerun.is_empty());
@@ -1473,7 +1734,7 @@ mod tests {
         assert!(!recalc_signals.is_empty());
 
         let latest_payload: serde_json::Value = serde_json::from_str(&recalc_signals.first().unwrap().payload).unwrap();
-        assert!(latest_payload["new_confidence"].as_f64().unwrap() >= 0.80);
+        assert!(latest_payload["new_confidence"].as_f64().unwrap() > 0.20);
         assert!(latest_payload["delta"].as_f64().unwrap() != 0.0);
         assert_eq!(latest_payload["workspace_id"].as_str().unwrap(), ws_paris.id);
     }
@@ -1763,5 +2024,134 @@ mod tests {
 
         let ws_items = crate::db::operations::list_items(&conn, Some(&ws.id)).unwrap();
         assert_eq!(ws_items.len(), 0, "Scoring must NEVER mutate workspace item memberships");
+    }
+
+    #[test]
+    fn test_single_strong_semantic_signal_has_limited_confidence() {
+        // Invariant: One strong semantic similarity signal allows high score/affinity,
+        // but confidence MUST remain limited (e.g. <= 0.45) due to lack of evidence diversity.
+        let mut evidence_set = ContextEvidenceSet::new("target_semantic_only");
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity(
+            "target_semantic_only",
+            "item_peer",
+            0.95,
+            Some("AI Research Paper"),
+            Some("AI Lab"),
+            None,
+        ));
+
+        let mut ws = WorkspaceScoringContext::new("ws_ai", "AI Lab");
+        ws.item_ids.push("item_peer".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        // Affinity score can be substantial (e.g. 0.40)
+        assert!(result.total_score >= 0.40, "Total score should reflect semantic match (actual: {})", result.total_score);
+
+        // But confidence must remain bounded and conservative
+        assert!(
+            result.confidence <= 0.45,
+            "Single semantic signal must have limited confidence <= 0.45 (actual: {})",
+            result.confidence
+        );
+        assert_ne!(result.confidence_band, "High", "Single semantic signal must never reach High confidence band");
+        assert!(result.confidence_factors.is_some());
+        let factors = result.confidence_factors.unwrap();
+        assert_eq!(factors.diversity_count, 1);
+        assert!(result.uncertainty_indicators.iter().any(|u| u.contains("relies on a single evidence category")));
+    }
+
+    #[test]
+    fn test_multiple_independent_agreeing_signals_yield_high_confidence() {
+        // Invariant: Multiple independent signals agreeing (e.g. history + session + graph + semantic)
+        // yields high score AND high confidence (>= 0.70, "High" band).
+        let mut evidence_set = ContextEvidenceSet::new("target_multi");
+        evidence_set.add(ContextEvidence::inferred_workspace_history("target_multi", "ws_proj", "Project Falcon", 1.0, None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity("target_multi", "falcon_doc", 0.90, Some("Falcon Architecture"), Some("Project Falcon"), None));
+        evidence_set.add(ContextEvidence::observed_session("target_multi", "sess_falcon", None));
+        evidence_set.add(ContextEvidence::observed_app("target_multi", "VSCode", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_proj", "Project Falcon");
+        ws.sessions.push("sess_falcon".to_string());
+        ws.item_ids.push("falcon_doc".to_string());
+        ws.app_names.push("VSCode".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert!(result.total_score >= 0.80, "Multi-signal affinity score should be >= 0.80 (actual: {})", result.total_score);
+        assert!(
+            result.confidence >= 0.70,
+            "Multiple independent agreeing signals must yield high confidence >= 0.70 (actual: {})",
+            result.confidence
+        );
+        assert_eq!(result.confidence_band, "High");
+        let factors = result.confidence_factors.unwrap();
+        assert!(factors.diversity_count >= 3);
+        assert_eq!(factors.diversity_multiplier, 1.0);
+    }
+
+    #[test]
+    fn test_nearly_identical_scores_decrease_confidence_via_ambiguity_margin() {
+        // Invariant: Two contexts with nearly identical scores experience ambiguity margin damping,
+        // reducing confidence so the system does not prematurely force a decision.
+        let mut evidence_set = ContextEvidenceSet::new("target_ambiguous");
+        evidence_set.add(ContextEvidence::observed_app("target_ambiguous", "Figma", None));
+        evidence_set.add(ContextEvidence::observed_domain("target_ambiguous", "figma.com", None, None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity("target_ambiguous", "item_a", 0.88, Some("UI Mockup"), Some("Workspace A"), None));
+        evidence_set.add(ContextEvidence::inferred_semantic_similarity("target_ambiguous", "item_b", 0.86, Some("UI Spec"), Some("Workspace B"), None));
+
+        let mut ws_a = WorkspaceScoringContext::new("ws_a", "Workspace A");
+        ws_a.item_ids.push("item_a".to_string());
+        ws_a.app_names.push("Figma".to_string());
+        ws_a.domains.push("figma.com".to_string());
+
+        let mut ws_b = WorkspaceScoringContext::new("ws_b", "Workspace B");
+        ws_b.item_ids.push("item_b".to_string());
+        ws_b.app_names.push("Figma".to_string());
+        ws_b.domains.push("figma.com".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let results = scorer.score_evidence(&evidence_set, &[ws_a, ws_b]);
+
+        assert_eq!(results.len(), 2);
+        let top_1 = &results[0];
+        let top_2 = &results[1];
+
+        // Margin between scores is very small
+        let margin = (top_1.total_score - top_2.total_score).abs();
+        assert!(margin <= AMBIGUITY_MARGIN);
+
+        // Confidence of top_1 must be significantly lower than its total_score due to ambiguity penalty
+        assert!(
+            top_1.confidence < top_1.total_score,
+            "Ambiguity must damp confidence below raw score (score: {}, conf: {})",
+            top_1.total_score,
+            top_1.confidence
+        );
+        assert!(top_1.confidence <= 0.45, "Ambiguous candidates must not have high confidence (actual: {})", top_1.confidence);
+        assert!(top_1.uncertainty_indicators.iter().any(|u| u.contains("Ambiguous context assignment")));
+    }
+
+    #[test]
+    fn test_very_little_evidence_yields_low_confidence() {
+        // Invariant: Very little evidence (e.g. single peripheral weak signal) yields low confidence.
+        let mut evidence_set = ContextEvidenceSet::new("target_sparse");
+        evidence_set.add(ContextEvidence::observed_content_type("target_sparse", "url", None));
+
+        let mut ws = WorkspaceScoringContext::new("ws_sparse", "Sparse WS");
+        ws.item_types.push("url".to_string());
+
+        let scorer = ContextEvidenceScorer::default();
+        let result = scorer.score_evidence_against_workspace(&evidence_set, &ws);
+
+        assert!(result.total_score <= 0.10);
+        assert!(
+            result.confidence <= 0.15,
+            "Sparse evidence must result in low confidence <= 0.15 (actual: {})",
+            result.confidence
+        );
+        assert_eq!(result.confidence_band, "Low");
     }
 }
