@@ -31,6 +31,13 @@ mod tests {
     };
     use crate::context_engine::relationships;
     use crate::context_engine::scoring;
+    use crate::context_engine::transitions::{
+        ContextReference, ContextTransitionDetector, ContextTransitionType,
+        record_context_transition,
+    };
+    use crate::context_engine::segments::{ContextActivitySegmenter, SegmentStreamEvent};
+    use crate::context_engine::summary::ContextActivitySummaryService;
+    use crate::context_engine::timeline::get_context_timeline;
     use crate::db::{self, operations, settings::PrivacySettings};
 
     // Helper to setup a test DB with temp file
@@ -2152,6 +2159,839 @@ mod tests {
             None,
         ).unwrap();
         assert_eq!(search_post_restart.len(), 3, "23. Search queries return persisted results after restart");
+
+        // Clean up temp database directory
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_context_transition_workflow_e2e() {
+        let (conn, db_path) = setup_test_db();
+        let engine = create_engine();
+
+        // -------------------------------------------------------------------
+        // Setup: Create Workspaces and establish profile signals
+        // -------------------------------------------------------------------
+        let ws_college = operations::create_workspace(&conn, "College").unwrap();
+        let ws_portfolio = operations::create_workspace(&conn, "Portfolio").unwrap();
+
+        let session_1 = engine.get_or_update_active_session(&conn).unwrap();
+
+        // Seed initial reference items to establish workspace profiles
+        let seed_col = operations::create_item(
+            &conn,
+            Some(&ws_college.id),
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b",
+            Some("Stanford CS106B Canvas"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T08:50:00Z' WHERE id = ?1", rusqlite::params![seed_col.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: seed_col.id.clone(),
+            workspace_id: Some(ws_college.id.clone()),
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+
+        let seed_port = operations::create_item(
+            &conn,
+            Some(&ws_portfolio.id),
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-core",
+            Some("Figma Portfolio Design"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-core\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T08:55:00Z' WHERE id = ?1", rusqlite::params![seed_port.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: seed_port.id.clone(),
+            workspace_id: Some(ws_portfolio.id.clone()),
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-core",
+                "domain": "figma.com"
+            }),
+        });
+
+        // Initialize Transition Detector
+        let mut detector = ContextTransitionDetector::new()
+            .with_min_consecutive_evidence(1)
+            .with_inactivity_threshold(7200)
+            .with_min_switch_confidence(0.40)
+            .with_min_return_confidence(0.40)
+            .with_max_return_gap_seconds(86400);
+
+        // ===================================================================
+        // Phase 1: User captures several College items (Scenario step 1)
+        // Verify: College is detected as initial context
+        // ===================================================================
+        let c1 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/assignments/2",
+            Some("CS106B Assignment 2 Recursion"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/assignments/2\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:00:00Z' WHERE id = ?1", rusqlite::params![c1.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c1.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/assignments/2",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c1.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let c2 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/lectures/5",
+            Some("Lecture 5 Notes: Binary Trees and Graph Traversals"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/lectures/5\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:05:00Z' WHERE id = ?1", rusqlite::params![c2.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c2.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/lectures/5",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c2.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let c3 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/handouts/trees.pdf",
+            Some("Trees and Heaps Handout"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/handouts/trees.pdf\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:10:00Z' WHERE id = ?1", rusqlite::params![c3.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c3.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/handouts/trees.pdf",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c3.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        // Evaluate detector on c1..c3
+        let res_c1 = detector.process_item(&conn, &c1.id).unwrap();
+        assert!(res_c1.is_transition(), "1. c1 triggers ContextStart transition");
+        let t1 = res_c1.transition().unwrap();
+        assert_eq!(t1.transition_type, ContextTransitionType::ContextStart);
+        assert_eq!(t1.to_context.as_ref().unwrap().id, ws_college.id);
+        assert_eq!(t1.to_context.as_ref().unwrap().name, "College");
+        assert!(t1.confidence >= 0.40, "1. Transition confidence is reasonable");
+        record_context_transition(&conn, &t1.to_context_transition()).unwrap();
+
+        let res_c2 = detector.process_item(&conn, &c2.id).unwrap();
+        assert!(res_c2.is_continuation(), "1. c2 continues College activity");
+
+        let res_c3 = detector.process_item(&conn, &c3.id).unwrap();
+        assert!(res_c3.is_continuation(), "1. c3 continues College activity");
+        assert_eq!(detector.current_context().unwrap().streak_count, 3);
+        assert_eq!(detector.current_context().unwrap().reference.name, "College");
+
+        // ===================================================================
+        // Phase 2: User continues College activity (Scenario step 2)
+        // Verify: Continuous activity increases streak without false transitions
+        // ===================================================================
+        let c4 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/discussions/42",
+            Some("Canvas Discussion on Recursive Backtracking"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/discussions/42\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:15:00Z' WHERE id = ?1", rusqlite::params![c4.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c4.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/discussions/42",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c4.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let c5 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/submissions/confirm",
+            Some("CS106B Project 2 Submission Confirmation"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/submissions/confirm\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:20:00Z' WHERE id = ?1", rusqlite::params![c5.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c5.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/submissions/confirm",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c5.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let res_c4 = detector.process_item(&conn, &c4.id).unwrap();
+        assert!(res_c4.is_continuation(), "2. c4 continues College");
+        let res_c5 = detector.process_item(&conn, &c5.id).unwrap();
+        assert!(res_c5.is_continuation(), "2. c5 continues College");
+        assert_eq!(detector.current_context().unwrap().streak_count, 5);
+
+        // ===================================================================
+        // Phase 3: Unrelated / Noisy item (Scenario step 7 - part 1)
+        // Verify: Temporary noisy activity does not create false transitions
+        // ===================================================================
+        let noise_1 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://www.amazon.com/orders/402-91823",
+            Some("Amazon Order Confirmation #402-91823"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://www.amazon.com/orders/402-91823\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:23:00Z' WHERE id = ?1", rusqlite::params![noise_1.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: noise_1.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://www.amazon.com/orders/402-91823",
+                "domain": "amazon.com"
+            }),
+        });
+
+        let res_noise1 = detector.process_item(&conn, &noise_1.id).unwrap();
+        assert!(!res_noise1.is_transition(), "3. Noise item does not create false transition");
+        assert_eq!(detector.current_context().unwrap().reference.name, "College", "3. Context remains College");
+
+        // ===================================================================
+        // Phase 4: User begins Portfolio activity with strong evidence (Scenario step 3 & 4)
+        // Verify: Portfolio transition is detected (ContextSwitch)
+        // ===================================================================
+        let p1 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-2026/Hero",
+            Some("Portfolio Hero Section Design"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-2026/Hero\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:30:00Z' WHERE id = ?1", rusqlite::params![p1.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: p1.id.clone(),
+            workspace_id: None,
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-2026/Hero",
+                "domain": "figma.com"
+            }),
+        });
+        operations::create_item_relationship(&conn, &p1.id, &seed_port.id, "same_domain", 0.85, None).unwrap();
+
+        let p2 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-2026/Components",
+            Some("Portfolio UI Component Library"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-2026/Components\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:35:00Z' WHERE id = ?1", rusqlite::params![p2.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: p2.id.clone(),
+            workspace_id: None,
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-2026/Components",
+                "domain": "figma.com"
+            }),
+        });
+        operations::create_item_relationship(&conn, &p2.id, &seed_port.id, "same_domain", 0.85, None).unwrap();
+
+        let p3 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-2026/CaseStudy",
+            Some("Interactive Project Case Study UI"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-2026/CaseStudy\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:40:00Z' WHERE id = ?1", rusqlite::params![p3.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: p3.id.clone(),
+            workspace_id: None,
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-2026/CaseStudy",
+                "domain": "figma.com"
+            }),
+        });
+        operations::create_item_relationship(&conn, &p3.id, &seed_port.id, "same_domain", 0.85, None).unwrap();
+
+        let res_p1 = detector.process_item(&conn, &p1.id).unwrap();
+        assert!(res_p1.is_transition(), "4. p1 triggers ContextSwitch to Portfolio");
+        let t2 = res_p1.transition().unwrap();
+        assert_eq!(t2.transition_type, ContextTransitionType::ContextSwitch);
+        assert_eq!(t2.from_context.as_ref().unwrap().name, "College");
+        assert_eq!(t2.to_context.as_ref().unwrap().name, "Portfolio");
+        assert!(t2.confidence >= 0.40, "4. Switch confidence is reasonable");
+        record_context_transition(&conn, &t2.to_context_transition()).unwrap();
+
+        let res_p2 = detector.process_item(&conn, &p2.id).unwrap();
+        assert!(res_p2.is_continuation(), "4. p2 continues Portfolio");
+        let res_p3 = detector.process_item(&conn, &p3.id).unwrap();
+        assert!(res_p3.is_continuation(), "4. p3 continues Portfolio");
+        assert_eq!(detector.current_context().unwrap().reference.name, "Portfolio");
+        assert_eq!(detector.current_context().unwrap().streak_count, 3);
+
+        // ===================================================================
+        // Phase 5: Intermediate noisy item (Scenario step 7 - part 2)
+        // ===================================================================
+        let noise_2 = operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://weather.com/weather/today/l/94305",
+            Some("Local Weather Forecast"),
+            "{\"app_name\": \"Safari\", \"original_url\": \"https://weather.com/weather/today/l/94305\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T09:45:00Z' WHERE id = ?1", rusqlite::params![noise_2.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: noise_2.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Safari",
+                "original_url": "https://weather.com/weather/today/l/94305",
+                "domain": "weather.com"
+            }),
+        });
+
+        let res_noise2 = detector.process_item(&conn, &noise_2.id).unwrap();
+        assert!(!res_noise2.is_transition(), "5. Intermediate noise ignored");
+        assert_eq!(detector.current_context().unwrap().reference.name, "Portfolio");
+
+        // ===================================================================
+        // Phase 6: User returns to College (Scenario step 5)
+        // Verify: College return is detected (ContextReturn)
+        // ===================================================================
+        let c6 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/assignments/final-practice",
+            Some("CS106B Final Exam Practice"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/assignments/final-practice\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T10:15:00Z' WHERE id = ?1", rusqlite::params![c6.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c6.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/assignments/final-practice",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c6.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let c7 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://canvas.stanford.edu/courses/106b/files/exam-review.pdf",
+            Some("CS106B Exam Review Slides"),
+            "{\"app_name\": \"Google Chrome\", \"original_url\": \"https://canvas.stanford.edu/courses/106b/files/exam-review.pdf\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T10:20:00Z' WHERE id = ?1", rusqlite::params![c7.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: c7.id.clone(),
+            workspace_id: None,
+            source: "browser".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Google Chrome",
+                "original_url": "https://canvas.stanford.edu/courses/106b/files/exam-review.pdf",
+                "domain": "canvas.stanford.edu"
+            }),
+        });
+        operations::create_item_relationship(&conn, &c7.id, &seed_col.id, "same_domain", 0.85, None).unwrap();
+
+        let res_c6 = detector.process_item(&conn, &c6.id).unwrap();
+        assert!(res_c6.is_transition(), "6. c6 triggers ContextReturn to College");
+        let t3 = res_c6.transition().unwrap();
+        assert_eq!(t3.transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(t3.from_context.as_ref().unwrap().name, "Portfolio");
+        assert_eq!(t3.to_context.as_ref().unwrap().name, "College");
+        assert!(t3.confidence >= 0.40, "6. Return confidence is reasonable");
+
+        let ret_c6 = t3.as_context_return().unwrap();
+        assert_eq!(ret_c6.returned_context.name, "College");
+        assert_eq!(ret_c6.previous_context.unwrap().name, "Portfolio");
+        assert_eq!(ret_c6.duration_since_previous_activity_seconds, 3300); // 10:15:00 - 09:20:00 = 55 mins
+        assert_eq!(ret_c6.duration_since_previous_activity_formatted, "55 minutes");
+        record_context_transition(&conn, &t3.to_context_transition()).unwrap();
+
+        let res_c7 = detector.process_item(&conn, &c7.id).unwrap();
+        assert!(res_c7.is_continuation(), "6. c7 continues College");
+        assert_eq!(detector.current_context().unwrap().reference.name, "College");
+
+        // ===================================================================
+        // Phase 7: User later returns to Portfolio (Scenario step 6)
+        // Verify: Portfolio return is detected (ContextReturn)
+        // ===================================================================
+        let p4 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-2026/VercelProduction",
+            Some("Portfolio Production Mockup"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-2026/VercelProduction\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T11:00:00Z' WHERE id = ?1", rusqlite::params![p4.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: p4.id.clone(),
+            workspace_id: None,
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-2026/VercelProduction",
+                "domain": "figma.com"
+            }),
+        });
+        operations::create_item_relationship(&conn, &p4.id, &seed_port.id, "same_domain", 0.85, None).unwrap();
+
+        let p5 = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "url",
+            "https://www.figma.com/file/portfolio-2026/LighthouseAudit",
+            Some("Portfolio Lighthouse Audit"),
+            "{\"app_name\": \"Figma\", \"original_url\": \"https://www.figma.com/file/portfolio-2026/LighthouseAudit\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T11:05:00Z' WHERE id = ?1", rusqlite::params![p5.id]).unwrap();
+        engine.process_event(&conn, ContextEvent::Capture {
+            item_id: p5.id.clone(),
+            workspace_id: None,
+            source: "app".to_string(),
+            data_type: "url".to_string(),
+            metadata: json!({
+                "app_name": "Figma",
+                "original_url": "https://www.figma.com/file/portfolio-2026/LighthouseAudit",
+                "domain": "figma.com"
+            }),
+        });
+        operations::create_item_relationship(&conn, &p5.id, &seed_port.id, "same_domain", 0.85, None).unwrap();
+
+        let res_p4 = detector.process_item(&conn, &p4.id).unwrap();
+        assert!(res_p4.is_transition(), "7. p4 triggers ContextReturn to Portfolio");
+        let t4 = res_p4.transition().unwrap();
+        assert_eq!(t4.transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(t4.from_context.as_ref().unwrap().name, "College");
+        assert_eq!(t4.to_context.as_ref().unwrap().name, "Portfolio");
+
+        let ret_p4 = t4.as_context_return().unwrap();
+        assert_eq!(ret_p4.returned_context.name, "Portfolio");
+        assert_eq!(ret_p4.previous_context.unwrap().name, "College");
+        assert_eq!(ret_p4.duration_since_previous_activity_seconds, 4800); // 11:00:00 - 09:40:00 = 80 mins
+        assert_eq!(ret_p4.duration_since_previous_activity_formatted, "1.3 hours");
+        record_context_transition(&conn, &t4.to_context_transition()).unwrap();
+
+        let res_p5 = detector.process_item(&conn, &p5.id).unwrap();
+        assert!(res_p5.is_continuation(), "7. p5 continues Portfolio");
+        assert_eq!(detector.current_context().unwrap().reference.name, "Portfolio");
+
+        // ===================================================================
+        // Phase 8: Also test ambiguous transitions (User request requirement)
+        // ===================================================================
+        let amb_item = operations::create_item(
+            &conn,
+            None,
+            Some(&session_1),
+            "text",
+            "Shared Design System and Course Presentation combining Stanford CS106B and Personal Portfolio Showcase",
+            Some("Ambiguous Cross-Context Project"),
+            "{\"app_name\": \"Notes\"}",
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-10T11:15:00Z' WHERE id = ?1", rusqlite::params![amb_item.id]).unwrap();
+
+        let res_amb = detector.evaluate_interpretation(
+            Some(&amb_item.id),
+            Some(&session_1),
+            "2026-09-10T11:15:00Z",
+            None,
+            0.45,
+            "Medium",
+            true, // is_ambiguous
+            vec![
+                "Ambiguous candidate affinities: College (48%) vs Portfolio (47%)".to_string(),
+                "Conflicting cross-domain signals".to_string(),
+            ],
+        );
+        assert!(res_amb.is_transition(), "8. Ambiguous signal triggers AmbiguousTransition");
+        let t5 = res_amb.transition().unwrap();
+        assert_eq!(t5.transition_type, ContextTransitionType::AmbiguousTransition);
+        assert_eq!(t5.from_context.as_ref().unwrap().name, "Portfolio");
+        assert!(t5.to_context.is_none());
+        assert_eq!(t5.confidence, 0.45);
+        record_context_transition(&conn, &t5.to_context_transition()).unwrap();
+
+        // ===================================================================
+        // Phase 9: Verifications
+        // ===================================================================
+
+        // 9.A: Activity Segments Verification
+        let item_sequence_events = vec![
+            SegmentStreamEvent {
+                item_id: c1.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:00:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("CS106B Assignment 2".to_string()),
+                evidence: vec!["Canvas URL".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: c2.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:05:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "text".to_string(),
+                item_title: Some("Lecture 5 Notes".to_string()),
+                evidence: vec!["Notes".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: c3.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:10:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Trees Handout".to_string()),
+                evidence: vec![],
+            },
+            SegmentStreamEvent {
+                item_id: c4.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:15:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Canvas Discussion".to_string()),
+                evidence: vec![],
+            },
+            SegmentStreamEvent {
+                item_id: c5.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:20:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("CS106B Submission".to_string()),
+                evidence: vec![],
+            },
+            // Noise 1
+            SegmentStreamEvent {
+                item_id: noise_1.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:23:00Z".to_string(),
+                target_context: None,
+                confidence: 0.15,
+                confidence_band: "Low".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Amazon Order".to_string()),
+                evidence: vec![],
+            },
+            // Portfolio 1..3
+            SegmentStreamEvent {
+                item_id: p1.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:30:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_portfolio.id, &ws_portfolio.name)),
+                confidence: 0.92,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Portfolio Hero".to_string()),
+                evidence: vec!["Figma app".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: p2.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:35:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_portfolio.id, &ws_portfolio.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("UI Components".to_string()),
+                evidence: vec!["Figma app".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: p3.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:40:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_portfolio.id, &ws_portfolio.name)),
+                confidence: 0.90,
+                confidence_band: "High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Case Study".to_string()),
+                evidence: vec!["Figma app".to_string()],
+            },
+            // Noise 2
+            SegmentStreamEvent {
+                item_id: noise_2.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T09:45:00Z".to_string(),
+                target_context: None,
+                confidence: 0.10,
+                confidence_band: "Low".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Weather".to_string()),
+                evidence: vec![],
+            },
+            // College Return (c6, c7)
+            SegmentStreamEvent {
+                item_id: c6.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T10:15:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.91,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Final Exam Practice".to_string()),
+                evidence: vec!["Canvas URL".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: c7.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T10:20:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_college.id, &ws_college.name)),
+                confidence: 0.91,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Exam Review Slides".to_string()),
+                evidence: vec![],
+            },
+            // Portfolio Return (p4, p5)
+            SegmentStreamEvent {
+                item_id: p4.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T11:00:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_portfolio.id, &ws_portfolio.name)),
+                confidence: 0.92,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Portfolio Vercel".to_string()),
+                evidence: vec!["Figma app".to_string()],
+            },
+            SegmentStreamEvent {
+                item_id: p5.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T11:05:00Z".to_string(),
+                target_context: Some(ContextReference::workspace(&ws_portfolio.id, &ws_portfolio.name)),
+                confidence: 0.92,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type: "url".to_string(),
+                item_title: Some("Lighthouse Audit".to_string()),
+                evidence: vec![],
+            },
+            // Ambiguous item
+            SegmentStreamEvent {
+                item_id: amb_item.id.clone(),
+                session_id: Some(session_1.clone()),
+                timestamp: "2026-09-10T11:15:00Z".to_string(),
+                target_context: None,
+                confidence: 0.45,
+                confidence_band: "Medium".to_string(),
+                is_ambiguous: true,
+                item_type: "text".to_string(),
+                item_title: Some("Ambiguous Project".to_string()),
+                evidence: vec!["Split affinity".to_string()],
+            },
+        ];
+
+        let segmenter_detector = ContextTransitionDetector::new()
+            .with_min_consecutive_evidence(1)
+            .with_inactivity_threshold(7200)
+            .with_min_switch_confidence(0.40)
+            .with_min_return_confidence(0.40)
+            .with_max_return_gap_seconds(86400);
+        let mut segmenter = ContextActivitySegmenter::new().with_detector(segmenter_detector);
+        let segments = segmenter.segment_event_stream(&item_sequence_events);
+
+        assert_eq!(segments.len(), 5, "9.A. Must produce exactly 5 distinct activity segments");
+
+        // Segment 1: College (09:00 - 09:23)
+        let seg1 = &segments[0];
+        assert_eq!(seg1.context.as_ref().unwrap().name, "College");
+        assert_eq!(seg1.started_at, "2026-09-10T09:00:00Z");
+        assert_eq!(seg1.ended_at, "2026-09-10T09:23:00Z");
+        assert_eq!(seg1.item_count, 6); // c1..c5 + noise_1
+        assert_eq!(seg1.transition_in.as_ref().unwrap().transition_type, ContextTransitionType::ContextStart);
+        assert_eq!(seg1.transition_out.as_ref().unwrap().transition_type, ContextTransitionType::ContextSwitch);
+
+        // Segment 2: Portfolio (09:30 - 09:45)
+        let seg2 = &segments[1];
+        assert_eq!(seg2.context.as_ref().unwrap().name, "Portfolio");
+        assert_eq!(seg2.started_at, "2026-09-10T09:30:00Z");
+        assert_eq!(seg2.ended_at, "2026-09-10T09:45:00Z");
+        assert_eq!(seg2.item_count, 4); // p1..p3 + noise_2
+        assert_eq!(seg2.transition_in.as_ref().unwrap().transition_type, ContextTransitionType::ContextSwitch);
+        assert_eq!(seg2.transition_out.as_ref().unwrap().transition_type, ContextTransitionType::ContextReturn);
+
+        // Segment 3: College Return (10:15 - 10:20)
+        let seg3 = &segments[2];
+        assert_eq!(seg3.context.as_ref().unwrap().name, "College");
+        assert_eq!(seg3.started_at, "2026-09-10T10:15:00Z");
+        assert_eq!(seg3.ended_at, "2026-09-10T10:20:00Z");
+        assert_eq!(seg3.item_count, 2); // c6, c7
+        assert_eq!(seg3.transition_in.as_ref().unwrap().transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(seg3.transition_out.as_ref().unwrap().transition_type, ContextTransitionType::ContextReturn);
+
+        // Segment 4: Portfolio Return (11:00 - 11:05)
+        let seg4 = &segments[3];
+        assert_eq!(seg4.context.as_ref().unwrap().name, "Portfolio");
+        assert_eq!(seg4.started_at, "2026-09-10T11:00:00Z");
+        assert_eq!(seg4.ended_at, "2026-09-10T11:05:00Z");
+        assert_eq!(seg4.item_count, 2); // p4, p5
+        assert_eq!(seg4.transition_in.as_ref().unwrap().transition_type, ContextTransitionType::ContextReturn);
+        assert_eq!(seg4.transition_out.as_ref().unwrap().transition_type, ContextTransitionType::AmbiguousTransition);
+
+        // Segment 5: Ambiguous Activity (11:15)
+        let seg5 = &segments[4];
+        assert!(seg5.is_ambiguous);
+        assert!(seg5.context.is_none());
+        assert_eq!(seg5.transition_in.as_ref().unwrap().transition_type, ContextTransitionType::AmbiguousTransition);
+        assert_eq!(seg5.item_count, 1);
+
+        // 9.B: Timeline Sequence Verification
+        let college_timeline = get_context_timeline(&conn, &ws_college.id).unwrap();
+        assert_eq!(college_timeline.workspace_name, "College");
+        // Verify timeline contains transition events
+        let college_transition_events: Vec<_> = college_timeline.chronological_activity.iter()
+            .filter(|e| e.event_type == "context_transition")
+            .collect();
+        assert!(college_transition_events.len() >= 2, "9.B. College timeline includes transitions");
+        assert!(college_transition_events.iter().any(|e| e.title.contains("Started College")));
+        assert!(college_transition_events.iter().any(|e| e.title.contains("Returned to College")));
+
+        let portfolio_timeline = get_context_timeline(&conn, &ws_portfolio.id).unwrap();
+        assert_eq!(portfolio_timeline.workspace_name, "Portfolio");
+        let portfolio_transition_events: Vec<_> = portfolio_timeline.chronological_activity.iter()
+            .filter(|e| e.event_type == "context_transition")
+            .collect();
+        assert!(portfolio_transition_events.len() >= 2, "9.B. Portfolio timeline includes transitions");
+        assert!(portfolio_transition_events.iter().any(|e| e.title.contains("Switched to Portfolio")));
+        assert!(portfolio_transition_events.iter().any(|e| e.title.contains("Returned to Portfolio")));
+
+        // 9.C: Context Activity Summary Service Verification
+        let summary_svc = ContextActivitySummaryService::new();
+        let summary = summary_svc.summarize_segments(&segments, None, None);
+        assert_eq!(summary.context_switches, 3, "9.C. 3 context switches total (1 switch + 2 returns)");
+        assert_eq!(summary.context_returns, 2, "9.C. Exactly 2 context returns (Portfolio -> College, College -> Portfolio)");
+        let named_contexts: Vec<_> = summary.contexts_used.iter().filter(|c| c.context.is_some()).collect();
+        assert_eq!(named_contexts.len(), 2, "9.C. 2 distinct named contexts used");
+        assert!(summary.sequence_formatted.contains("College → Portfolio → College → Portfolio"));
+
+        // 9.D: Strict Membership Invariance Verification
+        // No item was silently assigned a workspace!
+        let all_items_to_check = vec![
+            &c1, &c2, &c3, &c4, &c5, &noise_1,
+            &p1, &p2, &p3, &noise_2,
+            &c6, &c7, &p4, &p5, &amb_item,
+        ];
+        for item in all_items_to_check {
+            let reloaded = operations::get_item(&conn, &item.id).unwrap();
+            assert_eq!(reloaded.workspace_id, None, "9.D. Invariant: item '{}' remains unassigned in inbox", item.title.as_deref().unwrap_or(""));
+        }
+
+        let memberships = operations::list_workspace_memberships(&conn, &ws_college.id, None).unwrap();
+        // Seed item was confirmed, but none of the captured items were auto-assigned as confirmed
+        assert_eq!(memberships.len(), 1, "9.D. No phantom confirmed memberships created for College");
+
+        let port_memberships = operations::list_workspace_memberships(&conn, &ws_portfolio.id, None).unwrap();
+        assert_eq!(port_memberships.len(), 1, "9.D. No phantom confirmed memberships created for Portfolio");
 
         // Clean up temp database directory
         let _ = fs::remove_dir_all(db_path.parent().unwrap());

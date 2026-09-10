@@ -1001,18 +1001,62 @@ impl ContextEvidenceCollector {
             ));
         }
 
+        let mut extracted_url = if item.item_type == "url" && !item.content.trim().is_empty() && (item.content.starts_with("http://") || item.content.starts_with("https://")) {
+            Some(item.content.as_str())
+        } else {
+            None
+        };
+
         if let Ok(meta_val) = serde_json::from_str::<serde_json::Value>(&item.metadata) {
             // URL metadata in item payload
-            if let Some(url) = meta_val.get("url").or_else(|| meta_val.get("source_url")).and_then(|v| v.as_str()) {
+            if let Some(url) = meta_val.get("url")
+                .or_else(|| meta_val.get("source_url"))
+                .or_else(|| meta_val.get("original_url"))
+                .and_then(|v| v.as_str())
+            {
                 if !url.is_empty() {
+                    extracted_url = Some(url);
+                }
+            }
+
+            if let Some(url) = extracted_url {
+                let has_url = raw_evidences.iter().any(|e| {
+                    e.category == EvidenceCategory::BrowserUrl
+                        && e.attributes.get("url").and_then(|v| v.as_str()) == Some(url)
+                });
+                if !has_url {
                     raw_evidences.push(ContextEvidence::observed_url(item_id, url, Some(&item.created_at)));
-                    if let Some(domain) = meta_val.get("domain").and_then(|v| v.as_str()) {
-                        raw_evidences.push(ContextEvidence::observed_domain(item_id, domain, Some(url), Some(&item.created_at)));
-                    } else if let Ok(parsed_url) = url::Url::parse(url) {
-                        if let Some(host) = parsed_url.host_str() {
-                            raw_evidences.push(ContextEvidence::observed_domain(item_id, host, Some(url), Some(&item.created_at)));
+                }
+
+                if let Some(domain) = meta_val.get("domain").and_then(|v| v.as_str()) {
+                    let domain_clean = domain.strip_prefix("www.").unwrap_or(domain);
+                    let has_domain = raw_evidences.iter().any(|e| {
+                        e.category == EvidenceCategory::BrowserDomain
+                            && e.attributes.get("domain").and_then(|v| v.as_str()) == Some(domain_clean)
+                    });
+                    if !has_domain {
+                        raw_evidences.push(ContextEvidence::observed_domain(item_id, domain_clean, Some(url), Some(&item.created_at)));
+                    }
+                } else if let Ok(parsed_url) = url::Url::parse(url) {
+                    if let Some(host) = parsed_url.host_str() {
+                        let domain_clean = host.strip_prefix("www.").unwrap_or(host);
+                        let has_domain = raw_evidences.iter().any(|e| {
+                            e.category == EvidenceCategory::BrowserDomain
+                                && e.attributes.get("domain").and_then(|v| v.as_str()) == Some(domain_clean)
+                        });
+                        if !has_domain {
+                            raw_evidences.push(ContextEvidence::observed_domain(item_id, domain_clean, Some(url), Some(&item.created_at)));
                         }
                     }
+                }
+            } else if let Some(domain) = meta_val.get("domain").and_then(|v| v.as_str()) {
+                let domain_clean = domain.strip_prefix("www.").unwrap_or(domain);
+                let has_domain = raw_evidences.iter().any(|e| {
+                    e.category == EvidenceCategory::BrowserDomain
+                        && e.attributes.get("domain").and_then(|v| v.as_str()) == Some(domain_clean)
+                });
+                if !has_domain {
+                    raw_evidences.push(ContextEvidence::observed_domain(item_id, domain_clean, None, Some(&item.created_at)));
                 }
             }
 
@@ -1040,7 +1084,13 @@ impl ContextEvidenceCollector {
 
             // App Name in item payload
             if let Some(app) = meta_val.get("app_name").or_else(|| meta_val.get("source_app")).and_then(|v| v.as_str()) {
-                raw_evidences.push(ContextEvidence::observed_app(item_id, app, Some(&item.created_at)));
+                let has_app = raw_evidences.iter().any(|e| {
+                    e.category == EvidenceCategory::SourceApp
+                        && e.attributes.get("app_name").and_then(|v| v.as_str()) == Some(app)
+                });
+                if !has_app {
+                    raw_evidences.push(ContextEvidence::observed_app(item_id, app, Some(&item.created_at)));
+                }
             }
 
             // Window Title in item payload
@@ -1065,12 +1115,18 @@ impl ContextEvidenceCollector {
                 match sig.signal_type.as_str() {
                     "active_app" => {
                         if let Some(app) = payload.get("app_name").or_else(|| payload.get("bundle_id")).or_else(|| payload.get("process_name")).and_then(|v| v.as_str()) {
-                            let mut ev = ContextEvidence::observed_app(item_id, app, Some(&sig.created_at))
-                                .with_source_ref(sig_ref.clone());
-                            if let Some(proc) = payload.get("process_name").and_then(|v| v.as_str()) {
-                                ev = ev.with_attribute("process_name", proc);
+                            let has_app = raw_evidences.iter().any(|e| {
+                                e.category == EvidenceCategory::SourceApp
+                                    && e.attributes.get("app_name").and_then(|v| v.as_str()) == Some(app)
+                            });
+                            if !has_app {
+                                let mut ev = ContextEvidence::observed_app(item_id, app, Some(&sig.created_at))
+                                    .with_source_ref(sig_ref.clone());
+                                if let Some(proc) = payload.get("process_name").and_then(|v| v.as_str()) {
+                                    ev = ev.with_attribute("process_name", proc);
+                                }
+                                raw_evidences.push(ev);
                             }
-                            raw_evidences.push(ev);
                         }
                         if let Some(win) = payload.get("window_title").and_then(|v| v.as_str()) {
                             if !win.trim().is_empty() {
@@ -1085,30 +1141,50 @@ impl ContextEvidenceCollector {
                         if let Some(win) = payload.get("window_title").or_else(|| payload.get("title")).and_then(|v| v.as_str()) {
                             raw_evidences.push(
                                 ContextEvidence::observed_window(item_id, win, Some(&sig.created_at))
-                                    .with_source_ref(sig_ref.clone()),
+                                        .with_source_ref(sig_ref.clone()),
                             );
                         }
                     }
                     "url_metadata" => {
                         let url_opt = payload.get("url").and_then(|v| v.as_str());
                         if let Some(url) = url_opt {
-                            raw_evidences.push(
-                                ContextEvidence::observed_url(item_id, url, Some(&sig.created_at))
-                                    .with_source_ref(sig_ref.clone()),
-                            );
+                            let has_url = raw_evidences.iter().any(|e| {
+                                e.category == EvidenceCategory::BrowserUrl
+                                    && e.attributes.get("url").and_then(|v| v.as_str()) == Some(url)
+                            });
+                            if !has_url {
+                                raw_evidences.push(
+                                    ContextEvidence::observed_url(item_id, url, Some(&sig.created_at))
+                                        .with_source_ref(sig_ref.clone()),
+                                );
+                            }
                         }
                         if let Some(domain) = payload.get("domain").and_then(|v| v.as_str()) {
-                            raw_evidences.push(
-                                ContextEvidence::observed_domain(item_id, domain, url_opt, Some(&sig.created_at))
-                                    .with_source_ref(sig_ref.clone()),
-                            );
+                            let domain_clean = domain.strip_prefix("www.").unwrap_or(domain);
+                            let has_domain = raw_evidences.iter().any(|e| {
+                                e.category == EvidenceCategory::BrowserDomain
+                                    && e.attributes.get("domain").and_then(|v| v.as_str()) == Some(domain_clean)
+                            });
+                            if !has_domain {
+                                raw_evidences.push(
+                                    ContextEvidence::observed_domain(item_id, domain_clean, url_opt, Some(&sig.created_at))
+                                        .with_source_ref(sig_ref.clone()),
+                                );
+                            }
                         } else if let Some(url) = url_opt {
                             if let Ok(parsed_url) = url::Url::parse(url) {
                                 if let Some(host) = parsed_url.host_str() {
-                                    raw_evidences.push(
-                                        ContextEvidence::observed_domain(item_id, host, Some(url), Some(&sig.created_at))
-                                            .with_source_ref(sig_ref.clone()),
-                                    );
+                                    let domain_clean = host.strip_prefix("www.").unwrap_or(host);
+                                    let has_domain = raw_evidences.iter().any(|e| {
+                                        e.category == EvidenceCategory::BrowserDomain
+                                            && e.attributes.get("domain").and_then(|v| v.as_str()) == Some(domain_clean)
+                                    });
+                                    if !has_domain {
+                                        raw_evidences.push(
+                                            ContextEvidence::observed_domain(item_id, domain_clean, Some(url), Some(&sig.created_at))
+                                                .with_source_ref(sig_ref.clone()),
+                                        );
+                                    }
                                 }
                             }
                         }

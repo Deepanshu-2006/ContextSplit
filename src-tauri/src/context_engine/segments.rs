@@ -250,7 +250,11 @@ impl ContextActivitySegmenter {
                     let is_ambiguous = transition.transition_type
                         == ContextTransitionType::AmbiguousTransition
                         || event.is_ambiguous;
-                    let target_ctx = transition.to_context.clone().or(event.target_context.clone());
+                    let target_ctx = if is_ambiguous {
+                        None
+                    } else {
+                        transition.to_context.clone().or(event.target_context.clone())
+                    };
 
                     let mut new_act = ActiveSegmentState::new(
                         target_ctx,
@@ -268,9 +272,25 @@ impl ContextActivitySegmenter {
                     ..
                 } => {
                     // Continuous activity in existing segment
-                    if let Some(ref mut act) = active_state {
-                        act.confidence_sum += confidence;
-                        act.add_item(item_ref, event.session_id.as_deref());
+                    if let Some(mut act) = active_state.take() {
+                        if act.is_ambiguous && !event.is_ambiguous {
+                            // Conclude previous ambiguous period and start fresh active segment
+                            segments.push(act.seal(None));
+                            let mut new_act = ActiveSegmentState::new(
+                                event.target_context.clone(),
+                                event.timestamp.clone(),
+                                event.confidence,
+                                event.session_id.clone(),
+                                None,
+                                false,
+                            );
+                            new_act.add_item(item_ref, event.session_id.as_deref());
+                            active_state = Some(new_act);
+                        } else {
+                            act.confidence_sum += confidence;
+                            act.add_item(item_ref, event.session_id.as_deref());
+                            active_state = Some(act);
+                        }
                     } else {
                         // Fallback if no active state
                         let mut new_act = ActiveSegmentState::new(
