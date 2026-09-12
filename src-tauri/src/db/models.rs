@@ -802,6 +802,214 @@ impl ContextTransition {
     }
 }
 
+// =========================================================================
+// Task Candidates (Inferred Contextual Tasks)
+// =========================================================================
+
+/// Status representing the inferential state of a `TaskCandidate`.
+///
+/// Distinct from traditional task management states (no "todo", "done", "in progress"):
+/// - `detected`: Initially inferred from activity patterns, window titles, or URL topics.
+/// - `active`: Currently receiving active contextual signals.
+/// - `inactive`: Inactivity detected or focus has shifted away.
+/// - `uncertain`: Competing or ambiguous inferences.
+/// - `dismissed`: Inferred task was dismissed or suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCandidateStatus {
+    Detected,
+    Active,
+    Inactive,
+    Uncertain,
+    Dismissed,
+}
+
+impl TaskCandidateStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskCandidateStatus::Detected => "detected",
+            TaskCandidateStatus::Active => "active",
+            TaskCandidateStatus::Inactive => "inactive",
+            TaskCandidateStatus::Uncertain => "uncertain",
+            TaskCandidateStatus::Dismissed => "dismissed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_lowercase().as_str() {
+            "detected" => Ok(TaskCandidateStatus::Detected),
+            "active" => Ok(TaskCandidateStatus::Active),
+            "inactive" => Ok(TaskCandidateStatus::Inactive),
+            "uncertain" => Ok(TaskCandidateStatus::Uncertain),
+            "dismissed" => Ok(TaskCandidateStatus::Dismissed),
+            other => Err(format!("Unknown task candidate status: '{}'", other)),
+        }
+    }
+
+    pub fn from_str_lenient(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "detected" | "detect" | "new" => Some(TaskCandidateStatus::Detected),
+            "active" | "ongoing" | "focused" => Some(TaskCandidateStatus::Active),
+            "inactive" | "idle" | "paused" | "stale" => Some(TaskCandidateStatus::Inactive),
+            "uncertain" | "ambiguous" | "low_confidence" => Some(TaskCandidateStatus::Uncertain),
+            "dismissed" | "dismiss" | "rejected" | "ignored" => Some(TaskCandidateStatus::Dismissed),
+            _ => None,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            TaskCandidateStatus::Detected => "Detected",
+            TaskCandidateStatus::Active => "Active",
+            TaskCandidateStatus::Inactive => "Inactive",
+            TaskCandidateStatus::Uncertain => "Uncertain",
+            TaskCandidateStatus::Dismissed => "Dismissed",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            TaskCandidateStatus::Detected => "Task candidate initially inferred from activity",
+            TaskCandidateStatus::Active => "Task candidate actively receiving signals",
+            TaskCandidateStatus::Inactive => "Task candidate with no recent activity",
+            TaskCandidateStatus::Uncertain => "Task candidate with ambiguous or competing inferences",
+            TaskCandidateStatus::Dismissed => "Task candidate dismissed or suppressed",
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, TaskCandidateStatus::Active)
+    }
+
+    pub fn is_dismissed(&self) -> bool {
+        matches!(self, TaskCandidateStatus::Dismissed)
+    }
+
+    pub fn is_uncertain(&self) -> bool {
+        matches!(self, TaskCandidateStatus::Uncertain)
+    }
+}
+
+impl std::fmt::Display for TaskCandidateStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Domain model representing an inferred task within a contextual environment.
+///
+/// CRITICAL ARCHITECTURAL INVARIANTS:
+/// 1. A `TaskCandidate` is purely an activity/contextual inference for understanding user focus.
+/// 2. It is NOT a user-confirmed task management record or to-do item.
+/// 3. It intentionally contains NO due dates, priorities, checkboxes, assignees, or completion semantics.
+/// 4. A single context (Workspace or candidate) may have multiple `TaskCandidate`s over time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskCandidate {
+    pub id: String,
+    pub context_id: Option<String>,
+    pub title: String,
+    pub confidence: f64,
+    pub status: TaskCandidateStatus,
+    pub first_detected_at: String,
+    pub last_active_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl TaskCandidate {
+    pub fn new(
+        context_id: Option<String>,
+        title: impl Into<String>,
+        confidence: f64,
+    ) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            context_id,
+            title: title.into(),
+            confidence: confidence.clamp(0.0, 1.0),
+            status: TaskCandidateStatus::Detected,
+            first_detected_at: now.clone(),
+            last_active_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    pub fn with_status(mut self, status: TaskCandidateStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub fn with_first_detected_at(mut self, ts: impl Into<String>) -> Self {
+        self.first_detected_at = ts.into();
+        self
+    }
+
+    pub fn with_last_active_at(mut self, ts: impl Into<String>) -> Self {
+        self.last_active_at = ts.into();
+        self
+    }
+
+    pub fn with_timestamps(
+        mut self,
+        first_detected: impl Into<String>,
+        last_active: impl Into<String>,
+        created: impl Into<String>,
+        updated: impl Into<String>,
+    ) -> Self {
+        self.first_detected_at = first_detected.into();
+        self.last_active_at = last_active.into();
+        self.created_at = created.into();
+        self.updated_at = updated.into();
+        self
+    }
+
+    pub fn touch_activity(&mut self, timestamp: Option<&str>, confidence_update: Option<f64>) {
+        let ts = timestamp
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        self.last_active_at = ts.clone();
+        self.updated_at = ts;
+        if matches!(self.status, TaskCandidateStatus::Detected | TaskCandidateStatus::Inactive) {
+            self.status = TaskCandidateStatus::Active;
+        }
+        if let Some(conf) = confidence_update {
+            self.confidence = conf.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn mark_inactive(&mut self, timestamp: Option<&str>) {
+        let ts = timestamp
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        self.status = TaskCandidateStatus::Inactive;
+        self.updated_at = ts;
+    }
+
+    pub fn mark_uncertain(&mut self, timestamp: Option<&str>) {
+        let ts = timestamp
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        self.status = TaskCandidateStatus::Uncertain;
+        self.updated_at = ts;
+    }
+
+    pub fn dismiss(&mut self, timestamp: Option<&str>) {
+        let ts = timestamp
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        self.status = TaskCandidateStatus::Dismissed;
+        self.updated_at = ts;
+    }
+}
+
+
 
 
 

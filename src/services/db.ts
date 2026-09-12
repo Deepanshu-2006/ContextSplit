@@ -94,6 +94,25 @@ export interface ContextSignal {
   updated_at: string;
 }
 
+export type TaskCandidateStatus =
+  | "detected"
+  | "active"
+  | "inactive"
+  | "uncertain"
+  | "dismissed";
+
+export interface TaskCandidate {
+  id: string;
+  context_id: string | null;
+  title: string;
+  confidence: number;
+  status: TaskCandidateStatus;
+  first_detected_at: string;
+  last_active_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkspaceScore {
   workspace_id: string;
   total_score: number;

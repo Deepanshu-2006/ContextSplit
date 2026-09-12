@@ -428,6 +428,39 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 20;
     }
 
+    if user_version < 21 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS task_candidates (
+                id TEXT PRIMARY KEY,
+                context_id TEXT,
+                title TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'detected',
+                first_detected_at TEXT NOT NULL,
+                last_active_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(context_id) REFERENCES workspaces(id) ON DELETE SET NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_candidates_context_id ON task_candidates(context_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_candidates_status ON task_candidates(status)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_candidates_last_active ON task_candidates(last_active_at)",
+            [],
+        )?;
+
+        user_version = 21;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support
@@ -435,3 +468,4 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     Ok(())
 }
+
