@@ -22,6 +22,12 @@ pub mod debugger;
 pub mod transitions;
 pub mod segments;
 pub mod summary;
+pub mod task_evidence;
+
+pub use task_evidence::{
+    clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
+    TaskEvidenceCollectorOptions, TaskEvidenceSet, TaskEvidenceType,
+};
 
 pub use transitions::{
     format_duration_human, format_transition_summary, record_context_transition, ContextReference,
