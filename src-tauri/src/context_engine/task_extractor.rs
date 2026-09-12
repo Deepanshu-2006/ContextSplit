@@ -631,8 +631,8 @@ impl TaskCandidateExtractor {
                 } else {
                     name
                 };
-
-                let human_subject = humanize_identifier(stem);
+                let file_stem = stem.split('/').last().unwrap_or(stem);
+                let human_subject = humanize_identifier(file_stem);
 
                 if !human_subject.is_empty() && !is_generic_task_name(&human_subject) {
                     let verb = match ext.as_str() {
@@ -689,18 +689,30 @@ impl TaskCandidateExtractor {
                     "Working on"
                 };
 
-                let title = if cleaned.starts_with("Fix ")
-                    || cleaned.starts_with("Add ")
-                    || cleaned.starts_with("Update ")
-                    || cleaned.starts_with("Implementing ")
-                    || cleaned.starts_with("Reviewing ")
-                {
-                    cleaned.to_string()
+                let target = if cleaned.contains('.') {
+                    let stem = if let Some(pos) = cleaned.rfind('.') {
+                        &cleaned[..pos]
+                    } else {
+                        cleaned
+                    };
+                    let file_stem = stem.split('/').last().unwrap_or(stem);
+                    humanize_identifier(file_stem)
                 } else {
-                    format!("{} {}", verb, cleaned)
+                    cleaned.to_string()
                 };
 
-                return Some((title, Some(verb.to_string()), Some(cleaned.to_string())));
+                let title = if target.starts_with("Fix ")
+                    || target.starts_with("Add ")
+                    || target.starts_with("Update ")
+                    || target.starts_with("Implementing ")
+                    || target.starts_with("Reviewing ")
+                {
+                    target.clone()
+                } else {
+                    format!("{} {}", verb, target)
+                };
+
+                return Some((title, Some(verb.to_string()), Some(target)));
             }
         }
         None

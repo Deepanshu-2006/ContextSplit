@@ -24,6 +24,7 @@ pub mod segments;
 pub mod summary;
 pub mod task_evidence;
 pub mod task_extractor;
+pub mod task_ranking;
 
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
@@ -32,6 +33,10 @@ pub use task_evidence::{
 pub use task_extractor::{
     humanize_identifier, is_generic_task_name, ExtractedTaskCandidate,
     TaskCandidateEvidenceRef, TaskCandidateExtractor, TaskExtractionOptions,
+};
+pub use task_ranking::{
+    RankedTaskCandidate, TaskAmbiguityState, TaskCandidateRanker, TaskRankingConfig,
+    TaskRankingDimensionScores, TaskRankingResult,
 };
 
 pub use transitions::{
