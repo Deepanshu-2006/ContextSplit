@@ -1,4 +1,4 @@
-use super::models::{Workspace, Session, InboxState, InboxItemState};
+use super::models::{Workspace, Session, InboxState, InboxItemState, TaskCandidate, TaskCandidateStatus};
 use chrono::Utc;
 use rusqlite::{params, Connection, Result};
 use uuid::Uuid;
@@ -1839,6 +1839,189 @@ pub fn delete_context_transition(
     Ok(())
 }
 
+// =========================================================================
+// Task Candidates CRUD (Inferred Contextual Tasks)
+// =========================================================================
+
+pub fn create_task_candidate(
+    conn: &Connection,
+    candidate: &super::models::TaskCandidate,
+) -> Result<super::models::TaskCandidate> {
+    let status_str = candidate.status.as_str();
+    conn.execute(
+        "INSERT INTO task_candidates (
+            id, context_id, title, confidence, status,
+            first_detected_at, last_active_at, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            candidate.id,
+            candidate.context_id,
+            candidate.title,
+            candidate.confidence,
+            status_str,
+            candidate.first_detected_at,
+            candidate.last_active_at,
+            candidate.created_at,
+            candidate.updated_at,
+        ],
+    )?;
+
+    get_task_candidate(conn, &candidate.id)
+}
+
+pub fn get_task_candidate(
+    conn: &Connection,
+    id: &str,
+) -> Result<super::models::TaskCandidate> {
+    let mut stmt = conn.prepare(
+        "SELECT id, context_id, title, confidence, status,
+                first_detected_at, last_active_at, created_at, updated_at
+         FROM task_candidates WHERE id = ?1",
+    )?;
+
+    stmt.query_row(params![id], |row| {
+        let raw_status: String = row.get(4)?;
+        let status = super::models::TaskCandidateStatus::from_str_lenient(&raw_status)
+            .unwrap_or(super::models::TaskCandidateStatus::Detected);
+
+        Ok(super::models::TaskCandidate {
+            id: row.get(0)?,
+            context_id: row.get(1)?,
+            title: row.get(2)?,
+            confidence: row.get(3)?,
+            status,
+            first_detected_at: row.get(5)?,
+            last_active_at: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })
+}
+
+pub fn list_task_candidates(
+    conn: &Connection,
+    context_id_filter: Option<&str>,
+    status_filter: Option<&str>,
+) -> Result<Vec<super::models::TaskCandidate>> {
+    let mut sql = "SELECT id, context_id, title, confidence, status,
+                          first_detected_at, last_active_at, created_at, updated_at
+                   FROM task_candidates WHERE 1=1".to_string();
+
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(cid) = context_id_filter {
+        sql.push_str(" AND context_id = ?");
+        params_vec.push(Box::new(cid.to_string()));
+    }
+
+    if let Some(st) = status_filter {
+        sql.push_str(" AND status = ?");
+        params_vec.push(Box::new(st.to_string()));
+    }
+
+    sql.push_str(" ORDER BY last_active_at DESC, created_at DESC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_slice: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+    let rows = stmt.query_map(rusqlite::params_from_iter(params_slice), |row| {
+        let raw_status: String = row.get(4)?;
+        let status = super::models::TaskCandidateStatus::from_str_lenient(&raw_status)
+            .unwrap_or(super::models::TaskCandidateStatus::Detected);
+
+        Ok(super::models::TaskCandidate {
+            id: row.get(0)?,
+            context_id: row.get(1)?,
+            title: row.get(2)?,
+            confidence: row.get(3)?,
+            status,
+            first_detected_at: row.get(5)?,
+            last_active_at: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
+        })
+    })?;
+
+    let mut candidates = Vec::new();
+    for r in rows {
+        candidates.push(r?);
+    }
+    Ok(candidates)
+}
+
+pub fn list_task_candidates_for_context(
+    conn: &Connection,
+    context_id: &str,
+) -> Result<Vec<super::models::TaskCandidate>> {
+    list_task_candidates(conn, Some(context_id), None)
+}
+
+pub fn update_task_candidate_status(
+    conn: &Connection,
+    id: &str,
+    status: super::models::TaskCandidateStatus,
+) -> Result<super::models::TaskCandidate> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let status_str = status.as_str();
+
+    conn.execute(
+        "UPDATE task_candidates SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status_str, now, id],
+    )?;
+
+    get_task_candidate(conn, id)
+}
+
+pub fn update_task_candidate_activity(
+    conn: &Connection,
+    id: &str,
+    last_active_at: &str,
+    confidence: Option<f64>,
+) -> Result<super::models::TaskCandidate> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if let Some(conf) = confidence {
+        let clamped = conf.clamp(0.0, 1.0);
+        conn.execute(
+            "UPDATE task_candidates 
+             SET last_active_at = ?1, confidence = ?2, status = CASE WHEN status IN ('detected', 'inactive') THEN 'active' ELSE status END, updated_at = ?3 
+             WHERE id = ?4",
+            params![last_active_at, clamped, now, id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE task_candidates 
+             SET last_active_at = ?1, status = CASE WHEN status IN ('detected', 'inactive') THEN 'active' ELSE status END, updated_at = ?2 
+             WHERE id = ?3",
+            params![last_active_at, now, id],
+        )?;
+    }
+
+    get_task_candidate(conn, id)
+}
+
+pub fn update_task_candidate_title(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+) -> Result<super::models::TaskCandidate> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE task_candidates SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        params![title, now, id],
+    )?;
+
+    get_task_candidate(conn, id)
+}
+
+pub fn delete_task_candidate(
+    conn: &Connection,
+    id: &str,
+) -> Result<()> {
+    conn.execute("DELETE FROM task_candidates WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2805,5 +2988,191 @@ mod tests {
         assert!(get_context_transition(&conn, &switch_trans.id).is_err());
         let remaining = list_context_transitions(&conn, None, None).unwrap();
         assert_eq!(remaining.len(), 4);
+    }
+
+    #[test]
+    fn test_task_candidate_model_and_status_invariants() {
+        use super::super::models::{TaskCandidate, TaskCandidateStatus};
+
+        // 1. Test status parsing and string roundtrip
+        for status in [
+            TaskCandidateStatus::Detected,
+            TaskCandidateStatus::Active,
+            TaskCandidateStatus::Inactive,
+            TaskCandidateStatus::Uncertain,
+            TaskCandidateStatus::Dismissed,
+        ] {
+            let s_str = status.as_str();
+            assert_eq!(TaskCandidateStatus::from_str(s_str).unwrap(), status);
+            assert_eq!(TaskCandidateStatus::from_str_lenient(s_str).unwrap(), status);
+        }
+
+        assert_eq!(TaskCandidateStatus::from_str_lenient("new"), Some(TaskCandidateStatus::Detected));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("ongoing"), Some(TaskCandidateStatus::Active));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("idle"), Some(TaskCandidateStatus::Inactive));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("ambiguous"), Some(TaskCandidateStatus::Uncertain));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("rejected"), Some(TaskCandidateStatus::Dismissed));
+
+        // 2. Test status helpers
+        assert!(TaskCandidateStatus::Active.is_active());
+        assert!(!TaskCandidateStatus::Inactive.is_active());
+        assert!(TaskCandidateStatus::Dismissed.is_dismissed());
+        assert!(TaskCandidateStatus::Uncertain.is_uncertain());
+
+        // 3. Test TaskCandidate builder and mutation invariants
+        let mut candidate = TaskCandidate::new(
+            Some("ws-123".to_string()),
+            "Debugging Transition Hysteresis",
+            0.85,
+        );
+
+        assert_eq!(candidate.context_id.as_deref(), Some("ws-123"));
+        assert_eq!(candidate.title, "Debugging Transition Hysteresis");
+        assert_eq!(candidate.confidence, 0.85);
+        assert_eq!(candidate.status, TaskCandidateStatus::Detected);
+        assert_eq!(candidate.first_detected_at, candidate.last_active_at);
+
+        // Touch activity promotes Detected -> Active
+        candidate.touch_activity(Some("2026-09-13T10:00:00Z"), Some(0.92));
+        assert_eq!(candidate.status, TaskCandidateStatus::Active);
+        assert_eq!(candidate.last_active_at, "2026-09-13T10:00:00Z");
+        assert_eq!(candidate.confidence, 0.92);
+
+        // Mark inactive
+        candidate.mark_inactive(Some("2026-09-13T10:30:00Z"));
+        assert_eq!(candidate.status, TaskCandidateStatus::Inactive);
+
+        // Resumed activity promotes Inactive -> Active
+        candidate.touch_activity(Some("2026-09-13T11:00:00Z"), None);
+        assert_eq!(candidate.status, TaskCandidateStatus::Active);
+
+        // Mark uncertain
+        candidate.mark_uncertain(Some("2026-09-13T11:15:00Z"));
+        assert_eq!(candidate.status, TaskCandidateStatus::Uncertain);
+
+        // Dismiss
+        candidate.dismiss(Some("2026-09-13T11:30:00Z"));
+        assert_eq!(candidate.status, TaskCandidateStatus::Dismissed);
+    }
+
+    #[test]
+    fn test_task_candidate_crud_and_context_multiplicity() {
+        use super::super::models::{TaskCandidate, TaskCandidateStatus};
+        let conn = setup_db();
+
+        let ws_college = create_workspace(&conn, "College").unwrap();
+        let ws_work = create_workspace(&conn, "Work").unwrap();
+
+        // 1. Create multiple task candidates for the same context (College) over time
+        let task_1 = TaskCandidate::new(
+            Some(ws_college.id.clone()),
+            "CS106B Homework 2 - Dynamic Programming",
+            0.90,
+        )
+        .with_status(TaskCandidateStatus::Active);
+
+        let task_2 = TaskCandidate::new(
+            Some(ws_college.id.clone()),
+            "Bio 101 Lab 3 Report",
+            0.75,
+        )
+        .with_status(TaskCandidateStatus::Inactive);
+
+        let task_3 = TaskCandidate::new(
+            Some(ws_work.id.clone()),
+            "Q3 Financial Planning Model",
+            0.88,
+        )
+        .with_status(TaskCandidateStatus::Detected);
+
+        // Unassigned task candidate (no context yet)
+        let task_4 = TaskCandidate::new(
+            None,
+            "Researching Japanese Sourdough Recipes",
+            0.65,
+        )
+        .with_status(TaskCandidateStatus::Uncertain);
+
+        let created_1 = create_task_candidate(&conn, &task_1).unwrap();
+        let created_2 = create_task_candidate(&conn, &task_2).unwrap();
+        let created_3 = create_task_candidate(&conn, &task_3).unwrap();
+        let created_4 = create_task_candidate(&conn, &task_4).unwrap();
+
+        assert_eq!(created_1.id, task_1.id);
+        assert_eq!(created_1.title, "CS106B Homework 2 - Dynamic Programming");
+        assert_eq!(created_1.status, TaskCandidateStatus::Active);
+
+        assert_eq!(created_2.id, task_2.id);
+        assert_eq!(created_2.status, TaskCandidateStatus::Inactive);
+
+        assert_eq!(created_3.id, task_3.id);
+        assert_eq!(created_3.status, TaskCandidateStatus::Detected);
+
+        assert_eq!(created_4.id, task_4.id);
+        assert_eq!(created_4.status, TaskCandidateStatus::Uncertain);
+
+        // 2. Fetch by ID
+        let fetched_1 = get_task_candidate(&conn, &task_1.id).unwrap();
+        assert_eq!(fetched_1.id, task_1.id);
+        assert_eq!(fetched_1.context_id.as_deref(), Some(ws_college.id.as_str()));
+
+        // 3. List candidates for specific context (College has 2 candidates)
+        let college_candidates = list_task_candidates_for_context(&conn, &ws_college.id).unwrap();
+        assert_eq!(college_candidates.len(), 2, "A context must support multiple task candidates over time");
+        let titles: Vec<&str> = college_candidates.iter().map(|c| c.title.as_str()).collect();
+        assert!(titles.contains(&"CS106B Homework 2 - Dynamic Programming"));
+        assert!(titles.contains(&"Bio 101 Lab 3 Report"));
+
+        // 4. List with filters
+        let all_candidates = list_task_candidates(&conn, None, None).unwrap();
+        assert_eq!(all_candidates.len(), 4);
+
+        let active_candidates = list_task_candidates(&conn, None, Some("active")).unwrap();
+        assert_eq!(active_candidates.len(), 1);
+        assert_eq!(active_candidates[0].id, task_1.id);
+
+        let unassigned_candidates = list_task_candidates(&conn, None, Some("uncertain")).unwrap();
+        assert_eq!(unassigned_candidates.len(), 1);
+        assert_eq!(unassigned_candidates[0].id, task_4.id);
+
+        // 5. Update status
+        let updated_2 = update_task_candidate_status(&conn, &task_2.id, TaskCandidateStatus::Dismissed).unwrap();
+        assert_eq!(updated_2.status, TaskCandidateStatus::Dismissed);
+
+        // 6. Update activity
+        let updated_3 = update_task_candidate_activity(&conn, &task_3.id, "2026-09-13T12:00:00Z", Some(0.95)).unwrap();
+        assert_eq!(updated_3.status, TaskCandidateStatus::Active, "Updating activity on Detected task should promote to Active");
+        assert_eq!(updated_3.last_active_at, "2026-09-13T12:00:00Z");
+        assert_eq!(updated_3.confidence, 0.95);
+
+        // 7. Update title
+        let updated_title = update_task_candidate_title(&conn, &task_1.id, "CS106B HW2 - Graph Algorithms").unwrap();
+        assert_eq!(updated_title.title, "CS106B HW2 - Graph Algorithms");
+
+        // 8. Delete candidate
+        delete_task_candidate(&conn, &task_4.id).unwrap();
+        assert!(get_task_candidate(&conn, &task_4.id).is_err());
+        assert_eq!(list_task_candidates(&conn, None, None).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_task_candidate_context_deletion_nullifies_foreign_key() {
+        use super::super::models::TaskCandidate;
+        let conn = setup_db();
+
+        let ws = create_workspace(&conn, "Temporary Project").unwrap();
+        let candidate = TaskCandidate::new(
+            Some(ws.id.clone()),
+            "Initial Setup and Scaffolding",
+            0.80,
+        );
+        create_task_candidate(&conn, &candidate).unwrap();
+
+        // Delete workspace
+        delete_workspace(&conn, &ws.id).unwrap();
+
+        // Task candidate still exists, but context_id is set to NULL (ON DELETE SET NULL)
+        let refetched = get_task_candidate(&conn, &candidate.id).unwrap();
+        assert_eq!(refetched.context_id, None, "Workspace deletion must set context_id to NULL rather than cascade delete inferred tasks");
     }
 }
