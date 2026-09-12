@@ -9,6 +9,7 @@ use crate::context_engine::task_evidence::{
     clean_window_title, extract_file_extension, extract_salient_terms, TaskEvidence,
     TaskEvidenceCollector, TaskEvidenceCollectorOptions, TaskEvidenceSet, TaskEvidenceType,
 };
+use crate::context_engine::memory::ContextMemory;
 use crate::context_engine::transitions::ContextSnapshot;
 
 // =========================================================================
@@ -311,6 +312,36 @@ impl TaskCandidateExtractor {
             })
             .collect_for_context(conn, &snapshot.reference.id)
             .map_err(|e| format!("Failed to collect memory evidence: {}", e))?
+        };
+
+        Ok(Self::extract_from_evidence(&evidence_set, Some(&opts)))
+    }
+
+    /// Extracts task candidates from a `ContextMemory` working memory.
+    pub fn extract_from_context_memory(
+        conn: &Connection,
+        memory: &ContextMemory,
+        item_refs: Option<&[SegmentItemReference]>,
+        options: Option<&TaskExtractionOptions>,
+    ) -> Result<Vec<ExtractedTaskCandidate>, String> {
+        let opts = options.cloned().unwrap_or_default();
+        let context_id = memory.context_id().map(|s| s.to_string());
+
+        let evidence_set = if let Some(refs) = item_refs {
+            let item_ids: Vec<String> = refs.iter().map(|r| r.item_id.clone()).collect();
+            let mut ev =
+                Self::collect_evidence_for_item_ids(conn, &item_ids, opts.min_relationship_strength)?;
+            ev.context_id = context_id;
+            ev
+        } else if let Some(cid) = memory.context_id() {
+            TaskEvidenceCollector::with_options(TaskEvidenceCollectorOptions {
+                min_relationship_strength: opts.min_relationship_strength,
+                ..Default::default()
+            })
+            .collect_for_context(conn, cid)
+            .map_err(|e| format!("Failed to collect context memory evidence: {}", e))?
+        } else {
+            TaskEvidenceSet::new(None, None)
         };
 
         Ok(Self::extract_from_evidence(&evidence_set, Some(&opts)))
@@ -1224,5 +1255,48 @@ mod tests {
         assert!(!candidates.is_empty());
         let top = &candidates[0];
         assert!(!is_generic_task_name(&top.title));
+    }
+
+    #[test]
+    fn test_extract_from_context_memory() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Portfolio").unwrap();
+
+        let item = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Hero animation interactive spring physics implementation in Framer Motion",
+            Some("Hero Animation Physics"),
+            r#"{"app_name":"Figma"}"#,
+        )
+        .unwrap();
+
+        create_context_signal(&conn, Some(&ws.id), Some(&item.id), "app_name", None, "Figma").unwrap();
+
+        let ctx = ContextReference::workspace(&ws.id, &ws.name);
+        let memory = ContextMemory::new(Some(ctx), 0.95, "2026-09-13T10:00:00Z");
+
+        let item_refs = vec![SegmentItemReference {
+            item_id: item.id.clone(),
+            title: item.title.clone(),
+            item_type: item.item_type.clone(),
+            timestamp: "2026-09-13T10:00:00Z".to_string(),
+            confidence: 0.95,
+        }];
+
+        let candidates = TaskCandidateExtractor::extract_from_context_memory(
+            &conn,
+            &memory,
+            Some(&item_refs),
+            None,
+        )
+        .unwrap();
+
+        assert!(!candidates.is_empty());
+        let top = &candidates[0];
+        assert!(!is_generic_task_name(&top.title));
+        assert_eq!(memory.context_name(), "Portfolio");
     }
 }

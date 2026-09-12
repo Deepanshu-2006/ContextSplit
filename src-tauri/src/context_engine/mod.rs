@@ -26,7 +26,11 @@ pub mod task_evidence;
 pub mod task_extractor;
 pub mod task_ranking;
 pub mod task_transitions;
+pub mod memory;
 
+pub use memory::{
+    ContextMemory, InferredTaskState, TaskConfidenceBand,
+};
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
     TaskEvidenceCollectorOptions, TaskEvidenceSet, TaskEvidenceType,
