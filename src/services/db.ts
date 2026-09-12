@@ -554,6 +554,16 @@ export interface DomainUsageSummary {
   item_count: number;
 }
 
+export interface InferredTaskOverview {
+  title: string;
+  is_confident: boolean;
+  explanation: string;
+  confidence: number;
+  confidence_band: string;
+  recent_activity: string[];
+  evidence: string[];
+}
+
 export interface ContextOverview {
   workspace_id: string;
   name: string;
@@ -565,6 +575,7 @@ export interface ContextOverview {
   important_domains: DomainUsageSummary[];
   recent_items: TimelineItemSummary[];
   timeline: ContextTimeline;
+  current_task?: InferredTaskOverview | null;
 }
 
 export interface ContextEvidenceItem {

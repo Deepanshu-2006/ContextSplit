@@ -19,6 +19,7 @@ import {
   AlertCircle,
   Inbox,
   Folder,
+  Sparkles,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary } from '../../services/db';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -274,8 +275,122 @@ function OverviewContent({
   isUpdatingLifecycle,
   onViewFullTimeline,
 }: OverviewContentProps) {
+  const task = overview.current_task;
+  const isConfident = Boolean(task?.is_confident);
+  const taskTitle = isConfident && task?.title ? task.title : 'Not clear yet';
+  const confidenceBand = isConfident && task?.confidence_band ? task.confidence_band : 'Low';
+
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
+      {/* 0. Current Work & Inferred Context Task Card */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-50/60 via-white to-violet-50/40 border border-indigo-100/90 shadow-xs space-y-4">
+        {/* Context Identity */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1 min-w-0">
+            <span className="text-[11px] font-semibold text-indigo-900/60 uppercase tracking-wider block">
+              You're working on
+            </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-xl font-bold text-gray-900 tracking-tight">
+                {overview.name}
+              </h3>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-100/80 text-indigo-700 border border-indigo-200/80">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+                Confirmed Context
+              </span>
+            </div>
+          </div>
+          <LifecycleBadge state={overview.lifecycle_state} />
+        </div>
+
+        {/* Divider */}
+        <div className="h-px bg-gradient-to-r from-transparent via-gray-200 to-transparent" />
+
+        {/* Inferred Task Block */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <Sparkles size={13} className="text-violet-600" />
+              <span className="text-xs font-semibold text-gray-700 uppercase tracking-wider">
+                Current task
+              </span>
+              <span className="text-[10px] font-medium text-violet-600 bg-violet-50 px-1.5 py-0.5 rounded border border-violet-200/60">
+                Inferred
+              </span>
+            </div>
+
+            {/* Task Confidence Badge */}
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-[11px] text-gray-400">Task confidence</span>
+              <span
+                className={`px-2 py-0.5 rounded-md text-[11px] font-medium ${
+                  isConfident && confidenceBand.toLowerCase() === 'high'
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : isConfident && confidenceBand.toLowerCase() === 'medium'
+                    ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                    : 'bg-gray-100 text-gray-600 border border-gray-200'
+                }`}
+              >
+                {confidenceBand}
+              </span>
+            </div>
+          </div>
+
+          {/* Task Title */}
+          <div>
+            {isConfident ? (
+              <div className="text-base font-semibold text-gray-900">
+                {taskTitle}
+              </div>
+            ) : (
+              <div className="text-sm font-normal text-gray-400 italic">
+                {taskTitle}
+              </div>
+            )}
+          </div>
+
+          {/* Explanation Quote Block */}
+          {task?.explanation && (
+            <p className="text-xs text-gray-600 italic bg-white/90 p-3 rounded-xl border border-gray-100 shadow-2xs leading-relaxed">
+              "{task.explanation}"
+            </p>
+          )}
+
+          {/* Recent Activity Bullets */}
+          {task?.recent_activity && task.recent_activity.length > 0 && (
+            <div className="pt-1">
+              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+                Recent activity
+              </div>
+              <ul className="space-y-1 text-xs text-gray-700">
+                {task.recent_activity.map((act, i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    <span className="text-violet-500 font-bold">•</span>
+                    <span className="truncate">{act}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Task Evidence Pills */}
+          {task?.evidence && task.evidence.length > 0 && isConfident && (
+            <div className="pt-1">
+              <div className="flex flex-wrap gap-1.5">
+                {task.evidence.map((ev, i) => (
+                  <span
+                    key={i}
+                    className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-50 text-gray-600 border border-gray-200/80"
+                  >
+                    {ev}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* 1. Context Metric Cards */}
       <div className="grid grid-cols-3 gap-3">
         <div className="p-4 rounded-xl bg-gray-50/80 border border-gray-100 flex flex-col justify-between">

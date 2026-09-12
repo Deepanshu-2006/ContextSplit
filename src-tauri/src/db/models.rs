@@ -519,6 +519,17 @@ pub struct DomainUsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InferredTaskOverview {
+    pub title: String,
+    pub is_confident: bool,
+    pub explanation: String,
+    pub confidence: f64,
+    pub confidence_band: String,
+    pub recent_activity: Vec<String>,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextOverview {
     pub workspace_id: String,
     pub name: String,
@@ -530,6 +541,8 @@ pub struct ContextOverview {
     pub important_domains: Vec<DomainUsageSummary>,
     pub recent_items: Vec<TimelineItemSummary>,
     pub timeline: ContextTimeline,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<InferredTaskOverview>,
 }
 
 /// Day 12: Context-Aware Inbox State Machine states.
