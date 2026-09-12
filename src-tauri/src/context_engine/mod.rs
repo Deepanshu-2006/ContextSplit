@@ -99,6 +99,8 @@ pub mod workflow_tests;
 pub mod evidence_pipeline_e2e_tests;
 #[cfg(test)]
 pub mod adversarial_tests;
+#[cfg(test)]
+pub mod task_adversarial_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

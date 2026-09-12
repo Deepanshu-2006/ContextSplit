@@ -489,15 +489,15 @@ impl TaskCandidateRanker {
         }
 
         let runner_up = &ranked[1];
-        let margin = top.confidence - runner_up.confidence;
+        let margin = (top.confidence - runner_up.confidence).max(0.0);
 
         // If runner-up is also strong and margin is small -> CloseContenders
-        if runner_up.confidence >= 0.50 && margin < config.clear_margin_threshold {
+        if runner_up.confidence >= 0.45 && margin <= 0.20 {
             return TaskAmbiguityState::CloseContenders;
         }
 
         // If top candidate has significant contradictory evidence
-        if top.contradictory_evidence.len() >= 3 && top.confidence < 0.70 {
+        if !top.contradictory_evidence.is_empty() && top.confidence < 0.85 {
             return TaskAmbiguityState::HighlyAmbiguous;
         }
 

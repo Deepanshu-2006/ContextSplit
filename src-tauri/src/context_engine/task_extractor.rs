@@ -124,6 +124,26 @@ static GENERIC_TASK_TERMS: &[&str] = &[
     "computer",
     "activity",
     "unknown",
+    "react",
+    "vue",
+    "angular",
+    "rust",
+    "python",
+    "javascript",
+    "typescript",
+    "frontend",
+    "backend",
+    "https",
+    "http",
+    "www",
+    "com",
+    "org",
+    "net",
+    "io",
+    "html",
+    "htm",
+    "page",
+    "search",
 ];
 
 /// Checks whether a phrase or title is purely generic.
@@ -259,15 +279,124 @@ impl TaskCandidateExtractor {
             }
         }
 
+        // Merge candidates that refer to the same subject or have high term overlap
+        let mut merged_candidates = Self::merge_overlapping_candidates(candidates);
+
         // Sort descending by relevance score
-        candidates.sort_by(|a, b| {
+        merged_candidates.sort_by(|a, b| {
             b.relevance_score
                 .partial_cmp(&a.relevance_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        candidates.truncate(opts.max_candidates);
-        candidates
+        merged_candidates.truncate(opts.max_candidates);
+        merged_candidates
+    }
+
+    /// Merges co-referent task candidates that target the same deliverable or share salient terms.
+    fn merge_overlapping_candidates(
+        candidates: Vec<ExtractedTaskCandidate>,
+    ) -> Vec<ExtractedTaskCandidate> {
+        let mut merged: Vec<ExtractedTaskCandidate> = Vec::new();
+
+        for cand in candidates {
+            let mut matched_idx = None;
+            for (idx, existing) in merged.iter().enumerate() {
+                let same_subject = match (&existing.target_subject, &cand.target_subject) {
+                    (Some(s1), Some(s2)) => {
+                        !s1.trim().is_empty()
+                            && !is_generic_task_name(s1)
+                            && s1.eq_ignore_ascii_case(s2)
+                    }
+                    _ => false,
+                };
+                let same_title = !existing.title.trim().is_empty()
+                    && !is_generic_task_name(&existing.title)
+                    && existing.title.eq_ignore_ascii_case(&cand.title);
+
+                let item_overlap = {
+                    let set1: HashSet<_> = existing.item_ids.iter().collect();
+                    let set2: HashSet<_> = cand.item_ids.iter().collect();
+                    let common = set1.intersection(&set2).count();
+                    common > 0 && (common * 2 >= set1.len() || common * 2 >= set2.len())
+                };
+
+                let title_word_overlap = {
+                    let words1: HashSet<_> = existing
+                        .title
+                        .split(|c: char| !c.is_alphanumeric())
+                        .map(|s| s.to_lowercase())
+                        .filter(|w| w.len() >= 3 && !is_generic_task_name(w))
+                        .collect();
+                    let words2: HashSet<_> = cand
+                        .title
+                        .split(|c: char| !c.is_alphanumeric())
+                        .map(|s| s.to_lowercase())
+                        .filter(|w| w.len() >= 3 && !is_generic_task_name(w))
+                        .collect();
+                    let count = words1.intersection(&words2).count();
+                    count >= 2 || (!words1.is_empty() && count == words1.len() && count == words2.len())
+                };
+
+                if same_subject || same_title || item_overlap || title_word_overlap {
+                    matched_idx = Some(idx);
+                    break;
+                }
+            }
+
+            if let Some(idx) = matched_idx {
+                let existing = &mut merged[idx];
+                // Union item IDs
+                for id in cand.item_ids {
+                    if !existing.item_ids.contains(&id) {
+                        existing.item_ids.push(id);
+                    }
+                }
+                // Union evidence references
+                for ev in cand.evidence_references {
+                    if !existing
+                        .evidence_references
+                        .iter()
+                        .any(|e| e.summary == ev.summary)
+                    {
+                        existing.evidence_references.push(ev);
+                    }
+                }
+                // Union primary evidence types
+                for pt in cand.primary_evidence_types {
+                    if !existing.primary_evidence_types.contains(&pt) {
+                        existing.primary_evidence_types.push(pt);
+                    }
+                }
+                // Union salient terms
+                for st in cand.salient_terms {
+                    if !existing
+                        .salient_terms
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&st))
+                    {
+                        existing.salient_terms.push(st);
+                    }
+                }
+                // Combined relevance score (multi-source corroboration boost)
+                existing.relevance_score =
+                    (existing.relevance_score.max(cand.relevance_score) + 0.08).min(0.98);
+                // Prefer more descriptive or specific title
+                if cand.title.len() > existing.title.len() && !is_generic_task_name(&cand.title) {
+                    existing.title = cand.title;
+                    if cand.action_verb.is_some() {
+                        existing.action_verb = cand.action_verb;
+                    }
+                    if cand.target_subject.is_some() {
+                        existing.target_subject = cand.target_subject;
+                    }
+                }
+            } else {
+                merged.push(cand);
+            }
+        }
+
+        merged
     }
 
     /// Extracts task candidates from an explicit list of item IDs.
@@ -380,73 +509,138 @@ impl TaskCandidateExtractor {
 
     /// Partitions an evidence set into clusters representing distinct possible tasks.
     fn partition_evidence_into_clusters(evidence_set: &TaskEvidenceSet) -> Vec<Vec<TaskEvidence>> {
-        let mut groups: HashMap<String, Vec<TaskEvidence>> = HashMap::new();
-
-        for ev in &evidence_set.evidence {
-            let key = match ev.evidence_type {
-                TaskEvidenceType::UrlsDomains => {
-                    if let Some(slug) = ev.attributes.get("path_slug").and_then(|v| v.as_str())
-                    {
-                        if slug.contains("pull/") || slug.contains("issues/") || slug.contains("issue/") {
-                            format!("url_issue:{}", slug)
-                        } else {
-                            format!(
-                                "domain:{}",
-                                ev.attributes
-                                    .get("domain")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(slug)
-                            )
-                        }
-                    } else if let Some(dom) =
-                        ev.attributes.get("domain").and_then(|v| v.as_str())
-                    {
-                        format!("domain:{}", dom)
-                    } else {
-                        "other".to_string()
-                    }
-                }
-                TaskEvidenceType::Filenames => {
-                    if let Some(stem) = ev.attributes.get("filename").and_then(|v| v.as_str()) {
-                        format!("file:{}", stem.to_lowercase())
-                    } else {
-                        "files".to_string()
-                    }
-                }
-                TaskEvidenceType::ApplicationContext => {
-                    let app = ev
-                        .attributes
-                        .get("app_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("app");
-                    let title = ev
-                        .attributes
-                        .get("window_title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !title.is_empty() {
-                        format!("app_title:{}:{}", app, title.to_lowercase())
-                    } else {
-                        format!("app:{}", app)
-                    }
-                }
-                _ => "general".to_string(),
-            };
-
-            groups.entry(key).or_default().push(ev.clone());
+        if evidence_set.evidence.is_empty() {
+            return Vec::new();
         }
 
-        let general_items = groups.remove("general").unwrap_or_default();
-        let other_items = groups.remove("other").unwrap_or_default();
+        let mut item_groups: HashMap<String, Vec<TaskEvidence>> = HashMap::new();
+        let mut non_item_evidence: Vec<TaskEvidence> = Vec::new();
 
-        let mut clusters: Vec<Vec<TaskEvidence>> = Vec::new();
-
-        for (_k, mut cluster_items) in groups {
-            for gen in &general_items {
-                cluster_items.push(gen.clone());
+        for ev in &evidence_set.evidence {
+            if let Some(ref entity) = ev.source_entity {
+                item_groups
+                    .entry(entity.entity_id.clone())
+                    .or_default()
+                    .push(ev.clone());
+            } else if let Some(title) = ev.attributes.get("title").and_then(|v| v.as_str()) {
+                item_groups
+                    .entry(format!("title:{}", title))
+                    .or_default()
+                    .push(ev.clone());
+            } else if let Some(fn_str) = ev.attributes.get("filename").and_then(|v| v.as_str()) {
+                item_groups
+                    .entry(format!("file:{}", fn_str))
+                    .or_default()
+                    .push(ev.clone());
+            } else if let Some(url_str) = ev.attributes.get("url").and_then(|v| v.as_str()) {
+                item_groups
+                    .entry(format!("url:{}", url_str))
+                    .or_default()
+                    .push(ev.clone());
+            } else {
+                non_item_evidence.push(ev.clone());
             }
-            for oth in &other_items {
-                cluster_items.push(oth.clone());
+        }
+
+        // Build adjacency graph for connected items using ItemRelationships and SemanticSimilarity
+        let item_keys: Vec<String> = item_groups.keys().cloned().collect();
+        let mut parent_map: HashMap<String, String> = HashMap::new();
+        for k in &item_keys {
+            parent_map.insert(k.clone(), k.clone());
+        }
+
+        fn find_root(parent: &mut HashMap<String, String>, k: &str) -> String {
+            let p = parent.get(k).cloned().unwrap_or_else(|| k.to_string());
+            if p == k {
+                k.to_string()
+            } else {
+                let root = find_root(parent, &p);
+                parent.insert(k.to_string(), root.clone());
+                root
+            }
+        }
+
+        fn union_roots(parent: &mut HashMap<String, String>, a: &str, b: &str) {
+            let root_a = find_root(parent, a);
+            let root_b = find_root(parent, b);
+            if root_a != root_b {
+                parent.insert(root_a, root_b);
+            }
+        }
+
+        // Connect items that share explicit relationships in evidence
+        for ev in &evidence_set.evidence {
+            if ev.evidence_type == TaskEvidenceType::ItemRelationships
+                || ev.evidence_type == TaskEvidenceType::SemanticSimilarity
+            {
+                if let (Some(s1), Some(s2)) = (
+                    ev.attributes.get("source_item_id").and_then(|v| v.as_str()),
+                    ev.attributes.get("target_item_id").and_then(|v| v.as_str()),
+                ) {
+                    if item_groups.contains_key(s1) && item_groups.contains_key(s2) {
+                        union_roots(&mut parent_map, s1, s2);
+                    }
+                }
+            }
+        }
+
+        // Connect items that share significant salient words in their titles or content
+        for i in 0..item_keys.len() {
+            for j in (i + 1)..item_keys.len() {
+                let k1 = &item_keys[i];
+                let k2 = &item_keys[j];
+                let evs1 = &item_groups[k1];
+                let evs2 = &item_groups[k2];
+
+                let mut words1: HashSet<String> = HashSet::new();
+                for e in evs1 {
+                    for attr_key in &["title", "filename", "snippet", "url", "domain"] {
+                        if let Some(val) = e.attributes.get(*attr_key).and_then(|v| v.as_str()) {
+                            for w in val.split(|c: char| !c.is_alphanumeric()) {
+                                let lower = w.to_lowercase();
+                                if lower.len() >= 3 && !is_generic_task_name(&lower) {
+                                    words1.insert(lower);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut words2: HashSet<String> = HashSet::new();
+                for e in evs2 {
+                    for attr_key in &["title", "filename", "snippet", "url", "domain"] {
+                        if let Some(val) = e.attributes.get(*attr_key).and_then(|v| v.as_str()) {
+                            for w in val.split(|c: char| !c.is_alphanumeric()) {
+                                let lower = w.to_lowercase();
+                                if lower.len() >= 3 && !is_generic_task_name(&lower) {
+                                    words2.insert(lower);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let common = words1.intersection(&words2).count();
+                if common >= 2
+                    || (!words1.is_empty() && common == words1.len() && common == words2.len())
+                {
+                    union_roots(&mut parent_map, k1, k2);
+                }
+            }
+        }
+
+        // Group item evidence by connected component root
+        let mut cluster_map: HashMap<String, Vec<TaskEvidence>> = HashMap::new();
+        for (item_id, evs) in item_groups {
+            let root = find_root(&mut parent_map, &item_id);
+            cluster_map.entry(root).or_default().extend(evs);
+        }
+
+        // Attach global non-item evidence to each cluster
+        let mut clusters: Vec<Vec<TaskEvidence>> = Vec::new();
+        for (_root, mut cluster_items) in cluster_map {
+            for non_item in &non_item_evidence {
+                cluster_items.push(non_item.clone());
             }
             clusters.push(cluster_items);
         }

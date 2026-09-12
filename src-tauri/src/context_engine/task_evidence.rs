@@ -765,11 +765,14 @@ impl TaskEvidenceCollector {
                 // 1.2 Observed Filenames (from title or file item)
                 if let Some(ref t) = item.title {
                     if let Some(ext) = extract_file_extension(t) {
-                        evidence_set.add_evidence(TaskEvidence::observed_filename(
-                            t,
-                            Some(&ext),
-                            Some(&item.created_at),
-                        ));
+                        evidence_set.add_evidence(
+                            TaskEvidence::observed_filename(
+                                t,
+                                Some(&ext),
+                                Some(&item.created_at),
+                            )
+                            .with_source_entity(EntityReference::item(&item.id)),
+                        );
                     }
                 }
 
@@ -778,33 +781,42 @@ impl TaskEvidenceCollector {
                     if let Ok(parsed) = url::Url::parse(&item.content) {
                         let domain = parsed.host_str().unwrap_or("unknown");
                         let slug = extract_url_path_slug(&parsed);
-                        evidence_set.add_evidence(TaskEvidence::observed_url_domain(
-                            &item.content,
-                            domain,
-                            slug.as_deref(),
-                            Some(&item.created_at),
-                        ));
+                        evidence_set.add_evidence(
+                            TaskEvidence::observed_url_domain(
+                                &item.content,
+                                domain,
+                                slug.as_deref(),
+                                Some(&item.created_at),
+                            )
+                            .with_source_entity(EntityReference::item(&item.id)),
+                        );
                     }
                 } else if let Ok(meta_val) = serde_json::from_str::<Value>(&item.metadata_str) {
                     if let Some(url_str) = meta_val.get("original_url").and_then(|v| v.as_str()) {
                         if let Ok(parsed) = url::Url::parse(url_str) {
                             let domain = parsed.host_str().unwrap_or("unknown");
                             let slug = extract_url_path_slug(&parsed);
-                            evidence_set.add_evidence(TaskEvidence::observed_url_domain(
-                                url_str,
-                                domain,
-                                slug.as_deref(),
-                                Some(&item.created_at),
-                            ));
+                            evidence_set.add_evidence(
+                                TaskEvidence::observed_url_domain(
+                                    url_str,
+                                    domain,
+                                    slug.as_deref(),
+                                    Some(&item.created_at),
+                                )
+                                .with_source_entity(EntityReference::item(&item.id)),
+                            );
                         }
                     }
                     if let Some(app) = meta_val.get("app_name").and_then(|v| v.as_str()) {
                         let win_title = meta_val.get("window_title").and_then(|v| v.as_str());
-                        evidence_set.add_evidence(TaskEvidence::observed_app(
-                            app,
-                            win_title,
-                            Some(&item.created_at),
-                        ));
+                        evidence_set.add_evidence(
+                            TaskEvidence::observed_app(
+                                app,
+                                win_title,
+                                Some(&item.created_at),
+                            )
+                            .with_source_entity(EntityReference::item(&item.id)),
+                        );
                     }
                 }
 

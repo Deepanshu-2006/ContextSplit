@@ -157,7 +157,7 @@ impl InferredTaskState {
         timestamp: &str,
     ) -> Self {
         let band = TaskConfidenceBand::from_score(ranked.confidence);
-        let has_sufficient_evidence = ranked.confidence >= 0.45
+        let has_sufficient_evidence = band.is_sufficient()
             && !is_generic_task_name(&ranked.candidate.title);
 
         if has_sufficient_evidence {
@@ -483,7 +483,8 @@ impl ContextMemory {
         ranked: &RankedTaskCandidate,
         timestamp: &str,
     ) {
-        let is_sufficient = ranked.confidence >= 0.45
+        let band = TaskConfidenceBand::from_score(ranked.confidence);
+        let is_sufficient = band.is_sufficient()
             && !is_generic_task_name(&ranked.candidate.title);
 
         if is_sufficient {
