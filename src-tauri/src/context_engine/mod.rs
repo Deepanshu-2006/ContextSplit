@@ -25,6 +25,7 @@ pub mod summary;
 pub mod task_evidence;
 pub mod task_extractor;
 pub mod task_ranking;
+pub mod task_transitions;
 
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
@@ -37,6 +38,10 @@ pub use task_extractor::{
 pub use task_ranking::{
     RankedTaskCandidate, TaskAmbiguityState, TaskCandidateRanker, TaskRankingConfig,
     TaskRankingDimensionScores, TaskRankingResult,
+};
+pub use task_transitions::{
+    DetectedTaskTransition, PendingTaskTransition, TaskSnapshot, TaskTransitionConfig,
+    TaskTransitionDetector, TaskTransitionEvaluationResult, TaskTransitionType,
 };
 
 pub use transitions::{
