@@ -111,13 +111,129 @@ pub fn get_context_overview(
     important_domains.truncate(5);
 
     // 5. Recent Items (first 6 most recent)
-    let recent_items = timeline.items.iter().take(6).cloned().collect();
+    let recent_items: Vec<crate::db::models::TimelineItemSummary> =
+        timeline.items.iter().take(6).cloned().collect();
 
     // 6. Recent Activity Timestamp
     let recent_activity = ws.last_activity_at
         .clone()
         .or_else(|| timeline.latest_activity_at.clone())
         .or_else(|| Some(ws.updated_at.clone()));
+
+    // 7. Infer Current Task & Context Memory
+    let current_task = match crate::context_engine::task_evidence::TaskEvidenceCollector::new()
+        .collect_for_context(conn, workspace_id)
+    {
+        Ok(evidence_set) => {
+            let candidates = crate::context_engine::task_extractor::TaskCandidateExtractor::extract_from_evidence(
+                &evidence_set,
+                None,
+            );
+            if !candidates.is_empty() {
+                let ranked = crate::context_engine::task_ranking::TaskCandidateRanker::rank_candidates(
+                    &candidates,
+                    Some(0.90),
+                    None,
+                );
+                if let Some(top) = ranked.top_candidate.as_ref() {
+                    let is_confident = top.confidence >= 0.45
+                        && !crate::context_engine::task_extractor::is_generic_task_name(&top.candidate.title);
+
+                    let title = if is_confident {
+                        top.candidate.title.clone()
+                    } else {
+                        "Not clear yet".to_string()
+                    };
+
+                    let evidence_summaries: Vec<String> = top
+                        .supporting_evidence
+                        .iter()
+                        .map(|e| e.summary.clone())
+                        .collect();
+
+                    // Generate human-friendly explanation
+                    let explanation = if is_confident {
+                        let mut sources = Vec::new();
+                        for app in related_applications.iter().take(2) {
+                            sources.push(app.name.clone());
+                        }
+                        for dom in important_domains.iter().take(2) {
+                            if !sources.contains(&dom.domain) {
+                                sources.push(dom.domain.clone());
+                            }
+                        }
+                        let sources_desc = if !sources.is_empty() {
+                            sources.join(" and ")
+                        } else {
+                            "recent".to_string()
+                        };
+                        let target = top
+                            .candidate
+                            .target_subject
+                            .as_deref()
+                            .unwrap_or(&top.candidate.title);
+                        format!(
+                            "Recently working with {} resources related to the {}.",
+                            sources_desc,
+                            target.to_lowercase()
+                        )
+                    } else {
+                        "Activity is still emerging or too diverse to identify a specific task.".to_string()
+                    };
+
+                    // Pick top 3 recent item titles/descriptions for recent activity bullets
+                    let mut recent_activity_items = Vec::new();
+                    for item in recent_items.iter().take(3) {
+                        let name = item.title.clone().unwrap_or_else(|| {
+                            if item.content_snippet.len() > 30 {
+                                format!("{}...", &item.content_snippet[..30])
+                            } else {
+                                item.content_snippet.clone()
+                            }
+                        });
+                        if !name.is_empty() && !recent_activity_items.contains(&name) {
+                            recent_activity_items.push(name);
+                        }
+                    }
+
+                    Some(crate::db::models::InferredTaskOverview {
+                        title,
+                        is_confident,
+                        explanation,
+                        confidence: top.confidence,
+                        confidence_band: if is_confident {
+                            let b = &top.confidence_band;
+                            format!("{}{}", b[..1].to_uppercase(), &b[1..])
+                        } else {
+                            "Low".to_string()
+                        },
+                        recent_activity: recent_activity_items,
+                        evidence: evidence_summaries,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                let mut recent_activity_items = Vec::new();
+                for item in recent_items.iter().take(3) {
+                    let name = item.title.clone().unwrap_or_else(|| item.content_snippet.clone());
+                    if !name.is_empty() {
+                        recent_activity_items.push(name);
+                    }
+                }
+                Some(crate::db::models::InferredTaskOverview {
+                    title: "Not clear yet".to_string(),
+                    is_confident: false,
+                    explanation: "No recent task signals detected in this context.".to_string(),
+                    confidence: 0.0,
+                    confidence_band: "Low".to_string(),
+                    recent_activity: recent_activity_items,
+                    evidence: Vec::new(),
+                })
+            }
+        }
+        Err(_) => None,
+    };
 
     Ok(ContextOverview {
         workspace_id: ws.id,
@@ -130,6 +246,7 @@ pub fn get_context_overview(
         important_domains,
         recent_items,
         timeline,
+        current_task,
     })
 }
 
@@ -209,12 +326,64 @@ mod tests {
         assert!(overview.important_domains.iter().any(|d| d.domain == "figma.com"));
         assert!(overview.important_domains.iter().any(|d| d.domain == "github.com"));
 
-        // f) Recent Items populated
-        assert_eq!(overview.recent_items.len(), 3);
-
         // g) Contextual Timeline is present and populated
         assert_eq!(overview.timeline.total_items, 3);
         assert_eq!(overview.timeline.sessions.len(), 1);
         assert!(!overview.timeline.chronological_activity.is_empty());
+
+        // h) Current Task is inferred
+        assert!(overview.current_task.is_some());
+        let task = overview.current_task.unwrap();
+        assert!(!task.title.is_empty());
+    }
+
+    #[test]
+    fn test_inferred_task_in_portfolio_context_overview() {
+        let conn = setup_in_memory_db();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Portfolio").unwrap();
+        let session = crate::db::operations::create_session(&conn).unwrap();
+
+        let _item1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Hero animation interactive spring physics implementation in React Framer Motion",
+            Some("Figma hero design"),
+            r#"{"app_name":"Figma"}"#,
+        ).unwrap();
+
+        let _item2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            "Hero animation React component code and physics",
+            Some("React animation component"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+
+        let _item3 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "url",
+            "https://framer.com/motion/hero-animation",
+            Some("Animation reference"),
+            r#"{"app_name":"Safari","domain":"framer.com"}"#,
+        ).unwrap();
+
+        let overview = get_context_overview(&conn, &ws.id).unwrap();
+
+        assert_eq!(overview.name, "Portfolio");
+        assert!(overview.current_task.is_some());
+
+        let task = overview.current_task.unwrap();
+        assert!(task.is_confident);
+        assert!(task.title.to_lowercase().contains("hero") || task.title.to_lowercase().contains("animation"));
+        assert_eq!(task.confidence_band, "High");
+        assert!(!task.recent_activity.is_empty());
+        assert!(!task.explanation.is_empty());
     }
 }
