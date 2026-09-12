@@ -23,10 +23,15 @@ pub mod transitions;
 pub mod segments;
 pub mod summary;
 pub mod task_evidence;
+pub mod task_extractor;
 
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
     TaskEvidenceCollectorOptions, TaskEvidenceSet, TaskEvidenceType,
+};
+pub use task_extractor::{
+    humanize_identifier, is_generic_task_name, ExtractedTaskCandidate,
+    TaskCandidateEvidenceRef, TaskCandidateExtractor, TaskExtractionOptions,
 };
 
 pub use transitions::{
