@@ -1,10 +1,16 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::context_engine::memory::{
     ContextMemory, ContextMemoryBuilder, InformationProvenance,
     MemoryItemReference, MemoryTaskReference,
+};
+use crate::context_engine::segments::ContextActivitySegmenter;
+use crate::context_engine::work_sequence::{
+    format_activity_duration_estimate, format_date_label, RecentWorkSequenceService,
+    WorkSequenceEntry,
 };
 
 // =========================================================================
@@ -155,6 +161,93 @@ pub struct LastActiveTaskResponse {
     pub is_current: bool,
 }
 
+/// Usage and primary task information for a context on a specific historical day.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoricalContextUsage {
+    /// Context identifier
+    pub context_id: String,
+    /// Human-friendly name of the context (e.g. "Aurora Website", "University OS", "Tokyo Trip")
+    pub context_name: String,
+    /// Number of activity segments or sessions in this context on that day
+    pub session_count: usize,
+    /// Total duration in seconds
+    pub total_duration_seconds: i64,
+    /// Gentle estimate: "Active for about 40 minutes"
+    pub duration_estimate: String,
+    /// Primary task title if known
+    pub primary_task: Option<String>,
+    /// All tasks worked on in this context on that day
+    pub tasks: Vec<String>,
+    /// ISO-8601 timestamp of most recent activity on that day
+    pub last_active_at: String,
+}
+
+/// Summary of a task worked on during a specific historical day.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoricalTaskSummary {
+    /// Task title
+    pub title: String,
+    /// Context identifier if linked
+    pub context_id: Option<String>,
+    /// Context name
+    pub context_name: String,
+    /// Qualitative confidence band
+    pub confidence_band: String,
+    /// Epistemic classification
+    pub provenance: InformationProvenance,
+    /// ISO-8601 timestamp of last activity on that day
+    pub last_active_at: String,
+}
+
+/// Complete historical memory reconstruction for a given day (e.g. Today, Yesterday, Sep 12).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoricalContextMemoryResponse {
+    /// ISO date string (YYYY-MM-DD)
+    pub date: String,
+    /// Human-friendly relative or formatted label (e.g. "Today", "Yesterday", "Sep 12, 2026")
+    pub date_label: String,
+    /// List of contexts used during this day
+    pub contexts_used: Vec<HistoricalContextUsage>,
+    /// Primary tasks worked on during this day across contexts
+    pub primary_tasks: Vec<HistoricalTaskSummary>,
+    /// Number of context switches detected on this day
+    pub context_switches: usize,
+    /// Number of returns to earlier contexts on this day
+    pub context_returns: usize,
+    /// Most recent context active on this day
+    pub most_recent_context: Option<HistoricalContextUsage>,
+    /// Most recent task active on this day
+    pub most_recent_task: Option<HistoricalTaskSummary>,
+    /// Important items captured or interacted with on this day
+    pub important_captured_items: Vec<MemoryItemReference>,
+    /// Meaningful activity segments recorded on this day
+    pub meaningful_activity_segments: Vec<WorkSequenceEntry>,
+    /// Whether there is sufficient evidence to reconstruct working memory
+    pub has_sufficient_evidence: bool,
+    /// Truthful, deterministic natural language summary of what was worked on
+    pub summary_statement: String,
+}
+
+/// Helper to parse relative date queries ("today", "yesterday") or ISO strings ("YYYY-MM-DD").
+pub fn parse_date_query(query: &str, reference_now: DateTime<Utc>) -> Result<NaiveDate, String> {
+    let q = query.trim().to_lowercase();
+    let now_naive = reference_now.date_naive();
+    if q == "today" {
+        Ok(now_naive)
+    } else if q == "yesterday" {
+        Ok(now_naive - chrono::Duration::days(1))
+    } else if let Ok(d) = NaiveDate::parse_from_str(&q, "%Y-%m-%d") {
+        Ok(d)
+    } else if let Ok(dt) = DateTime::parse_from_rfc3339(query.trim()) {
+        Ok(dt.date_naive())
+    } else {
+        Err(format!(
+            "Unrecognized date query '{}'. Expected 'today', 'yesterday', or 'YYYY-MM-DD'.",
+            query
+        ))
+    }
+}
+
 // =========================================================================
 // ContextMemoryQueryService
 // =========================================================================
@@ -290,6 +383,249 @@ impl ContextMemoryQueryService {
         } else {
             Ok(None)
         }
+    }
+
+    /// Reconstructs historical contextual working memory for a specific calendar date.
+    pub fn get_memory_for_day(
+        &self,
+        conn: &Connection,
+        target_date: NaiveDate,
+    ) -> Result<HistoricalContextMemoryResponse, String> {
+        let date_key = target_date.format("%Y-%m-%d").to_string();
+        let reference_now = self.frozen_now.unwrap_or_else(Utc::now);
+        let sample_iso = format!("{}T12:00:00Z", date_key);
+        let (date_label, _) = format_date_label(&sample_iso, Some(reference_now));
+
+        // 1. Reconstruct activity segments via RecentWorkSequenceService
+        let mut segmenter = ContextActivitySegmenter::new();
+        let segments = segmenter.build_all_segments(conn)?;
+        let work_seq_service = RecentWorkSequenceService::new();
+        let work_seq = work_seq_service.reconstruct_from_segments(conn, &segments, Some(60), Some(reference_now));
+
+        // 2. Find entries for this specific date
+        let day_entries: Vec<WorkSequenceEntry> = work_seq
+            .days
+            .iter()
+            .find(|d| d.date_key == date_key)
+            .map(|d| d.entries.clone())
+            .unwrap_or_default();
+
+        // 3. Query items captured on this day
+        let start_iso = format!("{} 00:00:00", date_key);
+        let end_iso = format!("{} 23:59:59", date_key);
+        let start_iso_t = format!("{}T00:00:00Z", date_key);
+        let end_iso_t = format!("{}T23:59:59Z", date_key);
+
+        let mut item_stmt = conn
+            .prepare(
+                "SELECT id, workspace_id, content, title, item_type, metadata, created_at 
+                 FROM items 
+                 WHERE (created_at >= ?1 AND created_at <= ?2) 
+                    OR (created_at >= ?3 AND created_at <= ?4)
+                 ORDER BY created_at DESC LIMIT 30",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let item_rows = item_stmt
+            .query_map([&start_iso, &end_iso, &start_iso_t, &end_iso_t], |row| {
+                let id: String = row.get(0)?;
+                let _ws_id: Option<String> = row.get(1)?;
+                let content: String = row.get(2)?;
+                let title: Option<String> = row.get(3)?;
+                let item_type: String = row.get(4)?;
+                let meta_str: String = row.get(5)?;
+                let created_at: String = row.get(6)?;
+
+                let (app_name, domain) = if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                    (
+                        meta.get("app_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        meta.get("domain").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    )
+                } else {
+                    (None, None)
+                };
+
+                let clean_title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+                    if content.len() > 60 {
+                        format!("{}...", &content[..60].trim())
+                    } else {
+                        content
+                    }
+                });
+
+                Ok(MemoryItemReference {
+                    id,
+                    title: Some(clean_title),
+                    item_type,
+                    timestamp: created_at,
+                    provenance: InformationProvenance::Observed,
+                    app_name,
+                    domain,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut important_captured_items = Vec::new();
+        for r in item_rows {
+            if let Ok(item) = r {
+                important_captured_items.push(item);
+            }
+        }
+
+        // 4. Aggregate contexts used on this day
+        let mut context_map: HashMap<String, (String, usize, i64, Vec<String>, String)> = HashMap::new(); // id -> (name, count, duration, tasks, last_active)
+        let mut task_map: HashMap<String, HistoricalTaskSummary> = HashMap::new();
+        let mut context_switches = 0;
+        let mut context_returns = 0;
+
+        for entry in &day_entries {
+            if entry.is_context_return {
+                context_returns += 1;
+            } else if entry.transition_type.as_deref() == Some("context_switch") {
+                context_switches += 1;
+            }
+
+            if let Some(ref cid) = entry.context_id {
+                let e = context_map.entry(cid.clone()).or_insert_with(|| {
+                    (entry.context_name.clone(), 0, 0, Vec::new(), entry.ended_at.clone())
+                });
+                e.1 += 1;
+                e.2 += entry.duration_seconds;
+                if entry.ended_at > e.4 {
+                    e.4 = entry.ended_at.clone();
+                }
+                if let Some(ref t) = entry.task_title {
+                    if !e.3.contains(t) {
+                        e.3.push(t.clone());
+                    }
+                }
+            }
+
+            if let Some(ref task_title) = entry.task_title {
+                let key = format!("{}:{}", entry.context_id.as_deref().unwrap_or(""), task_title);
+                task_map.entry(key).or_insert_with(|| HistoricalTaskSummary {
+                    title: task_title.clone(),
+                    context_id: entry.context_id.clone(),
+                    context_name: entry.context_name.clone(),
+                    confidence_band: entry.task_confidence_band.clone().unwrap_or_else(|| "Medium".to_string()),
+                    provenance: entry.task_provenance,
+                    last_active_at: entry.ended_at.clone(),
+                });
+            }
+        }
+
+        let mut contexts_used: Vec<HistoricalContextUsage> = context_map
+            .into_iter()
+            .map(|(id, (name, count, dur, tasks, last_active))| {
+                let primary_task = tasks.first().cloned();
+                HistoricalContextUsage {
+                    context_id: id,
+                    context_name: name,
+                    session_count: count,
+                    total_duration_seconds: dur,
+                    duration_estimate: format_activity_duration_estimate(dur),
+                    primary_task,
+                    tasks,
+                    last_active_at: last_active,
+                }
+            })
+            .collect();
+        contexts_used.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+
+        let mut primary_tasks: Vec<HistoricalTaskSummary> = task_map.into_values().collect();
+        primary_tasks.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+
+        let most_recent_context = contexts_used.first().cloned();
+        let most_recent_task = primary_tasks.first().cloned();
+
+        let has_sufficient_evidence = !contexts_used.is_empty() || !important_captured_items.is_empty();
+
+        // 5. Generate truthful, deterministic summary statement
+        let summary_statement = if !contexts_used.is_empty() {
+            let mut parts = Vec::new();
+            for ctx in &contexts_used {
+                if let Some(ref pt) = ctx.primary_task {
+                    parts.push(format!("{} on {}", ctx.context_name, pt));
+                } else {
+                    parts.push(ctx.context_name.clone());
+                }
+            }
+            if parts.len() == 1 {
+                format!("{} you worked on {}.", date_label, parts[0])
+            } else if parts.len() == 2 {
+                format!("{} you worked across {} and {}.", date_label, parts[0], parts[1])
+            } else {
+                let last = parts.pop().unwrap();
+                format!("{} you worked across {}, and {}.", date_label, parts.join(", "), last)
+            }
+        } else if !important_captured_items.is_empty() {
+            format!(
+                "{} you captured {} item{}.",
+                date_label,
+                important_captured_items.len(),
+                if important_captured_items.len() == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("No meaningful activity recorded for {}.", date_label.to_lowercase())
+        };
+
+        Ok(HistoricalContextMemoryResponse {
+            date: date_key,
+            date_label,
+            contexts_used,
+            primary_tasks,
+            context_switches,
+            context_returns,
+            most_recent_context,
+            most_recent_task,
+            important_captured_items,
+            meaningful_activity_segments: day_entries,
+            has_sufficient_evidence,
+            summary_statement,
+        })
+    }
+
+    /// Queries historical working memory for "Today".
+    pub fn get_today_memory(&self, conn: &Connection) -> Result<HistoricalContextMemoryResponse, String> {
+        let now = self.frozen_now.unwrap_or_else(Utc::now);
+        self.get_memory_for_day(conn, now.date_naive())
+    }
+
+    /// Queries historical working memory for "Yesterday".
+    pub fn get_yesterday_memory(&self, conn: &Connection) -> Result<HistoricalContextMemoryResponse, String> {
+        let now = self.frozen_now.unwrap_or_else(Utc::now);
+        let yesterday = now.date_naive() - chrono::Duration::days(1);
+        self.get_memory_for_day(conn, yesterday)
+    }
+
+    /// Queries historical working memory for a date string ("today", "yesterday", "YYYY-MM-DD").
+    pub fn get_historical_memory_for_date(
+        &self,
+        conn: &Connection,
+        date_query: &str,
+    ) -> Result<HistoricalContextMemoryResponse, String> {
+        let now = self.frozen_now.unwrap_or_else(Utc::now);
+        let date = parse_date_query(date_query, now)?;
+        self.get_memory_for_day(conn, date)
+    }
+
+    /// Queries historical memories for the past N active days.
+    pub fn get_recent_historical_memories(
+        &self,
+        conn: &Connection,
+        limit_days: Option<usize>,
+    ) -> Result<Vec<HistoricalContextMemoryResponse>, String> {
+        let limit = limit_days.unwrap_or(7).clamp(1, 30);
+        let now = self.frozen_now.unwrap_or_else(Utc::now);
+        let mut results = Vec::new();
+        for i in 0..limit {
+            let date = now.date_naive() - chrono::Duration::days(i as i64);
+            let resp = self.get_memory_for_day(conn, date)?;
+            if resp.has_sufficient_evidence || i < 2 {
+                results.push(resp);
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -530,5 +866,158 @@ mod tests {
 
         // Contradictory/ambiguous unconfirmed tasks without a clear leader should not force an inaccurate task
         assert_eq!(resp.context, "Mixed Space");
+    }
+
+    #[test]
+    fn test_parse_date_query() {
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let today = parse_date_query("today", fixed_now).unwrap();
+        assert_eq!(today.to_string(), "2026-09-14");
+
+        let yesterday = parse_date_query("Yesterday", fixed_now).unwrap();
+        assert_eq!(yesterday.to_string(), "2026-09-13");
+
+        let specific = parse_date_query("2026-09-10", fixed_now).unwrap();
+        assert_eq!(specific.to_string(), "2026-09-10");
+
+        let invalid = parse_date_query("invalid-date", fixed_now);
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn test_query_yesterday_memory_prompt_example() {
+        let conn = setup_in_memory_db();
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let ws_aurora = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+        let ws_os = crate::db::operations::create_workspace(&conn, "University OS").unwrap();
+        let ws_tokyo = crate::db::operations::create_workspace(&conn, "Tokyo Trip").unwrap();
+
+        // Items captured yesterday (2026-09-13)
+        let _item_aurora = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "text",
+            "Hero animation implementation with Framer Motion",
+            Some("Hero animation"),
+            r#"{"app_name":"VS Code","created_at":"2026-09-13T10:00:00Z"}"#,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE items SET created_at = '2026-09-13 10:00:00' WHERE id = ?1",
+            [&_item_aurora.id],
+        )
+        .unwrap();
+
+        let _item_os = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_os.id),
+            None,
+            "text",
+            "Process scheduling assignment for OS course",
+            Some("Process scheduling assignment"),
+            r#"{"app_name":"CLion","created_at":"2026-09-13T13:00:00Z"}"#,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE items SET created_at = '2026-09-13 13:00:00' WHERE id = ?1",
+            [&_item_os.id],
+        )
+        .unwrap();
+
+        let _item_tokyo = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_tokyo.id),
+            None,
+            "text",
+            "Initial trip planning and flight search for Tokyo",
+            Some("Initial trip planning"),
+            r#"{"app_name":"Safari","created_at":"2026-09-13T16:00:00Z"}"#,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE items SET created_at = '2026-09-13 16:00:00' WHERE id = ?1",
+            [&_item_tokyo.id],
+        )
+        .unwrap();
+
+        let service = ContextMemoryQueryService::new().with_now(fixed_now);
+        let resp = service.get_yesterday_memory(&conn).unwrap();
+
+        assert_eq!(resp.date, "2026-09-13");
+        assert_eq!(resp.date_label, "Yesterday");
+        assert!(resp.has_sufficient_evidence);
+        assert!(!resp.contexts_used.is_empty());
+
+        let context_names: Vec<&str> = resp.contexts_used.iter().map(|c| c.context_name.as_str()).collect();
+        assert!(context_names.contains(&"Aurora Website"));
+        assert!(context_names.contains(&"University OS"));
+        assert!(context_names.contains(&"Tokyo Trip"));
+
+        // Verify summary statement is truthful and mentions the work
+        assert!(resp.summary_statement.contains("Yesterday"));
+        assert!(resp.summary_statement.contains("Aurora Website"));
+    }
+
+    #[test]
+    fn test_query_insufficient_evidence_empty_day() {
+        let conn = setup_in_memory_db();
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let service = ContextMemoryQueryService::new().with_now(fixed_now);
+        let resp = service.get_historical_memory_for_date(&conn, "2026-09-01").unwrap();
+
+        assert_eq!(resp.date, "2026-09-01");
+        assert!(!resp.has_sufficient_evidence);
+        assert!(resp.contexts_used.is_empty());
+        assert!(resp.primary_tasks.is_empty());
+        assert!(resp.important_captured_items.is_empty());
+        assert!(resp.summary_statement.contains("No meaningful activity recorded"));
+    }
+
+    #[test]
+    fn test_query_today_memory_and_recent_range() {
+        let conn = setup_in_memory_db();
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let ws = crate::db::operations::create_workspace(&conn, "ContextSplit App").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Refactoring Context Memory Query",
+            Some("Refactoring Context Memory Query"),
+            r#"{"app_name":"Rust Rover"}"#,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE items SET created_at = '2026-09-14 10:00:00' WHERE id = ?1",
+            [&item.id],
+        )
+        .unwrap();
+
+        let service = ContextMemoryQueryService::new().with_now(fixed_now);
+        let today_resp = service.get_today_memory(&conn).unwrap();
+
+        assert_eq!(today_resp.date, "2026-09-14");
+        assert_eq!(today_resp.date_label, "Today");
+        assert!(today_resp.has_sufficient_evidence);
+        assert_eq!(today_resp.contexts_used.len(), 1);
+        assert_eq!(today_resp.contexts_used[0].context_name, "ContextSplit App");
+
+        let recent_memories = service.get_recent_historical_memories(&conn, Some(5)).unwrap();
+        assert!(!recent_memories.is_empty());
+        assert_eq!(recent_memories[0].date, "2026-09-14");
     }
 }
