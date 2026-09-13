@@ -184,6 +184,25 @@ impl ContextMemoryActivityState {
     }
 }
 
+/// Structured, human-readable explanation grounding a contextual memory statement.
+/// Explains why the engine determined the user was working on a specific task/context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryExplanation {
+    /// Concise summary headline (e.g. "Reconstructed from 4 recent items and persistent task candidate activity.")
+    pub summary: String,
+    /// Clean, user-friendly reasons answering "Why?"
+    /// e.g. ["4 related recent items", "semantic similarity between recent items", "same Aurora Website context", "task candidate remained active across sessions"]
+    pub why_reasons: Vec<String>,
+    /// Supporting evidence references (observed and inferred, sanitized)
+    pub supporting_evidence: Vec<String>,
+    /// Qualitative confidence band ("High", "Medium", "Low", "Insufficient")
+    pub confidence_band: String,
+    /// Epistemic classification
+    pub provenance: InformationProvenance,
+    /// Honest uncertainty note (never claiming certainty beyond underlying evidence)
+    pub uncertainty_note: Option<String>,
+}
+
 // =========================================================================
 // Task Confidence & State Models
 // =========================================================================
@@ -514,6 +533,8 @@ pub struct ContextMemory {
     pub activity_state: ContextMemoryActivityState,
     /// Reconstructed working memory statement answering "What was the user working on?"
     pub memory_statement: String,
+    /// Structured, human-readable explanation answering "Why?" for this memory statement
+    pub explanation: MemoryExplanation,
 
     // Backward-compatibility / helper state:
     /// Inferred task state with detailed evidence lines (for legacy callers)
@@ -555,6 +576,15 @@ impl ContextMemory {
         let ctx_id = context.as_ref().map(|c| c.id.clone()).unwrap_or_default();
         let ctx_name = context.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Unknown".to_string());
 
+        let default_explanation = MemoryExplanation {
+            summary: format!("Contextual memory initialized for {}.", ctx_name),
+            why_reasons: vec![format!("same {} context", ctx_name)],
+            supporting_evidence: Vec::new(),
+            confidence_band: band.to_string(),
+            provenance: InformationProvenance::Observed,
+            uncertainty_note: None,
+        };
+
         Self {
             context_id: ctx_id,
             context_name: ctx_name.clone(),
@@ -575,6 +605,7 @@ impl ContextMemory {
             memory_updated_at: timestamp.to_string(),
             activity_state: ContextMemoryActivityState::InsufficientEvidence,
             memory_statement: format!("No recent activity recorded in {}.", ctx_name),
+            explanation: default_explanation,
 
             context,
             current_task: InferredTaskState::unknown(),
@@ -622,6 +653,29 @@ impl ContextMemory {
             self.recent_tasks = vec![mem_task];
             self.activity_state = ContextMemoryActivityState::Active;
             self.memory_statement = format!("You are working on {}.", task.title);
+
+            let mut why_reasons = Vec::new();
+            if !task.evidence.is_empty() {
+                why_reasons.extend(task.evidence.clone());
+            } else {
+                why_reasons.push("consistent candidate detected across recent activity".to_string());
+            }
+            why_reasons.push(format!("same {} context", self.context_name));
+
+            self.explanation = MemoryExplanation {
+                summary: format!("Reconstructed from recent activity and contextual signals in {}.", self.context_name),
+                why_reasons,
+                supporting_evidence: task.evidence.clone(),
+                confidence_band: task.confidence_band.clone(),
+                provenance: InformationProvenance::Inferred,
+                uncertainty_note: if task.confidence_band == "Medium" {
+                    Some("Inferred from recent patterns; may evolve with further activity.".to_string())
+                } else if task.confidence_band == "Low" {
+                    Some("Preliminary signal with limited corroborating evidence.".to_string())
+                } else {
+                    None
+                },
+            };
         } else {
             self.current_task_title = None;
             self.current_task_confidence = None;
@@ -1333,6 +1387,74 @@ impl ContextMemoryBuilder {
 
         let ctx_ref = ContextReference::workspace(&self.workspace_id, &ws_name);
 
+        // 9. Synthesize Explainable Memory (Why?)
+        let mut why_reasons = Vec::new();
+        let mut supporting_evidence = Vec::new();
+
+        if !recent_items.is_empty() {
+            let count = recent_items.len();
+            why_reasons.push(format!("{} related recent item{}", count, if count == 1 { "" } else { "s" }));
+            for item in recent_items.iter().take(4) {
+                if let Some(ref t) = item.title {
+                    supporting_evidence.push(format!("Captured item: '{}'", t));
+                }
+            }
+        }
+
+        if let Some(ref task) = current_task_title {
+            if current_task_provenance == InformationProvenance::Confirmed {
+                why_reasons.push(format!("confirmed task in {}", ws_name));
+            } else {
+                if recent_items.len() >= 2 {
+                    why_reasons.push("semantic similarity between recent items".to_string());
+                }
+                if self.task_candidates.iter().any(|c| c.title.eq_ignore_ascii_case(task)) {
+                    why_reasons.push("task candidate remained active across sessions".to_string());
+                }
+            }
+        }
+
+        why_reasons.push(format!("same {} context", ws_name));
+
+        if let Some(ref trans) = recent_context_transition {
+            if trans.transition_type == "context_return" || trans.transition_type == "return" {
+                why_reasons.push(format!("returned to {} context", ws_name));
+            }
+        }
+
+        let explanation_conf_band = if current_task_title.is_some() {
+            current_task_state.confidence_band.clone()
+        } else {
+            confidence_band.to_string()
+        };
+
+        let uncertainty_note = if current_task_title.is_some() {
+            if explanation_conf_band == "Medium" {
+                Some("Inferred from recent patterns; may evolve with further activity.".to_string())
+            } else if explanation_conf_band == "Low" || explanation_conf_band == "Insufficient" {
+                Some("Preliminary signal with limited corroborating evidence.".to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let explanation_summary = if let Some(ref _task) = current_task_title {
+            format!("Reconstructed from recent activity and contextual signals in {}.", ws_name)
+        } else {
+            format!("Reconstructed from recent activity signals in {}.", ws_name)
+        };
+
+        let explanation = MemoryExplanation {
+            summary: explanation_summary,
+            why_reasons,
+            supporting_evidence,
+            confidence_band: explanation_conf_band,
+            provenance: current_task_provenance,
+            uncertainty_note,
+        };
+
         Ok(ContextMemory {
             context_id: self.workspace_id.clone(),
             context_name: ws_name,
@@ -1353,6 +1475,7 @@ impl ContextMemoryBuilder {
             memory_updated_at: now_iso,
             activity_state,
             memory_statement,
+            explanation,
 
             current_task: current_task_state,
             context: Some(ctx_ref),
