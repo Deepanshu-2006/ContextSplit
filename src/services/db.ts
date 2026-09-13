@@ -1224,7 +1224,16 @@ export const db = {
     invoke<import("./contextMemory").HistoricalContextMemoryResponse[]>("get_recent_historical_memories", {
       limitDays: limitDays ?? null,
     }),
+
+  submitMemoryFeedback: (contextId: string, taskTitle?: string | null, taskId?: string | null, isPositive: boolean = true) =>
+    invoke<boolean>("submit_memory_feedback", {
+      contextId,
+      taskTitle: taskTitle || null,
+      taskId: taskId || null,
+      isPositive,
+    }),
 };
 
 export * from "./contextMemory";
+
 

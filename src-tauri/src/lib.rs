@@ -1057,6 +1057,24 @@ fn get_recent_historical_memories(
     query_service.get_recent_historical_memories(&conn, limit_days)
 }
 
+#[tauri::command]
+fn submit_memory_feedback(
+    context_id: String,
+    task_title: Option<String>,
+    task_id: Option<String>,
+    is_positive: bool,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::memory::record_memory_feedback(
+        &conn,
+        &context_id,
+        task_title.as_deref(),
+        task_id.as_deref(),
+        is_positive,
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1279,7 +1297,8 @@ pub fn run() {
             get_today_memory,
             get_yesterday_memory,
             get_historical_memory_for_date,
-            get_recent_historical_memories
+            get_recent_historical_memories,
+            submit_memory_feedback
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

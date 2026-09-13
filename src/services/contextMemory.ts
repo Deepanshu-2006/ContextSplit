@@ -298,6 +298,29 @@ export const contextMemoryService = {
       return [];
     }
   },
+
+  /**
+   * Submits explicit user feedback on contextual memory reconstruction.
+   * Positive = "Correct" (confirms candidate), Negative = "Not quite" (dismisses candidate).
+   */
+  async submitMemoryFeedback(
+    contextId: string,
+    taskTitle?: string | null,
+    taskId?: string | null,
+    isPositive: boolean = true
+  ): Promise<boolean> {
+    try {
+      return await invoke<boolean>("submit_memory_feedback", {
+        contextId,
+        taskTitle: taskTitle || null,
+        taskId: taskId || null,
+        isPositive,
+      });
+    } catch (err) {
+      console.error("Failed to submit memory feedback:", err);
+      return false;
+    }
+  },
 };
 
 // Standalone function exports matching the required method names
@@ -311,3 +334,5 @@ export const getTodayMemory = contextMemoryService.getTodayMemory;
 export const getYesterdayMemory = contextMemoryService.getYesterdayMemory;
 export const getHistoricalMemoryForDate = contextMemoryService.getHistoricalMemoryForDate;
 export const getRecentHistoricalMemories = contextMemoryService.getRecentHistoricalMemories;
+export const submitMemoryFeedback = contextMemoryService.submitMemoryFeedback;
+

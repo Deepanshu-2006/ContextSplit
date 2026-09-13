@@ -25,6 +25,7 @@ import {
   HelpCircle,
   Sparkles,
   Info,
+  Check,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
@@ -224,6 +225,11 @@ export function ContextOverviewPanel() {
                     openTimeline(overview.workspace_id);
                   }
                 }}
+                onMemoryFeedbackRecorded={() => {
+                  if (overviewWorkspaceId) {
+                    loadOverviewAndMemory(overviewWorkspaceId);
+                  }
+                }}
               />
             ) : (
               <TimelineTabContent
@@ -285,6 +291,7 @@ interface ResumeMemoryOverviewContentProps {
   onToggleArchive: () => void;
   isUpdatingLifecycle: boolean;
   onViewFullTimeline: () => void;
+  onMemoryFeedbackRecorded?: () => void;
 }
 
 function ResumeMemoryOverviewContent({
@@ -294,10 +301,13 @@ function ResumeMemoryOverviewContent({
   onToggleArchive,
   isUpdatingLifecycle,
   onViewFullTimeline,
+  onMemoryFeedbackRecorded,
 }: ResumeMemoryOverviewContentProps) {
   const [showRecentWork, setShowRecentWork] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
+  const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'submitting' | 'submitted'>('idle');
 
+  const contextId = overview?.workspace_id || memory?.context_id;
   const contextName = overview?.name || memory?.context || targetWorkspaceName || 'Workspace';
 
   // Determine if we have a confident task
@@ -317,6 +327,26 @@ function ResumeMemoryOverviewContent({
   // Last active timestamp
   const lastActiveTimestamp = memory?.last_active_at || overview?.recent_activity;
   const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Recently active';
+
+  const handleFeedback = async (isPositive: boolean) => {
+    if (!contextId || feedbackStatus !== 'idle') return;
+    setFeedbackStatus('submitting');
+    try {
+      await db.submitMemoryFeedback(
+        contextId,
+        rawTask,
+        memory?.recent_task?.id,
+        isPositive
+      );
+      setFeedbackStatus('submitted');
+      if (onMemoryFeedbackRecorded) {
+        onMemoryFeedbackRecorded();
+      }
+    } catch (err) {
+      console.error('Failed to submit memory feedback:', err);
+      setFeedbackStatus('idle');
+    }
+  };
 
   // 3-5 Recent items
   const recentItems: TimelineItemSummary[] = useMemo(() => {
@@ -437,10 +467,41 @@ function ResumeMemoryOverviewContent({
             </button>
           </div>
 
-          <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
-            <span className="font-medium text-gray-700">{contextName}</span>
-            <span>•</span>
-            <span>{formattedLastActive}</span>
+          <div className="text-xs text-gray-500 flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-medium text-gray-700">{contextName}</span>
+              <span>•</span>
+              <span>{formattedLastActive}</span>
+            </div>
+
+            {/* Subtle Memory Feedback Action */}
+            {isTaskAvailable && (
+              feedbackStatus === 'idle' ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => handleFeedback(true)}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 px-2 py-0.5 rounded border border-gray-200/80 hover:border-emerald-300 transition-colors cursor-pointer"
+                    title="Confirm this was what you were working on"
+                  >
+                    <Check size={11} className="text-emerald-600" />
+                    <span>Correct</span>
+                  </button>
+                  <button
+                    onClick={() => handleFeedback(false)}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded border border-gray-200/80 hover:border-red-300 transition-colors cursor-pointer"
+                    title="Not what I was doing"
+                  >
+                    <X size={11} className="text-gray-400 hover:text-red-500" />
+                    <span>Not quite</span>
+                  </button>
+                </div>
+              ) : feedbackStatus === 'submitted' ? (
+                <div className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/80 animate-in fade-in duration-150">
+                  <Check size={11} className="text-emerald-600" />
+                  <span>Got it</span>
+                </div>
+              ) : null
+            )}
           </div>
 
           {!isTaskAvailable && (
