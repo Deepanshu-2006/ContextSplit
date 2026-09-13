@@ -44,6 +44,7 @@ export interface ContextMemoryResponse {
   recent_items: MemoryItemReference[];
   recent_task?: MemoryTaskReference | null;
   provenance: InformationProvenance;
+  is_context_return?: boolean;
   evidence: string[];
   memory_statement: string;
 }

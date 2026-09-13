@@ -37,6 +37,8 @@ pub struct ContextMemoryResponse {
     pub recent_task: Option<MemoryTaskReference>,
     /// Epistemic classification: whether the active information is observed, inferred, or confirmed
     pub provenance: InformationProvenance,
+    /// Indicates if the most recent context activity was a context return
+    pub is_context_return: bool,
     /// Curated, user-friendly evidence summaries backing this memory snapshot
     pub evidence: Vec<String>,
     /// Reconstructed working memory statement answering "What was the user working on?"
@@ -57,6 +59,10 @@ impl ContextMemoryResponse {
         } else {
             None
         };
+
+        let is_context_return = memory.recent_context_transition.as_ref().map_or(false, |t| {
+            t.transition_type == "context_return" || t.transition_type == "return"
+        });
 
         // Curate user-friendly evidence lines
         let mut evidence = Vec::new();
@@ -92,10 +98,8 @@ impl ContextMemoryResponse {
                 ));
             }
         }
-        if let Some(trans) = &memory.recent_context_transition {
-            if trans.transition_type == "context_return" || trans.transition_type == "return" {
-                evidence.push(format!("Returned to {}", memory.context_name));
-            }
+        if is_context_return {
+            evidence.push(format!("Returned to {}", memory.context_name));
         }
 
         let provenance = memory
@@ -119,6 +123,7 @@ impl ContextMemoryResponse {
             recent_items: memory.recent_items.clone(),
             recent_task,
             provenance,
+            is_context_return,
             evidence,
             memory_statement: memory.memory_statement.clone(),
         }

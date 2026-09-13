@@ -21,6 +21,7 @@ import {
   Folder,
   ChevronDown,
   ChevronUp,
+  RotateCcw,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
@@ -141,7 +142,7 @@ export function ContextOverviewPanel() {
               <p className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
                 <span>Working Context Overview</span>
                 <span>•</span>
-                <span>Local-first</span>
+                <span>Resume & Memory</span>
               </p>
             </div>
           </div>
@@ -176,7 +177,7 @@ export function ContextOverviewPanel() {
             }`}
           >
             <Activity size={13} />
-            <span>Overview</span>
+            <span>Resume & Overview</span>
           </button>
           <button
             onClick={() => setActiveTab('timeline')}
@@ -196,7 +197,7 @@ export function ContextOverviewPanel() {
           {isLoading && !overview && !memory ? (
             <div className="h-64 flex flex-col items-center justify-center text-gray-400 gap-2">
               <RefreshCw size={20} className="animate-spin text-gray-500" />
-              <p className="text-xs">Loading context memory...</p>
+              <p className="text-xs">Reconstructing working memory...</p>
             </div>
           ) : error ? (
             <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200 text-sm flex items-start gap-3">
@@ -208,7 +209,7 @@ export function ContextOverviewPanel() {
             </div>
           ) : (
             activeTab === 'overview' ? (
-              <WorkingMemoryOverviewContent
+              <ResumeMemoryOverviewContent
                 overview={overview}
                 memory={memory}
                 targetWorkspaceName={targetWorkspace?.name}
@@ -274,7 +275,7 @@ function LifecycleBadge({ state }: { state: 'active' | 'dormant' | 'archived' })
   );
 }
 
-interface WorkingMemoryOverviewContentProps {
+interface ResumeMemoryOverviewContentProps {
   overview: ContextOverview | null;
   memory: ContextMemoryResponse | null;
   targetWorkspaceName?: string;
@@ -283,14 +284,15 @@ interface WorkingMemoryOverviewContentProps {
   onViewFullTimeline: () => void;
 }
 
-function WorkingMemoryOverviewContent({
+function ResumeMemoryOverviewContent({
   overview,
   memory,
   targetWorkspaceName,
   onToggleArchive,
   isUpdatingLifecycle,
   onViewFullTimeline,
-}: WorkingMemoryOverviewContentProps) {
+}: ResumeMemoryOverviewContentProps) {
+  const [showRecentWork, setShowRecentWork] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
 
   const contextName = overview?.name || memory?.context || targetWorkspaceName || 'Workspace';
@@ -302,6 +304,12 @@ function WorkingMemoryOverviewContent({
 
   // Task provenance
   const taskProvenance = memory?.recent_task?.provenance === 'confirmed' ? 'Confirmed' : 'Inferred';
+
+  // Context Return indicator
+  const isContextReturn = Boolean(
+    memory?.is_context_return ||
+    memory?.evidence?.some((e) => e.toLowerCase().includes('returned to'))
+  );
 
   // Last active timestamp
   const lastActiveTimestamp = memory?.last_active_at || overview?.recent_activity;
@@ -365,174 +373,195 @@ function WorkingMemoryOverviewContent({
     return [];
   }, [overview, memory]);
 
+  const recentItemsCount = recentItems.length;
+
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
       {/* =================================================================== */}
-      {/* 1. PRIMARY WORKING MEMORY SECTION                                  */}
+      {/* 1. RESUME WHERE I LEFT OFF CARD                                    */}
       {/* =================================================================== */}
       <div className="p-5 rounded-xl bg-white border border-gray-200/90 shadow-2xs space-y-4">
-        {/* Context Identity Header */}
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-wrap min-w-0">
-            <h3 className="text-base font-semibold text-gray-900 tracking-tight truncate">
-              {contextName}
+        {/* Muted header */}
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            You were working on
+          </span>
+          {isContextReturn && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200/70">
+              <RotateCcw size={10} />
+              Returned to context
+            </span>
+          )}
+        </div>
+
+        {/* Focus & Subtitle */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
+              {taskTitle}
             </h3>
-            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-100 text-gray-600 border border-gray-200/80">
-              Confirmed
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 border border-gray-200/60">
+              {isTaskAvailable ? taskProvenance : 'Confirmed'}
             </span>
           </div>
 
-          {overview?.lifecycle_state && (
-            <LifecycleBadge state={overview.lifecycle_state} />
-          )}
-        </div>
-
-        <div className="h-px bg-gray-100" />
-
-        {/* Working Focus */}
-        <div className="space-y-2">
-          <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-            You were working on
+          <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-gray-700">{contextName}</span>
+            <span>•</span>
+            <span>{formattedLastActive}</span>
           </div>
 
-          {isTaskAvailable ? (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-lg font-semibold text-gray-900 leading-snug">
-                  {taskTitle}
-                </span>
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 border border-gray-200/60">
-                  {taskProvenance}
-                </span>
-              </div>
-
-              <div className="text-xs text-gray-500">
-                {formattedLastActive}
-              </div>
-
-              {/* Recent activity bullet points */}
-              {recentActivityBullets.length > 0 && (
-                <div className="pt-2 space-y-1.5">
-                  <div className="text-xs font-medium text-gray-700">
-                    Recent activity:
-                  </div>
-                  <ul className="space-y-1 text-xs text-gray-600 pl-1">
-                    {recentActivityBullets.map((bullet, idx) => (
-                      <li key={idx} className="flex items-start gap-2">
-                        <span className="text-gray-400 font-bold">•</span>
-                        <span className="truncate">{bullet}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-lg font-semibold text-gray-900 leading-snug">
-                {contextName}
-              </div>
-              <div className="text-xs text-gray-500">
-                {formattedLastActive}
-              </div>
-              <p className="text-xs text-gray-600 pt-1">
-                Recent activity suggests you were active here.
-              </p>
-            </div>
+          {!isTaskAvailable && (
+            <p className="text-xs text-gray-600 pt-1">
+              Recent activity suggests you were active here.
+            </p>
           )}
         </div>
 
-        {/* Subtle "Why?" Progressive Disclosure */}
+        {/* Item count line */}
+        <div className="text-xs text-gray-500 font-medium flex items-center gap-1.5">
+          <FileText size={13} className="text-gray-400" />
+          <span>
+            {recentItemsCount > 0
+              ? `${recentItemsCount} recent item${recentItemsCount === 1 ? '' : 's'}`
+              : 'No recent items'}
+          </span>
+        </div>
+
+        {/* Action Button: View recent work */}
         <div className="pt-1">
           <button
-            onClick={() => setShowWhy(!showWhy)}
-            className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors cursor-pointer py-1"
+            onClick={() => setShowRecentWork(!showRecentWork)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-medium transition-colors cursor-pointer"
           >
-            <span>Why?</span>
-            {showWhy ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            <span>{showRecentWork ? 'Hide recent work' : 'View recent work'}</span>
+            {showRecentWork ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
           </button>
+        </div>
 
-          {showWhy && (
-            <div className="mt-2 p-3 bg-gray-50/80 rounded-lg border border-gray-150 text-xs text-gray-600 space-y-2.5 animate-in fade-in duration-100">
-              <p className="leading-relaxed text-gray-700">
-                {explanationText}
-              </p>
-
-              {evidenceList.length > 0 && (
-                <div className="space-y-1 pt-1">
-                  <div className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
-                    Grounding evidence
-                  </div>
-                  <ul className="space-y-1 text-gray-600">
-                    {evidenceList.map((ev, i) => (
-                      <li key={i} className="flex items-start gap-1.5">
-                        <span className="text-gray-400">•</span>
-                        <span>{ev}</span>
-                      </li>
-                    ))}
-                  </ul>
+        {/* Revealed Recent Work Details */}
+        {showRecentWork && (
+          <div className="pt-4 border-t border-gray-100 space-y-4 animate-in fade-in duration-150">
+            {/* Recent activity bullet points */}
+            {recentActivityBullets.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-gray-700">
+                  Recent activity:
                 </div>
-              )}
+                <ul className="space-y-1 text-xs text-gray-600 pl-1">
+                  {recentActivityBullets.map((bullet, idx) => (
+                    <li key={idx} className="flex items-start gap-2">
+                      <span className="text-gray-400 font-bold">•</span>
+                      <span className="truncate">{bullet}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-              {/* Related applications & domains in quiet tags */}
-              {((overview?.related_applications && overview.related_applications.length > 0) ||
-                (overview?.important_domains && overview.important_domains.length > 0)) && (
-                <div className="pt-1 flex flex-wrap gap-1.5">
-                  {overview?.related_applications?.map((app) => (
-                    <span
-                      key={app.name}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
-                    >
-                      <Laptop size={10} className="text-gray-400" />
-                      <span>{app.name}</span>
-                      <span className="text-gray-400">({app.item_count})</span>
-                    </span>
+            {/* Recent items preview (3-5 items) */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
+                <span>Recent items ({recentItemsCount})</span>
+              </div>
+              {recentItemsCount > 0 ? (
+                <div className="space-y-1.5">
+                  {recentItems.map((item) => (
+                    <RecentItemRow key={item.id} item={item} />
                   ))}
-                  {overview?.important_domains?.map((dom) => (
-                    <span
-                      key={dom.domain}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
-                    >
-                      <Globe size={10} className="text-gray-400" />
-                      <span>{dom.domain}</span>
-                      <span className="text-gray-400">({dom.item_count})</span>
-                    </span>
-                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400 italic">No recent items captured.</p>
+              )}
+            </div>
+
+            {/* Progressive "Why?" Disclosure */}
+            <div className="pt-2 border-t border-gray-100">
+              <button
+                onClick={() => setShowWhy(!showWhy)}
+                className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors cursor-pointer py-0.5"
+              >
+                <span>Why?</span>
+                {showWhy ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+
+              {showWhy && (
+                <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-150 text-xs text-gray-600 space-y-2.5 animate-in fade-in duration-100">
+                  <p className="leading-relaxed text-gray-700">
+                    {explanationText}
+                  </p>
+
+                  {evidenceList.length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <div className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
+                        Grounding evidence
+                      </div>
+                      <ul className="space-y-1 text-gray-600">
+                        {evidenceList.map((ev, i) => (
+                          <li key={i} className="flex items-start gap-1.5">
+                            <span className="text-gray-400">•</span>
+                            <span>{ev}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Related applications & domains in quiet tags */}
+                  {((overview?.related_applications && overview.related_applications.length > 0) ||
+                    (overview?.important_domains && overview.important_domains.length > 0)) && (
+                    <div className="pt-1 flex flex-wrap gap-1.5">
+                      {overview?.related_applications?.map((app) => (
+                        <span
+                          key={app.name}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
+                        >
+                          <Laptop size={10} className="text-gray-400" />
+                          <span>{app.name}</span>
+                          <span className="text-gray-400">({app.item_count})</span>
+                        </span>
+                      ))}
+                      {overview?.important_domains?.map((dom) => (
+                        <span
+                          key={dom.domain}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
+                        >
+                          <Globe size={10} className="text-gray-400" />
+                          <span>{dom.domain}</span>
+                          <span className="text-gray-400">({dom.item_count})</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* =================================================================== */}
-      {/* 2. RECENT ITEMS (3–5 items)                                        */}
+      {/* 2. CONTEXT ITEMS OVERVIEW (When top is collapsed)                  */}
       {/* =================================================================== */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="text-xs font-semibold text-gray-900 flex items-center gap-1.5">
-            <FileText size={14} className="text-gray-600" />
-            <span>Recent items</span>
-          </div>
-          {recentItems.length > 0 && (
+      {!showRecentWork && recentItemsCount > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-semibold text-gray-900 flex items-center gap-1.5">
+              <FileText size={14} className="text-gray-600" />
+              <span>Recent items</span>
+            </div>
             <span className="text-[11px] text-gray-400">
-              {recentItems.length} item{recentItems.length === 1 ? '' : 's'}
+              {recentItemsCount} item{recentItemsCount === 1 ? '' : 's'}
             </span>
-          )}
-        </div>
+          </div>
 
-        {recentItems.length > 0 ? (
           <div className="space-y-2">
             {recentItems.map((item) => (
               <RecentItemRow key={item.id} item={item} />
             ))}
           </div>
-        ) : (
-          <div className="p-5 text-center border border-dashed border-gray-200 rounded-xl text-xs text-gray-400">
-            No recent items in this context yet.
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* =================================================================== */}
       {/* 3. CONTEXT ACTIONS & TIMELINE LINK                                 */}
@@ -679,11 +708,11 @@ function formatLastActive(dateStr: string): string {
 
     if (diffSec < 60) return 'Active just now';
     if (diffMin === 1) return 'Last active 1 minute ago';
-    if (diffMin < 60) return `Last active ${diffMin} minutes ago`;
-    if (diffHours === 1) return 'Last active 1 hour ago';
-    if (diffHours < 24) return `Last active ${diffHours} hours ago`;
+    if (diffMin < 60) return `Last active ${diffMin}m ago`;
+    if (diffHours === 1) return 'Last active 1h ago';
+    if (diffHours < 24) return `Last active ${diffHours}h ago`;
     if (diffDays === 1) return 'Last active yesterday';
-    if (diffDays < 7) return `Last active ${diffDays} days ago`;
+    if (diffDays < 7) return `Last active ${diffDays}d ago`;
     return `Last active on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
   } catch {
     return `Last active ${dateStr}`;
