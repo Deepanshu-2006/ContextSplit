@@ -2,6 +2,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::context_engine::memory::{
     ContextMemory, ContextMemoryBuilder, InformationProvenance, MemoryExplanation,
@@ -254,6 +256,83 @@ pub fn parse_date_query(query: &str, reference_now: DateTime<Utc>) -> Result<Nai
 }
 
 // =========================================================================
+// In-Memory Caching for Historical Context Memory
+// =========================================================================
+
+struct CachedHistoricalMemoryEntry {
+    response: HistoricalContextMemoryResponse,
+    cached_at: Instant,
+}
+
+/// Thread-safe in-memory cache for historical memory reconstruction.
+/// Eliminates repeated segment derivation and timeline scanning during UI renders.
+pub struct HistoricalMemoryCache {
+    entries: RwLock<HashMap<String, CachedHistoricalMemoryEntry>>,
+    ttl: Duration,
+}
+
+impl Default for HistoricalMemoryCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HistoricalMemoryCache {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(300), // 5 minute TTL for historical daily memory
+        }
+    }
+
+    pub fn get(&self, date_key: &str) -> Option<HistoricalContextMemoryResponse> {
+        if let Ok(guard) = self.entries.read() {
+            if let Some(entry) = guard.get(date_key) {
+                if entry.cached_at.elapsed() < self.ttl {
+                    return Some(entry.response.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn insert(&self, date_key: &str, response: HistoricalContextMemoryResponse) {
+        if let Ok(mut guard) = self.entries.write() {
+            if guard.len() >= 100 {
+                guard.clear();
+            }
+            guard.insert(
+                date_key.to_string(),
+                CachedHistoricalMemoryEntry {
+                    response,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    pub fn invalidate(&self, date_key: Option<&str>) {
+        if let Ok(mut guard) = self.entries.write() {
+            if let Some(key) = date_key {
+                guard.remove(key);
+            } else {
+                guard.clear();
+            }
+        }
+    }
+}
+
+static GLOBAL_HISTORICAL_CACHE: OnceLock<HistoricalMemoryCache> = OnceLock::new();
+
+pub fn get_global_historical_cache() -> &'static HistoricalMemoryCache {
+    GLOBAL_HISTORICAL_CACHE.get_or_init(HistoricalMemoryCache::new)
+}
+
+pub fn invalidate_historical_memory_cache() {
+    get_global_historical_cache().invalidate(None);
+}
+
+// =========================================================================
 // ContextMemoryQueryService
 // =========================================================================
 
@@ -307,12 +386,22 @@ impl ContextMemoryQueryService {
             return Ok(None);
         }
 
+        let is_live = self.frozen_now.is_none();
+        if is_live {
+            if let Some(cached) = crate::context_engine::memory::get_global_memory_cache().get(context_id) {
+                return Ok(Some(ContextMemoryResponse::from_memory(&cached)));
+            }
+        }
+
         let mut builder = ContextMemoryBuilder::from_db(conn, context_id)?;
         if let Some(now) = self.frozen_now {
             builder = builder.with_now(now);
         }
 
         let memory = builder.build()?;
+        if is_live {
+            crate::context_engine::memory::get_global_memory_cache().insert(context_id, memory.clone());
+        }
         Ok(Some(ContextMemoryResponse::from_memory(&memory)))
     }
 
@@ -397,13 +486,23 @@ impl ContextMemoryQueryService {
         target_date: NaiveDate,
     ) -> Result<HistoricalContextMemoryResponse, String> {
         let date_key = target_date.format("%Y-%m-%d").to_string();
+        let is_live = self.frozen_now.is_none();
+
+        if is_live {
+            if let Some(cached) = get_global_historical_cache().get(&date_key) {
+                return Ok(cached);
+            }
+        }
+
         let reference_now = self.frozen_now.unwrap_or_else(Utc::now);
         let sample_iso = format!("{}T12:00:00Z", date_key);
         let (date_label, _) = format_date_label(&sample_iso, Some(reference_now));
 
-        // 1. Reconstruct activity segments via RecentWorkSequenceService
+        // 1. Reconstruct activity segments via RecentWorkSequenceService using bounded date range
+        let start_iso = format!("{} 00:00:00", date_key);
+        let end_iso = format!("{} 23:59:59", date_key);
         let mut segmenter = ContextActivitySegmenter::new();
-        let segments = segmenter.build_all_segments(conn)?;
+        let segments = segmenter.build_segments_for_date_range(conn, &start_iso, &end_iso, Some(100))?;
         let work_seq_service = RecentWorkSequenceService::new();
         let work_seq = work_seq_service.reconstruct_from_segments(conn, &segments, Some(60), Some(reference_now));
 
@@ -415,9 +514,7 @@ impl ContextMemoryQueryService {
             .map(|d| d.entries.clone())
             .unwrap_or_default();
 
-        // 3. Query items captured on this day
-        let start_iso = format!("{} 00:00:00", date_key);
-        let end_iso = format!("{} 23:59:59", date_key);
+        // 3. Query items captured on this day (bounded)
         let start_iso_t = format!("{}T00:00:00Z", date_key);
         let end_iso_t = format!("{}T23:59:59Z", date_key);
 
@@ -427,7 +524,7 @@ impl ContextMemoryQueryService {
                  FROM items 
                  WHERE (created_at >= ?1 AND created_at <= ?2) 
                     OR (created_at >= ?3 AND created_at <= ?4)
-                 ORDER BY created_at DESC LIMIT 30",
+                 ORDER BY created_at DESC LIMIT 50",
             )
             .map_err(|e| e.to_string())?;
 
@@ -613,8 +710,8 @@ impl ContextMemoryQueryService {
             },
         };
 
-        Ok(HistoricalContextMemoryResponse {
-            date: date_key,
+        let response = HistoricalContextMemoryResponse {
+            date: date_key.clone(),
             date_label,
             contexts_used,
             primary_tasks,
@@ -627,7 +724,13 @@ impl ContextMemoryQueryService {
             has_sufficient_evidence,
             summary_statement,
             explanation,
-        })
+        };
+
+        if is_live {
+            get_global_historical_cache().insert(&date_key, response.clone());
+        }
+
+        Ok(response)
     }
 
     /// Queries historical working memory for "Today".
@@ -1121,5 +1224,99 @@ mod tests {
 
         // Verify supporting evidence references are clean (no raw floats or SQL dumps)
         assert!(!resp.explanation.supporting_evidence.is_empty());
+    }
+
+    #[test]
+    fn test_context_memory_cache_hit_and_invalidation() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "TripWise").unwrap();
+
+        let _item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://tripadvisor.com/tokyo-hotels",
+            Some("Tokyo Hotels"),
+            r#"{"app_name":"Safari"}"#,
+        )
+        .unwrap();
+
+        // Invalidate cache first to ensure cold state
+        crate::context_engine::memory::invalidate_memory_cache(Some(&ws.id));
+
+        let service = ContextMemoryQueryService::new();
+
+        // Cold query: populates cache
+        let start_cold = std::time::Instant::now();
+        let resp1 = service.get_context_memory(&conn, &ws.id).unwrap().unwrap();
+        let cold_duration = start_cold.elapsed();
+
+        // Warm query: should hit cache immediately (< 1ms)
+        let start_warm = std::time::Instant::now();
+        let resp2 = service.get_context_memory(&conn, &ws.id).unwrap().unwrap();
+        let warm_duration = start_warm.elapsed();
+
+        assert_eq!(resp1.context, resp2.context);
+        assert_eq!(resp1.state, resp2.state);
+        assert_eq!(resp1.recent_items.len(), resp2.recent_items.len());
+        assert!(warm_duration <= cold_duration || warm_duration.as_millis() < 5);
+
+        // Verify cache invalidation when feedback or workspace mutation happens
+        crate::context_engine::memory::invalidate_memory_cache(Some(&ws.id));
+        assert!(crate::context_engine::memory::get_global_memory_cache().get(&ws.id).is_none());
+    }
+
+    #[test]
+    fn test_historical_memory_cache_and_bounded_queries() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Performance Project").unwrap();
+
+        // Seed 100 items spanning different days to test bounded windowing
+        for i in 0..100 {
+            let day_offset = i % 10;
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "text",
+                &format!("High scale task processing item number {}", i),
+                Some(&format!("Task item {}", i)),
+                r#"{"app_name":"Rust Rover"}"#,
+            )
+            .unwrap();
+            let date_str = format!("2026-09-{:02} 10:00:00", 10 + day_offset);
+            conn.execute(
+                "UPDATE items SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![date_str, item.id],
+            )
+            .unwrap();
+        }
+
+        // Invalidate historical cache
+        invalidate_historical_memory_cache();
+
+        let service = ContextMemoryQueryService::new();
+        let target_date = chrono::NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+
+        // 1. First retrieval computes using bounded date range (start_iso to end_iso)
+        let t0 = std::time::Instant::now();
+        let resp1 = service.get_memory_for_day(&conn, target_date).unwrap();
+        let query_time = t0.elapsed();
+
+        assert_eq!(resp1.date, "2026-09-14");
+        assert!(resp1.has_sufficient_evidence);
+
+        // 2. Second retrieval hits thread-safe in-memory cache
+        let t1 = std::time::Instant::now();
+        let resp2 = service.get_memory_for_day(&conn, target_date).unwrap();
+        let cache_time = t1.elapsed();
+
+        assert_eq!(resp1.summary_statement, resp2.summary_statement);
+        assert!(cache_time.as_micros() < 500); // Sub-millisecond cache hit
+
+        // 3. Invalidate historical cache
+        invalidate_historical_memory_cache();
+        assert!(get_global_historical_cache().get("2026-09-14").is_none());
     }
 }
