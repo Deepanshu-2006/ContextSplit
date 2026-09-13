@@ -5,63 +5,51 @@ import {
   Image as ImageIcon,
   Link2,
   FileCode,
-  Sparkles,
-  Plus,
-  X,
-  Search,
   MoreVertical,
   Check,
-  BoxSelect,
-  CheckCircle2,
   ExternalLink,
+  Copy,
+  Trash2,
   FolderPlus,
+  BoxSelect,
 } from 'lucide-react';
 import { db, Workspace } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
-import { useDiscoveryStore } from '../../store/discoveryStore';
-import { ContextInspector } from '../workspace/ContextInspector';
-import { ContextBadge } from '../workspace/ContextBadge';
-import { QuickContextAssignmentMenu } from './QuickContextAssignmentMenu';
+import { toast } from 'sonner';
 
 interface InboxItemCardProps {
   derived: DerivedInboxItem;
   workspaces: Workspace[];
+  onSelectItem?: (itemId: string) => void;
   onMoveToWorkspace: (itemId: string, workspaceId: string) => void;
-  showSectionBadge?: boolean;
 }
 
 function InboxItemCardComponent({
   derived,
   workspaces,
+  onSelectItem,
   onMoveToWorkspace,
-  showSectionBadge = false,
 }: InboxItemCardProps) {
-  const { item, section, attention, candidateInfo } = derived;
+  const { item, attention, candidateInfo, inboxState } = derived;
   const {
-    dismissItemSuggestion,
     selectedItemIds,
     toggleSelectItem,
     isMultiSelectActive,
     focusedItemId,
     setFocusedItemId,
   } = useInboxStore();
-  const { reviewCandidate } = useDiscoveryStore();
   const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
 
   const isSelected = selectedItemIds.includes(item.id);
   const isFocused = focusedItemId === item.id;
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const [quickMenuOpen, setQuickMenuOpen] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
-  const [quickMenuPos, setQuickMenuPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [isProcessingAction, setIsProcessingAction] = useState(false);
 
-  // Close options menu on click outside
+  // Close options dropdown on click outside
   useEffect(() => {
     function handleClickOutside(event: globalThis.MouseEvent) {
       if (
@@ -73,40 +61,54 @@ function InboxItemCardComponent({
         setMenuOpen(false);
       }
     }
-    document.addEventListener('mousedown', handleClickOutside);
+    if (menuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [menuOpen]);
 
-  const openMenu = () => {
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (menuBtnRef.current) {
       const rect = menuBtnRef.current.getBoundingClientRect();
-      setMenuPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+      setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
     }
     setMenuOpen((v) => !v);
   };
 
-  const openQuickMenu = (e: React.MouseEvent<HTMLElement>) => {
+  const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    const rect = e.currentTarget.getBoundingClientRect();
-    setQuickMenuPos({ top: rect.bottom + 6, left: rect.left });
-    setQuickMenuOpen(true);
     setMenuOpen(false);
-  };
-
-  const handleDismiss = async (wsId?: string) => {
     try {
-      setIsProcessingAction(true);
-      await dismissItemSuggestion(item.id, wsId);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsProcessingAction(false);
+      await navigator.clipboard.writeText(item.content);
+      toast.success('Copied to clipboard');
+    } catch {
+      toast.error('Could not copy to clipboard');
     }
   };
 
-  const handleReviewCandidate = () => {
-    if (candidateInfo?.candidateId) {
-      reviewCandidate(candidateInfo.candidateId);
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setMenuOpen(false);
+    try {
+      await db.deleteItem(item.id);
+      const currentActive = useWorkspaceStore.getState().activeItems;
+      useWorkspaceStore.setState({
+        activeItems: currentActive.filter((i) => i.id !== item.id),
+        inboxCount: Math.max(0, useWorkspaceStore.getState().inboxCount - 1),
+      });
+      toast.success('Item deleted');
+    } catch {
+      toast.error('Failed to delete item');
+    }
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (item.item_type === 'url') {
+      window.open(item.content, '_blank');
+    } else {
+      onSelectItem?.(item.id);
     }
   };
 
@@ -118,110 +120,114 @@ function InboxItemCardComponent({
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / (1000 * 60));
       const diffHours = Math.floor(diffMins / 60);
-      const diffDays = Math.floor(diffHours / 24);
 
       if (diffMins < 1) return 'Just now';
-      if (diffMins < 60) return `${diffMins}m ago`;
-      if (diffHours < 24) return `${diffHours}h ago`;
-      return `${diffDays}d ago`;
+      if (diffMins < 60) return `${diffMins} min ago`;
+      if (diffHours < 24) return `${diffHours} hr ago`;
+
+      // If older, show time of day if today, otherwise date
+      const isToday = date.toDateString() === now.toDateString();
+      if (isToday) {
+        return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      }
+      return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
     } catch {
       return '';
     }
   };
 
-  // Extract application name from metadata
-  let appName: string | null = null;
-  try {
-    const meta = JSON.parse(item.metadata || '{}');
-    appName = meta.app_name || meta.source_app || null;
-  } catch {}
+  // Generate clean snippet and title
+  let displayTitle = item.title;
+  let snippet = '';
 
-  // Render type-specific content preview
-  const renderContent = () => {
-    switch (item.item_type) {
-      case 'text':
-        return (
-          <p className="text-[13px] text-gray-700 leading-relaxed line-clamp-4 font-mono select-text bg-gray-50/70 p-2.5 rounded-lg border border-black/3">
-            {item.content}
-          </p>
-        );
-      case 'image':
-        return (
-          <div className="rounded-lg overflow-hidden border border-black/5 bg-gray-50 flex items-center justify-center max-h-48">
-            <img
-              src={item.content}
-              alt={item.title || 'Captured image'}
-              className="w-full h-full object-contain max-h-44"
-              loading="lazy"
-            />
-          </div>
-        );
-      case 'url':
-        return (
-          <div className="p-2.5 bg-blue-50/40 rounded-lg border border-blue-100 flex flex-col gap-1">
-            <a
-              href={item.content}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[13px] font-medium text-blue-600 hover:text-blue-800 flex items-center gap-1.5 truncate"
-            >
-              <span className="truncate">{item.title || item.content}</span>
-              <ExternalLink size={12} className="shrink-0 opacity-70" />
-            </a>
-            <span className="text-[11px] text-gray-400 font-mono truncate">{item.content}</span>
-          </div>
-        );
-      case 'file':
-      default:
-        return (
-          <div className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg border border-black/4">
-            <FileCode size={18} className="text-gray-500 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <p className="text-[12px] font-medium text-gray-800 truncate">{item.title || item.content}</p>
-              <p className="text-[10px] text-gray-400 uppercase tracking-wider">File Resource</p>
-            </div>
-          </div>
-        );
+  if (item.item_type === 'url') {
+    try {
+      const url = new URL(item.content);
+      displayTitle = item.title || `Link from ${url.hostname.replace(/^www\./, '')}`;
+      snippet = url.hostname + url.pathname;
+    } catch {
+      displayTitle = item.title || 'Link';
+      snippet = item.content;
     }
+  } else if (item.item_type === 'image') {
+    displayTitle = item.title || 'Image capture';
+    try {
+      const meta = JSON.parse(item.metadata || '{}');
+      snippet = meta.file_size ? `Image · ${meta.file_size}` : 'Image';
+    } catch {
+      snippet = 'Image';
+    }
+  } else {
+    // Text / Note
+    const lines = item.content.trim().split('\n');
+    if (!displayTitle) {
+      displayTitle = lines[0] || 'Note';
+      snippet = lines.slice(1).join(' ').trim() || lines[0];
+    } else {
+      snippet = lines.join(' ').trim();
+    }
+  }
+
+  // Determine ONE subtle context pill
+  const suggestedWsId = attention?.factors?.suggested_workspace_id;
+  const suggestedWs = workspaces.find((w) => w.id === suggestedWsId);
+  const currentWs = workspaces.find((w) => w.id === item.workspace_id);
+
+  const isNeedsReview = Boolean(
+    attention?.factors?.is_ambiguous || derived.section === 'needs_attention' || inboxState?.state === 'needs_review'
+  );
+
+  const renderContextPill = () => {
+    if (currentWs) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-700 bg-gray-100/90 px-2 py-0.5 rounded-md shrink-0 border border-black/5">
+          {currentWs.name}
+        </span>
+      );
+    }
+    if (isNeedsReview) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md shrink-0 border border-amber-200/80">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+          <span>Needs review</span>
+        </span>
+      );
+    }
+    if (suggestedWs) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-700 bg-gray-100/90 px-2 py-0.5 rounded-md shrink-0 border border-black/5">
+          <span className="text-gray-400">Suggested:</span>
+          <span className="font-semibold text-gray-800">{suggestedWs.name}</span>
+        </span>
+      );
+    }
+    if (candidateInfo) {
+      return (
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-800 bg-cyan-50 px-2 py-0.5 rounded-md shrink-0 border border-cyan-200/60">
+          <span className="text-cyan-600 font-normal">Candidate:</span>
+          <span className="font-semibold">{candidateInfo.candidateName}</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center text-[11px] font-normal text-gray-400 bg-gray-50 px-2 py-0.5 rounded-md shrink-0">
+        No context yet
+      </span>
+    );
   };
 
   const getItemIcon = () => {
     switch (item.item_type) {
-      case 'text':
-        return <FileText size={14} className="text-gray-500" />;
       case 'image':
-        return <ImageIcon size={14} className="text-purple-500" />;
+        return <ImageIcon size={14} className="text-purple-500 shrink-0" />;
       case 'url':
-        return <Link2 size={14} className="text-blue-500" />;
+        return <Link2 size={14} className="text-blue-500 shrink-0" />;
+      case 'file':
+        return <FileCode size={14} className="text-gray-500 shrink-0" />;
       default:
-        return <FileCode size={14} className="text-gray-500" />;
+        return <FileText size={14} className="text-gray-500 shrink-0" />;
     }
   };
-
-  const suggestedWsId = attention?.factors?.suggested_workspace_id;
-
-  // Evaluate Contextual Action State
-  const hasHighConfidenceSuggestion =
-    Boolean(
-      (attention?.factors?.has_suggested_membership ||
-        (suggestedWsId != null && (attention?.factors?.contextual_confidence ?? 0) >= 0.70)) &&
-        !attention?.factors?.is_ambiguous
-    );
-
-  const hasCandidate = Boolean(
-    candidateInfo != null || attention?.factors?.has_new_candidate === true
-  );
-
-  const isUncertain = Boolean(
-    attention?.factors?.is_ambiguous === true ||
-      derived.section === 'needs_attention'
-  );
-
-  const isUnderstood = Boolean(
-    derived.section === 'already_understood' ||
-      derived.inboxState?.state === 'understood' ||
-      ((attention?.factors?.contextual_confidence ?? 0) >= 0.70 && !attention?.factors?.is_ambiguous)
-  );
 
   return (
     <div
@@ -236,318 +242,148 @@ function InboxItemCardComponent({
         setIsDraggingCard(false);
         setHoveredWorkspaceId(null);
       }}
-      onClick={(e) => {
+      onClick={() => {
         setFocusedItemId(item.id);
-        if (e.shiftKey || e.metaKey || e.ctrlKey || isMultiSelectActive) {
-          const target = e.target as HTMLElement;
-          if (!target.closest('button') && !target.closest('a') && !target.closest('input')) {
-            toggleSelectItem(item.id);
-          }
-        }
+        onSelectItem?.(item.id);
       }}
-      className={`group bg-white rounded-xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-2xs hover:shadow-md cursor-pointer ${
+      onDoubleClick={handleDoubleClick}
+      onContextMenu={(e) => openMenu(e)}
+      className={`group relative flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50/70 border-b border-black/5 transition-all duration-100 select-none cursor-pointer ${
         isSelected
-          ? 'ring-2 ring-indigo-600 border-indigo-400 bg-indigo-50/15 shadow-sm'
+          ? 'bg-blue-50/30'
           : isFocused
-          ? 'ring-2 ring-indigo-500/80 border-indigo-500 shadow-md ring-offset-1'
-          : section === 'needs_attention'
-          ? 'border-amber-200/90 hover:border-amber-400/80 bg-linear-to-b from-amber-50/20 to-white'
-          : section === 'new_candidates'
-          ? 'border-cyan-200/90 hover:border-cyan-400/80 bg-linear-to-b from-cyan-50/20 to-white'
-          : section === 'context_suggestions'
-          ? 'border-indigo-200/90 hover:border-indigo-400/80 bg-linear-to-b from-indigo-50/15 to-white'
-          : section === 'already_understood'
-          ? 'border-teal-200/90 hover:border-teal-400/80 bg-linear-to-b from-teal-50/15 to-white'
-          : 'border-black/6 hover:border-black/15'
+          ? 'bg-gray-50/80 ring-1 ring-black/10'
+          : ''
       }`}
     >
-      {/* Top Card Header */}
-      <div className="flex items-center justify-between px-3.5 pt-3 pb-2 border-b border-black/3">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleSelectItem(item.id);
-            }}
-            className={`w-4 h-4 rounded border flex items-center justify-center transition-colors cursor-pointer ${
-              isSelected
-                ? 'bg-indigo-600 border-indigo-600 text-white'
-                : 'border-gray-300 hover:border-gray-500 bg-white'
-            }`}
-            title={isSelected ? 'Deselect item' : 'Select item (X)'}
-          >
-            {isSelected && <Check size={11} strokeWidth={3} />}
-          </button>
+      {/* Left Column: Selection Checkbox + Type Icon + Title & Snippet */}
+      <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
+        {/* Selection Checkbox */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleSelectItem(item.id);
+          }}
+          className={`w-4 h-4 rounded border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+            isSelected
+              ? 'bg-gray-900 border-gray-900 text-white'
+              : 'border-gray-300 hover:border-gray-500 bg-white opacity-0 group-hover:opacity-100'
+          } ${isMultiSelectActive ? '!opacity-100' : ''}`}
+          title={isSelected ? 'Deselect' : 'Select (X)'}
+        >
+          {isSelected && <Check size={11} strokeWidth={3} />}
+        </button>
 
-          <span className="text-gray-400">{getItemIcon()}</span>
-          <span className="text-[11px] font-medium text-gray-500 capitalize truncate">
-            {item.item_type}
-          </span>
-          {showSectionBadge && (
-            <span
-              className={`text-[9px] font-semibold px-1.5 py-0.2 rounded-full border ${
-                section === 'needs_attention'
-                  ? 'bg-amber-50 text-amber-700 border-amber-200'
-                  : section === 'new_candidates'
-                  ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
-                  : section === 'context_suggestions'
-                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                  : section === 'already_understood'
-                  ? 'bg-teal-50 text-teal-700 border-teal-200'
-                  : 'bg-gray-100 text-gray-600 border-gray-200'
-              }`}
-            >
-              {section.replace('_', ' ')}
+        {/* Content Icon */}
+        <div className="w-5 flex items-center justify-center shrink-0">
+          {getItemIcon()}
+        </div>
+
+        {/* Text Details & Context Pill */}
+        <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[13px] font-semibold text-gray-900 truncate">
+              {displayTitle}
             </span>
-          )}
-        </div>
+            {renderContextPill()}
+          </div>
 
-        <div className="flex items-center gap-1 text-gray-400">
-          <span className="text-[10px] text-gray-400 font-mono">
-            {getRelativeTime(item.created_at)}
-          </span>
-          <button
-            ref={menuBtnRef}
-            onClick={(e) => {
-              e.stopPropagation();
-              openMenu();
-            }}
-            className="p-1 hover:text-gray-700 hover:bg-black/5 rounded transition-colors cursor-pointer opacity-80 group-hover:opacity-100"
-            title="Item options"
-          >
-            <MoreVertical size={13} />
-          </button>
+          <p className="text-[12px] text-gray-500 truncate leading-normal">
+            {snippet}
+          </p>
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="p-3.5 flex-1 flex flex-col gap-2 min-w-0">
-        {/* Title */}
-        {item.title && (
-          <h3 className="text-xs font-semibold text-gray-900 line-clamp-1 group-hover:text-indigo-600 transition-colors">
-            {item.title}
-          </h3>
-        )}
+      {/* Right Column: Relative Timestamp & Subtle Hover Menu */}
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-[11px] text-gray-400 font-mono">
+          {getRelativeTime(item.created_at)}
+        </span>
 
-        {/* Content Preview */}
-        {renderContent()}
-
-        {/* Source App / Domain Badge */}
-        {appName && (
-          <div className="flex items-center gap-1 text-[10px] text-gray-400 truncate">
-            <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
-            <span className="truncate">From {appName}</span>
-          </div>
-        )}
-
-        {/* Match Highlight if Search Active */}
-        {derived.searchResult && (
-          <div className="mt-1 p-1.5 rounded-md bg-gray-50 border border-black/4 flex items-center justify-between text-[10px]">
-            {derived.searchResult.semantic_score != null ? (
-              <span className="flex items-center gap-1 text-indigo-700 font-medium">
-                <Sparkles size={11} className="text-amber-500" />
-                Semantic match
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-gray-500 font-medium">
-                <Search size={11} className="text-gray-400" />
-                Keyword match
-              </span>
-            )}
-            {derived.searchResult.match_highlights && derived.searchResult.match_highlights.length > 0 && (
-              <span className="text-[9px] text-gray-400 truncate max-w-[120px]" title={derived.searchResult.match_highlights[0]}>
-                {derived.searchResult.match_highlights[0]}
-              </span>
-            )}
-          </div>
-        )}
+        <button
+          ref={menuBtnRef}
+          onClick={openMenu}
+          className="p-1 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-md transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+          title="More options"
+        >
+          <MoreVertical size={14} />
+        </button>
       </div>
 
-      {/* Context Status & Inline Actions Section */}
-      <div className="px-3.5 pb-3 flex flex-col gap-2.5 border-t border-black/3 pt-2.5 bg-gray-50/40">
-        {/* Contextual Badge (Clickable to Inspect ContextExplanation) */}
-        <div className="flex items-center justify-between gap-2">
-          <ContextBadge
-            itemId={item.id}
-            attention={attention}
-            candidateInfo={candidateInfo}
-            workspaces={workspaces}
-            onOpenInspector={() => setInspectorOpen(true)}
-          />
-        </div>
-
-        {/* ==================================================================== */}
-        {/* INLINE CONTEXTUAL ACTIONS */}
-        {/* ==================================================================== */}
-
-        {/* 1. HIGH-CONFIDENCE SUGGESTED MEMBERSHIP: [Add to Context] */}
-        {hasHighConfidenceSuggestion && (
-          <div className="flex items-center gap-1.5 pt-0.5">
-            <button
-              onClick={openQuickMenu}
-              disabled={isProcessingAction}
-              className="flex-1 flex items-center justify-between px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer group/btn"
-              title="Add to Context (A)"
-            >
-              <div className="flex items-center gap-1.5">
-                <Plus size={13} strokeWidth={2.5} />
-                <span>Add to Context</span>
-              </div>
-              <kbd className="text-[9px] font-mono text-indigo-200 bg-indigo-800/50 px-1 py-0.2 rounded border border-indigo-400/30 opacity-80 group-hover/btn:opacity-100">
-                A
-              </kbd>
-            </button>
-            <button
-              onClick={() => handleDismiss(suggestedWsId || undefined)}
-              disabled={isProcessingAction}
-              title="Dismiss suggestion (D)"
-              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer flex items-center gap-1"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
-
-        {/* 2. NEW CONTEXT CANDIDATES: [Review Context] */}
-        {!hasHighConfidenceSuggestion && hasCandidate && candidateInfo && (
-          <div className="pt-0.5">
-            <button
-              onClick={handleReviewCandidate}
-              className="w-full flex items-center justify-between px-3 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer group/btn"
-              title="Review Context (R)"
-            >
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={13} />
-                <span>Review Context</span>
-              </div>
-              <kbd className="text-[9px] font-mono text-cyan-200 bg-cyan-800/50 px-1 py-0.2 rounded border border-cyan-400/30 opacity-80 group-hover/btn:opacity-100">
-                R
-              </kbd>
-            </button>
-          </div>
-        )}
-
-        {/* 3. UNCERTAIN ITEMS: [Choose Context] */}
-        {!hasHighConfidenceSuggestion && !hasCandidate && isUncertain && (
-          <div className="flex items-center gap-1.5 pt-0.5 relative">
-            <button
-              onClick={openQuickMenu}
-              disabled={isProcessingAction}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
-              title="Choose Context"
-            >
-              <FolderPlus size={13} />
-              <span>Choose Context</span>
-            </button>
-            <button
-              onClick={() => handleDismiss()}
-              disabled={isProcessingAction}
-              title="Dismiss prompt (D)"
-              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg border border-black/5 transition-colors cursor-pointer"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
-
-        {/* 4. UNDERSTOOD ITEMS: [Add to Context] */}
-        {!hasHighConfidenceSuggestion && !hasCandidate && !isUncertain && isUnderstood && (
-          <div className="flex items-center gap-1.5 pt-0.5">
-            <button
-              onClick={openQuickMenu}
-              disabled={isProcessingAction}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-[11px] font-semibold shadow-2xs transition-colors cursor-pointer"
-              title="Add / Confirm Context"
-            >
-              <Plus size={13} strokeWidth={2.5} />
-              <span>Add to Context</span>
-            </button>
-          </div>
-        )}
-
-        {/* 5. ITEMS WITH NO MEANINGFUL EVIDENCE: SHOW NO ACTION */}
-      </div>
-
-      {/* Floating Options Dropdown Menu */}
+      {/* Options Menu Dropdown Portal */}
       {menuOpen && menuPos && createPortal(
         <div
           ref={menuRef}
           style={{ top: menuPos.top, right: menuPos.right }}
-          className="fixed w-52 bg-white rounded-xl shadow-xl border border-gray-200/90 py-1.5 z-[9999] overflow-hidden"
+          className="fixed w-48 bg-white rounded-xl shadow-xl border border-black/10 py-1.5 z-50 text-[12px] overflow-hidden animate-in fade-in-0 duration-100"
+          onClick={(e) => e.stopPropagation()}
         >
-          <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
-            Item Actions
-          </div>
           <button
-            className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
-            onClick={openQuickMenu}
-          >
-            <FolderPlus size={13} className="text-indigo-600" />
-            <span>Add to Context...</span>
-          </button>
-          <button
-            className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
-            onClick={() => {
-              setInspectorOpen(true);
+            onClick={(e) => {
+              e.stopPropagation();
               setMenuOpen(false);
+              onSelectItem?.(item.id);
             }}
+            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
           >
-            <Search size={13} className="text-indigo-500" />
-            <span>Inspect Context Evidence</span>
+            <FolderPlus size={13} className="text-gray-500" />
+            <span>View Context Details</span>
           </button>
 
-          {section !== 'already_understood' && (
+          <button
+            onClick={handleCopy}
+            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <Copy size={13} className="text-gray-500" />
+            <span>Copy Content</span>
+          </button>
+
+          {item.item_type === 'url' && (
             <button
-              className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
-              onClick={() => {
-                db.transitionInboxItemState(item.id, 'understood', 'User marked as understood')
-                  .then(() => setMenuOpen(false));
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen(false);
+                window.open(item.content, '_blank');
               }}
+              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
             >
-              <CheckCircle2 size={13} className="text-emerald-500" />
-              <span>Mark as Understood</span>
+              <ExternalLink size={13} className="text-gray-500" />
+              <span>Open in Browser</span>
             </button>
           )}
 
-          <div className="my-1 border-t border-gray-100" />
-          <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+          <div className="my-1 border-t border-black/5" />
+
+          <div className="px-3 py-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
             Move to Workspace
           </div>
-
           {workspaces.map((ws) => (
             <button
               key={ws.id}
-              className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
-              onClick={() => {
-                onMoveToWorkspace(item.id, ws.id);
+              onClick={(e) => {
+                e.stopPropagation();
                 setMenuOpen(false);
+                onMoveToWorkspace(item.id, ws.id);
               }}
+              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
             >
-              <BoxSelect size={13} className="text-gray-400" />
+              <BoxSelect size={12} className="text-gray-400" />
               <span className="truncate">{ws.name}</span>
             </button>
           ))}
+
+          <div className="my-1 border-t border-black/5" />
+
+          <button
+            onClick={handleDelete}
+            className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <Trash2 size={13} className="text-red-500" />
+            <span>Delete Item</span>
+          </button>
         </div>,
         document.body
-      )}
-
-      {/* Quick Context Assignment Menu */}
-      <QuickContextAssignmentMenu
-        itemId={item.id}
-        suggestedWorkspaceId={suggestedWsId}
-        suggestedConfidence={attention?.factors?.contextual_confidence}
-        workspaces={workspaces}
-        isOpen={quickMenuOpen}
-        position={quickMenuPos}
-        onClose={() => setQuickMenuOpen(false)}
-        onAssignSuccess={(wsId) => {
-          onMoveToWorkspace(item.id, wsId);
-        }}
-      />
-
-      {/* Context Inspector Modal */}
-      {inspectorOpen && (
-        <ContextInspector itemId={item.id} onClose={() => setInspectorOpen(false)} />
       )}
     </div>
   );
