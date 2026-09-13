@@ -957,6 +957,58 @@ fn windows_target_drop(_state: State<'_, capture::SystemTarget>) -> bool {
     return false;
 }
 
+// =========================================================================
+// Context Memory Queries (Day 17)
+// =========================================================================
+
+#[tauri::command]
+fn get_current_memory(
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::memory_query::ContextMemoryResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_current_memory(&conn)
+}
+
+#[tauri::command]
+fn get_context_memory(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::memory_query::ContextMemoryResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_context_memory(&conn, context_id)
+}
+
+#[tauri::command]
+fn get_recent_context_memories(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::memory_query::ContextMemoryResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_recent_context_memories(&conn, limit)
+}
+
+#[tauri::command]
+fn get_last_active_context(
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::memory_query::ContextMemoryResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_last_active_context(&conn)
+}
+
+#[tauri::command]
+fn get_last_active_task(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::memory_query::LastActiveTaskResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_last_active_task(&conn, context_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1168,7 +1220,13 @@ pub fn run() {
             bulk_dismiss_inbox_suggestions,
             bulk_archive_or_clear_inbox_items,
             // Inbox Search Architecture
-            search_inbox_items
+            search_inbox_items,
+            // Context Memory Queries (Day 17)
+            get_current_memory,
+            get_context_memory,
+            get_recent_context_memories,
+            get_last_active_context,
+            get_last_active_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

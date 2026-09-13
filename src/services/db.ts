@@ -1181,7 +1181,28 @@ export const db = {
   // Inbox Search Architecture
   searchInboxItems: (params: InboxSearchParams) =>
     invoke<InboxSearchResult[]>("search_inbox_items", { params }),
+
+  // Context Memory Queries (Day 17)
+  getCurrentMemory: () =>
+    invoke<import("./contextMemory").ContextMemoryResponse | null>("get_current_memory"),
+
+  getContextMemory: (contextId: string) =>
+    invoke<import("./contextMemory").ContextMemoryResponse | null>("get_context_memory", {
+      contextId,
+    }),
+
+  getRecentContextMemories: (limit: number = 5) =>
+    invoke<import("./contextMemory").ContextMemoryResponse[]>("get_recent_context_memories", {
+      limit,
+    }),
+
+  getLastActiveContext: () =>
+    invoke<import("./contextMemory").ContextMemoryResponse | null>("get_last_active_context"),
+
+  getLastActiveTask: (contextId: string) =>
+    invoke<import("./contextMemory").LastActiveTaskResponse | null>("get_last_active_task", {
+      contextId,
+    }),
 };
 
-
-
+export * from "./contextMemory";

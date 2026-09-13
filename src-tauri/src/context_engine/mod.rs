@@ -27,11 +27,15 @@ pub mod task_extractor;
 pub mod task_ranking;
 pub mod task_transitions;
 pub mod memory;
+pub mod memory_query;
 
 pub use memory::{
     ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryRepository,
     ContextMemoryService, InferredTaskState, InformationProvenance, MemoryActivitySequenceEntry,
     MemoryItemReference, MemoryTaskReference, MemoryTransitionReference, TaskConfidenceBand,
+};
+pub use memory_query::{
+    ContextMemoryQueryService, ContextMemoryResponse, LastActiveTaskResponse,
 };
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
