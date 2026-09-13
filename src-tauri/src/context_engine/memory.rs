@@ -770,6 +770,99 @@ impl ContextMemory {
     }
 }
 
+/// Records explicit user feedback on contextual working memory.
+///
+/// - If positive confirmation (`is_positive: true`, e.g. "Correct"):
+///   - Updates the task candidate status to `Active` with boosted confidence.
+///   - Records a `user_action` signal in `context_signals` for engine calibration.
+///
+/// - If negative feedback (`is_positive: false`, e.g. "Not quite" / "Not what I was doing"):
+///   - Marks the task candidate status as `Dismissed` so future memory derivations suppress it.
+///   - Records a `user_action` signal in `context_signals` for negative grounding.
+///
+/// Invariant: **DOES NOT directly mutate historical evidence** (items, segments, transitions).
+pub fn record_memory_feedback(
+    conn: &Connection,
+    context_id: &str,
+    task_title: Option<&str>,
+    task_id: Option<&str>,
+    is_positive: bool,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let signal_id = uuid::Uuid::new_v4().to_string();
+
+    // 1. Update task candidate status if identifier or title matches
+    if let Some(id) = task_id {
+        if is_positive {
+            let _ = crate::db::operations::update_task_candidate_status(
+                conn,
+                id,
+                crate::db::models::TaskCandidateStatus::Active,
+            );
+            let _ = crate::db::operations::update_task_candidate_activity(conn, id, &now, Some(1.0));
+        } else {
+            let _ = crate::db::operations::update_task_candidate_status(
+                conn,
+                id,
+                crate::db::models::TaskCandidateStatus::Dismissed,
+            );
+        }
+    } else if let Some(title) = task_title {
+        if let Ok(candidates) = crate::db::operations::list_task_candidates_for_context(conn, context_id) {
+            if let Some(cand) = candidates.iter().find(|c| c.title.eq_ignore_ascii_case(title)) {
+                if is_positive {
+                    let _ = crate::db::operations::update_task_candidate_status(
+                        conn,
+                        &cand.id,
+                        crate::db::models::TaskCandidateStatus::Active,
+                    );
+                    let _ = crate::db::operations::update_task_candidate_activity(conn, &cand.id, &now, Some(1.0));
+                } else {
+                    let _ = crate::db::operations::update_task_candidate_status(
+                        conn,
+                        &cand.id,
+                        crate::db::models::TaskCandidateStatus::Dismissed,
+                    );
+                }
+            } else if is_positive {
+                let mut new_cand = crate::db::models::TaskCandidate::new(
+                    Some(context_id.to_string()),
+                    title,
+                    1.0,
+                );
+                new_cand.status = crate::db::models::TaskCandidateStatus::Active;
+                let _ = crate::db::operations::create_task_candidate(conn, &new_cand);
+            }
+        }
+    }
+
+    // 2. Insert explicit feedback context signal for feedback learning & contradiction tracking
+    let action_str = if is_positive {
+        "memory_task_confirmed"
+    } else {
+        "memory_task_rejected"
+    };
+
+    let payload = serde_json::json!({
+        "context_id": context_id,
+        "task_title": task_title,
+        "task_id": task_id,
+        "is_positive": is_positive,
+        "action": action_str,
+        "feedback_type": if is_positive { "user_confirmation" } else { "user_dismissal" },
+        "created_at": now,
+    })
+    .to_string();
+
+    let _ = conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, NULL, 'user_action', NULL, ?3, ?4, ?4)",
+        params![signal_id, context_id, payload, now],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
 // =========================================================================
 // ContextMemoryBuilder: Working Memory Reconstruction Engine
 // =========================================================================
@@ -1052,7 +1145,7 @@ impl ContextMemoryBuilder {
         let mut current_task_state = InferredTaskState::unknown();
         let mut recent_tasks: Vec<MemoryTaskReference> = Vec::new();
 
-        // Priority 1: User-confirmed / Active Task Candidate
+        // Priority 1: User-confirmed / Active Task Candidate (ignoring Dismissed / Inactive)
         let mut extracted_candidates = Vec::new();
         let confirmed_candidate = self.task_candidates.iter().find(|tc| {
             (tc.status == crate::db::models::TaskCandidateStatus::Active
@@ -1122,7 +1215,17 @@ impl ContextMemoryBuilder {
                 extracted_candidates.push(r.candidate.clone());
             }
 
-            if let Some(top) = &rank_result.top_candidate {
+            // Suppress candidates that user previously rejected / dismissed in this context
+            let non_dismissed_top = rank_result.ranked_candidates.iter().find(|r| {
+                let is_dismissed = self.task_candidates.iter().any(|tc| {
+                    (tc.status == crate::db::models::TaskCandidateStatus::Dismissed
+                        || tc.status.as_str() == "dismissed")
+                        && tc.title.eq_ignore_ascii_case(&r.candidate.title)
+                });
+                !is_dismissed
+            });
+
+            if let Some(top) = non_dismissed_top {
                 let is_generic = is_generic_task_name(&top.candidate.title);
                 let is_confident = top.confidence >= 0.45 && !is_generic && rank_result.ambiguity_state == crate::context_engine::task_ranking::TaskAmbiguityState::ClearLeader;
 
@@ -2827,4 +2930,64 @@ Unknown";
 
         assert_eq!(m1, m2);
     }
+
+    #[test]
+    fn test_record_memory_feedback_positive_and_negative() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Portfolio").unwrap();
+
+        // 1. Create a candidate in detected state
+        let mut cand = crate::db::models::TaskCandidate::new(
+            Some(ws.id.clone()),
+            "Hero animation",
+            0.85,
+        );
+        cand.status = crate::db::models::TaskCandidateStatus::Active;
+        let created_cand = crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        // 2. Add an item
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://figma.com/file/hero-anim",
+            Some("Figma Hero Animation"),
+            "{}",
+        ).unwrap();
+
+        // Verify initial reconstruction prioritizes Hero animation
+        let m_init = ContextMemoryBuilder::from_db(&conn, &ws.id).unwrap().build().unwrap();
+        assert_eq!(m_init.active_task_title(), "Hero animation");
+
+        // 3. User provides negative feedback ("Not what I was doing")
+        let res_neg = record_memory_feedback(&conn, &ws.id, Some("Hero animation"), Some(&created_cand.id), false);
+        assert!(res_neg.is_ok());
+
+        // Verify candidate status is now Dismissed
+        let cand_after_neg = crate::db::operations::get_task_candidate(&conn, &created_cand.id).unwrap();
+        assert_eq!(cand_after_neg.status, crate::db::models::TaskCandidateStatus::Dismissed);
+
+        // Verify context signal is recorded
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&ws.id), None).unwrap();
+        assert!(signals.iter().any(|s| s.payload.contains("memory_task_rejected")));
+
+        // Verify historical item still exists and is untouched
+        let refetched_item = crate::db::operations::get_item(&conn, &item.id).unwrap();
+        assert_eq!(refetched_item.content, "https://figma.com/file/hero-anim");
+
+        // Verify subsequent memory derivation suppresses dismissed candidate
+        let m_after_neg = ContextMemoryBuilder::from_db(&conn, &ws.id).unwrap().build().unwrap();
+        assert_ne!(m_after_neg.active_task_title(), "Hero animation");
+
+        // 4. User provides positive confirmation for "Case Study Layout"
+        let res_pos = record_memory_feedback(&conn, &ws.id, Some("Case Study Layout"), None, true);
+        assert!(res_pos.is_ok());
+
+        // Verify subsequent memory derivation confirms "Case Study Layout"
+        let m_after_pos = ContextMemoryBuilder::from_db(&conn, &ws.id).unwrap().build().unwrap();
+        assert_eq!(m_after_pos.active_task_title(), "Case Study Layout");
+        assert_eq!(m_after_pos.current_task_provenance, Some(InformationProvenance::Confirmed));
+    }
 }
+
