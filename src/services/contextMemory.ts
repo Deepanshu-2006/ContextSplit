@@ -116,6 +116,41 @@ export interface RecentWorkSequenceResponse {
   sequence_statement: string;
 }
 
+export interface HistoricalContextUsage {
+  context_id: string;
+  context_name: string;
+  session_count: number;
+  total_duration_seconds: number;
+  duration_estimate: string;
+  primary_task?: string | null;
+  tasks: string[];
+  last_active_at: string;
+}
+
+export interface HistoricalTaskSummary {
+  title: string;
+  context_id?: string | null;
+  context_name: string;
+  confidence_band: string;
+  provenance: InformationProvenance;
+  last_active_at: string;
+}
+
+export interface HistoricalContextMemoryResponse {
+  date: string;
+  date_label: string;
+  contexts_used: HistoricalContextUsage[];
+  primary_tasks: HistoricalTaskSummary[];
+  context_switches: number;
+  context_returns: number;
+  most_recent_context?: HistoricalContextUsage | null;
+  most_recent_task?: HistoricalTaskSummary | null;
+  important_captured_items: MemoryItemReference[];
+  meaningful_activity_segments: WorkSequenceEntry[];
+  has_sufficient_evidence: boolean;
+  summary_statement: string;
+}
+
 /**
  * Dedicated ContextMemoryQuery and WorkSequence service independent from React.
  * Answers "What was I working on?" and reconstructs cross-context work sequences.
@@ -200,6 +235,58 @@ export const contextMemoryService = {
       return null;
     }
   },
+
+  /**
+   * Reconstructs historical contextual working memory for "Today".
+   */
+  async getTodayMemory(): Promise<HistoricalContextMemoryResponse | null> {
+    try {
+      return await invoke<HistoricalContextMemoryResponse>("get_today_memory");
+    } catch (err) {
+      console.error("Failed to fetch today's memory:", err);
+      return null;
+    }
+  },
+
+  /**
+   * Reconstructs historical contextual working memory for "Yesterday".
+   */
+  async getYesterdayMemory(): Promise<HistoricalContextMemoryResponse | null> {
+    try {
+      return await invoke<HistoricalContextMemoryResponse>("get_yesterday_memory");
+    } catch (err) {
+      console.error("Failed to fetch yesterday's memory:", err);
+      return null;
+    }
+  },
+
+  /**
+   * Reconstructs historical contextual working memory for a date string ("today", "yesterday", "YYYY-MM-DD").
+   */
+  async getHistoricalMemoryForDate(date: string): Promise<HistoricalContextMemoryResponse | null> {
+    try {
+      return await invoke<HistoricalContextMemoryResponse>("get_historical_memory_for_date", {
+        date,
+      });
+    } catch (err) {
+      console.error(`Failed to fetch historical memory for '${date}':`, err);
+      return null;
+    }
+  },
+
+  /**
+   * Queries historical memories for the past N active days.
+   */
+  async getRecentHistoricalMemories(limitDays?: number): Promise<HistoricalContextMemoryResponse[]> {
+    try {
+      return await invoke<HistoricalContextMemoryResponse[]>("get_recent_historical_memories", {
+        limitDays: limitDays ?? null,
+      });
+    } catch (err) {
+      console.error("Failed to fetch recent historical memories:", err);
+      return [];
+    }
+  },
 };
 
 // Standalone function exports matching the required method names
@@ -209,3 +296,7 @@ export const getRecentContextMemories = contextMemoryService.getRecentContextMem
 export const getLastActiveContext = contextMemoryService.getLastActiveContext;
 export const getLastActiveTask = contextMemoryService.getLastActiveTask;
 export const getRecentWorkSequence = contextMemoryService.getRecentWorkSequence;
+export const getTodayMemory = contextMemoryService.getTodayMemory;
+export const getYesterdayMemory = contextMemoryService.getYesterdayMemory;
+export const getHistoricalMemoryForDate = contextMemoryService.getHistoricalMemoryForDate;
+export const getRecentHistoricalMemories = contextMemoryService.getRecentHistoricalMemories;

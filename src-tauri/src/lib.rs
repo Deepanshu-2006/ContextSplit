@@ -1019,6 +1019,44 @@ fn get_recent_work_sequence(
     service.get_recent_work_sequence(&conn, limit_days)
 }
 
+#[tauri::command]
+fn get_today_memory(
+    state: State<'_, AppState>,
+) -> Result<context_engine::memory_query::HistoricalContextMemoryResponse, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_today_memory(&conn)
+}
+
+#[tauri::command]
+fn get_yesterday_memory(
+    state: State<'_, AppState>,
+) -> Result<context_engine::memory_query::HistoricalContextMemoryResponse, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_yesterday_memory(&conn)
+}
+
+#[tauri::command]
+fn get_historical_memory_for_date(
+    date: String,
+    state: State<'_, AppState>,
+) -> Result<context_engine::memory_query::HistoricalContextMemoryResponse, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_historical_memory_for_date(&conn, &date)
+}
+
+#[tauri::command]
+fn get_recent_historical_memories(
+    limit_days: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::memory_query::HistoricalContextMemoryResponse>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let query_service = context_engine::memory_query::ContextMemoryQueryService::new();
+    query_service.get_recent_historical_memories(&conn, limit_days)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1237,7 +1275,11 @@ pub fn run() {
             get_recent_context_memories,
             get_last_active_context,
             get_last_active_task,
-            get_recent_work_sequence
+            get_recent_work_sequence,
+            get_today_memory,
+            get_yesterday_memory,
+            get_historical_memory_for_date,
+            get_recent_historical_memories
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

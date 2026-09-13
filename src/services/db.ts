@@ -1208,6 +1208,23 @@ export const db = {
     invoke<import("./contextMemory").RecentWorkSequenceResponse>("get_recent_work_sequence", {
       limitDays: limitDays ?? null,
     }),
+
+  getTodayMemory: () =>
+    invoke<import("./contextMemory").HistoricalContextMemoryResponse | null>("get_today_memory"),
+
+  getYesterdayMemory: () =>
+    invoke<import("./contextMemory").HistoricalContextMemoryResponse | null>("get_yesterday_memory"),
+
+  getHistoricalMemoryForDate: (date: string) =>
+    invoke<import("./contextMemory").HistoricalContextMemoryResponse | null>("get_historical_memory_for_date", {
+      date,
+    }),
+
+  getRecentHistoricalMemories: (limitDays?: number) =>
+    invoke<import("./contextMemory").HistoricalContextMemoryResponse[]>("get_recent_historical_memories", {
+      limitDays: limitDays ?? null,
+    }),
 };
 
 export * from "./contextMemory";
+

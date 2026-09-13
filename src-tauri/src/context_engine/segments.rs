@@ -69,6 +69,19 @@ struct ActiveSegmentState {
     is_ambiguous: bool,
 }
 
+pub(crate) fn parse_timestamp_utc(ts: &str) -> DateTime<Utc> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+        return dt.with_timezone(&Utc);
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        return DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%SZ") {
+        return DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc);
+    }
+    Utc::now()
+}
+
 impl ActiveSegmentState {
     fn new(
         context: Option<ContextReference>,
@@ -107,14 +120,8 @@ impl ActiveSegmentState {
     }
 
     fn seal(self, transition_out: Option<DetectedTransition>) -> ContextActivitySegment {
-        let start_dt = self
-            .started_at
-            .parse::<DateTime<Utc>>()
-            .unwrap_or_else(|_| Utc::now());
-        let end_dt = self
-            .last_event_at
-            .parse::<DateTime<Utc>>()
-            .unwrap_or_else(|_| start_dt);
+        let start_dt = parse_timestamp_utc(&self.started_at);
+        let end_dt = parse_timestamp_utc(&self.last_event_at);
 
         let duration_seconds = end_dt.signed_duration_since(start_dt).num_seconds().max(0);
         let duration_formatted = format_duration_human(duration_seconds);
@@ -200,21 +207,17 @@ impl ContextActivitySegmenter {
         let mut active_state: Option<ActiveSegmentState> = None;
 
         for event in events {
-            let event_time_dt = event
-                .timestamp
-                .parse::<DateTime<Utc>>()
-                .unwrap_or_else(|_| Utc::now());
+            let event_time_dt = parse_timestamp_utc(&event.timestamp);
 
             // 1. Check if inactivity threshold elapsed since last event
             if let Some(ref act) = active_state {
-                if let Ok(last_dt) = act.last_event_at.parse::<DateTime<Utc>>() {
-                    let elapsed = event_time_dt.signed_duration_since(last_dt).num_seconds();
-                    if elapsed >= self.inactivity_threshold_secs {
-                        // Inactivity gap! Seal previous segment at its last active timestamp
-                        let end_transition = self.detector.check_inactivity(&event.timestamp);
-                        let sealed = active_state.take().unwrap().seal(end_transition);
-                        segments.push(sealed);
-                    }
+                let last_dt = parse_timestamp_utc(&act.last_event_at);
+                let elapsed = event_time_dt.signed_duration_since(last_dt).num_seconds();
+                if elapsed >= self.inactivity_threshold_secs {
+                    // Inactivity gap! Seal previous segment at its last active timestamp
+                    let end_transition = self.detector.check_inactivity(&event.timestamp);
+                    let sealed = active_state.take().unwrap().seal(end_transition);
+                    segments.push(sealed);
                 }
             }
 
@@ -437,8 +440,14 @@ impl ContextActivitySegmenter {
         &mut self,
         conn: &Connection,
     ) -> Result<Vec<ContextActivitySegment>, String> {
-        let items = crate::db::operations::list_items(conn, None).map_err(|e| e.to_string())?;
-        let item_ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+        let mut stmt = conn
+            .prepare("SELECT id FROM items ORDER BY created_at ASC")
+            .map_err(|e| e.to_string())?;
+        let item_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
         self.build_segments_from_items(conn, &item_ids)
     }
 }
