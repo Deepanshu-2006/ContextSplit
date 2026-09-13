@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::context_engine::task_extractor::is_generic_task_name;
 use crate::context_engine::task_ranking::{RankedTaskCandidate, TaskAmbiguityState};
@@ -749,7 +752,13 @@ impl ContextMemory {
         conn: &Connection,
         workspace_id: &str,
     ) -> Result<Self, String> {
-        ContextMemoryBuilder::from_db(conn, workspace_id)?.build()
+        if let Some(cached) = get_global_memory_cache().get(workspace_id) {
+            return Ok(cached);
+        }
+
+        let memory = ContextMemoryBuilder::from_db(conn, workspace_id)?.build()?;
+        get_global_memory_cache().insert(workspace_id, memory.clone());
+        Ok(memory)
     }
 
     /// Derives the currently active contextual working memory across the entire system.
@@ -768,6 +777,84 @@ impl ContextMemory {
             Ok(None)
         }
     }
+}
+
+// =========================================================================
+// ContextMemoryCache: In-Memory Working Memory Cache & Invalidation
+// =========================================================================
+
+/// Cached entry for active context memory.
+#[derive(Debug, Clone)]
+struct CachedMemoryEntry {
+    memory: ContextMemory,
+    cached_at: Instant,
+}
+
+/// In-memory thread-safe cache for context memories to prevent repeated reconstruction on UI renders.
+pub struct ContextMemoryCache {
+    entries: RwLock<HashMap<String, CachedMemoryEntry>>,
+    ttl: Duration,
+}
+
+impl ContextMemoryCache {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(30),
+        }
+    }
+
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    pub fn get(&self, workspace_id: &str) -> Option<ContextMemory> {
+        if let Ok(guard) = self.entries.read() {
+            if let Some(entry) = guard.get(workspace_id) {
+                if entry.cached_at.elapsed() < self.ttl {
+                    return Some(entry.memory.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn insert(&self, workspace_id: &str, memory: ContextMemory) {
+        if let Ok(mut guard) = self.entries.write() {
+            if guard.len() >= 100 {
+                guard.clear();
+            }
+            guard.insert(
+                workspace_id.to_string(),
+                CachedMemoryEntry {
+                    memory,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    pub fn invalidate(&self, workspace_id: Option<&str>) {
+        if let Ok(mut guard) = self.entries.write() {
+            if let Some(id) = workspace_id {
+                guard.remove(id);
+            } else {
+                guard.clear();
+            }
+        }
+    }
+}
+
+static GLOBAL_MEMORY_CACHE: OnceLock<ContextMemoryCache> = OnceLock::new();
+
+pub fn get_global_memory_cache() -> &'static ContextMemoryCache {
+    GLOBAL_MEMORY_CACHE.get_or_init(ContextMemoryCache::new)
+}
+
+pub fn invalidate_memory_cache(workspace_id: Option<&str>) {
+    get_global_memory_cache().invalidate(workspace_id);
+    crate::context_engine::memory_query::invalidate_historical_memory_cache();
 }
 
 /// Records explicit user feedback on contextual working memory.
@@ -859,6 +946,9 @@ pub fn record_memory_feedback(
          VALUES (?1, ?2, NULL, 'user_action', NULL, ?3, ?4, ?4)",
         params![signal_id, context_id, payload, now],
     ).map_err(|e| e.to_string())?;
+
+    // Invalidate working memory cache for this workspace on user feedback
+    invalidate_memory_cache(Some(context_id));
 
     Ok(true)
 }
@@ -1013,17 +1103,23 @@ impl ContextMemoryBuilder {
             }
         }
 
-        // 3. Task Candidates
+        // 3. Task Candidates (bounded to top 15 by recency)
         let task_candidates = crate::db::operations::list_task_candidates_for_context(conn, workspace_id)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .take(15)
+            .collect();
 
-        // 4. Context Transitions
+        // 4. Context Transitions (bounded to top 10 by recency)
         let context_transitions = crate::db::operations::list_context_transitions_for_context(conn, workspace_id)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .take(10)
+            .collect();
 
-        // 5. Segments
+        // 5. Segments (bounded recent activity window)
         let segments = crate::context_engine::segments::ContextActivitySegmenter::new()
-            .build_segments_for_workspace(conn, workspace_id)
+            .build_segments_for_workspace_bounded(conn, workspace_id, Some(30))
             .unwrap_or_default();
 
         // 6. Evidence Set

@@ -429,9 +429,59 @@ impl ContextActivitySegmenter {
         conn: &Connection,
         workspace_id: &str,
     ) -> Result<Vec<ContextActivitySegment>, String> {
-        let items = crate::db::operations::list_items(conn, Some(workspace_id))
+        self.build_segments_for_workspace_bounded(conn, workspace_id, None)
+    }
+
+    /// Derives contextual activity segments for a specific workspace bounded by a recent item limit.
+    pub fn build_segments_for_workspace_bounded(
+        &mut self,
+        conn: &Connection,
+        workspace_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContextActivitySegment>, String> {
+        let limit_val = limit.unwrap_or(50).clamp(1, 200) as i64;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM items 
+                 WHERE workspace_id = ?1 
+                 ORDER BY created_at DESC 
+                 LIMIT ?2",
+            )
             .map_err(|e| e.to_string())?;
-        let item_ids: Vec<String> = items.into_iter().map(|i| i.id).collect();
+        let mut item_ids = stmt
+            .query_map(rusqlite::params![workspace_id, limit_val], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        item_ids.reverse();
+        self.build_segments_from_items(conn, &item_ids)
+    }
+
+    /// Derives contextual activity segments within a specific date/time window.
+    pub fn build_segments_for_date_range(
+        &mut self,
+        conn: &Connection,
+        start_iso: &str,
+        end_iso: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContextActivitySegment>, String> {
+        let limit_val = limit.unwrap_or(300).clamp(1, 1000) as i64;
+        let start_t = start_iso.replace(' ', "T");
+        let end_t = end_iso.replace(' ', "T");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM items 
+                 WHERE (created_at >= ?1 AND created_at <= ?2)
+                    OR (created_at >= ?3 AND created_at <= ?4)
+                 ORDER BY created_at ASC 
+                 LIMIT ?5",
+            )
+            .map_err(|e| e.to_string())?;
+        let item_ids = stmt
+            .query_map(rusqlite::params![start_iso, end_iso, start_t, end_t, limit_val], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
         self.build_segments_from_items(conn, &item_ids)
     }
 

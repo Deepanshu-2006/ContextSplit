@@ -127,6 +127,8 @@ pub fn update_workspace_lifecycle_state(
         &payload,
     );
 
+    crate::context_engine::memory::invalidate_memory_cache(Some(id));
+
     get_workspace(conn, id).map_err(|e| e.to_string())
 }
 
@@ -140,6 +142,7 @@ pub fn unarchive_workspace(conn: &Connection, id: &str) -> Result<Workspace, Str
         "UPDATE workspaces SET lifecycle_state = 'active', archived_at = NULL, last_activity_at = ?1, updated_at = ?1 WHERE id = ?2",
         params![now, id],
     ).map_err(|e| e.to_string())?;
+    crate::context_engine::memory::invalidate_memory_cache(Some(id));
     get_workspace(conn, id).map_err(|e| e.to_string())
 }
 
@@ -1147,6 +1150,9 @@ pub fn confirm_membership(
         Some(item_id),
     );
 
+    // 7. Invalidate memory cache for this workspace
+    crate::context_engine::memory::invalidate_memory_cache(Some(workspace_id));
+
     Ok(mem)
 }
 
@@ -1173,11 +1179,15 @@ pub fn dismiss_membership(
         params![signal_id, workspace_id, item_id, payload, now],
     );
 
+    // Invalidate memory cache for this workspace
+    crate::context_engine::memory::invalidate_memory_cache(Some(workspace_id));
+
     Ok(mem)
 }
 
 pub fn delete_membership(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM context_memberships WHERE id = ?1", params![id])?;
+    crate::context_engine::memory::invalidate_memory_cache(None);
     Ok(())
 }
 
@@ -1190,6 +1200,7 @@ pub fn delete_item_workspace_membership(
         "DELETE FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
         params![item_id, workspace_id],
     )?;
+    crate::context_engine::memory::invalidate_memory_cache(Some(workspace_id));
     Ok(())
 }
 
@@ -1969,7 +1980,9 @@ pub fn update_task_candidate_status(
         params![status_str, now, id],
     )?;
 
-    get_task_candidate(conn, id)
+    let res = get_task_candidate(conn, id)?;
+    crate::context_engine::memory::invalidate_memory_cache(res.context_id.as_deref());
+    Ok(res)
 }
 
 pub fn update_task_candidate_activity(
@@ -1997,7 +2010,9 @@ pub fn update_task_candidate_activity(
         )?;
     }
 
-    get_task_candidate(conn, id)
+    let res = get_task_candidate(conn, id)?;
+    crate::context_engine::memory::invalidate_memory_cache(res.context_id.as_deref());
+    Ok(res)
 }
 
 pub fn update_task_candidate_title(
@@ -2011,7 +2026,9 @@ pub fn update_task_candidate_title(
         params![title, now, id],
     )?;
 
-    get_task_candidate(conn, id)
+    let res = get_task_candidate(conn, id)?;
+    crate::context_engine::memory::invalidate_memory_cache(res.context_id.as_deref());
+    Ok(res)
 }
 
 pub fn delete_task_candidate(
