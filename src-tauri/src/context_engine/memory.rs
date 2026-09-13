@@ -46,6 +46,16 @@ fn normalize_app_name(name: &str) -> Option<String> {
     }
 }
 
+fn parse_timestamp_or_rfc3339(ts: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+        Some(dt.with_timezone(&Utc))
+    } else if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        Some(DateTime::from_naive_utc_and_offset(naive, Utc))
+    } else {
+        None
+    }
+}
+
 // =========================================================================
 // Epistemic Source: Information Provenance
 // =========================================================================
@@ -1426,8 +1436,8 @@ impl ContextMemoryBuilder {
         } else if recent_items.is_empty() && recent_context_transition.is_none() && self.task_candidates.is_empty() && self.segments.is_empty() {
             ContextMemoryActivityState::InsufficientEvidence
         } else if let Some(last_ts) = &last_active_at {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(last_ts) {
-                let elapsed_secs = (self.now - dt.with_timezone(&Utc)).num_seconds().max(0);
+            if let Some(dt) = parse_timestamp_or_rfc3339(last_ts) {
+                let elapsed_secs = (self.now - dt).num_seconds().max(0);
                 if elapsed_secs <= 3600 {
                     ContextMemoryActivityState::Active
                 } else if elapsed_secs <= 86400 {

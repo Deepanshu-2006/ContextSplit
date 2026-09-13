@@ -113,6 +113,8 @@ pub mod evidence_pipeline_e2e_tests;
 pub mod adversarial_tests;
 #[cfg(test)]
 pub mod task_adversarial_tests;
+#[cfg(test)]
+pub mod memory_e2e_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

@@ -1,4 +1,4 @@
-use super::models::{Workspace, Session, InboxState, InboxItemState, TaskCandidate, TaskCandidateStatus};
+use super::models::{Workspace, Session, InboxState, InboxItemState};
 use chrono::Utc;
 use rusqlite::{params, Connection, Result};
 use uuid::Uuid;

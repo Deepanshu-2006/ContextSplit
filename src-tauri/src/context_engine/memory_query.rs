@@ -1302,7 +1302,7 @@ mod tests {
         // 1. First retrieval computes using bounded date range (start_iso to end_iso)
         let t0 = std::time::Instant::now();
         let resp1 = service.get_memory_for_day(&conn, target_date).unwrap();
-        let query_time = t0.elapsed();
+        let _query_time = t0.elapsed();
 
         assert_eq!(resp1.date, "2026-09-14");
         assert!(resp1.has_sufficient_evidence);
