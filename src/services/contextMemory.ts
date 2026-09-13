@@ -62,9 +62,63 @@ export interface LastActiveTaskResponse {
   is_current: boolean;
 }
 
+export interface WorkSequenceEntry {
+  id: string;
+  context_id?: string | null;
+  context_name: string;
+  time_window: string;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+  duration_estimate: string;
+  task_title?: string | null;
+  task_confidence_band?: string | null;
+  task_provenance: InformationProvenance;
+  transition_type?: string | null;
+  is_context_return: boolean;
+  item_count: number;
+  recent_items: MemoryItemReference[];
+}
+
+export interface WorkSequenceDayGroup {
+  date_label: string;
+  date_key: string;
+  entries: WorkSequenceEntry[];
+}
+
+export interface RecentContextUsageRef {
+  context_id: string;
+  context_name: string;
+  session_count: number;
+  total_duration_seconds: number;
+  duration_estimate: string;
+  last_active_at: string;
+}
+
+export interface RecentTaskUsageRef {
+  title: string;
+  context_id?: string | null;
+  context_name: string;
+  confidence_band: string;
+  provenance: InformationProvenance;
+  last_active_at: string;
+}
+
+export interface RecentWorkSequenceResponse {
+  days: WorkSequenceDayGroup[];
+  all_entries: WorkSequenceEntry[];
+  recent_contexts: RecentContextUsageRef[];
+  recent_tasks: RecentTaskUsageRef[];
+  context_switches: number;
+  context_returns: number;
+  last_active_context?: RecentContextUsageRef | null;
+  last_active_task?: RecentTaskUsageRef | null;
+  sequence_statement: string;
+}
+
 /**
- * Dedicated ContextMemoryQuery service independent from React.
- * Answers "What was I working on?" from derived contextual data.
+ * Dedicated ContextMemoryQuery and WorkSequence service independent from React.
+ * Answers "What was I working on?" and reconstructs cross-context work sequences.
  */
 export const contextMemoryService = {
   /**
@@ -132,6 +186,20 @@ export const contextMemoryService = {
       return null;
     }
   },
+
+  /**
+   * Reconstructs the user's chronological cross-context recent work sequence.
+   */
+  async getRecentWorkSequence(limitDays?: number): Promise<RecentWorkSequenceResponse | null> {
+    try {
+      return await invoke<RecentWorkSequenceResponse>("get_recent_work_sequence", {
+        limitDays: limitDays ?? null,
+      });
+    } catch (err) {
+      console.error("Failed to fetch recent work sequence:", err);
+      return null;
+    }
+  },
 };
 
 // Standalone function exports matching the required method names
@@ -140,3 +208,4 @@ export const getContextMemory = contextMemoryService.getContextMemory;
 export const getRecentContextMemories = contextMemoryService.getRecentContextMemories;
 export const getLastActiveContext = contextMemoryService.getLastActiveContext;
 export const getLastActiveTask = contextMemoryService.getLastActiveTask;
+export const getRecentWorkSequence = contextMemoryService.getRecentWorkSequence;

@@ -1009,6 +1009,16 @@ fn get_last_active_task(
     query_service.get_last_active_task(&conn, context_id)
 }
 
+#[tauri::command]
+fn get_recent_work_sequence(
+    limit_days: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<context_engine::work_sequence::RecentWorkSequenceResponse, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::work_sequence::RecentWorkSequenceService::new();
+    service.get_recent_work_sequence(&conn, limit_days)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1226,7 +1236,8 @@ pub fn run() {
             get_context_memory,
             get_recent_context_memories,
             get_last_active_context,
-            get_last_active_task
+            get_last_active_task,
+            get_recent_work_sequence
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

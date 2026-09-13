@@ -28,6 +28,7 @@ pub mod task_ranking;
 pub mod task_transitions;
 pub mod memory;
 pub mod memory_query;
+pub mod work_sequence;
 
 pub use memory::{
     ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryRepository,
@@ -36,6 +37,11 @@ pub use memory::{
 };
 pub use memory_query::{
     ContextMemoryQueryService, ContextMemoryResponse, LastActiveTaskResponse,
+};
+pub use work_sequence::{
+    format_activity_duration_estimate, format_date_label, format_time_window,
+    RecentContextUsageRef, RecentTaskUsageRef, RecentWorkSequenceResponse,
+    RecentWorkSequenceService, WorkSequenceDayGroup, WorkSequenceEntry,
 };
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,

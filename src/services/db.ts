@@ -1203,6 +1203,11 @@ export const db = {
     invoke<import("./contextMemory").LastActiveTaskResponse | null>("get_last_active_task", {
       contextId,
     }),
+
+  getRecentWorkSequence: (limitDays?: number) =>
+    invoke<import("./contextMemory").RecentWorkSequenceResponse>("get_recent_work_sequence", {
+      limitDays: limitDays ?? null,
+    }),
 };
 
 export * from "./contextMemory";
