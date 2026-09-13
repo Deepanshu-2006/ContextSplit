@@ -454,7 +454,7 @@ impl TaskCandidateExtractor {
         options: Option<&TaskExtractionOptions>,
     ) -> Result<Vec<ExtractedTaskCandidate>, String> {
         let opts = options.cloned().unwrap_or_default();
-        let context_id = memory.context_id().map(|s| s.to_string());
+        let context_id = memory.context_id_str().map(|s| s.to_string());
 
         let evidence_set = if let Some(refs) = item_refs {
             let item_ids: Vec<String> = refs.iter().map(|r| r.item_id.clone()).collect();
@@ -462,7 +462,7 @@ impl TaskCandidateExtractor {
                 Self::collect_evidence_for_item_ids(conn, &item_ids, opts.min_relationship_strength)?;
             ev.context_id = context_id;
             ev
-        } else if let Some(cid) = memory.context_id() {
+        } else if let Some(cid) = memory.context_id_str() {
             TaskEvidenceCollector::with_options(TaskEvidenceCollectorOptions {
                 min_relationship_strength: opts.min_relationship_strength,
                 ..Default::default()

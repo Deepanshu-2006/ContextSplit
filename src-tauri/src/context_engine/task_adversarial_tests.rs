@@ -109,7 +109,7 @@ mod tests {
         }
 
         // Must NOT force a confident task
-        assert_eq!(memory.current_task_title(), "Unknown");
+        assert_eq!(memory.active_task_title(), "Unknown");
         assert!(!memory.has_confident_task());
     }
 
@@ -281,7 +281,7 @@ mod tests {
         memory.update_from_ranked_candidate(top, "2026-09-13T10:00:00Z");
 
         assert!(memory.has_confident_task());
-        assert_eq!(memory.current_task_title(), top.candidate.title);
+        assert_eq!(memory.active_task_title(), top.candidate.title);
         assert_eq!(memory.context_name(), "Portfolio");
     }
 
@@ -401,7 +401,7 @@ mod tests {
             Some("ws-portfolio".to_string()),
         );
         memory.update_from_snapshot(&snap1, vec!["Figma hero design".to_string()]);
-        assert_eq!(memory.current_task_title(), "Hero animation");
+        assert_eq!(memory.active_task_title(), "Hero animation");
         assert_eq!(memory.task_history().len(), 0);
 
         // Phase 2: Switch to Case study writing
@@ -416,7 +416,7 @@ mod tests {
         memory.update_from_snapshot(&snap2, vec!["Notion draft".to_string()]);
 
         // Verifications
-        assert_eq!(memory.current_task_title(), "Case study writing");
+        assert_eq!(memory.active_task_title(), "Case study writing");
         assert_eq!(memory.task_history().len(), 1);
         assert_eq!(memory.task_history()[0].title, "Hero animation");
         assert_eq!(memory.context_name(), "Portfolio");
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(memory.context_confidence_band(), "High");
 
         // Task is Unknown
-        assert_eq!(memory.current_task_title(), "Unknown");
+        assert_eq!(memory.active_task_title(), "Unknown");
         assert!(!memory.has_confident_task());
         assert_eq!(memory.task_confidence_band(), "Insufficient");
     }
@@ -667,7 +667,7 @@ mod tests {
 
         let ctx = ContextReference::workspace(&ws.id, &ws.name);
         let memory = ContextMemory::new(Some(ctx), 0.50, "2026-09-13T10:00:00Z");
-        assert_eq!(memory.current_task_title(), "Unknown");
+        assert_eq!(memory.active_task_title(), "Unknown");
         assert!(!memory.has_confident_task());
     }
 

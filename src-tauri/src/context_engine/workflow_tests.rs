@@ -2176,6 +2176,13 @@ mod tests {
         let ws_portfolio = operations::create_workspace(&conn, "Portfolio").unwrap();
 
         let session_1 = engine.get_or_update_active_session(&conn).unwrap();
+        crate::context_engine::temporal::update_temporal_decay_config(
+            &conn,
+            &crate::context_engine::temporal::TemporalDecayConfig {
+                strategy: "none".to_string(),
+                ..Default::default()
+            },
+        ).unwrap();
 
         // Seed initial reference items to establish workspace profiles
         let seed_col = operations::create_item(
