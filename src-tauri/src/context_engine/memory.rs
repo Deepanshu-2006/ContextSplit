@@ -1,15 +1,16 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::context_engine::task_evidence::TaskEvidenceCollector;
-use crate::context_engine::task_extractor::{is_generic_task_name, TaskCandidateExtractor};
-use crate::context_engine::task_ranking::{RankedTaskCandidate, TaskAmbiguityState, TaskCandidateRanker};
+use crate::context_engine::task_extractor::is_generic_task_name;
+use crate::context_engine::task_ranking::{RankedTaskCandidate, TaskAmbiguityState};
 use crate::context_engine::task_transitions::{
     DetectedTaskTransition, TaskSnapshot, TaskTransitionType,
 };
-use crate::context_engine::transitions::{ContextReference, ContextSnapshot};
+use crate::context_engine::transitions::{
+    ContextReference, ContextSnapshot,
+};
 
 // =========================================================================
 // Helpers for Domain and App Normalization
@@ -156,6 +157,31 @@ pub struct MemoryActivitySequenceEntry {
     pub provenance: InformationProvenance,
     /// Relevant entity ID (item_id, transition_id, task_id)
     pub reference_id: Option<String>,
+}
+
+/// Activity state of the context within memory reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMemoryActivityState {
+    /// Active working session within the last hour.
+    Active,
+    /// Recently active within the past 24 hours.
+    RecentlyActive,
+    /// Dormant context with no recent activity or explicitly marked dormant.
+    Dormant,
+    /// Brand new context or insufficient data to reconstruct working activity.
+    InsufficientEvidence,
+}
+
+impl ContextMemoryActivityState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::RecentlyActive => "recently_active",
+            Self::Dormant => "dormant",
+            Self::InsufficientEvidence => "insufficient_evidence",
+        }
+    }
 }
 
 // =========================================================================
@@ -460,6 +486,8 @@ pub struct ContextMemory {
     pub current_task_title: Option<String>,
     /// Current task confidence score [0.0, 1.0] (nullable: None if insufficient)
     pub current_task_confidence: Option<f64>,
+    /// Epistemic source of current task (Confirmed by user, Inferred by engine)
+    pub current_task_provenance: Option<InformationProvenance>,
     /// Calibrated confidence score for the context container itself [0.0, 1.0]
     pub current_context_confidence: f64,
     /// Qualitative confidence band for context ("High", "Medium", "Low", "None")
@@ -482,6 +510,10 @@ pub struct ContextMemory {
     pub activity_sequence: Vec<MemoryActivitySequenceEntry>,
     /// When this memory snapshot was derived/updated
     pub memory_updated_at: String,
+    /// Activity state of the context ("active", "recently_active", "dormant", "insufficient_evidence")
+    pub activity_state: ContextMemoryActivityState,
+    /// Reconstructed working memory statement answering "What was the user working on?"
+    pub memory_statement: String,
 
     // Backward-compatibility / helper state:
     /// Inferred task state with detailed evidence lines (for legacy callers)
@@ -525,10 +557,11 @@ impl ContextMemory {
 
         Self {
             context_id: ctx_id,
-            context_name: ctx_name,
+            context_name: ctx_name.clone(),
             current_task_id: None,
             current_task_title: None,
             current_task_confidence: None,
+            current_task_provenance: None,
             current_context_confidence: context_confidence,
             context_confidence_band: band.to_string(),
             context_provenance: InformationProvenance::Confirmed,
@@ -540,6 +573,8 @@ impl ContextMemory {
             recent_context_transition: None,
             activity_sequence: Vec::new(),
             memory_updated_at: timestamp.to_string(),
+            activity_state: ContextMemoryActivityState::InsufficientEvidence,
+            memory_statement: format!("No recent activity recorded in {}.", ctx_name),
 
             context,
             current_task: InferredTaskState::unknown(),
@@ -569,6 +604,7 @@ impl ContextMemory {
         if task.is_confident && task.title != "Unknown" {
             self.current_task_title = Some(task.title.clone());
             self.current_task_confidence = Some(task.confidence);
+            self.current_task_provenance = Some(InformationProvenance::Inferred);
             let mem_task = MemoryTaskReference {
                 id: None,
                 title: task.title.clone(),
@@ -584,9 +620,12 @@ impl ContextMemory {
             };
             self.last_active_task = Some(mem_task.clone());
             self.recent_tasks = vec![mem_task];
+            self.activity_state = ContextMemoryActivityState::Active;
+            self.memory_statement = format!("You are working on {}.", task.title);
         } else {
             self.current_task_title = None;
             self.current_task_confidence = None;
+            self.current_task_provenance = None;
         }
         self.current_task = task;
         self
@@ -634,6 +673,18 @@ impl ContextMemory {
         self
     }
 
+    /// Fluent builder to set activity state.
+    pub fn with_activity_state(mut self, state: ContextMemoryActivityState) -> Self {
+        self.activity_state = state;
+        self
+    }
+
+    /// Fluent builder to set memory statement.
+    pub fn with_memory_statement(mut self, statement: impl Into<String>) -> Self {
+        self.memory_statement = statement.into();
+        self
+    }
+
     // =========================================================================
     // Core Derivation from Existing Database Evidence
     // =========================================================================
@@ -644,11 +695,223 @@ impl ContextMemory {
         conn: &Connection,
         workspace_id: &str,
     ) -> Result<Self, String> {
+        ContextMemoryBuilder::from_db(conn, workspace_id)?.build()
+    }
+
+    /// Derives the currently active contextual working memory across the entire system.
+    pub fn derive_active(conn: &Connection) -> Result<Option<Self>, String> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM workspaces 
+             WHERE lifecycle_state != 'archived' 
+             ORDER BY COALESCE(last_activity_at, updated_at) DESC LIMIT 1",
+        ).map_err(|e| e.to_string())?;
+
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let ws_id: String = row.get(0).map_err(|e| e.to_string())?;
+            Self::derive_for_workspace(conn, &ws_id).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+// =========================================================================
+// ContextMemoryBuilder: Working Memory Reconstruction Engine
+// =========================================================================
+
+/// Builder and reconstruction engine that derives `ContextMemory` snapshots
+/// answering "What was the user working on?" from existing multi-modal data.
+#[derive(Debug, Clone)]
+pub struct ContextMemoryBuilder {
+    pub workspace_id: String,
+    pub workspace: Option<crate::db::models::Workspace>,
+    pub items: Vec<crate::db::models::Item>,
+    pub memberships: Vec<crate::db::models::ContextMembership>,
+    pub segments: Vec<crate::context_engine::segments::ContextActivitySegment>,
+    pub context_transitions: Vec<crate::db::models::ContextTransition>,
+    pub task_candidates: Vec<crate::db::models::TaskCandidate>,
+    pub task_transitions: Vec<crate::context_engine::task_transitions::DetectedTaskTransition>,
+    pub evidence_set: Option<crate::context_engine::task_evidence::TaskEvidenceSet>,
+    pub activity_summary: Option<crate::context_engine::summary::ContextActivitySummary>,
+    pub now: DateTime<Utc>,
+}
+
+impl ContextMemoryBuilder {
+    pub fn new(workspace_id: impl Into<String>) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            workspace: None,
+            items: Vec::new(),
+            memberships: Vec::new(),
+            segments: Vec::new(),
+            context_transitions: Vec::new(),
+            task_candidates: Vec::new(),
+            task_transitions: Vec::new(),
+            evidence_set: None,
+            activity_summary: None,
+            now: Utc::now(),
+        }
+    }
+
+    pub fn with_workspace(mut self, ws: crate::db::models::Workspace) -> Self {
+        self.workspace_id = ws.id.clone();
+        self.workspace = Some(ws);
+        self
+    }
+
+    pub fn with_items(mut self, items: Vec<crate::db::models::Item>) -> Self {
+        self.items = items;
+        self
+    }
+
+    pub fn with_memberships(mut self, memberships: Vec<crate::db::models::ContextMembership>) -> Self {
+        self.memberships = memberships;
+        self
+    }
+
+    pub fn with_segments(mut self, segments: Vec<crate::context_engine::segments::ContextActivitySegment>) -> Self {
+        self.segments = segments;
+        self
+    }
+
+    pub fn with_context_transitions(mut self, transitions: Vec<crate::db::models::ContextTransition>) -> Self {
+        self.context_transitions = transitions;
+        self
+    }
+
+    pub fn with_task_candidates(mut self, candidates: Vec<crate::db::models::TaskCandidate>) -> Self {
+        self.task_candidates = candidates;
+        self
+    }
+
+    pub fn with_task_transitions(mut self, transitions: Vec<crate::context_engine::task_transitions::DetectedTaskTransition>) -> Self {
+        self.task_transitions = transitions;
+        self
+    }
+
+    pub fn with_evidence_set(mut self, evidence: crate::context_engine::task_evidence::TaskEvidenceSet) -> Self {
+        self.evidence_set = Some(evidence);
+        self
+    }
+
+    pub fn with_activity_summary(mut self, summary: crate::context_engine::summary::ContextActivitySummary) -> Self {
+        self.activity_summary = Some(summary);
+        self
+    }
+
+    pub fn with_now(mut self, now: DateTime<Utc>) -> Self {
+        self.now = now;
+        self
+    }
+
+    pub fn from_db(conn: &Connection, workspace_id: &str) -> Result<Self, String> {
         let ws = crate::db::operations::get_workspace(conn, workspace_id)
             .map_err(|e| format!("Workspace '{}' not found: {}", workspace_id, e))?;
 
-        let now_iso = Utc::now().to_rfc3339();
-        let context_confidence = match ws.lifecycle_state.as_str() {
+        // 1. Fetch Items
+        let mut item_stmt = conn.prepare(
+            "SELECT DISTINCT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+             FROM items i
+             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
+             WHERE i.workspace_id = ?1 OR cm.workspace_id = ?1
+             ORDER BY i.created_at DESC LIMIT 50",
+        ).map_err(|e| e.to_string())?;
+
+        let item_rows = item_stmt.query_map(params![workspace_id], |row| {
+            Ok(crate::db::models::Item {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                session_id: row.get(2)?,
+                item_type: row.get(3)?,
+                content: row.get(4)?,
+                title: row.get(5)?,
+                metadata: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        }).map_err(|e| e.to_string())?;
+
+        let mut items = Vec::new();
+        for item_res in item_rows {
+            if let Ok(item) = item_res {
+                items.push(item);
+            }
+        }
+
+        // 2. Fetch Memberships
+        let mut mem_stmt = conn.prepare(
+            "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
+             FROM context_memberships
+             WHERE workspace_id = ?1",
+        ).map_err(|e| e.to_string())?;
+
+        let mem_rows = mem_stmt.query_map(params![workspace_id], |row| {
+            Ok(crate::db::models::ContextMembership {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+                membership_type: row.get(3)?,
+                confidence: row.get(4)?,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        }).map_err(|e| e.to_string())?;
+
+        let mut memberships = Vec::new();
+        for m in mem_rows {
+            if let Ok(mem) = m {
+                memberships.push(mem);
+            }
+        }
+
+        // 3. Task Candidates
+        let task_candidates = crate::db::operations::list_task_candidates_for_context(conn, workspace_id)
+            .unwrap_or_default();
+
+        // 4. Context Transitions
+        let context_transitions = crate::db::operations::list_context_transitions_for_context(conn, workspace_id)
+            .unwrap_or_default();
+
+        // 5. Segments
+        let segments = crate::context_engine::segments::ContextActivitySegmenter::new()
+            .build_segments_for_workspace(conn, workspace_id)
+            .unwrap_or_default();
+
+        // 6. Evidence Set
+        let evidence_set = crate::context_engine::task_evidence::TaskEvidenceCollector::new()
+            .collect_for_context(conn, workspace_id)
+            .ok();
+
+        // 7. Activity Summary
+        let activity_summary = Some(
+            crate::context_engine::summary::ContextActivitySummaryService::new()
+                .summarize_segments(&segments, None, None),
+        );
+
+        Ok(Self {
+            workspace_id: workspace_id.to_string(),
+            workspace: Some(ws),
+            items,
+            memberships,
+            segments,
+            context_transitions,
+            task_candidates,
+            task_transitions: Vec::new(),
+            evidence_set,
+            activity_summary,
+            now: Utc::now(),
+        })
+    }
+
+    pub fn build(self) -> Result<ContextMemory, String> {
+        let ws_name = self.workspace.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| self.workspace_id.clone());
+        let lifecycle_state = self.workspace.as_ref().map(|w| w.lifecycle_state.clone()).unwrap_or_else(|| "active".to_string());
+        let created_at = self.workspace.as_ref().map(|w| w.created_at.clone()).unwrap_or_else(|| self.now.to_rfc3339());
+
+        let now_iso = self.now.to_rfc3339();
+        let context_confidence = match lifecycle_state.as_str() {
             "active" => 1.0,
             "dormant" => 0.5,
             "archived" => 0.2,
@@ -664,28 +927,12 @@ impl ContextMemory {
             "None"
         };
 
-        // 1. Fetch Items associated with this workspace
-        let mut item_stmt = conn.prepare(
-            "SELECT DISTINCT i.id, i.item_type, i.content, i.title, i.metadata, i.created_at,
-                    cm.membership_type
-             FROM items i
-             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
-             WHERE i.workspace_id = ?1 OR cm.workspace_id = ?1
-             ORDER BY i.created_at DESC LIMIT 20",
-        ).map_err(|e| e.to_string())?;
-
-        let item_rows = item_stmt.query_map(params![workspace_id], |row| {
-            let id: String = row.get(0)?;
-            let item_type: String = row.get(1)?;
-            let content: String = row.get(2)?;
-            let title: Option<String> = row.get(3)?;
-            let metadata_str: String = row.get(4)?;
-            let created_at: String = row.get(5)?;
-            let m_type: Option<String> = row.get(6)?;
-
+        // 1. Convert Items to MemoryItemReference
+        let mut recent_items: Vec<MemoryItemReference> = Vec::new();
+        for item in &self.items {
             let mut app_name = None;
             let mut domain = None;
-            if let Ok(meta) = serde_json::from_str::<Value>(&metadata_str) {
+            if let Ok(meta) = serde_json::from_str::<Value>(&item.metadata) {
                 if let Some(app) = meta.get("app_name").and_then(|v| v.as_str()).and_then(normalize_app_name) {
                     app_name = Some(app);
                 }
@@ -695,138 +942,149 @@ impl ContextMemory {
                     domain = extract_domain_from_url(url_str);
                 }
             }
-            if domain.is_none() && item_type == "url" {
-                domain = extract_domain_from_url(&content);
+            if domain.is_none() && item.item_type == "url" {
+                domain = extract_domain_from_url(&item.content);
             }
 
-            let provenance = match m_type.as_deref() {
+            let mem = self.memberships.iter().find(|m| m.item_id == item.id);
+            let provenance = match mem.map(|m| m.membership_type.as_str()) {
                 Some("confirmed") => InformationProvenance::Confirmed,
-                Some("suggested") => InformationProvenance::Inferred,
+                Some("suggested") | Some("inferred") => InformationProvenance::Inferred,
                 _ => InformationProvenance::Observed,
             };
 
-            let display_title = title.or_else(|| {
-                if content.len() > 60 {
-                    Some(format!("{}...", &content[..60]))
-                } else if !content.trim().is_empty() {
-                    Some(content)
+            let display_title = item.title.clone().or_else(|| {
+                if item.content.len() > 60 {
+                    Some(format!("{}...", &item.content[..60]))
+                } else if !item.content.trim().is_empty() {
+                    Some(item.content.clone())
                 } else {
                     None
                 }
             });
 
-            Ok(MemoryItemReference {
-                id,
-                title: display_title,
-                item_type,
-                timestamp: created_at,
-                provenance,
-                app_name,
-                domain,
-            })
-        }).map_err(|e| e.to_string())?;
-
-        let mut recent_items = Vec::new();
-        for item_res in item_rows {
-            if let Ok(item) = item_res {
-                if !recent_items.iter().any(|existing: &MemoryItemReference| existing.id == item.id) {
-                    recent_items.push(item);
-                }
+            if !recent_items.iter().any(|existing| existing.id == item.id) {
+                recent_items.push(MemoryItemReference {
+                    id: item.id.clone(),
+                    title: display_title,
+                    item_type: item.item_type.clone(),
+                    timestamp: item.created_at.clone(),
+                    provenance,
+                    app_name,
+                    domain,
+                });
             }
         }
+        recent_items.truncate(20);
 
-        // 2. Fetch Recent Context Transition
-        let mut trans_stmt = conn.prepare(
-            "SELECT id, from_context_id, to_context_id, transition_type, confidence, detected_at
-             FROM context_transitions
-             WHERE from_context_id = ?1 OR to_context_id = ?1
-             ORDER BY detected_at DESC LIMIT 1",
-        ).map_err(|e| e.to_string())?;
+        // 2. Context Transition
+        let recent_context_transition = self.context_transitions.first().map(|ct| MemoryTransitionReference {
+            id: Some(ct.id.clone()),
+            transition_type: ct.transition_type.to_string(),
+            from_context_id: ct.from_context_id.clone(),
+            from_context_name: None,
+            to_context_id: ct.to_context_id.clone(),
+            to_context_name: None,
+            confidence: ct.confidence,
+            detected_at: ct.detected_at.clone(),
+            provenance: InformationProvenance::Inferred,
+        });
 
-        let mut trans_rows = trans_stmt.query_map(params![workspace_id], |row| {
-            let id: String = row.get(0)?;
-            let from_id: Option<String> = row.get(1)?;
-            let to_id: Option<String> = row.get(2)?;
-            let t_type: String = row.get(3)?;
-            let conf: f64 = row.get(4)?;
-            let det_at: String = row.get(5)?;
-
-            Ok(MemoryTransitionReference {
-                id: Some(id),
-                transition_type: t_type,
-                from_context_id: from_id,
-                from_context_name: None,
-                to_context_id: to_id,
-                to_context_name: None,
-                confidence: conf,
-                detected_at: det_at,
-                provenance: InformationProvenance::Inferred,
-            })
-        }).map_err(|e| e.to_string())?;
-
-        let recent_context_transition = trans_rows.next().and_then(|r| r.ok());
-
-        // 3. Last active timestamp
-        let mut last_active_at = ws.last_activity_at.clone();
-        if let Some(newest_item) = recent_items.first() {
-            if last_active_at.is_none() || last_active_at.as_deref() < Some(&newest_item.timestamp) {
-                last_active_at = Some(newest_item.timestamp.clone());
-            }
-        }
-        if let Some(trans) = &recent_context_transition {
-            if last_active_at.is_none() || last_active_at.as_deref() < Some(&trans.detected_at) {
-                last_active_at = Some(trans.detected_at.clone());
-            }
-        }
-
-        // 4. Task Candidates & Extraction
-        let persisted_candidates = crate::db::operations::list_task_candidates_for_context(conn, workspace_id)
-            .unwrap_or_default();
-
-        let (top_ranked, extracted_candidates) = match TaskEvidenceCollector::new().collect_for_context(conn, workspace_id) {
-            Ok(evidence_set) => {
-                let candidates = TaskCandidateExtractor::extract_from_evidence(&evidence_set, None);
-                if !candidates.is_empty() {
-                    let ranked = TaskCandidateRanker::rank_candidates(&candidates, Some(context_confidence), None);
-                    (ranked.top_candidate, candidates)
-                } else {
-                    (None, Vec::new())
-                }
-            }
-            Err(_) => (None, Vec::new()),
-        };
-
-        // Determine current task
+        // 3. Task Inference & Ranking
         let mut current_task_id = None;
         let mut current_task_title = None;
         let mut current_task_confidence = None;
-        let mut current_task_state = InferredTaskState::unknown();
         let mut current_task_provenance = InformationProvenance::Inferred;
+        let mut current_task_state = InferredTaskState::unknown();
+        let mut recent_tasks: Vec<MemoryTaskReference> = Vec::new();
 
-        if let Some(top) = top_ranked.as_ref() {
-            let is_confident = top.confidence >= 0.45 && !is_generic_task_name(&top.candidate.title);
-            if is_confident {
-                current_task_title = Some(top.candidate.title.clone());
-                current_task_confidence = Some(top.confidence);
+        // Priority 1: User-confirmed / Active Task Candidate
+        let mut extracted_candidates = Vec::new();
+        let confirmed_candidate = self.task_candidates.iter().find(|tc| {
+            (tc.status == crate::db::models::TaskCandidateStatus::Active
+                || tc.status.as_str() == "confirmed")
+                && tc.confidence >= 0.50
+                && !is_generic_task_name(&tc.title)
+        });
 
-                // Look for matching persisted candidate
-                if let Some(matched_persisted) = persisted_candidates.iter().find(|pc| pc.title.eq_ignore_ascii_case(&top.candidate.title)) {
-                    current_task_id = Some(matched_persisted.id.clone());
-                    if matched_persisted.status.as_str() == "active" || matched_persisted.status.as_str() == "confirmed" {
-                        current_task_provenance = InformationProvenance::Confirmed;
-                    }
+        if let Some(cand) = confirmed_candidate {
+            current_task_id = Some(cand.id.clone());
+            current_task_title = Some(cand.title.clone());
+            current_task_confidence = Some(cand.confidence);
+            current_task_provenance = InformationProvenance::Confirmed;
+            current_task_state = InferredTaskState::new(
+                &cand.title,
+                None,
+                None,
+                cand.confidence,
+                vec![format!("User-confirmed active task: '{}'", cand.title)],
+                &cand.last_active_at,
+                Some(self.workspace_id.clone()),
+            );
+            recent_tasks.push(MemoryTaskReference {
+                id: Some(cand.id.clone()),
+                title: cand.title.clone(),
+                action_verb: None,
+                target_subject: None,
+                confidence: cand.confidence,
+                confidence_band: TaskConfidenceBand::from_score(cand.confidence).as_str().to_string(),
+                provenance: InformationProvenance::Confirmed,
+                first_seen_at: Some(cand.first_detected_at.clone()),
+                last_active_at: Some(cand.last_active_at.clone()),
+                streak_count: 1,
+                status: Some(cand.status.as_str().to_string()),
+            });
+        } else {
+            // Priority 2: Extract & Rank Candidates from Evidence Set or Items
+            let rank_result = if let Some(evidence_set) = &self.evidence_set {
+                let candidates = crate::context_engine::task_extractor::TaskCandidateExtractor::extract_from_evidence(evidence_set, None);
+                crate::context_engine::task_ranking::TaskCandidateRanker::rank_candidates(&candidates, Some(context_confidence), None)
+            } else if !self.items.is_empty() {
+                let mut ev_set = crate::context_engine::task_evidence::TaskEvidenceSet::new(Some(self.workspace_id.clone()), None);
+                for item in &self.items {
+                    let ev = crate::context_engine::task_evidence::TaskEvidence::observed_item_content(
+                        &item.id,
+                        item.title.as_deref(),
+                        &item.content,
+                        &item.item_type,
+                        Some(&item.created_at),
+                    );
+                    ev_set.add_evidence(ev);
                 }
+                let candidates = crate::context_engine::task_extractor::TaskCandidateExtractor::extract_from_evidence(&ev_set, None);
+                crate::context_engine::task_ranking::TaskCandidateRanker::rank_candidates(&candidates, Some(context_confidence), None)
+            } else {
+                crate::context_engine::task_ranking::TaskRankingResult {
+                    ranked_candidates: Vec::new(),
+                    top_candidate: None,
+                    ambiguity_state: crate::context_engine::task_ranking::TaskAmbiguityState::InsufficientEvidence,
+                    context_id: Some(self.workspace_id.clone()),
+                    context_confidence: Some(context_confidence),
+                    total_candidates_evaluated: 0,
+                }
+            };
 
-                current_task_state = InferredTaskState::from_ranked(
-                    top,
-                    Some(workspace_id.to_string()),
-                    &now_iso,
-                );
+            for r in &rank_result.ranked_candidates {
+                extracted_candidates.push(r.candidate.clone());
+            }
+
+            if let Some(top) = &rank_result.top_candidate {
+                let is_generic = is_generic_task_name(&top.candidate.title);
+                let is_confident = top.confidence >= 0.45 && !is_generic && rank_result.ambiguity_state == crate::context_engine::task_ranking::TaskAmbiguityState::ClearLeader;
+
+                if is_confident {
+                    current_task_title = Some(top.candidate.title.clone());
+                    current_task_confidence = Some(top.confidence);
+                    current_task_provenance = InformationProvenance::Inferred;
+                    current_task_state = InferredTaskState::from_ranked(
+                        top,
+                        Some(self.workspace_id.clone()),
+                        &now_iso,
+                    );
+                }
             }
         }
 
-        // Build recent_tasks
-        let mut recent_tasks = Vec::new();
         if let Some(title) = &current_task_title {
             recent_tasks.push(MemoryTaskReference {
                 id: current_task_id.clone(),
@@ -843,8 +1101,7 @@ impl ContextMemory {
             });
         }
 
-        // Add other persisted candidates
-        for pc in &persisted_candidates {
+        for pc in &self.task_candidates {
             if !recent_tasks.iter().any(|t| t.title.eq_ignore_ascii_case(&pc.title)) {
                 let prov = if pc.status.as_str() == "active" || pc.status.as_str() == "confirmed" {
                     InformationProvenance::Confirmed
@@ -867,7 +1124,6 @@ impl ContextMemory {
             }
         }
 
-        // Add other extracted candidates
         for ec in &extracted_candidates {
             if !recent_tasks.iter().any(|t| t.title.eq_ignore_ascii_case(&ec.title)) {
                 recent_tasks.push(MemoryTaskReference {
@@ -887,14 +1143,85 @@ impl ContextMemory {
         }
         recent_tasks.truncate(5);
 
-        // Determine last active task
-        let last_active_task = if recent_tasks.len() > 1 {
-            Some(recent_tasks[1].clone())
+        let last_active_task = if recent_tasks.len() > 1 && current_task_title.is_some() {
+            Some(recent_tasks[0].clone())
         } else {
             recent_tasks.first().cloned()
         };
 
-        // 5. Activity sequence
+        // 4. Determine last_active_at
+        let mut last_active_at = self.workspace.as_ref().and_then(|w| w.last_activity_at.clone());
+        for item in &recent_items {
+            if last_active_at.as_deref().map(|curr| item.timestamp.as_str() > curr).unwrap_or(true) {
+                last_active_at = Some(item.timestamp.clone());
+            }
+        }
+        if let Some(trans) = &recent_context_transition {
+            if last_active_at.as_deref().map(|curr| trans.detected_at.as_str() > curr).unwrap_or(true) {
+                last_active_at = Some(trans.detected_at.clone());
+            }
+        }
+        for seg in &self.segments {
+            if last_active_at.as_deref().map(|curr| seg.ended_at.as_str() > curr).unwrap_or(true) {
+                last_active_at = Some(seg.ended_at.clone());
+            }
+        }
+
+        // 5. Activity State Classification
+        let activity_state = if lifecycle_state == "dormant" || lifecycle_state == "archived" {
+            ContextMemoryActivityState::Dormant
+        } else if recent_items.is_empty() && recent_context_transition.is_none() && self.task_candidates.is_empty() && self.segments.is_empty() {
+            ContextMemoryActivityState::InsufficientEvidence
+        } else if let Some(last_ts) = &last_active_at {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(last_ts) {
+                let elapsed_secs = (self.now - dt.with_timezone(&Utc)).num_seconds().max(0);
+                if elapsed_secs <= 3600 {
+                    ContextMemoryActivityState::Active
+                } else if elapsed_secs <= 86400 {
+                    ContextMemoryActivityState::RecentlyActive
+                } else {
+                    ContextMemoryActivityState::Dormant
+                }
+            } else {
+                ContextMemoryActivityState::RecentlyActive
+            }
+        } else {
+            ContextMemoryActivityState::InsufficientEvidence
+        };
+
+        // 6. Natural Language Memory Statement ("What was the user working on?")
+        let memory_statement = match (&current_task_title, activity_state) {
+            (Some(task), ContextMemoryActivityState::Active) => {
+                format!("You are working on {}.", task)
+            }
+            (Some(task), ContextMemoryActivityState::RecentlyActive) => {
+                format!("You were working on {}.", task)
+            }
+            (Some(task), ContextMemoryActivityState::Dormant) => {
+                format!("Context is dormant. You previously worked on {}.", task)
+            }
+            (Some(task), ContextMemoryActivityState::InsufficientEvidence) => {
+                format!("You were working on {}.", task)
+            }
+            (None, ContextMemoryActivityState::Active) => {
+                format!("You are active in {}.", ws_name)
+            }
+            (None, ContextMemoryActivityState::RecentlyActive) => {
+                format!("You were recently active in {}.", ws_name)
+            }
+            (None, ContextMemoryActivityState::Dormant) => {
+                if let Some(ts) = &last_active_at {
+                    format!("Context is dormant. Last activity was recorded on {}.", ts)
+                } else {
+                    "Context is dormant.".to_string()
+                }
+            }
+            (None, ContextMemoryActivityState::InsufficientEvidence) => {
+                format!("No recent activity recorded in {}.", ws_name)
+            }
+        };
+
+        // 7. Activity Sequence
         let mut activity_sequence = Vec::new();
         if let Some(trans) = &recent_context_transition {
             activity_sequence.push(MemoryActivitySequenceEntry {
@@ -903,6 +1230,15 @@ impl ContextMemory {
                 timestamp: trans.detected_at.clone(),
                 provenance: trans.provenance,
                 reference_id: trans.id.clone(),
+            });
+        }
+        for trans in &self.task_transitions {
+            activity_sequence.push(MemoryActivitySequenceEntry {
+                entry_type: "task_transition".to_string(),
+                description: format!("Task transition: {} -> {}", trans.from_task.as_deref().unwrap_or("None"), trans.to_task.as_deref().unwrap_or("None")),
+                timestamp: trans.timestamp.clone(),
+                provenance: InformationProvenance::Inferred,
+                reference_id: Some(trans.id.clone()),
             });
         }
         for item in recent_items.iter().take(5) {
@@ -930,41 +1266,80 @@ impl ContextMemory {
         }
         activity_sequence.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-        // 6. Recent activity summary string
-        let recent_activity = if recent_items.is_empty() && recent_context_transition.is_none() && current_task_title.is_none() {
-            "No activity recorded yet in this context.".to_string()
-        } else if ws.lifecycle_state == "dormant" {
-            let last_ts = last_active_at.as_deref().unwrap_or("unknown date");
-            format!("Context is dormant. Last activity was recorded on {}.", last_ts)
-        } else if let Some(title) = &current_task_title {
-            let conf_pct = (current_task_confidence.unwrap_or(0.0) * 100.0) as u32;
-            if recent_items.is_empty() {
-                format!("Active working on '{}' ({}% confidence).", title, conf_pct)
-            } else {
-                format!(
-                    "Active working on '{}' ({}% confidence) with {} recent item{}.",
-                    title,
-                    conf_pct,
-                    recent_items.len(),
-                    if recent_items.len() == 1 { "" } else { "s" }
-                )
+        // 8. Recent Activity Summary String
+        let recent_activity = match (&current_task_title, activity_state) {
+            (Some(title), ContextMemoryActivityState::Active) => {
+                let conf_pct = (current_task_confidence.unwrap_or(0.0) * 100.0) as u32;
+                if recent_items.is_empty() {
+                    format!("Active working on '{}' ({}% confidence).", title, conf_pct)
+                } else {
+                    format!(
+                        "Active working on '{}' ({}% confidence) with {} recent item{}.",
+                        title,
+                        conf_pct,
+                        recent_items.len(),
+                        if recent_items.len() == 1 { "" } else { "s" }
+                    )
+                }
             }
-        } else {
-            format!(
-                "Active with {} recent item{}. Current task is still emerging.",
-                recent_items.len(),
-                if recent_items.len() == 1 { "" } else { "s" }
-            )
+            (Some(title), ContextMemoryActivityState::RecentlyActive) => {
+                let conf_pct = (current_task_confidence.unwrap_or(0.0) * 100.0) as u32;
+                if recent_items.is_empty() {
+                    format!("Recently worked on '{}' ({}% confidence).", title, conf_pct)
+                } else {
+                    format!(
+                        "Recently worked on '{}' ({}% confidence) with {} recent item{}.",
+                        title,
+                        conf_pct,
+                        recent_items.len(),
+                        if recent_items.len() == 1 { "" } else { "s" }
+                    )
+                }
+            }
+            (Some(title), ContextMemoryActivityState::Dormant) => {
+                let last_ts = last_active_at.as_deref().unwrap_or("unknown date");
+                format!("Context is dormant. Previously worked on '{}' (last active {}).", title, last_ts)
+            }
+            (None, ContextMemoryActivityState::Dormant) => {
+                let last_ts = last_active_at.as_deref().unwrap_or("unknown date");
+                format!("Context is dormant. Last activity was recorded on {}.", last_ts)
+            }
+            (None, ContextMemoryActivityState::Active) => {
+                if recent_items.is_empty() {
+                    format!("Active in {}.", ws_name)
+                } else {
+                    format!(
+                        "Active in {} with {} recent item{}.",
+                        ws_name,
+                        recent_items.len(),
+                        if recent_items.len() == 1 { "" } else { "s" }
+                    )
+                }
+            }
+            (None, ContextMemoryActivityState::RecentlyActive) => {
+                if recent_items.is_empty() {
+                    format!("Recently active in {}.", ws_name)
+                } else {
+                    format!(
+                        "Recently active in {} with {} recent item{}.",
+                        ws_name,
+                        recent_items.len(),
+                        if recent_items.len() == 1 { "" } else { "s" }
+                    )
+                }
+            }
+            _ => "No activity recorded yet in this context.".to_string(),
         };
 
-        let ctx_ref = ContextReference::workspace(&ws.id, &ws.name);
+        let ctx_ref = ContextReference::workspace(&self.workspace_id, &ws_name);
 
-        Ok(Self {
-            context_id: ws.id.clone(),
-            context_name: ws.name.clone(),
+        Ok(ContextMemory {
+            context_id: self.workspace_id.clone(),
+            context_name: ws_name,
             current_task_id,
-            current_task_title,
+            current_task_title: current_task_title.clone(),
             current_task_confidence,
+            current_task_provenance: if current_task_title.is_some() { Some(current_task_provenance) } else { None },
             current_context_confidence: context_confidence,
             context_confidence_band: confidence_band.to_string(),
             context_provenance: InformationProvenance::Confirmed,
@@ -976,39 +1351,26 @@ impl ContextMemory {
             recent_context_transition,
             activity_sequence,
             memory_updated_at: now_iso,
+            activity_state,
+            memory_statement,
 
             current_task: current_task_state,
             context: Some(ctx_ref),
             context_confidence,
             task_history: Vec::new(),
             context_history: Vec::new(),
-            max_history_depth: Self::DEFAULT_MAX_HISTORY_DEPTH,
-            first_seen_at: Some(ws.created_at),
+            max_history_depth: ContextMemory::DEFAULT_MAX_HISTORY_DEPTH,
+            first_seen_at: Some(created_at),
             session_id: None,
         })
     }
+}
 
-    /// Derives the currently active contextual working memory across the entire system.
-    pub fn derive_active(conn: &Connection) -> Result<Option<Self>, String> {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM workspaces 
-             WHERE lifecycle_state != 'archived' 
-             ORDER BY COALESCE(last_activity_at, updated_at) DESC LIMIT 1",
-        ).map_err(|e| e.to_string())?;
+// =========================================================================
+// Accessors & Queries
+// =========================================================================
 
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        if let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let ws_id: String = row.get(0).map_err(|e| e.to_string())?;
-            Self::derive_for_workspace(conn, &ws_id).map(Some)
-        } else {
-            Ok(None)
-        }
-    }
-
-    // =========================================================================
-    // Accessors & Queries
-    // =========================================================================
-
+impl ContextMemory {
     /// Returns the context reference if active.
     pub fn context_identity(&self) -> Option<&ContextReference> {
         self.context.as_ref()
@@ -1448,6 +1810,7 @@ impl ContextMemory {
             "current_task_id": self.current_task_id,
             "current_task_title": self.current_task_title,
             "current_task_confidence": self.current_task_confidence,
+            "current_task_provenance": self.current_task_provenance.map(|p| p.as_str()),
             "current_context_confidence": self.current_context_confidence,
             "context_confidence_band": self.context_confidence_band,
             "context_provenance": self.context_provenance,
@@ -1459,6 +1822,8 @@ impl ContextMemory {
             "recent_context_transition": self.recent_context_transition,
             "activity_sequence": self.activity_sequence,
             "memory_updated_at": self.memory_updated_at,
+            "activity_state": self.activity_state.as_str(),
+            "memory_statement": self.memory_statement,
             "context": self.context,
             "current_task": {
                 "title": self.active_task_title(),
@@ -1482,22 +1847,36 @@ impl ContextMemory {
 // Repository / Service Interface
 // =========================================================================
 
-/// Repository abstraction for deriving ContextMemory snapshots.
+/// Repository abstraction for deriving and reconstructing ContextMemory snapshots.
 pub trait ContextMemoryRepository: Send + Sync {
     /// Derives the contextual memory snapshot for a given workspace/context.
     fn derive_context_memory(&self, conn: &Connection, workspace_id: &str) -> Result<ContextMemory, String>;
 
     /// Derives the currently active global contextual memory snapshot across the app.
     fn derive_active_context_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String>;
+
+    /// Reconstructs the contextual working memory answering "What was the user working on?".
+    fn reconstruct_memory(&self, conn: &Connection, workspace_id: &str) -> Result<ContextMemory, String>;
+
+    /// Reconstructs the currently active global contextual working memory.
+    fn reconstruct_active_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String>;
 }
 
-/// Concrete stateless service providing ContextMemory derivation.
+/// Concrete stateless service providing ContextMemory derivation and reconstruction.
 #[derive(Debug, Default, Clone)]
 pub struct ContextMemoryService;
 
 impl ContextMemoryService {
     pub fn new() -> Self {
         Self
+    }
+
+    pub fn reconstruct_memory(&self, conn: &Connection, workspace_id: &str) -> Result<ContextMemory, String> {
+        ContextMemoryBuilder::from_db(conn, workspace_id)?.build()
+    }
+
+    pub fn reconstruct_active_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String> {
+        ContextMemory::derive_active(conn)
     }
 }
 
@@ -1508,6 +1887,14 @@ impl ContextMemoryRepository for ContextMemoryService {
 
     fn derive_active_context_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String> {
         ContextMemory::derive_active(conn)
+    }
+
+    fn reconstruct_memory(&self, conn: &Connection, workspace_id: &str) -> Result<ContextMemory, String> {
+        self.reconstruct_memory(conn, workspace_id)
+    }
+
+    fn reconstruct_active_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String> {
+        self.reconstruct_active_memory(conn)
     }
 }
 
@@ -2029,5 +2416,292 @@ Unknown";
 
         assert_eq!(memory.task_history().len(), 1);
         assert_eq!(memory.task_history()[0].title, "Hero animation");
+    }
+
+    #[test]
+    fn test_reconstruction_empty_context() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "New Workspace").unwrap();
+
+        let memory = ContextMemoryService::new()
+            .reconstruct_memory(&conn, &ws.id)
+            .unwrap();
+
+        assert_eq!(memory.context_id, ws.id);
+        assert_eq!(memory.context_name, "New Workspace");
+        assert_eq!(memory.activity_state, ContextMemoryActivityState::InsufficientEvidence);
+        assert_eq!(memory.memory_statement, "No recent activity recorded in New Workspace.");
+        assert_eq!(memory.active_task_title(), "Unknown");
+        assert!(!memory.has_confident_task());
+    }
+
+    #[test]
+    fn test_reconstruction_aurora_website_hero_animation() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // 1. Figma hero design
+        let i1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://figma.com/file/aurora-hero-design",
+            Some("Figma hero design"),
+            r#"{"app_name":"Figma","domain":"figma.com"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-14T11:45:00Z' WHERE id = ?1", rusqlite::params![i1.id]).unwrap();
+
+        // 2. React Hero component
+        let i2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "export const Hero = () => <motion.div animate={{ opacity: 1 }} />",
+            Some("React Hero component"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-14T11:48:00Z' WHERE id = ?1", rusqlite::params![i2.id]).unwrap();
+
+        // 3. Framer Motion animation
+        let i3 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Framer motion animation curve spring transition",
+            Some("Framer Motion animation"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-14T11:50:00Z' WHERE id = ?1", rusqlite::params![i3.id]).unwrap();
+
+        // 4. GitHub repository (generic tool capture)
+        let i4 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/website",
+            Some("GitHub repository"),
+            r#"{"app_name":"Google Chrome","domain":"github.com"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-14T11:52:00Z' WHERE id = ?1", rusqlite::params![i4.id]).unwrap();
+
+        // Confirmed task candidate: "Hero animation"
+        let cand = crate::db::models::TaskCandidate {
+            id: "task-hero-anim".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.90,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T11:45:00Z".to_string(),
+            last_active_at: "2026-09-14T11:52:00Z".to_string(),
+            created_at: "2026-09-14T11:45:00Z".to_string(),
+            updated_at: "2026-09-14T11:52:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .with_now(fixed_now)
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.activity_state, ContextMemoryActivityState::Active);
+        assert_eq!(memory.active_task_title(), "Hero animation");
+        assert_eq!(memory.memory_statement, "You are working on Hero animation.");
+        assert!(!memory.memory_statement.contains("GitHub"));
+    }
+
+    #[test]
+    fn test_reconstruction_weak_evidence_suppresses_generic_task() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Only 1 item: GitHub repository (generic tool without specific task)
+        let i = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/website",
+            Some("GitHub repository"),
+            r#"{"app_name":"Google Chrome","domain":"github.com"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = '2026-09-14T06:00:00Z' WHERE id = ?1", rusqlite::params![i.id]).unwrap();
+
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .with_now(fixed_now)
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.activity_state, ContextMemoryActivityState::RecentlyActive);
+        assert_eq!(memory.active_task_title(), "Unknown");
+        assert!(!memory.has_confident_task());
+        // Must say "You were recently active in Aurora Website.", NOT "You were working on GitHub."
+        assert_eq!(memory.memory_statement, "You were recently active in Aurora Website.");
+        assert!(!memory.memory_statement.to_lowercase().contains("github"));
+    }
+
+    #[test]
+    fn test_reconstruction_dormant_state() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Legacy Backend").unwrap();
+        crate::db::operations::update_workspace_lifecycle_state(&conn, &ws.id, "dormant").unwrap();
+
+        let cand = crate::db::models::TaskCandidate {
+            id: "task-db-mig".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Database migration".to_string(),
+            confidence: 0.85,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-01T10:00:00Z".to_string(),
+            last_active_at: "2026-09-01T12:00:00Z".to_string(),
+            created_at: "2026-09-01T10:00:00Z".to_string(),
+            updated_at: "2026-09-01T12:00:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.activity_state, ContextMemoryActivityState::Dormant);
+        assert!(memory.memory_statement.contains("dormant"));
+        assert!(memory.memory_statement.contains("Database migration"));
+    }
+
+    #[test]
+    fn test_reconstruction_recently_active_state() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Mobile App").unwrap();
+
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let cand = crate::db::models::TaskCandidate {
+            id: "task-push".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Implementing push notifications".to_string(),
+            confidence: 0.88,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T07:00:00Z".to_string(),
+            last_active_at: "2026-09-14T07:30:00Z".to_string(),
+            created_at: "2026-09-14T07:00:00Z".to_string(),
+            updated_at: "2026-09-14T07:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .with_now(fixed_now)
+            .build()
+            .unwrap();
+
+        assert_eq!(memory.activity_state, ContextMemoryActivityState::RecentlyActive);
+        assert_eq!(memory.memory_statement, "You were working on Implementing push notifications.");
+    }
+
+    #[test]
+    fn test_reconstruction_confirmed_task_priority() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "DevOps").unwrap();
+
+        // Confirmed active task
+        let cand = crate::db::models::TaskCandidate {
+            id: "task-k8s".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Kubernetes cluster migration".to_string(),
+            confidence: 0.95,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T11:00:00Z".to_string(),
+            last_active_at: "2026-09-14T11:30:00Z".to_string(),
+            created_at: "2026-09-14T11:00:00Z".to_string(),
+            updated_at: "2026-09-14T11:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        // New unconfirmed capture item
+        let _item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Drafting weekly team email update",
+            Some("Weekly Email"),
+            "{}",
+        ).unwrap();
+
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Must prioritize confirmed task
+        assert_eq!(memory.active_task_title(), "Kubernetes cluster migration");
+        assert_eq!(memory.current_task_provenance, Some(InformationProvenance::Confirmed));
+    }
+
+    #[test]
+    fn test_reconstruction_activity_segments_and_transitions() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Analytics").unwrap();
+
+        let t_switch = DetectedTaskTransition {
+            id: "trans-123".to_string(),
+            transition_type: TaskTransitionType::TaskSwitch,
+            from_task: Some("Old Task".to_string()),
+            to_task: Some("New Task".to_string()),
+            confidence: 0.90,
+            timestamp: "2026-09-14T11:00:00Z".to_string(),
+            context_id: Some(ws.id.clone()),
+            evidence: vec!["log.txt".to_string()],
+            trigger_item_id: None,
+            duration_seconds: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let builder = ContextMemoryBuilder::new(&ws.id)
+            .with_workspace(ws)
+            .with_task_transitions(vec![t_switch]);
+
+        let memory = builder.build().unwrap();
+        assert!(memory.activity_sequence.iter().any(|e| e.entry_type == "task_transition"));
+    }
+
+    #[test]
+    fn test_deterministic_reconstruction_with_frozen_clock() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Deterministic Lab").unwrap();
+
+        let fixed_now = chrono::DateTime::parse_from_rfc3339("2026-09-14T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let m1 = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .with_now(fixed_now)
+            .build()
+            .unwrap();
+
+        let m2 = ContextMemoryBuilder::from_db(&conn, &ws.id)
+            .unwrap()
+            .with_now(fixed_now)
+            .build()
+            .unwrap();
+
+        assert_eq!(m1, m2);
     }
 }

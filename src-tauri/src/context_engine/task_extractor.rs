@@ -144,6 +144,21 @@ static GENERIC_TASK_TERMS: &[&str] = &[
     "htm",
     "page",
     "search",
+    "github",
+    "repo",
+    "repository",
+    "git",
+    "chrome",
+    "google chrome",
+    "safari",
+    "firefox",
+    "figma",
+    "slack",
+    "notion",
+    "terminal",
+    "vscode",
+    "visual studio code",
+    "browser",
 ];
 
 /// Checks whether a phrase or title is purely generic.

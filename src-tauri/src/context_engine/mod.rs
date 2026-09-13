@@ -29,9 +29,9 @@ pub mod task_transitions;
 pub mod memory;
 
 pub use memory::{
-    ContextMemory, ContextMemoryRepository, ContextMemoryService, InferredTaskState,
-    InformationProvenance, MemoryActivitySequenceEntry, MemoryItemReference,
-    MemoryTaskReference, MemoryTransitionReference, TaskConfidenceBand,
+    ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryRepository,
+    ContextMemoryService, InferredTaskState, InformationProvenance, MemoryActivitySequenceEntry,
+    MemoryItemReference, MemoryTaskReference, MemoryTransitionReference, TaskConfidenceBand,
 };
 pub use task_evidence::{
     clean_window_title, extract_salient_terms, TaskEvidence, TaskEvidenceCollector,
