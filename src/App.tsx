@@ -18,7 +18,7 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 import "./App.css";
 
 function App() {
-  const { isLoading, loadWorkspaces, listenForClipboard } = useWorkspaceStore();
+  const { isLoading, loadWorkspaces, listenForClipboard, activeWorkspaceId } = useWorkspaceStore();
   const { checkForCandidates } = useDiscoveryStore();
   
   const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
@@ -104,7 +104,7 @@ function App() {
       <CaptureTarget />
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
-        <TopBar />
+        {activeWorkspaceId !== "inbox" && <TopBar />}
         <Canvas />
       </div>
       <DiscoveryNotificationCard />

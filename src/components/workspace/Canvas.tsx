@@ -1,10 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { BoxSelect, LayoutTemplate, Inbox, Clock, Trash2, LayoutList } from "lucide-react";
+import { BoxSelect, LayoutTemplate, Clock } from "lucide-react";
 import { ReactFlow, Background, BackgroundVariant, Node, applyNodeChanges, NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceStore } from "../../store/workspaceStore";
-import { useInboxStore } from "../../store/inboxStore";
 import { ItemNode } from "./nodes/ItemNode";
 import { InboxView } from "../inbox/InboxView";
 
@@ -17,9 +15,8 @@ export function Canvas() {
     workspaces, activeWorkspaceId, activeItems, 
     updateItemPositions, moveItemsToWorkspace,
     setIsDraggingCard, setHoveredWorkspaceId,
-    openTimeline, emptyInbox,
+    openTimeline,
   } = useWorkspaceStore();
-  const { viewMode, setViewMode } = useInboxStore();
   const activeWorkspace = workspaces.find((ws) => ws.id === activeWorkspaceId);
   const isInbox = activeWorkspaceId === "inbox";
 
@@ -140,14 +137,13 @@ export function Canvas() {
     [updateItemPositions, activeWorkspaceId, moveItemsToWorkspace]
   );
 
-  // If viewing Inbox and not in freeform Canvas mode, render the modern Sectioned/Timeline InboxView
-  if (isInbox && viewMode !== 'canvas') {
+  // If viewing Inbox, render the clean vertical InboxView
+  if (isInbox) {
     return (
       <InboxView
         items={activeItems}
         workspaces={workspaces}
         onMoveToWorkspace={(itemId, wsId) => moveItemsToWorkspace([itemId], wsId)}
-        onSelectCanvasView={() => setViewMode('canvas')}
       />
     );
   }
@@ -172,20 +168,9 @@ export function Canvas() {
     );
   }
 
-  const handleEmptyInbox = async () => {
-    const isConfirmed = await confirm(
-      "Are you sure you want to empty the inbox? All items in the inbox will be permanently deleted.",
-      { title: "Empty Inbox", kind: "warning" }
-    );
-    if (isConfirmed) {
-      await emptyInbox();
-    }
-  };
-
-  const title = isInbox ? "Inbox (Canvas Mode)" : activeWorkspace?.name;
-  const description = isInbox
-    ? "Your Inbox is empty. Captured items will appear here."
-    : "This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.";
+  const title = activeWorkspace?.name || "Workspace";
+  const description =
+    "This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.";
 
   return (
     <div className="flex-1 w-full h-full relative bg-[#FDFDFD] overflow-hidden flex flex-col">
@@ -220,28 +205,13 @@ export function Canvas() {
         {/* Floating Workspace Title & Actions */}
         <div className="absolute top-8 left-8 z-10 flex items-center gap-4">
           <div className="flex items-center gap-3 opacity-40 pointer-events-none">
-            {isInbox ? (
-              <Inbox size={20} strokeWidth={2} />
-            ) : (
-              <BoxSelect size={20} strokeWidth={2} />
-            )}
+            <BoxSelect size={20} strokeWidth={2} />
             <h1 className="text-2xl font-semibold tracking-tight text-gray-900">
               {title}
             </h1>
           </div>
 
-          {isInbox && (
-            <button
-              onClick={() => setViewMode('sections')}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white/95 hover:bg-white border border-black/10 rounded-lg text-xs font-semibold text-gray-700 hover:text-indigo-600 shadow-sm backdrop-blur-xs transition-all cursor-pointer pointer-events-auto"
-              title="Return to Sectioned Inbox"
-            >
-              <LayoutList size={13} className="text-indigo-600" />
-              <span>Sectioned View</span>
-            </button>
-          )}
-
-          {!isInbox && activeWorkspace && (
+          {activeWorkspace && (
             <button
               onClick={() => openTimeline(activeWorkspace.id)}
               className="flex items-center gap-1.5 px-2.5 py-1 bg-white/80 hover:bg-white border border-black/5 hover:border-black/10 rounded-lg text-xs font-medium text-slate-600 hover:text-indigo-600 shadow-2xs backdrop-blur-xs transition-all cursor-pointer pointer-events-auto"
@@ -253,30 +223,12 @@ export function Canvas() {
           )}
         </div>
 
-        {/* Floating Empty Inbox Trash Bin Button */}
-        {isInbox && activeItems.length > 0 && (
-          <div className="absolute bottom-6 right-6 z-20 pointer-events-auto">
-            <button
-              onClick={handleEmptyInbox}
-              className="flex items-center gap-2 px-3.5 py-2.5 bg-white/95 hover:bg-rose-50 text-gray-600 hover:text-rose-600 border border-gray-200/80 hover:border-rose-200 shadow-md hover:shadow-lg rounded-xl backdrop-blur-md transition-all duration-200 cursor-pointer group"
-              title="Empty Inbox"
-            >
-              <Trash2 size={16} className="text-gray-400 group-hover:text-rose-500 transition-colors" />
-              <span className="text-xs font-semibold tracking-wide">Empty Inbox</span>
-            </button>
-          </div>
-        )}
-
         {/* Empty State Overlay */}
         {activeItems.length === 0 && (
           <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8 z-10">
             <div className="flex flex-col items-center text-center opacity-40">
               <div className="w-12 h-12 rounded-xl bg-gray-50 flex items-center justify-center mb-4">
-                {isInbox ? (
-                  <Inbox className="text-gray-400" size={24} strokeWidth={1.5} />
-                ) : (
-                  <BoxSelect className="text-gray-400" size={24} strokeWidth={1.5} />
-                )}
+                <BoxSelect className="text-gray-400" size={24} strokeWidth={1.5} />
               </div>
               <p className="text-[13px] text-gray-500 max-w-60 leading-relaxed">
                 {description}
