@@ -22,6 +22,9 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCcw,
+  HelpCircle,
+  Sparkles,
+  Info,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
@@ -315,44 +318,6 @@ function ResumeMemoryOverviewContent({
   const lastActiveTimestamp = memory?.last_active_at || overview?.recent_activity;
   const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Recently active';
 
-  // Extract recent activity bullet items
-  const recentActivityBullets: string[] = useMemo(() => {
-    if (overview?.current_task?.recent_activity && overview.current_task.recent_activity.length > 0) {
-      return overview.current_task.recent_activity;
-    }
-    if (memory?.recent_items && memory.recent_items.length > 0) {
-      return memory.recent_items.slice(0, 3).map((item) => {
-        if (item.title) {
-          return item.title;
-        }
-        return `Saved ${item.item_type} in ${contextName}`;
-      });
-    }
-    return [];
-  }, [overview, memory, contextName]);
-
-  // Clean evidence for "Why?" explanation (no raw telemetry or IDs)
-  const explanationText = overview?.current_task?.explanation || memory?.memory_statement || (
-    isTaskAvailable
-      ? `Reconstructed from recent activity patterns and related resources in ${contextName}.`
-      : `Based on activity signals recorded in ${contextName}.`
-  );
-
-  const evidenceList: string[] = useMemo(() => {
-    const list: string[] = [];
-    if (memory?.evidence && memory.evidence.length > 0) {
-      for (const ev of memory.evidence) {
-        if (!list.includes(ev)) list.push(ev);
-      }
-    }
-    if (overview?.current_task?.evidence && overview.current_task.evidence.length > 0) {
-      for (const ev of overview.current_task.evidence) {
-        if (!list.includes(ev)) list.push(ev);
-      }
-    }
-    return list;
-  }, [memory, overview]);
-
   // 3-5 Recent items
   const recentItems: TimelineItemSummary[] = useMemo(() => {
     if (overview?.recent_items && overview.recent_items.length > 0) {
@@ -375,6 +340,56 @@ function ResumeMemoryOverviewContent({
 
   const recentItemsCount = recentItems.length;
 
+  // Extract recent activity bullet items
+  const recentActivityBullets: string[] = useMemo(() => {
+    if (overview?.current_task?.recent_activity && overview.current_task.recent_activity.length > 0) {
+      return overview.current_task.recent_activity;
+    }
+    if (memory?.recent_items && memory.recent_items.length > 0) {
+      return memory.recent_items.slice(0, 3).map((item) => {
+        if (item.title) {
+          return item.title;
+        }
+        return `Saved ${item.item_type} in ${contextName}`;
+      });
+    }
+    return [];
+  }, [overview, memory, contextName]);
+
+  // Memory explanation structures (without raw scores or technical internals)
+  const explanation = memory?.explanation;
+  const whyReasons: string[] = useMemo(() => {
+    if (explanation?.why_reasons && explanation.why_reasons.length > 0) {
+      return explanation.why_reasons;
+    }
+    const reasons: string[] = [];
+    if (recentItemsCount > 0) {
+      reasons.push(`${recentItemsCount} related recent item${recentItemsCount === 1 ? '' : 's'}`);
+    }
+    if (recentItemsCount > 1) {
+      reasons.push('semantic similarity between recent items');
+    }
+    if (contextName) {
+      reasons.push(`same ${contextName} context`);
+    }
+    if (isContextReturn) {
+      reasons.push(`returned to ${contextName} context`);
+    }
+    if (isTaskAvailable && taskProvenance === 'Inferred') {
+      reasons.push('task candidate remained active across sessions');
+    }
+    return reasons;
+  }, [explanation, recentItemsCount, contextName, isContextReturn, isTaskAvailable, taskProvenance]);
+
+  const explanationSummary = explanation?.summary || overview?.current_task?.explanation || memory?.memory_statement || (
+    isTaskAvailable
+      ? `Reconstructed from recent activity patterns and related resources in ${contextName}.`
+      : `Based on activity signals recorded in ${contextName}.`
+  );
+
+  const uncertaintyNote = explanation?.uncertainty_note;
+  const confidenceBand = explanation?.confidence_band || (isTaskAvailable ? (taskProvenance === 'Confirmed' ? 'Confirmed' : 'Inferred') : 'Contextual signal');
+
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
       {/* =================================================================== */}
@@ -394,15 +409,32 @@ function ResumeMemoryOverviewContent({
           )}
         </div>
 
-        {/* Focus & Subtitle */}
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
-              {taskTitle}
-            </h3>
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 border border-gray-200/60">
-              {isTaskAvailable ? taskProvenance : 'Confirmed'}
-            </span>
+        {/* Focus & Subtitle & Direct [Why?] Trigger */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
+                {taskTitle}
+              </h3>
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 border border-gray-200/60">
+                {isTaskAvailable ? taskProvenance : 'Confirmed'}
+              </span>
+            </div>
+
+            {/* Direct [Why?] trigger button */}
+            <button
+              onClick={() => setShowWhy(!showWhy)}
+              className={`inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-md transition-colors cursor-pointer border ${
+                showWhy
+                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                  : 'bg-gray-50 text-gray-600 hover:text-gray-900 hover:bg-gray-100 border-gray-200/80'
+              }`}
+              title="Explain how this memory was inferred"
+            >
+              <HelpCircle size={12} className={showWhy ? 'text-indigo-600' : 'text-gray-400'} />
+              <span>Why?</span>
+              {showWhy ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </button>
           </div>
 
           <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
@@ -412,14 +444,56 @@ function ResumeMemoryOverviewContent({
           </div>
 
           {!isTaskAvailable && (
-            <p className="text-xs text-gray-600 pt-1">
+            <p className="text-xs text-gray-600 pt-0.5">
               Recent activity suggests you were active here.
             </p>
+          )}
+
+          {/* Explainable Memory Section (Toggled by [Why?]) */}
+          {showWhy && (
+            <div className="mt-3 p-3.5 bg-slate-50/95 rounded-lg border border-slate-200/90 text-xs space-y-2.5 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-700 tracking-wide uppercase flex items-center gap-1.5">
+                  <Sparkles size={12} className="text-indigo-500" />
+                  Why?
+                </span>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-white text-slate-600 border border-slate-200 shadow-2xs">
+                  {confidenceBand}
+                </span>
+              </div>
+
+              {/* Supporting Reasons */}
+              {whyReasons.length > 0 && (
+                <ul className="space-y-1 text-slate-700 pl-0.5">
+                  {whyReasons.map((reason, idx) => (
+                    <li key={idx} className="flex items-start gap-2">
+                      <span className="text-indigo-500 font-bold">•</span>
+                      <span>{reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* Grounded Summary Text */}
+              {explanationSummary && (
+                <p className="text-[11px] text-slate-600 leading-relaxed pt-1 border-t border-slate-200/70">
+                  {explanationSummary}
+                </p>
+              )}
+
+              {/* Uncertainty Note (Honest epistemic confidence, never overclaiming) */}
+              {uncertaintyNote && (
+                <div className="flex items-start gap-1.5 pt-1 text-[11px] text-amber-800 bg-amber-50/80 p-2 rounded-md border border-amber-200/60">
+                  <Info size={12} className="flex-shrink-0 mt-0.5 text-amber-600" />
+                  <span>{uncertaintyNote}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
 
         {/* Item count line */}
-        <div className="text-xs text-gray-500 font-medium flex items-center gap-1.5">
+        <div className="text-xs text-gray-500 font-medium flex items-center gap-1.5 pt-1">
           <FileText size={13} className="text-gray-400" />
           <span>
             {recentItemsCount > 0
@@ -475,67 +549,32 @@ function ResumeMemoryOverviewContent({
               )}
             </div>
 
-            {/* Progressive "Why?" Disclosure */}
-            <div className="pt-2 border-t border-gray-100">
-              <button
-                onClick={() => setShowWhy(!showWhy)}
-                className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-800 transition-colors cursor-pointer py-0.5"
-              >
-                <span>Why?</span>
-                {showWhy ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-              </button>
-
-              {showWhy && (
-                <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-150 text-xs text-gray-600 space-y-2.5 animate-in fade-in duration-100">
-                  <p className="leading-relaxed text-gray-700">
-                    {explanationText}
-                  </p>
-
-                  {evidenceList.length > 0 && (
-                    <div className="space-y-1 pt-1">
-                      <div className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
-                        Grounding evidence
-                      </div>
-                      <ul className="space-y-1 text-gray-600">
-                        {evidenceList.map((ev, i) => (
-                          <li key={i} className="flex items-start gap-1.5">
-                            <span className="text-gray-400">•</span>
-                            <span>{ev}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Related applications & domains in quiet tags */}
-                  {((overview?.related_applications && overview.related_applications.length > 0) ||
-                    (overview?.important_domains && overview.important_domains.length > 0)) && (
-                    <div className="pt-1 flex flex-wrap gap-1.5">
-                      {overview?.related_applications?.map((app) => (
-                        <span
-                          key={app.name}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
-                        >
-                          <Laptop size={10} className="text-gray-400" />
-                          <span>{app.name}</span>
-                          <span className="text-gray-400">({app.item_count})</span>
-                        </span>
-                      ))}
-                      {overview?.important_domains?.map((dom) => (
-                        <span
-                          key={dom.domain}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-white border border-gray-200 text-gray-600"
-                        >
-                          <Globe size={10} className="text-gray-400" />
-                          <span>{dom.domain}</span>
-                          <span className="text-gray-400">({dom.item_count})</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+            {/* Related applications & domains in quiet tags */}
+            {((overview?.related_applications && overview.related_applications.length > 0) ||
+              (overview?.important_domains && overview.important_domains.length > 0)) && (
+              <div className="pt-2 border-t border-gray-100 flex flex-wrap gap-1.5">
+                {overview?.related_applications?.map((app) => (
+                  <span
+                    key={app.name}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-gray-50 border border-gray-200 text-gray-600"
+                  >
+                    <Laptop size={10} className="text-gray-400" />
+                    <span>{app.name}</span>
+                    <span className="text-gray-400">({app.item_count})</span>
+                  </span>
+                ))}
+                {overview?.important_domains?.map((dom) => (
+                  <span
+                    key={dom.domain}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-gray-50 border border-gray-200 text-gray-600"
+                  >
+                    <Globe size={10} className="text-gray-400" />
+                    <span>{dom.domain}</span>
+                    <span className="text-gray-400">({dom.item_count})</span>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

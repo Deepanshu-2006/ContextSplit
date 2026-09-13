@@ -32,6 +32,15 @@ export interface MemoryTaskReference {
   status?: string | null;
 }
 
+export interface MemoryExplanation {
+  summary: string;
+  why_reasons: string[];
+  supporting_evidence: string[];
+  confidence_band: string;
+  provenance: InformationProvenance;
+  uncertainty_note?: string | null;
+}
+
 export interface ContextMemoryResponse {
   context_id: string;
   context: string;
@@ -47,6 +56,7 @@ export interface ContextMemoryResponse {
   is_context_return?: boolean;
   evidence: string[];
   memory_statement: string;
+  explanation?: MemoryExplanation | null;
 }
 
 export interface LastActiveTaskResponse {
@@ -149,6 +159,7 @@ export interface HistoricalContextMemoryResponse {
   meaningful_activity_segments: WorkSequenceEntry[];
   has_sufficient_evidence: boolean;
   summary_statement: string;
+  explanation?: MemoryExplanation | null;
 }
 
 /**

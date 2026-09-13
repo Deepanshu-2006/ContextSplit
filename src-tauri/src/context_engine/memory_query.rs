@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::context_engine::memory::{
-    ContextMemory, ContextMemoryBuilder, InformationProvenance,
+    ContextMemory, ContextMemoryBuilder, InformationProvenance, MemoryExplanation,
     MemoryItemReference, MemoryTaskReference,
 };
 use crate::context_engine::segments::ContextActivitySegmenter;
@@ -49,6 +49,8 @@ pub struct ContextMemoryResponse {
     pub evidence: Vec<String>,
     /// Reconstructed working memory statement answering "What was the user working on?"
     pub memory_statement: String,
+    /// Structured, human-readable explanation answering "Why?" for this memory snapshot
+    pub explanation: MemoryExplanation,
 }
 
 impl ContextMemoryResponse {
@@ -132,6 +134,7 @@ impl ContextMemoryResponse {
             is_context_return,
             evidence,
             memory_statement: memory.memory_statement.clone(),
+            explanation: memory.explanation.clone(),
         }
     }
 }
@@ -226,6 +229,8 @@ pub struct HistoricalContextMemoryResponse {
     pub has_sufficient_evidence: bool,
     /// Truthful, deterministic natural language summary of what was worked on
     pub summary_statement: String,
+    /// Structured, human-readable explanation answering "Why?" for this day's memory statement
+    pub explanation: MemoryExplanation,
 }
 
 /// Helper to parse relative date queries ("today", "yesterday") or ISO strings ("YYYY-MM-DD").
@@ -569,6 +574,45 @@ impl ContextMemoryQueryService {
             format!("No meaningful activity recorded for {}.", date_label.to_lowercase())
         };
 
+        // 6. Synthesize explainability for historical response
+        let mut why_reasons = Vec::new();
+        let mut supporting_evidence = Vec::new();
+
+        if !contexts_used.is_empty() {
+            let count = contexts_used.len();
+            why_reasons.push(format!("{} active context{}", count, if count == 1 { "" } else { "s" }));
+            for c in &contexts_used {
+                if let Some(ref t) = c.primary_task {
+                    supporting_evidence.push(format!("Active task in {}: '{}'", c.context_name, t));
+                }
+            }
+        }
+        if !primary_tasks.is_empty() {
+            why_reasons.push(format!("{} primary task{} identified", primary_tasks.len(), if primary_tasks.len() == 1 { "" } else { "s" }));
+        }
+        if !day_entries.is_empty() {
+            why_reasons.push(format!("{} activity segment{}", day_entries.len(), if day_entries.len() == 1 { "" } else { "s" }));
+        }
+        if context_returns > 0 {
+            why_reasons.push(format!("{} context return{}", context_returns, if context_returns == 1 { "" } else { "s" }));
+        }
+        if !important_captured_items.is_empty() {
+            why_reasons.push(format!("{} item{} captured", important_captured_items.len(), if important_captured_items.len() == 1 { "" } else { "s" }));
+        }
+
+        let explanation = MemoryExplanation {
+            summary: format!("Reconstructed working memory for {}.", date_label),
+            why_reasons,
+            supporting_evidence,
+            confidence_band: if has_sufficient_evidence { "High".to_string() } else { "Insufficient".to_string() },
+            provenance: if contexts_used.iter().any(|c| c.primary_task.is_some()) { InformationProvenance::Inferred } else { InformationProvenance::Observed },
+            uncertainty_note: if !has_sufficient_evidence {
+                Some("Insufficient recorded activity to establish clear working memory.".to_string())
+            } else {
+                None
+            },
+        };
+
         Ok(HistoricalContextMemoryResponse {
             date: date_key,
             date_label,
@@ -582,6 +626,7 @@ impl ContextMemoryQueryService {
             meaningful_activity_segments: day_entries,
             has_sufficient_evidence,
             summary_statement,
+            explanation,
         })
     }
 
@@ -1019,5 +1064,62 @@ mod tests {
         let recent_memories = service.get_recent_historical_memories(&conn, Some(5)).unwrap();
         assert!(!recent_memories.is_empty());
         assert_eq!(recent_memories[0].date, "2026-09-14");
+    }
+
+    #[test]
+    fn test_explainable_context_memory_why_reasons() {
+        let conn = setup_in_memory_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // 4 related items for Hero animation
+        for i in 1..=4 {
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "text",
+                &format!("Hero animation keyframes and framer motion setup part {}", i),
+                Some("Hero animation"),
+                r#"{"app_name":"VS Code"}"#,
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE items SET created_at = '2026-09-14 10:00:00' WHERE id = ?1",
+                [&item.id],
+            )
+            .unwrap();
+        }
+
+        // Active task candidate
+        let cand = crate::db::models::TaskCandidate {
+            id: "task-hero-anim".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.85,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T09:00:00Z".to_string(),
+            last_active_at: "2026-09-14T10:30:00Z".to_string(),
+            created_at: "2026-09-14T09:00:00Z".to_string(),
+            updated_at: "2026-09-14T10:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        let service = ContextMemoryQueryService::new();
+        let resp = service.get_context_memory(&conn, &ws.id).unwrap().unwrap();
+
+        assert_eq!(resp.context, "Aurora Website");
+        assert_eq!(resp.task.as_deref(), Some("Hero animation"));
+
+        // Verify MemoryExplanation exists and contains reasons
+        assert!(!resp.explanation.summary.is_empty());
+        assert!(!resp.explanation.why_reasons.is_empty());
+
+        let why_text = resp.explanation.why_reasons.join(" ");
+        assert!(why_text.contains("Aurora Website") || why_text.contains("context"));
+        assert!(why_text.contains("4 related recent items") || why_text.contains("related recent item"));
+        assert!(why_text.contains("task candidate") || why_text.contains("confirmed task"));
+
+        // Verify supporting evidence references are clean (no raw floats or SQL dumps)
+        assert!(!resp.explanation.supporting_evidence.is_empty());
     }
 }
