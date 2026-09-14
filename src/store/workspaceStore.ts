@@ -42,7 +42,7 @@ interface WorkspaceState {
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
-  activeWorkspaceId: null,
+  activeWorkspaceId: "inbox",
   activeItems: [],
   inboxCount: 0,
   isLoading: true,
@@ -81,7 +81,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         db.listItems(null)
       ]);
       
-      const defaultActiveId = workspaces.length > 0 ? workspaces[0].id : null;
+      const defaultActiveId = workspaces.length > 0 ? workspaces[0].id : "inbox";
       
       set({
         workspaces,
@@ -90,9 +90,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         isLoading: false,
       });
       
-      if (defaultActiveId) {
-        get().loadItems(defaultActiveId);
-      }
+      get().loadItems(defaultActiveId);
     } catch (err) {
       console.error("Failed to load workspaces:", err);
       set({ isLoading: false });

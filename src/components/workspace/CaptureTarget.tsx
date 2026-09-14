@@ -55,98 +55,130 @@ export const CaptureTarget: React.FC = () => {
   if (!isNotch && captureState === 'hidden') return null;
 
   if (isNotch) {
-    // Top-flush container for macOS Notch overlay
-    const baseNotchContainer = "fixed top-0 left-1/2 -translate-x-1/2 z-50 flex items-start justify-center pointer-events-none transition-all duration-300 ease-out";
+    const isIdle = notchState === 'idle';
+
+    // Top-flush container for macOS Notch overlay, hidden and retracted when idle
+    const baseNotchContainer = `w-full flex items-start justify-center pointer-events-none origin-top apple-notch-container-transition ${
+      isIdle ? '-translate-y-full opacity-0' : 'translate-y-0 opacity-100'
+    }`;
     
-    let innerClasses = "flex items-center justify-center transition-all duration-300 ease-out backdrop-blur-xl overflow-hidden ";
+    let innerClasses = "flex items-center justify-between px-3.5 apple-notch-pill-transition overflow-hidden origin-top select-none mx-auto ";
     let content: React.ReactNode = null;
 
     switch (notchState) {
-      case 'idle':
-        // Hardware-matching unobtrusive camera notch pill flush to the top
-        innerClasses += "w-36 h-6 rounded-b-xl bg-black/85 dark:bg-black/95 border-b border-x border-white/10 shadow-sm opacity-70 hover:opacity-100";
-        content = (
-          <div className="flex items-center gap-1.5 opacity-60">
-            <div className="w-2 h-2 rounded-full bg-zinc-800 border border-zinc-700/60 shadow-inner"></div>
-            <div className="w-1 h-1 rounded-full bg-blue-500/80 animate-pulse"></div>
-          </div>
-        );
-        break;
-
       case 'drag_detected':
-        // Global drag detected -> notch wakes up and pulses gently
-        innerClasses += "w-44 h-8 rounded-b-2xl bg-zinc-950/90 border-b border-x border-blue-500/30 shadow-md ring-1 ring-blue-500/20 animate-pulse";
+        // Global drag detected -> notch expands smoothly from MacBook bezel
+        innerClasses += "w-[240px] h-[42px] rounded-b-[22px] apple-notch-glass border-b border-x border-white/15";
         content = (
-          <div className="flex items-center gap-1.5 text-zinc-300">
-            <Sparkles size={13} className="text-blue-400 animate-spin" style={{ animationDuration: '3s' }} />
-            <span className="font-medium text-[11px] tracking-wide text-zinc-300">ContextSplit</span>
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2.5">
+              <div className="w-6 h-6 rounded-full bg-linear-to-br from-indigo-500/30 to-purple-500/30 border border-indigo-400/40 flex items-center justify-center">
+                <Sparkles size={13} className="text-indigo-300 animate-apple-pulse" />
+              </div>
+              <span className="font-medium text-[13px] tracking-tight text-white/90">ContextSplit</span>
+            </div>
+            <div className="w-2 h-2 rounded-full bg-indigo-400/80 animate-apple-pulse shadow-[0_0_8px_rgba(129,140,248,0.8)]" />
           </div>
         );
         break;
 
       case 'hover':
       case 'hovering':
-        // Content dragged into proximity -> expands into prominent capture capsule
-        innerClasses += "w-56 h-12 rounded-b-2xl bg-white/95 dark:bg-zinc-900/95 border-b border-x border-black/10 dark:border-white/15 shadow-2xl scale-100 opacity-100 ring-2 ring-black/5";
+        // Approaching notch -> expands with drop cue
+        innerClasses += "w-[270px] h-[48px] rounded-b-[24px] apple-notch-glass border-b border-x border-white/20 shadow-2xl ring-1 ring-white/10";
         content = (
-          <div className="flex items-center gap-2 text-gray-700 dark:text-zinc-200">
-            <ArrowDownToLine size={16} className="text-blue-500 animate-bounce" />
-            <span className="font-semibold text-xs tracking-wide">ContextSplit Capture</span>
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-full bg-linear-to-b from-indigo-500/40 to-blue-600/40 border border-indigo-400/50 flex items-center justify-center shadow-inner">
+                <ArrowDownToLine size={14} className="text-indigo-300 animate-apple-bounce" />
+              </div>
+              <div className="flex flex-col text-left">
+                <span className="font-semibold text-[13px] tracking-tight text-white">Drop to Capture</span>
+                <span className="font-medium text-[10px] tracking-tight text-white/50">Auto-organize context</span>
+              </div>
+            </div>
+            <div className="w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.9)]" />
           </div>
         );
         break;
 
       case 'active':
       case 'activated':
-        // Center drop activation zone -> prominent blue highlight
-        innerClasses += "w-60 h-14 rounded-b-2xl bg-blue-600/95 text-white border-b border-x border-blue-400 shadow-2xl scale-105 opacity-100 ring-4 ring-blue-400/40 animate-pulse";
+        // Inside drop activation zone -> prominent Apple Intelligence aura glow
+        innerClasses += "w-[300px] h-[54px] rounded-b-[26px] apple-notch-glass apple-notch-active-glow border-b border-x border-indigo-400/60 scale-[1.02]";
         content = (
-          <div className="flex items-center gap-2 text-white">
-            <ArrowDownToLine size={18} strokeWidth={2.5} />
-            <span className="font-semibold text-sm tracking-wide">Release to capture</span>
+          <div className="flex items-center justify-between w-full px-1">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-full bg-linear-to-tr from-indigo-600 to-purple-600 flex items-center justify-center shadow-[0_0_14px_rgba(99,102,241,0.6)] border border-indigo-300/60">
+                <ArrowDownToLine size={16} strokeWidth={2.5} className="text-white animate-apple-bounce" />
+              </div>
+              <div className="flex flex-col text-left">
+                <span className="font-semibold text-[13.5px] tracking-tight text-white">Release to Capture</span>
+                <span className="font-medium text-[10px] tracking-tight text-indigo-300/80">Save to ContextSplit</span>
+              </div>
+            </div>
+            <div className="px-2 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-400/40 text-[10px] font-semibold text-indigo-200">
+              Ready
+            </div>
           </div>
         );
         break;
 
       case 'paused':
       case 'pause':
-        // Capture paused indicator
-        innerClasses += "w-48 h-12 rounded-b-2xl bg-amber-600/95 text-white border-b border-x border-amber-400 shadow-xl scale-100 opacity-100 ring-2 ring-amber-400/40";
+        innerClasses += "w-[240px] h-[44px] rounded-b-[22px] apple-notch-glass border-b border-x border-amber-500/40";
         content = (
-          <div className="flex items-center gap-2 text-white">
-            <PauseCircle size={18} strokeWidth={2.5} />
-            <span className="font-semibold text-xs tracking-wide">Capture Paused</span>
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2.5">
+              <div className="w-6 h-6 rounded-full bg-amber-500/30 border border-amber-400/40 flex items-center justify-center">
+                <PauseCircle size={14} className="text-amber-300" />
+              </div>
+              <span className="font-medium text-[12.5px] tracking-tight text-white">Capture Paused</span>
+            </div>
+            <div className="w-2 h-2 rounded-full bg-amber-400" />
           </div>
         );
         break;
 
       case 'captured':
       case 'success':
-        // Successful capture feedback
-        innerClasses += "w-52 h-12 rounded-b-2xl bg-emerald-600/95 text-white border-b border-x border-emerald-400 shadow-xl scale-100 opacity-100";
+        // Success pill with Apple spring pop animation
+        innerClasses += "w-[270px] h-[48px] rounded-b-[24px] apple-notch-glass apple-notch-success-glow border-b border-x border-emerald-400/60";
         content = (
-          <div className="flex items-center gap-2 text-white">
-            <Check size={18} strokeWidth={3} />
-            <span className="font-semibold text-sm">Captured</span>
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-full bg-linear-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-[0_0_12px_rgba(16,185,129,0.6)] border border-emerald-300/60 animate-apple-pop">
+                <Check size={16} strokeWidth={3} className="text-white" />
+              </div>
+              <div className="flex flex-col text-left">
+                <span className="font-semibold text-[13px] tracking-tight text-white">Captured to Inbox</span>
+                <span className="font-medium text-[10px] tracking-tight text-emerald-300/80">Context updated</span>
+              </div>
+            </div>
+            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.9)]" />
           </div>
         );
         break;
 
       case 'cancelled':
       case 'failure':
-        // Cancelled or invalid drop feedback
-        innerClasses += "w-44 h-11 rounded-b-2xl bg-red-500/90 text-white border-b border-x border-red-400 shadow-lg scale-95 opacity-90";
+        innerClasses += "w-[230px] h-[42px] rounded-b-[22px] apple-notch-glass border-b border-x border-red-500/40";
         content = (
-          <div className="flex items-center gap-2 text-white">
-            <X size={16} strokeWidth={2.5} />
-            <span className="font-medium text-xs">Cancelled</span>
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded-full bg-red-500/30 border border-red-400/40 flex items-center justify-center">
+                <X size={14} className="text-red-300" />
+              </div>
+              <span className="font-medium text-[12px] tracking-tight text-zinc-300">Cancelled</span>
+            </div>
+            <div className="w-2 h-2 rounded-full bg-red-400/70" />
           </div>
         );
         break;
 
       default:
-        innerClasses += "w-36 h-6 rounded-b-xl bg-black/85 border-b border-x border-white/10 shadow-sm opacity-70";
-        content = <div className="w-2 h-2 rounded-full bg-zinc-800"></div>;
+        innerClasses += "w-[170px] h-0 opacity-0 pointer-events-none";
+        content = null;
         break;
     }
 

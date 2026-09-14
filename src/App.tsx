@@ -73,7 +73,7 @@ function App() {
 
   if (isNotchTarget) {
     return (
-      <div className="w-screen h-screen flex justify-center bg-transparent">
+      <div className="w-screen h-screen flex flex-col items-center justify-start bg-transparent overflow-hidden">
         <CaptureTarget />
       </div>
     );

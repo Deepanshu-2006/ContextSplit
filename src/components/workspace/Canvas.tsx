@@ -182,8 +182,8 @@ export function Canvas() {
         onNodeDragStop={onNodeDragStop}
         nodeTypes={nodeTypes}
         edges={[]}
-        minZoom={0.1}
-        maxZoom={4}
+        minZoom={0.2}
+        maxZoom={1.5}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         proOptions={{ hideAttribution: true }}
         panOnScroll={true}
@@ -192,7 +192,6 @@ export function Canvas() {
         zoomOnPinch={true}
         zoomOnScroll={false}
         zoomActivationKeyCode="Meta"
-        fitView
       >
         <Background 
           color="#9CA3AF" 
