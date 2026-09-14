@@ -63,6 +63,157 @@ fn create_content_snippet(content: &str, item_type: &str) -> String {
     }
 }
 
+/// Returns true if an item's title/content is purely generic noise without context or task grounding.
+pub fn is_generic_noise(
+    title: Option<&str>,
+    content: &str,
+    is_task_grounded: bool,
+    is_user_confirmed: bool,
+) -> bool {
+    if is_user_confirmed || is_task_grounded {
+        return false;
+    }
+
+    let t = title.unwrap_or("").trim().to_lowercase();
+    let c = content.trim().to_lowercase();
+
+    // Check if title is an inbox suggestion or meaningful custom title
+    if t.starts_with("inbox item") || t.starts_with("inbox note") {
+        return false;
+    }
+
+    let generic_titles = [
+        "new tab",
+        "untitled",
+        "untitled document",
+        "google search",
+        "google",
+        "home",
+        "dashboard",
+        "desktop",
+        "finder",
+        "login",
+        "sign in",
+        "log in",
+        "sign up",
+        "welcome",
+        "settings",
+        "preferences",
+        "blank page",
+        "about:blank",
+        "about:home",
+        "chrome://newtab",
+        "document 1",
+        "search...",
+        "search",
+    ];
+
+    if generic_titles.iter().any(|&g| t == g || t.starts_with(g)) {
+        return true;
+    }
+
+    if c == "about:blank"
+        || c == "chrome://newtab"
+        || c.starts_with("chrome://")
+        || c.starts_with("about:")
+        || c == "https://google.com/search?q="
+        || c == "https://www.google.com/search?q="
+        || c == "http://google.com/search?q="
+        || c == "https://google.com"
+        || c == "https://google.com/"
+        || c == "https://www.google.com"
+        || c == "https://www.google.com/"
+        || c == "https://bing.com/search?q="
+        || c == "https://www.bing.com/search?q="
+        || c == "https://bing.com"
+        || c == "https://bing.com/"
+        || c == "https://www.bing.com"
+        || c == "https://www.bing.com/"
+        || c == "https://duckduckgo.com"
+        || c == "https://duckduckgo.com/"
+        || c == "404 not found"
+        || c == "error"
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Returns true if an item appears to be an accidental, corrupt, or empty ephemeral capture.
+pub fn is_accidental_capture(
+    item_type: &str,
+    title: Option<&str>,
+    content: &str,
+    is_user_confirmed: bool,
+) -> bool {
+    if is_user_confirmed {
+        return false;
+    }
+
+    let trimmed = content.trim();
+    let t = title.unwrap_or("").trim();
+
+    if trimmed.is_empty()
+        && (t.is_empty()
+            || t.eq_ignore_ascii_case("untitled")
+            || t.eq_ignore_ascii_case("new tab")
+            || t.eq_ignore_ascii_case("empty content"))
+    {
+        return true;
+    }
+
+    if item_type == "url"
+        && (trimmed == "about:blank"
+            || trimmed == "chrome://newtab"
+            || trimmed.starts_with("about:")
+            || trimmed.starts_with("chrome://")
+            || trimmed.starts_with("javascript:"))
+    {
+        return true;
+    }
+
+    if item_type == "text" && trimmed.len() <= 2 && t.is_empty() {
+        return true;
+    }
+
+    false
+}
+
+/// Generates a deduplication signature for an item to collapse duplicate captures.
+pub fn get_deduplication_key(item: &WorksetItemReference, raw_content: Option<&str>) -> String {
+    if item.item_type == "url" {
+        let url_to_clean = raw_content.unwrap_or(&item.content_snippet);
+        let clean_url = url_to_clean
+            .trim()
+            .trim_end_matches('/')
+            .to_lowercase();
+        let base_url = clean_url.split('?').next().unwrap_or(&clean_url);
+        return format!("url:{}", base_url);
+    }
+
+    if let (Some(app), Some(title)) = (&item.app_name, &item.title) {
+        let clean_title = title.trim().to_lowercase();
+        if !clean_title.is_empty() && clean_title.len() > 3 {
+            return format!("app_title:{}:{}", app.to_lowercase(), clean_title);
+        }
+    }
+
+    if let (Some(dom), Some(title)) = (&item.domain, &item.title) {
+        let clean_title = title.trim().to_lowercase();
+        if !clean_title.is_empty() && clean_title.len() > 3 {
+            return format!("dom_title:{}:{}", dom.to_lowercase(), clean_title);
+        }
+    }
+
+    let snippet_trimmed = item.content_snippet.trim().to_lowercase();
+    if snippet_trimmed.len() >= 15 {
+        return format!("snippet:{}", &snippet_trimmed[..snippet_trimmed.len().min(60)]);
+    }
+
+    format!("id:{}", item.id)
+}
+
 // =========================================================================
 // Enums: WorksetItemRelevance & WorksetState
 // =========================================================================
@@ -203,7 +354,47 @@ impl Default for WorksetStabilityConfig {
 }
 
 // =========================================================================
-// WorksetConfig: Configurable Ranking, Sizing & Stability
+// WorksetQualityFilterConfig: Configurable Quality Rules & Noise Suppression
+// =========================================================================
+
+/// Configuration options for contextual workset quality filtering, noise suppression, and deduplication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorksetQualityFilterConfig {
+    /// Minimum composite relevance score threshold to be eligible for workset (default: 0.28)
+    pub min_relevance_threshold: f64,
+    /// Minimum confidence for suggested inbox additions (default: 0.65)
+    pub suggested_min_confidence: f64,
+    /// Minimum relationship edge strength to qualify as supporting without task connection (default: 0.20)
+    pub min_relationship_strength: f64,
+    /// Stale threshold in days for non-reference items with low activity (default: 14)
+    pub stale_irrelevance_days: i64,
+    /// Enable deduplication of duplicate captures (default: true)
+    pub enable_deduplication: bool,
+    /// Filter out accidental, empty or corrupt captures (default: true)
+    pub filter_accidental_captures: bool,
+    /// Filter out generic non-informative content (default: true)
+    pub filter_generic_content: bool,
+    /// Strictly exclude dismissed or user-rejected items (default: true)
+    pub exclude_dismissed_and_rejected: bool,
+}
+
+impl Default for WorksetQualityFilterConfig {
+    fn default() -> Self {
+        Self {
+            min_relevance_threshold: 0.28,
+            suggested_min_confidence: 0.65,
+            min_relationship_strength: 0.20,
+            stale_irrelevance_days: 14,
+            enable_deduplication: true,
+            filter_accidental_captures: true,
+            filter_generic_content: true,
+            exclude_dismissed_and_rejected: true,
+        }
+    }
+}
+
+// =========================================================================
+// WorksetConfig: Configurable Ranking, Sizing, Stability & Quality
 // =========================================================================
 
 /// Configuration options for deriving and ranking contextual worksets.
@@ -215,12 +406,15 @@ pub struct WorksetConfig {
     pub max_items: usize,
     /// Whether to evaluate high-confidence unfiled inbox items for suggested addition (default: true)
     pub include_suggested_inbox: bool,
-    /// Minimum confidence threshold for suggested inbox items (default: 0.60)
+    /// Minimum confidence threshold for suggested inbox items (default: 0.60, legacy fallback)
     pub suggested_min_confidence: f64,
     /// Temporal decay configuration for recency weighting
     pub temporal_decay: TemporalDecayConfig,
     /// Stability and hysteresis configuration
     pub stability: WorksetStabilityConfig,
+    /// Final quality filtering and noise suppression configuration
+    #[serde(default)]
+    pub quality: WorksetQualityFilterConfig,
 }
 
 impl Default for WorksetConfig {
@@ -232,6 +426,7 @@ impl Default for WorksetConfig {
             suggested_min_confidence: 0.60,
             temporal_decay: TemporalDecayConfig::default(),
             stability: WorksetStabilityConfig::default(),
+            quality: WorksetQualityFilterConfig::default(),
         }
     }
 }
@@ -539,6 +734,11 @@ impl ContextWorksetBuilder {
         self
     }
 
+    pub fn with_quality_config(mut self, quality: WorksetQualityFilterConfig) -> Self {
+        self.config.quality = quality;
+        self
+    }
+
     pub fn with_limits(mut self, min_items: usize, max_items: usize) -> Self {
         self.config.min_items = min_items;
         self.config.max_items = max_items;
@@ -602,12 +802,12 @@ impl ContextWorksetBuilder {
             .take(10)
             .collect();
 
-        // 8. Fetch user feedback / action signals
+        // 8. Fetch user feedback / action / rejection signals
         let mut user_feedback_signals = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
             "SELECT id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at 
              FROM context_signals 
-             WHERE (workspace_id = ?1 OR signal_type IN ('user_action', 'user_feedback')) 
+             WHERE (workspace_id = ?1 OR signal_type IN ('user_action', 'user_feedback', 'user_dismiss', 'user_reject')) 
              ORDER BY created_at DESC LIMIT 50"
         ) {
             if let Ok(rows) = stmt.query_map(params![workspace_id], |row| {
@@ -729,11 +929,33 @@ impl ContextWorksetBuilder {
             }
         }
 
-        // Identify items with positive user feedback / confirmation
+        // Identify items with positive user feedback / confirmation vs rejected/dismissed items
         let mut confirmed_by_user_item_ids: HashSet<String> = HashSet::new();
+        let mut rejected_item_ids: HashSet<String> = HashSet::new();
+
+        for m in &self.dismissed_memberships {
+            rejected_item_ids.insert(m.item_id.clone());
+        }
+
         for sig in &self.user_feedback_signals {
             if let Some(ref i_id) = sig.item_id {
-                if sig.signal_type == "user_action" || sig.signal_type == "user_feedback" {
+                if sig.signal_type == "user_dismiss" || sig.signal_type == "user_reject" {
+                    rejected_item_ids.insert(i_id.clone());
+                } else if sig.signal_type == "user_feedback" {
+                    if let Ok(val) = serde_json::from_str::<Value>(&sig.payload) {
+                        if val.get("rejected").and_then(|v| v.as_bool()).unwrap_or(false)
+                            || val.get("is_positive").and_then(|v| v.as_bool()) == Some(false)
+                            || val.get("action").and_then(|v| v.as_str()) == Some("dismiss")
+                            || val.get("action").and_then(|v| v.as_str()) == Some("reject")
+                        {
+                            rejected_item_ids.insert(i_id.clone());
+                        } else if val.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false)
+                            || val.get("is_positive").and_then(|v| v.as_bool()) == Some(true)
+                        {
+                            confirmed_by_user_item_ids.insert(i_id.clone());
+                        }
+                    }
+                } else if sig.signal_type == "user_action" {
                     confirmed_by_user_item_ids.insert(i_id.clone());
                 }
             }
@@ -1086,49 +1308,20 @@ impl ContextWorksetBuilder {
         }
 
         // ---------------------------------------------------------------------
-        // 3. Deterministic Sorting, Primary Promotion & Bounded Selection
+        // 3. Apply Final Quality Filtering, Deduplication & Noise Suppression
         // ---------------------------------------------------------------------
-        candidate_items.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let raw_items_map: HashMap<String, &Item> = self.items.iter().map(|i| (i.id.clone(), i)).collect();
 
-        // Ensure at least 1 Primary item exists if we have items
-        if !candidate_items.is_empty()
-            && !candidate_items
-                .iter()
-                .any(|i| i.relevance == WorksetItemRelevance::Primary)
-        {
-            if let Some(top_item) = candidate_items.iter_mut().max_by(|a, b| {
-                a.relevance_score
-                    .partial_cmp(&b.relevance_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }) {
-                top_item.relevance = WorksetItemRelevance::Primary;
-                if !top_item
-                    .reasons
-                    .iter()
-                    .any(|r| r.contains("primary") || r.contains("current task"))
-                {
-                    top_item
-                        .reasons
-                        .insert(0, "strongly related to current task".to_string());
-                }
-            }
-        }
-
-        // Avoid over-selection:
-        // Filter out candidates with low relevance (< 0.25) so unrelated items are excluded
-        let mut final_items: Vec<WorksetItemReference> = candidate_items
-            .into_iter()
-            .filter(|i| i.relevance_score >= 0.25)
-            .collect();
-
-        // Enforce maximum workset capacity limit (default: 8 items) with displacement protection
-        if final_items.len() > self.config.max_items {
-            final_items.truncate(self.config.max_items);
-        }
+        let final_items = ContextWorksetQualityFilter::filter_and_curate(
+            candidate_items,
+            &raw_items_map,
+            &self.config,
+            task_title.as_deref(),
+            task_subject,
+            &confirmed_by_user_item_ids,
+            &rejected_item_ids,
+            self.now,
+        );
 
         // Partition into categorized sub-lists
         let relevant_items: Vec<WorksetItemReference> = final_items
@@ -1206,6 +1399,207 @@ impl ContextWorksetBuilder {
     }
 }
 
+// =========================================================================
+// ContextWorksetQualityFilter: Final Noise & Quality Gate
+// =========================================================================
+
+/// Final Quality Filter that curates and filters candidate items before presentation in the workset.
+///
+/// Invariants:
+/// 1. Non-destructive: Absolutely no deletion of items or inbox records.
+/// 2. Deduplicates repeated captures (by URL, app+title, or snippet hash).
+/// 3. Suppresses generic/ephemeral non-informative content unless grounded in task or explicitly confirmed.
+/// 4. Filters out accidental/empty captures and browser error screens.
+/// 5. Enforces minimum confidence threshold for suggested inbox items.
+/// 6. Strictly excludes items dismissed in membership or rejected in user feedback.
+/// 7. Downgrades/prunes stale irrelevant items and items linked solely by extremely weak edges.
+/// 8. Prioritizes confirmed items, active task items, meaningful artifacts, and core reference assets.
+pub struct ContextWorksetQualityFilter;
+
+impl ContextWorksetQualityFilter {
+    /// Curates, deduplicates, and filters candidate items according to quality rules.
+    pub fn filter_and_curate(
+        candidates: Vec<WorksetItemReference>,
+        raw_items_map: &HashMap<String, &Item>,
+        config: &WorksetConfig,
+        task_title: Option<&str>,
+        task_subject: &str,
+        confirmed_by_user_item_ids: &HashSet<String>,
+        rejected_item_ids: &HashSet<String>,
+        now: DateTime<Utc>,
+    ) -> Vec<WorksetItemReference> {
+        let quality_cfg = &config.quality;
+        let task_title_lower = task_title.unwrap_or("").to_lowercase();
+        let task_subject_lower = task_subject.to_lowercase();
+
+        let mut surviving_candidates: Vec<WorksetItemReference> = Vec::new();
+
+        for mut item in candidates {
+            let is_confirmed = item.provenance == InformationProvenance::Confirmed;
+            let is_user_confirmed = confirmed_by_user_item_ids.contains(&item.id);
+            let raw_content = raw_items_map
+                .get(&item.id)
+                .map(|i| i.content.as_str())
+                .unwrap_or(&item.content_snippet);
+            let item_title = item.title.as_deref().unwrap_or("");
+            let title_lower = item_title.to_lowercase();
+            let content_lower = raw_content.to_lowercase();
+
+            // Task grounding check: true if item title or content explicitly mentions active task title or subject
+            let is_task_grounded = (!task_title_lower.is_empty()
+                && (title_lower.contains(&task_title_lower)
+                    || (!content_lower.is_empty() && content_lower.contains(&task_title_lower))))
+                || (!task_subject_lower.is_empty()
+                    && (title_lower.contains(&task_subject_lower)
+                        || (!content_lower.is_empty() && content_lower.contains(&task_subject_lower))));
+
+            // 1. Exclude dismissed or explicitly rejected items
+            if quality_cfg.exclude_dismissed_and_rejected && rejected_item_ids.contains(&item.id) {
+                continue;
+            }
+
+            // 2. Exclude accidental / corrupt captures
+            if quality_cfg.filter_accidental_captures
+                && is_accidental_capture(
+                    &item.item_type,
+                    item.title.as_deref(),
+                    raw_content,
+                    is_user_confirmed,
+                )
+            {
+                continue;
+            }
+
+            // 3. Exclude pure generic content
+            if quality_cfg.filter_generic_content
+                && is_generic_noise(
+                    item.title.as_deref(),
+                    raw_content,
+                    is_task_grounded,
+                    is_user_confirmed,
+                )
+            {
+                continue;
+            }
+
+            // 4. Exclude low-confidence suggestions from inbox
+            if item.is_suggested_addition {
+                let min_conf = quality_cfg
+                    .suggested_min_confidence
+                    .max(config.suggested_min_confidence);
+                // In candidate generation, score = mem.confidence * 0.70
+                if item.relevance_score < (min_conf * 0.70) - 0.01 {
+                    continue;
+                }
+            }
+
+            // 5. Check for stale irrelevant items
+            let is_permanent_reference = item.item_type == "url"
+                && (raw_content.contains("github.com")
+                    || raw_content.contains("gitlab.com")
+                    || raw_content.contains("docs."));
+
+            let item_created_dt = DateTime::parse_from_rfc3339(&item.created_at)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(now);
+            let age_days = (now - item_created_dt).num_days();
+
+            let is_stale_and_irrelevant = age_days > quality_cfg.stale_irrelevance_days
+                && !is_permanent_reference
+                && !is_user_confirmed
+                && !is_task_grounded
+                && item.relevance_score < 0.35;
+
+            if is_stale_and_irrelevant {
+                item.relevance_score *= 0.50;
+            }
+
+            // 6. Threshold check: filter out items with score below min_relevance_threshold
+            if item.relevance_score < quality_cfg.min_relevance_threshold
+                && !is_confirmed
+                && !is_task_grounded
+                && !is_user_confirmed
+            {
+                continue;
+            }
+
+            surviving_candidates.push(item);
+        }
+
+        // 7. Deduplicate Duplicate Captures
+        let mut deduplicated: Vec<WorksetItemReference> = Vec::new();
+        if quality_cfg.enable_deduplication {
+            let mut seen_keys: HashMap<String, usize> = HashMap::new();
+            for item in surviving_candidates {
+                let raw_content = raw_items_map.get(&item.id).map(|i| i.content.as_str());
+                let key = get_deduplication_key(&item, raw_content);
+                if let Some(&existing_idx) = seen_keys.get(&key) {
+                    let existing = &deduplicated[existing_idx];
+                    let replace = match (item.provenance, existing.provenance) {
+                        (InformationProvenance::Confirmed, InformationProvenance::Inferred) => true,
+                        (InformationProvenance::Inferred, InformationProvenance::Confirmed) => false,
+                        _ => item.relevance_score > existing.relevance_score,
+                    };
+                    if replace {
+                        deduplicated[existing_idx] = item;
+                    }
+                } else {
+                    seen_keys.insert(key, deduplicated.len());
+                    deduplicated.push(item);
+                }
+            }
+        } else {
+            deduplicated = surviving_candidates;
+        }
+
+        // 8. Deterministic Sorting & Primary Promotion
+        deduplicated.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if !deduplicated.is_empty()
+            && !deduplicated
+                .iter()
+                .any(|i| i.relevance == WorksetItemRelevance::Primary)
+        {
+            // Prefer promoting a non-Reference item (e.g. Supporting, Recent, Related) to Primary
+            let non_ref_idx = deduplicated
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.relevance != WorksetItemRelevance::Reference)
+                .max_by(|(_, a), (_, b)| {
+                    a.relevance_score
+                        .partial_cmp(&b.relevance_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(idx, _)| idx);
+
+            let target_idx = non_ref_idx.unwrap_or(0);
+            if let Some(top_item) = deduplicated.get_mut(target_idx) {
+                top_item.relevance = WorksetItemRelevance::Primary;
+                if !top_item
+                    .reasons
+                    .iter()
+                    .any(|r| r.contains("primary") || r.contains("current task"))
+                {
+                    top_item
+                        .reasons
+                        .insert(0, "strongly related to current task".to_string());
+                }
+            }
+        }
+
+        // 9. Enforce Capacity Limits
+        if deduplicated.len() > config.max_items {
+            deduplicated.truncate(config.max_items);
+        }
+
+        deduplicated
+    }
+}
+
 /// Service interface for deriving and managing `ContextWorkset` instances.
 pub struct ContextWorksetService;
 
@@ -1264,6 +1658,7 @@ mod tests {
     };
 
     fn setup_test_db() -> Connection {
+        invalidate_workset_cache(None);
         let conn = Connection::open_in_memory().unwrap();
         crate::db::run_migrations(&conn).unwrap();
         conn
@@ -2427,6 +2822,362 @@ mod tests {
         assert_eq!(workset_a.workset_state, WorksetState::DetourReturn);
         assert_eq!(workset_a.task_title.as_deref(), Some("Hero animation"));
         assert_eq!(workset_a.items[0].id, item_hero.id);
+    }
+
+    // =========================================================================
+    // Step 8: Quality Filtering, Deduplication & Noise Suppression Tests
+    // =========================================================================
+
+    #[test]
+    fn test_quality_filter_duplicate_captures_deduplication() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // 2 duplicate URL captures of the exact same repo
+        let item1 = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/site/",
+            Some("GitHub repository"),
+            "{\"domain\": \"github.com\"}",
+        ).unwrap();
+
+        let item2 = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/site?ref=header",
+            Some("GitHub repository"),
+            "{\"domain\": \"github.com\"}",
+        ).unwrap();
+
+        // 2 duplicate screenshot/app captures of Figma
+        let item3 = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "image",
+            "figma_hero_mock_v1.png",
+            Some("Figma hero design"),
+            "{\"app_name\": \"Figma\"}",
+        ).unwrap();
+
+        let item4 = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "image",
+            "figma_hero_mock_v2.png",
+            Some("Figma hero design"),
+            "{\"app_name\": \"Figma\"}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        // Verify deduplication: exactly 1 GitHub URL and 1 Figma item retained in workset
+        let github_count = workset.items.iter().filter(|i| i.id == item1.id || i.id == item2.id).count();
+        let figma_count = workset.items.iter().filter(|i| i.id == item3.id || i.id == item4.id).count();
+
+        assert_eq!(github_count, 1, "Duplicate URLs should be deduplicated to 1 instance in workset");
+        assert_eq!(figma_count, 1, "Duplicate app/title captures should be deduplicated to 1 instance in workset");
+    }
+
+    #[test]
+    fn test_quality_filter_generic_content_suppression() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Valid substantive item
+        let item_valid = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "React hero animation component with Framer Motion spring curves",
+            Some("Hero Animation Component"),
+            "{}",
+        ).unwrap();
+
+        // Generic non-informative noise items
+        let item_newtab = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "chrome://newtab",
+            Some("New Tab"),
+            "{}",
+        ).unwrap();
+
+        let item_google = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://google.com/search?q=",
+            Some("Google Search"),
+            "{}",
+        ).unwrap();
+
+        let item_untitled = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "   ",
+            Some("Untitled"),
+            "{}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        // Verify that generic noise items are excluded
+        assert!(workset.items.iter().any(|i| i.id == item_valid.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_newtab.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_google.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_untitled.id));
+    }
+
+    #[test]
+    fn test_quality_filter_accidental_captures_excluded() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Meaningful artifact
+        let item_code = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "export const Button = () => <button>Click</button>",
+            Some("Button Component"),
+            "{}",
+        ).unwrap();
+
+        // Accidental corrupt/empty captures
+        let item_empty = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "",
+            None,
+            "{}",
+        ).unwrap();
+
+        let item_blank_url = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "about:blank",
+            Some("about:blank"),
+            "{}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        assert!(workset.items.iter().any(|i| i.id == item_code.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_empty.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_blank_url.id));
+    }
+
+    #[test]
+    fn test_quality_filter_dismissed_and_user_rejected_items_excluded() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        let item_accepted = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Design specs for Aurora branding",
+            Some("Aurora Brand Specs"),
+            "{}",
+        ).unwrap();
+
+        let item_dismissed = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Random irrelevant note",
+            Some("Random note"),
+            "{}",
+        ).unwrap();
+
+        let item_rejected = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Spam capture rejected by user",
+            Some("Spam Capture"),
+            "{}",
+        ).unwrap();
+
+        // Set item_dismissed membership to "dismissed"
+        crate::db::operations::create_or_update_membership(
+            &conn,
+            &item_dismissed.id,
+            &ws.id,
+            "dismissed",
+            0.10,
+            "user",
+        ).unwrap();
+
+        // Create user_reject signal for item_rejected
+        conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "sig-reject-1",
+                ws.id,
+                item_rejected.id,
+                "user_reject",
+                None::<String>,
+                "{\"rejected\": true}",
+                "2026-09-14T01:00:00Z",
+                "2026-09-14T01:00:00Z"
+            ],
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        assert!(workset.items.iter().any(|i| i.id == item_accepted.id));
+        assert!(!workset.items.iter().any(|i| i.id == item_dismissed.id), "Dismissed membership must be excluded");
+        assert!(!workset.items.iter().any(|i| i.id == item_rejected.id), "User rejected item must be excluded");
+    }
+
+    #[test]
+    fn test_quality_filter_low_confidence_suggestions_excluded() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // High confidence inbox suggestion (0.85)
+        let item_high_conf = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Inbox item strongly matching Aurora",
+            Some("Aurora Inbox Note"),
+            "{}",
+        ).unwrap();
+
+        crate::db::operations::create_or_update_membership(
+            &conn,
+            &item_high_conf.id,
+            &ws.id,
+            "suggested",
+            0.85,
+            "context_engine",
+        ).unwrap();
+
+        // Low confidence inbox suggestion (0.40)
+        let item_low_conf = create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Vague random inbox item",
+            Some("Vague Item"),
+            "{}",
+        ).unwrap();
+
+        crate::db::operations::create_or_update_membership(
+            &conn,
+            &item_low_conf.id,
+            &ws.id,
+            "suggested",
+            0.40,
+            "context_engine",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        assert!(workset.items.iter().any(|i| i.id == item_high_conf.id), "High confidence suggestion should be present");
+        assert!(!workset.items.iter().any(|i| i.id == item_low_conf.id), "Low confidence suggestion must be excluded");
+    }
+
+    #[test]
+    fn test_quality_filter_stale_irrelevant_vs_permanent_references() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Permanent GitHub reference created 30 days ago
+        let item_github = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/site",
+            Some("GitHub repository"),
+            "{\"domain\": \"github.com\"}",
+        ).unwrap();
+
+        let old_date = "2026-08-01T00:00:00Z";
+        conn.execute(
+            "UPDATE items SET created_at = ?1, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![old_date, item_github.id],
+        ).unwrap();
+
+        // Fresh active item
+        let item_fresh = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Current hero section updates",
+            Some("Hero Section Updates"),
+            "{}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        // Both should be in workset: fresh in Primary/Supporting, old GitHub repo in Reference tier
+        assert!(workset.items.iter().any(|i| i.id == item_fresh.id));
+        assert!(workset.items.iter().any(|i| i.id == item_github.id));
+        let github_ref = workset.items.iter().find(|i| i.id == item_github.id).unwrap();
+        assert_eq!(github_ref.relevance, WorksetItemRelevance::Reference);
+    }
+
+    #[test]
+    fn test_quality_filter_non_destructive_preserves_inbox_store() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Create generic/noisy item and empty item
+        let noisy_item = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "chrome://newtab",
+            Some("New Tab"),
+            "{}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        // 1. Filtered from the workset view
+        assert!(!workset.items.iter().any(|i| i.id == noisy_item.id));
+
+        // 2. BUT still safely intact in SQLite database / Inbox store!
+        let db_item = crate::db::operations::get_item(&conn, &noisy_item.id).unwrap();
+        assert_eq!(db_item.id, noisy_item.id);
+        assert_eq!(db_item.title.as_deref(), Some("New Tab"));
     }
 }
 
