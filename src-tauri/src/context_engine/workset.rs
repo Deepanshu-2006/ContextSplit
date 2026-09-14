@@ -2162,4 +2162,271 @@ mod tests {
         assert!(active.is_some());
         assert_eq!(active.unwrap().context_id, ws2.id);
     }
+
+    #[test]
+    fn test_reconstruct_workset_return_a_b_a() {
+        let conn = setup_test_db();
+        let ws_aurora = create_workspace(&conn, "Aurora Website").unwrap();
+        let ws_os = create_workspace(&conn, "University OS").unwrap();
+
+        // Items in Context A (Aurora Website)
+        let item_hero = create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "text",
+            "export const Hero = () => { return <div className='hero-animation'>...</div>; }",
+            Some("React Hero component"),
+            "{\"app_name\": \"VS Code\"}",
+        ).unwrap();
+
+        let item_framer = create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "url",
+            "https://framer.com/motion/animation",
+            Some("Framer Motion animation reference"),
+            "{\"domain\": \"framer.com\"}",
+        ).unwrap();
+
+        let item_figma = create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "url",
+            "https://figma.com/file/hero-design",
+            Some("Figma hero design"),
+            "{\"domain\": \"figma.com\"}",
+        ).unwrap();
+
+        let item_github = create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "url",
+            "https://github.com/aurora/website",
+            Some("GitHub repository"),
+            "{\"domain\": \"github.com\"}",
+        ).unwrap();
+
+        let item_anim = create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "image",
+            "animation_capture.png",
+            Some("latest captured animation example"),
+            "{\"app_name\": \"CleanShot X\"}",
+        ).unwrap();
+
+        // Items in Context B (University OS)
+        let item_os_lecture = create_item(
+            &conn,
+            Some(&ws_os.id),
+            None,
+            "text",
+            "Virtual memory paging notes and algorithms",
+            Some("Paging Lecture Notes"),
+            "{}",
+        ).unwrap();
+
+        let item_os_kernel = create_item(
+            &conn,
+            Some(&ws_os.id),
+            None,
+            "text",
+            "kernel/sched.c process scheduler implementation",
+            Some("Kernel Scheduler Code"),
+            "{}",
+        ).unwrap();
+
+        // Relationships in Context A
+        create_item_relationship(&conn, &item_hero.id, &item_framer.id, "semantic_similarity", 0.88, None).unwrap();
+        create_item_relationship(&conn, &item_hero.id, &item_figma.id, "temporal_proximity", 0.75, None).unwrap();
+
+        // Task candidate for Aurora Website
+        let cand_aurora = crate::db::models::TaskCandidate {
+            id: "task-aurora-hero".to_string(),
+            context_id: Some(ws_aurora.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.92,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T07:00:00Z".to_string(),
+            last_active_at: "2026-09-14T07:30:00Z".to_string(),
+            created_at: "2026-09-14T07:00:00Z".to_string(),
+            updated_at: "2026-09-14T07:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand_aurora).unwrap();
+
+        // Task candidate for University OS
+        let cand_os = crate::db::models::TaskCandidate {
+            id: "task-os-paging".to_string(),
+            context_id: Some(ws_os.id.clone()),
+            title: "Paging lab assignment".to_string(),
+            confidence: 0.89,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T08:00:00Z".to_string(),
+            last_active_at: "2026-09-14T08:45:00Z".to_string(),
+            created_at: "2026-09-14T08:00:00Z".to_string(),
+            updated_at: "2026-09-14T08:45:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand_os).unwrap();
+
+        // Sequence of transitions: A -> B, then B -> A (ContextReturn)
+        let trans1 = ContextTransition::new(
+            Some(ws_aurora.id.clone()),
+            Some(ws_os.id.clone()),
+            crate::db::models::ContextTransitionType::ContextSwitch,
+            0.95,
+        );
+        crate::db::operations::create_context_transition(&conn, &trans1).unwrap();
+
+        let trans2 = ContextTransition::new(
+            Some(ws_os.id.clone()),
+            Some(ws_aurora.id.clone()),
+            crate::db::models::ContextTransitionType::ContextReturn,
+            0.96,
+        );
+        crate::db::operations::create_context_transition(&conn, &trans2).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset_aurora = service.derive_for_workspace(&conn, &ws_aurora.id).unwrap();
+
+        // 1. Verify state and task restoration
+        assert_eq!(workset_aurora.context_name, "Aurora Website");
+        assert_eq!(workset_aurora.workset_state, WorksetState::DetourReturn);
+        assert_eq!(workset_aurora.task_title.as_deref(), Some("Hero animation"));
+
+        // 2. Verify Aurora items are present in appropriate tiers
+        assert!(workset_aurora.items.iter().any(|i| i.id == item_hero.id));
+        assert!(workset_aurora.items.iter().any(|i| i.id == item_framer.id));
+        assert!(workset_aurora.items.iter().any(|i| i.id == item_figma.id));
+        assert!(workset_aurora.items.iter().any(|i| i.id == item_github.id));
+        assert!(workset_aurora.items.iter().any(|i| i.id == item_anim.id));
+
+        // 3. Verify strict context isolation (no OS items leaked into Aurora workset)
+        assert!(!workset_aurora.items.iter().any(|i| i.id == item_os_lecture.id));
+        assert!(!workset_aurora.items.iter().any(|i| i.id == item_os_kernel.id));
+    }
+
+    #[test]
+    fn test_reconstruct_workset_return_a_b_c_a() {
+        let conn = setup_test_db();
+        let ws_a = create_workspace(&conn, "Aurora Website").unwrap();
+        let ws_b = create_workspace(&conn, "University OS").unwrap();
+        let ws_c = create_workspace(&conn, "TripWise").unwrap();
+
+        let item_a = create_item(&conn, Some(&ws_a.id), None, "text", "Hero animation code", Some("Hero component"), "{}").unwrap();
+        let item_b = create_item(&conn, Some(&ws_b.id), None, "text", "OS homework code", Some("OS assignment"), "{}").unwrap();
+        let item_c = create_item(&conn, Some(&ws_c.id), None, "url", "https://tripwise.com/flight", Some("Flight research"), "{}").unwrap();
+
+        let cand_a = crate::db::models::TaskCandidate {
+            id: "task-aurora".to_string(),
+            context_id: Some(ws_a.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.90,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T06:00:00Z".to_string(),
+            last_active_at: "2026-09-14T06:30:00Z".to_string(),
+            created_at: "2026-09-14T06:00:00Z".to_string(),
+            updated_at: "2026-09-14T06:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand_a).unwrap();
+
+        // Multi-hop detour: A -> B -> C -> A
+        let t1 = ContextTransition::new(Some(ws_a.id.clone()), Some(ws_b.id.clone()), crate::db::models::ContextTransitionType::ContextSwitch, 0.9);
+        let t2 = ContextTransition::new(Some(ws_b.id.clone()), Some(ws_c.id.clone()), crate::db::models::ContextTransitionType::ContextSwitch, 0.9);
+        let t3 = ContextTransition::new(Some(ws_c.id.clone()), Some(ws_a.id.clone()), crate::db::models::ContextTransitionType::ContextReturn, 0.95);
+        crate::db::operations::create_context_transition(&conn, &t1).unwrap();
+        crate::db::operations::create_context_transition(&conn, &t2).unwrap();
+        crate::db::operations::create_context_transition(&conn, &t3).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset_a = service.derive_for_workspace(&conn, &ws_a.id).unwrap();
+
+        assert_eq!(workset_a.workset_state, WorksetState::DetourReturn);
+        assert_eq!(workset_a.task_title.as_deref(), Some("Hero animation"));
+        assert_eq!(workset_a.items.len(), 1);
+        assert_eq!(workset_a.items[0].id, item_a.id);
+        assert!(!workset_a.items.iter().any(|i| i.id == item_b.id || i.id == item_c.id));
+    }
+
+    #[test]
+    fn test_reconstruct_workset_return_a_b_a_with_task_change() {
+        let conn = setup_test_db();
+        let ws_a = create_workspace(&conn, "Aurora Website").unwrap();
+        let ws_b = create_workspace(&conn, "University OS").unwrap();
+
+        // Initial items for task 1 (Hero animation)
+        let _item_hero = create_item(&conn, Some(&ws_a.id), None, "text", "Hero code", Some("Hero component"), "{}").unwrap();
+        let item_github = create_item(&conn, Some(&ws_a.id), None, "url", "https://github.com/aurora/site", Some("GitHub repository"), "{}").unwrap();
+
+        // Detour to B
+        let t1 = ContextTransition::new(Some(ws_a.id.clone()), Some(ws_b.id.clone()), crate::db::models::ContextTransitionType::ContextSwitch, 0.9);
+        crate::db::operations::create_context_transition(&conn, &t1).unwrap();
+
+        // Return to A with a newly started task 2 (Case study documentation)
+        let item_case_study = create_item(&conn, Some(&ws_a.id), None, "text", "Case study draft for website launch", Some("Case study draft"), "{}").unwrap();
+
+        let cand_case_study = crate::db::models::TaskCandidate {
+            id: "task-case-study".to_string(),
+            context_id: Some(ws_a.id.clone()),
+            title: "Case study documentation".to_string(),
+            confidence: 0.94,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T09:00:00Z".to_string(),
+            last_active_at: "2026-09-14T09:30:00Z".to_string(),
+            created_at: "2026-09-14T09:00:00Z".to_string(),
+            updated_at: "2026-09-14T09:30:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand_case_study).unwrap();
+
+        let t2 = ContextTransition::new(Some(ws_b.id.clone()), Some(ws_a.id.clone()), crate::db::models::ContextTransitionType::ContextReturn, 0.95);
+        crate::db::operations::create_context_transition(&conn, &t2).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset_a = service.derive_for_workspace(&conn, &ws_a.id).unwrap();
+
+        assert_eq!(workset_a.workset_state, WorksetState::DetourReturn);
+        assert_eq!(workset_a.task_title.as_deref(), Some("Case study documentation"));
+        assert!(workset_a.items.iter().any(|i| i.id == item_case_study.id));
+        assert!(workset_a.items.iter().any(|i| i.id == item_github.id));
+    }
+
+    #[test]
+    fn test_reconstruct_workset_return_a_unrelated_activity_a() {
+        let conn = setup_test_db();
+        let ws_a = create_workspace(&conn, "Aurora Website").unwrap();
+
+        let item_hero = create_item(&conn, Some(&ws_a.id), None, "text", "Hero code", Some("Hero component"), "{}").unwrap();
+
+        let cand_hero = crate::db::models::TaskCandidate {
+            id: "task-hero-anim".to_string(),
+            context_id: Some(ws_a.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.91,
+            status: crate::db::models::TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-14T07:00:00Z".to_string(),
+            last_active_at: "2026-09-14T07:20:00Z".to_string(),
+            created_at: "2026-09-14T07:00:00Z".to_string(),
+            updated_at: "2026-09-14T07:20:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand_hero).unwrap();
+
+        // Transition from A to Inactivity / None, then return to A
+        let t_inact = ContextTransition::new(Some(ws_a.id.clone()), None, crate::db::models::ContextTransitionType::ContextEnd, 0.85);
+        crate::db::operations::create_context_transition(&conn, &t_inact).unwrap();
+
+        let t_return = ContextTransition::new(None, Some(ws_a.id.clone()), crate::db::models::ContextTransitionType::ContextReturn, 0.92);
+        crate::db::operations::create_context_transition(&conn, &t_return).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset_a = service.derive_for_workspace(&conn, &ws_a.id).unwrap();
+
+        assert_eq!(workset_a.workset_state, WorksetState::DetourReturn);
+        assert_eq!(workset_a.task_title.as_deref(), Some("Hero animation"));
+        assert_eq!(workset_a.items[0].id, item_hero.id);
+    }
 }
+
