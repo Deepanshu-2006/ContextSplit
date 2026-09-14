@@ -390,6 +390,7 @@ pub fn delete_item(conn: &Connection, id: &str) -> Result<()> {
     
     if let Some(ws_id) = old_ws {
         let _ = recalculate_workspace_profile(conn, &ws_id);
+        crate::context_engine::memory::invalidate_memory_cache(Some(&ws_id));
     }
     
     Ok(())
@@ -468,6 +469,14 @@ pub fn move_item(
             InboxState::New,
             Some("Item returned to inbox"),
         );
+    }
+
+    // Invalidate memory & workset caches for affected workspaces
+    if let Some(old_ws) = &old_workspace_id {
+        crate::context_engine::memory::invalidate_memory_cache(Some(old_ws));
+    }
+    if let Some(new_ws) = workspace_id {
+        crate::context_engine::memory::invalidate_memory_cache(Some(new_ws));
     }
     
     get_item(conn, id)
