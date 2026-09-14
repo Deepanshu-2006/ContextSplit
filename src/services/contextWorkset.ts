@@ -101,6 +101,27 @@ export const contextWorksetService = {
   },
 
   /**
+   * Submits explicit user feedback (keep or remove) on a workset item.
+   * Invariant: Does not delete the item from the system or database.
+   */
+  async submitWorksetFeedback(
+    contextId: string,
+    itemId: string,
+    isPositive: boolean
+  ): Promise<boolean> {
+    try {
+      return await invoke<boolean>("submit_workset_feedback", {
+        contextId,
+        itemId,
+        isPositive,
+      });
+    } catch (err) {
+      console.error("Failed to submit workset feedback:", err);
+      return false;
+    }
+  },
+
+  /**
    * Returns items partitioned by relevance category.
    */
   getItemsByRelevance(
@@ -131,3 +152,4 @@ export const contextWorksetService = {
 
 export const getContextWorkset = contextWorksetService.getContextWorkset;
 export const getActiveWorkset = contextWorksetService.getActiveWorkset;
+export const submitWorksetFeedback = contextWorksetService.submitWorksetFeedback;

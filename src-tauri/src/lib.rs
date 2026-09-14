@@ -1094,6 +1094,17 @@ fn get_active_workset(
     service.derive_active(&conn)
 }
 
+#[tauri::command]
+fn submit_workset_feedback(
+    context_id: String,
+    item_id: String,
+    is_positive: bool,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::workset::record_workset_feedback(&conn, &context_id, &item_id, is_positive)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1290,7 +1301,8 @@ pub fn run() {
             submit_memory_feedback,
             // Context Workset (Day 18)
             get_context_workset,
-            get_active_workset
+            get_active_workset,
+            submit_workset_feedback
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

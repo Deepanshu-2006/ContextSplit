@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   ArrowLeft,
   Layers,
@@ -13,8 +13,11 @@ import {
   ChevronDown,
   ChevronUp,
   Sparkles,
+  MoreHorizontal,
+  BookmarkCheck,
+  EyeOff,
 } from 'lucide-react';
-import { ContextWorkset, WorksetItemReference } from '../../services/contextWorkset';
+import { ContextWorkset, WorksetItemReference, contextWorksetService } from '../../services/contextWorkset';
 import { toast } from 'sonner';
 
 interface ContextWorksetDetailViewProps {
@@ -23,6 +26,7 @@ interface ContextWorksetDetailViewProps {
   currentTaskTitle?: string | null;
   onBack: () => void;
   onSelectItem: (itemId: string) => void;
+  onWorksetUpdated?: () => void;
 }
 
 export function ContextWorksetDetailView({
@@ -31,12 +35,14 @@ export function ContextWorksetDetailView({
   currentTaskTitle,
   onBack,
   onSelectItem,
+  onWorksetUpdated,
 }: ContextWorksetDetailViewProps) {
   const [showGlobalWhy, setShowGlobalWhy] = useState(false);
   const [expandedWhyItemIds, setExpandedWhyItemIds] = useState<Set<string>>(new Set());
 
   const effectiveContextName = workset?.context_name || contextName || 'Workspace';
   const effectiveTaskTitle = workset?.task_title || currentTaskTitle || null;
+  const contextId = workset?.context_id;
 
   const toggleItemWhy = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -157,9 +163,11 @@ export function ContextWorksetDetailView({
               <WorksetSection
                 title="Primary"
                 items={primaryItems}
+                contextId={contextId}
                 onSelectItem={onSelectItem}
                 expandedWhyItemIds={expandedWhyItemIds}
                 onToggleItemWhy={toggleItemWhy}
+                onWorksetUpdated={onWorksetUpdated}
               />
             )}
 
@@ -168,9 +176,11 @@ export function ContextWorksetDetailView({
               <WorksetSection
                 title="Supporting"
                 items={supportingItems}
+                contextId={contextId}
                 onSelectItem={onSelectItem}
                 expandedWhyItemIds={expandedWhyItemIds}
                 onToggleItemWhy={toggleItemWhy}
+                onWorksetUpdated={onWorksetUpdated}
               />
             )}
 
@@ -179,9 +189,11 @@ export function ContextWorksetDetailView({
               <WorksetSection
                 title="References"
                 items={referenceItems}
+                contextId={contextId}
                 onSelectItem={onSelectItem}
                 expandedWhyItemIds={expandedWhyItemIds}
                 onToggleItemWhy={toggleItemWhy}
+                onWorksetUpdated={onWorksetUpdated}
               />
             )}
 
@@ -190,9 +202,11 @@ export function ContextWorksetDetailView({
               <WorksetSection
                 title="Recent"
                 items={recentItems}
+                contextId={contextId}
                 onSelectItem={onSelectItem}
                 expandedWhyItemIds={expandedWhyItemIds}
                 onToggleItemWhy={toggleItemWhy}
+                onWorksetUpdated={onWorksetUpdated}
               />
             )}
 
@@ -201,9 +215,11 @@ export function ContextWorksetDetailView({
               <WorksetSection
                 title="Related"
                 items={relatedItems}
+                contextId={contextId}
                 onSelectItem={onSelectItem}
                 expandedWhyItemIds={expandedWhyItemIds}
                 onToggleItemWhy={toggleItemWhy}
+                onWorksetUpdated={onWorksetUpdated}
               />
             )}
           </div>
@@ -220,15 +236,19 @@ export function ContextWorksetDetailView({
 function WorksetSection({
   title,
   items,
+  contextId,
   onSelectItem,
   expandedWhyItemIds,
   onToggleItemWhy,
+  onWorksetUpdated,
 }: {
   title: string;
   items: WorksetItemReference[];
+  contextId?: string;
   onSelectItem: (itemId: string) => void;
   expandedWhyItemIds: Set<string>;
   onToggleItemWhy: (id: string, e: React.MouseEvent) => void;
+  onWorksetUpdated?: () => void;
 }) {
   return (
     <div className="space-y-2">
@@ -242,9 +262,11 @@ function WorksetSection({
           <WorksetDetailItemRow
             key={item.id}
             item={item}
+            contextId={contextId}
             onSelect={() => onSelectItem(item.id)}
             isWhyExpanded={expandedWhyItemIds.has(item.id)}
             onToggleWhy={(e) => onToggleItemWhy(item.id, e)}
+            onWorksetUpdated={onWorksetUpdated}
           />
         ))}
       </div>
@@ -253,19 +275,23 @@ function WorksetSection({
 }
 
 // ---------------------------------------------------------------------------
-// Actionable Workset Item Row
+// Actionable Workset Item Row with Subtle Feedback Menu
 // ---------------------------------------------------------------------------
 
 function WorksetDetailItemRow({
   item,
+  contextId,
   onSelect,
   isWhyExpanded,
   onToggleWhy,
+  onWorksetUpdated,
 }: {
   item: WorksetItemReference;
+  contextId?: string;
   onSelect: () => void;
   isWhyExpanded: boolean;
   onToggleWhy: (e: React.MouseEvent) => void;
+  onWorksetUpdated?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -368,6 +394,13 @@ function WorksetDetailItemRow({
               {isWhyExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             </button>
           )}
+
+          {/* Subtle Menu: Keep / Remove from workset */}
+          <WorksetItemActionsMenu
+            itemId={item.id}
+            contextId={contextId}
+            onWorksetUpdated={onWorksetUpdated}
+          />
         </div>
       </div>
 
@@ -386,6 +419,90 @@ function WorksetDetailItemRow({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Subtle Workset Item Actions Menu (⋯)
+// ---------------------------------------------------------------------------
+
+export function WorksetItemActionsMenu({
+  itemId,
+  contextId,
+  onWorksetUpdated,
+}: {
+  itemId: string;
+  contextId?: string;
+  onWorksetUpdated?: () => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isOpen]);
+
+  const handleAction = async (isPositive: boolean, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsOpen(false);
+    if (!contextId) return;
+
+    try {
+      await contextWorksetService.submitWorksetFeedback(contextId, itemId, isPositive);
+      if (isPositive) {
+        toast.success('Kept in workset');
+      } else {
+        toast.success('Removed from workset (item remains saved)');
+      }
+      onWorksetUpdated?.();
+    } catch (err) {
+      console.error('Failed to submit workset feedback:', err);
+      toast.error('Failed to update workset feedback');
+    }
+  };
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setIsOpen(!isOpen);
+        }}
+        className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors cursor-pointer"
+        title="Workset options"
+      >
+        <MoreHorizontal size={14} />
+      </button>
+
+      {isOpen && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute right-0 top-full mt-1 w-44 bg-white rounded-lg border border-gray-200 shadow-lg py-1 z-30 text-xs animate-in fade-in-0 zoom-in-95 duration-100"
+        >
+          <button
+            onClick={(e) => handleAction(true, e)}
+            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <BookmarkCheck size={13} className="text-emerald-600" />
+            <span>Keep in workset</span>
+          </button>
+          <button
+            onClick={(e) => handleAction(false, e)}
+            className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <EyeOff size={13} className="text-red-500" />
+            <span>Remove from workset</span>
+          </button>
         </div>
       )}
     </div>

@@ -31,7 +31,7 @@ import {
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset, WorksetItemReference } from '../../services/contextWorkset';
-import { ContextWorksetDetailView } from './ContextWorksetDetailView';
+import { ContextWorksetDetailView, WorksetItemActionsMenu } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
 
@@ -273,6 +273,11 @@ export function ContextOverviewPanel() {
                 }
                 onBack={() => setActiveTab('overview')}
                 onSelectItem={(itemId) => setSelectedItemId(itemId)}
+                onWorksetUpdated={() => {
+                  if (overviewWorkspaceId) {
+                    loadOverviewAndMemory(overviewWorkspaceId);
+                  }
+                }}
               />
             ) : (
               <TimelineTabContent
@@ -607,7 +612,9 @@ function ResumeMemoryOverviewContent({
                 <WorksetItemRow
                   key={item.id}
                   item={item}
+                  contextId={contextId}
                   onClick={() => onSelectItem(item.id)}
+                  onWorksetUpdated={onMemoryFeedbackRecorded}
                 />
               ))}
 
@@ -643,7 +650,9 @@ function ResumeMemoryOverviewContent({
                     content_snippet: item.content_snippet || '',
                     is_suggested_addition: false,
                   }}
+                  contextId={contextId}
                   onClick={() => onSelectItem(item.id)}
+                  onWorksetUpdated={onMemoryFeedbackRecorded}
                 />
               ))}
             </div>
@@ -689,10 +698,14 @@ function ResumeMemoryOverviewContent({
 
 function WorksetItemRow({
   item,
+  contextId,
   onClick,
+  onWorksetUpdated,
 }: {
   item: WorksetItemReference;
+  contextId?: string;
   onClick: () => void;
+  onWorksetUpdated?: () => void;
 }) {
   const getItemIcon = (type: string, appName?: string | null) => {
     const lowerApp = (appName || '').toLowerCase();
@@ -757,7 +770,11 @@ function WorksetItemRow({
             Reference
           </span>
         )}
-        <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-600 transition-colors ml-0.5" />
+        <WorksetItemActionsMenu
+          itemId={item.id}
+          contextId={contextId}
+          onWorksetUpdated={onWorksetUpdated}
+        />
       </div>
     </div>
   );

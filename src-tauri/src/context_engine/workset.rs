@@ -758,9 +758,33 @@ impl ContextWorksetBuilder {
         // 1. Derive ContextMemory (reusing Day 17 memory pipeline)
         let memory = ContextMemory::derive_for_workspace(conn, workspace_id)?;
 
-        // 2. Fetch all confirmed items for this workspace
-        let items = crate::db::operations::list_items(conn, Some(workspace_id))
-            .unwrap_or_default();
+        // 2. Fetch all confirmed items for this workspace (direct or confirmed membership)
+        let mut items = Vec::new();
+        if let Ok(mut item_stmt) = conn.prepare(
+            "SELECT DISTINCT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+             FROM items i
+             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
+             WHERE i.workspace_id = ?1 OR (cm.workspace_id = ?1 AND cm.membership_type = 'confirmed')
+             ORDER BY i.created_at DESC LIMIT 50",
+        ) {
+            if let Ok(rows) = item_stmt.query_map(params![workspace_id], |row| {
+                Ok(Item {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    item_type: row.get(3)?,
+                    content: row.get(4)?,
+                    title: row.get(5)?,
+                    metadata: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            }) {
+                for r in rows.flatten() {
+                    items.push(r);
+                }
+            }
+        }
 
         // 3. Fetch high-confidence suggested memberships from unfiled inbox items
         let suggested_memberships = crate::db::operations::list_workspace_memberships(
@@ -938,6 +962,11 @@ impl ContextWorksetBuilder {
         }
 
         for sig in &self.user_feedback_signals {
+            if let Some(ref sig_ws) = sig.workspace_id {
+                if sig_ws != &self.workspace_id {
+                    continue;
+                }
+            }
             if let Some(ref i_id) = sig.item_id {
                 if sig.signal_type == "user_dismiss" || sig.signal_type == "user_reject" {
                     rejected_item_ids.insert(i_id.clone());
@@ -947,10 +976,12 @@ impl ContextWorksetBuilder {
                             || val.get("is_positive").and_then(|v| v.as_bool()) == Some(false)
                             || val.get("action").and_then(|v| v.as_str()) == Some("dismiss")
                             || val.get("action").and_then(|v| v.as_str()) == Some("reject")
+                            || val.get("action").and_then(|v| v.as_str()) == Some("remove_from_workset")
                         {
                             rejected_item_ids.insert(i_id.clone());
                         } else if val.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false)
                             || val.get("is_positive").and_then(|v| v.as_bool()) == Some(true)
+                            || val.get("action").and_then(|v| v.as_str()) == Some("keep_in_workset")
                         {
                             confirmed_by_user_item_ids.insert(i_id.clone());
                         }
@@ -1641,6 +1672,62 @@ impl ContextWorksetService {
             Ok(None)
         }
     }
+
+    /// Records explicit user feedback (keep or remove) on an item within a contextual workset.
+    ///
+    /// Invariants:
+    /// 1. **Non-destructive**: Does NOT delete the item from the database or inbox.
+    /// 2. Records a negative signal for removal (excluding it from this context's workset while leaving it discoverable elsewhere).
+    /// 3. Records a positive confirmation signal for keep actions (boosting future ranking).
+    /// 4. Reuses the existing `context_signals` learning pipeline.
+    pub fn record_feedback(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+        item_id: &str,
+        is_positive: bool,
+    ) -> Result<bool, String> {
+        record_workset_feedback(conn, context_id, item_id, is_positive)
+    }
+}
+
+/// Records explicit user feedback (keep or remove) on an item within a contextual workset.
+///
+/// Invariant: **DOES NOT delete the item from the system or inbox**.
+/// The item remains fully discoverable and accessible in search, timelines, and other contexts.
+/// Reuses the existing `context_signals` architecture for consistent feedback learning.
+pub fn record_workset_feedback(
+    conn: &Connection,
+    context_id: &str,
+    item_id: &str,
+    is_positive: bool,
+) -> Result<bool, String> {
+    let now = Utc::now().to_rfc3339();
+    let signal_id = uuid::Uuid::new_v4().to_string();
+
+    let payload = serde_json::json!({
+        "action": if is_positive { "keep_in_workset" } else { "remove_from_workset" },
+        "is_positive": is_positive,
+        "confirmed": is_positive,
+        "rejected": !is_positive,
+        "recorded_at": now,
+        "target": "workset"
+    })
+    .to_string();
+
+    let signal_type = if is_positive { "user_feedback" } else { "user_dismiss" };
+
+    conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
+        params![signal_id, context_id, item_id, signal_type, payload, now, now],
+    )
+    .map_err(|e| format!("Failed to record workset feedback signal: {}", e))?;
+
+    // Invalidate the cache for this context so subsequent derivation reflects user choice immediately
+    invalidate_workset_cache(Some(context_id));
+
+    Ok(true)
 }
 
 // =========================================================================
@@ -3178,6 +3265,121 @@ mod tests {
         let db_item = crate::db::operations::get_item(&conn, &noisy_item.id).unwrap();
         assert_eq!(db_item.id, noisy_item.id);
         assert_eq!(db_item.title.as_deref(), Some("New Tab"));
+    }
+
+    #[test]
+    fn test_workset_feedback_remove_item_excludes_from_workset_without_deleting_item() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        let item_a = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Framer motion spring animation curves specification",
+            Some("Spring Curves Spec"),
+            "{}",
+        ).unwrap();
+
+        let item_b = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Hero React Component Implementation",
+            Some("Hero Component"),
+            "{}",
+        ).unwrap();
+
+        let service = ContextWorksetService::new();
+        let initial_workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        assert!(initial_workset.items.iter().any(|i| i.id == item_a.id));
+        assert!(initial_workset.items.iter().any(|i| i.id == item_b.id));
+
+        // User removes item_a from workset
+        record_workset_feedback(&conn, &ws.id, &item_a.id, false).unwrap();
+
+        // Re-derive workset
+        let updated_workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        // item_a is now excluded from workset
+        assert!(!updated_workset.items.iter().any(|i| i.id == item_a.id), "Removed item must not appear in workset");
+        assert!(updated_workset.items.iter().any(|i| i.id == item_b.id), "Other items must remain");
+
+        // Non-destructive check: item_a STILL exists in the database
+        let db_item_a = crate::db::operations::get_item(&conn, &item_a.id).unwrap();
+        assert_eq!(db_item_a.id, item_a.id);
+        assert_eq!(db_item_a.title.as_deref(), Some("Spring Curves Spec"));
+    }
+
+    #[test]
+    fn test_workset_feedback_keep_item_boosts_relevance_and_adds_reason() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "Aurora Website").unwrap();
+
+        let item = create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Secondary animation reference document",
+            Some("Animation Reference"),
+            "{}",
+        ).unwrap();
+
+        // User explicitly marks "Keep in workset"
+        record_workset_feedback(&conn, &ws.id, &item.id, true).unwrap();
+
+        let service = ContextWorksetService::new();
+        let workset = service.derive_for_workspace(&conn, &ws.id).unwrap();
+
+        let ref_item = workset.items.iter().find(|i| i.id == item.id).unwrap();
+        assert!(
+            ref_item.reasons.iter().any(|r| r == "confirmed by user feedback"),
+            "Positive feedback must add confirmed reason"
+        );
+    }
+
+    #[test]
+    fn test_workset_feedback_item_remains_discoverable_in_other_contexts() {
+        let conn = setup_test_db();
+        let ws_a = create_workspace(&conn, "Context A").unwrap();
+        let ws_b = create_workspace(&conn, "Context B").unwrap();
+
+        // An item associated with Context A and Context B
+        let shared_item = create_item(
+            &conn,
+            Some(&ws_a.id),
+            None,
+            "text",
+            "Shared utility library documentation",
+            Some("Shared Utils"),
+            "{}",
+        ).unwrap();
+
+        crate::db::operations::create_or_update_membership(
+            &conn,
+            &shared_item.id,
+            &ws_b.id,
+            "confirmed",
+            0.90,
+            "user",
+        ).unwrap();
+
+        // User removes shared_item from Context A workset only
+        record_workset_feedback(&conn, &ws_a.id, &shared_item.id, false).unwrap();
+
+        let service = ContextWorksetService::new();
+
+        // Workset for Context A must exclude shared_item
+        let workset_a = service.derive_for_workspace(&conn, &ws_a.id).unwrap();
+        assert!(!workset_a.items.iter().any(|i| i.id == shared_item.id));
+
+        // Workset for Context B must still include shared_item
+        let workset_b = service.derive_for_workspace(&conn, &ws_b.id).unwrap();
+        assert!(workset_b.items.iter().any(|i| i.id == shared_item.id), "Item should remain discoverable in Context B");
     }
 }
 
