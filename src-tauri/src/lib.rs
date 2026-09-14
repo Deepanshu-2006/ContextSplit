@@ -1075,6 +1075,25 @@ fn submit_memory_feedback(
     )
 }
 
+#[tauri::command]
+fn get_context_workset(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::workset::ContextWorkset, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::workset::ContextWorksetService::new();
+    service.derive_for_workspace(&conn, context_id)
+}
+
+#[tauri::command]
+fn get_active_workset(
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::workset::ContextWorkset>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::workset::ContextWorksetService::new();
+    service.derive_active(&conn)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1268,7 +1287,10 @@ pub fn run() {
             get_yesterday_memory,
             get_historical_memory_for_date,
             get_recent_historical_memories,
-            submit_memory_feedback
+            submit_memory_feedback,
+            // Context Workset (Day 18)
+            get_context_workset,
+            get_active_workset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import { db, Workspace, Item } from '../services/db';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import { toast } from 'sonner';
 
 export type CaptureTargetState = 'hidden' | 'visible' | 'approaching' | 'active' | 'success' | 'failure';
 
@@ -294,18 +293,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         set({ activeItems: [newItem, ...state.activeItems] });
       }
 
-      // Trigger capture toast notification
-      let preview = newItem.title || newItem.content || "Content copied";
-      if (newItem.item_type === "image") {
-        preview = "Image copied to Inbox";
-      } else if (preview.length > 50) {
-        preview = preview.substring(0, 50) + "...";
-      }
-
-      toast.success("Captured to Inbox", {
-        description: preview,
-        duration: 3000,
-      });
     });
 
     const unlistenUpdated = await listen('inbox://updated', async () => {

@@ -29,6 +29,13 @@ pub mod task_transitions;
 pub mod memory;
 pub mod memory_query;
 pub mod work_sequence;
+pub mod workset;
+
+pub use workset::{
+    get_global_workset_cache, invalidate_workset_cache, ContextWorkset, ContextWorksetBuilder,
+    ContextWorksetCache, ContextWorksetService, WorksetItemReference, WorksetItemRelevance,
+    WorksetState,
+};
 
 pub use memory::{
     ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryRepository,

@@ -865,6 +865,7 @@ pub fn get_global_memory_cache() -> &'static ContextMemoryCache {
 pub fn invalidate_memory_cache(workspace_id: Option<&str>) {
     get_global_memory_cache().invalidate(workspace_id);
     crate::context_engine::memory_query::invalidate_historical_memory_cache();
+    crate::context_engine::workset::invalidate_workset_cache(workspace_id);
 }
 
 /// Records explicit user feedback on contextual working memory.
@@ -1412,11 +1413,16 @@ impl ContextMemoryBuilder {
             recent_tasks.first().cloned()
         };
 
-        // 4. Determine last_active_at
-        let mut last_active_at = self.workspace.as_ref().and_then(|w| w.last_activity_at.clone());
+        // 4. Determine last_active_at from actual context evidence/signals first
+        let mut last_active_at: Option<String> = None;
         for item in &recent_items {
             if last_active_at.as_deref().map(|curr| item.timestamp.as_str() > curr).unwrap_or(true) {
                 last_active_at = Some(item.timestamp.clone());
+            }
+        }
+        for cand in &self.task_candidates {
+            if last_active_at.as_deref().map(|curr| cand.last_active_at.as_str() > curr).unwrap_or(true) {
+                last_active_at = Some(cand.last_active_at.clone());
             }
         }
         if let Some(trans) = &recent_context_transition {
@@ -1428,6 +1434,10 @@ impl ContextMemoryBuilder {
             if last_active_at.as_deref().map(|curr| seg.ended_at.as_str() > curr).unwrap_or(true) {
                 last_active_at = Some(seg.ended_at.clone());
             }
+        }
+        // Fallback to workspace metadata if no item/task/transition/segment signals were found
+        if last_active_at.is_none() {
+            last_active_at = self.workspace.as_ref().and_then(|w| w.last_activity_at.clone());
         }
 
         // 5. Activity State Classification
