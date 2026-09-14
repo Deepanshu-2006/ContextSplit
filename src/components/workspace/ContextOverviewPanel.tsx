@@ -17,8 +17,6 @@ import {
   Laptop,
   CheckCircle2,
   AlertCircle,
-  Inbox,
-  Folder,
   ChevronDown,
   ChevronUp,
   RotateCcw,
@@ -362,9 +360,7 @@ function ResumeMemoryOverviewContent({
   onViewFullTimeline,
   onMemoryFeedbackRecorded,
 }: ResumeMemoryOverviewContentProps) {
-  const [showRecentWork, setShowRecentWork] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
-  const [isViewAllWorkset, setIsViewAllWorkset] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'submitting' | 'submitted'>('idle');
 
   const contextId = overview?.workspace_id || memory?.context_id || workset?.context_id;
@@ -417,13 +413,13 @@ function ResumeMemoryOverviewContent({
     return [];
   }, [workset]);
 
-  // 3-5 Recent items fallback
-  const recentItems: TimelineItemSummary[] = useMemo(() => {
+  // Fallback items if workset not yet derived
+  const fallbackRecentItems: TimelineItemSummary[] = useMemo(() => {
     if (overview?.recent_items && overview.recent_items.length > 0) {
-      return overview.recent_items.slice(0, 5);
+      return overview.recent_items.slice(0, 4);
     }
     if (memory?.recent_items && memory.recent_items.length > 0) {
-      return memory.recent_items.slice(0, 5).map((m) => ({
+      return memory.recent_items.slice(0, 4).map((m) => ({
         id: m.id,
         item_type: m.item_type,
         title: m.title || null,
@@ -437,28 +433,7 @@ function ResumeMemoryOverviewContent({
     return [];
   }, [overview, memory]);
 
-  const recentItemsCount = recentItems.length;
-
-  // Extract recent activity bullet items
-  const recentActivityBullets: string[] = useMemo(() => {
-    if (overview?.current_task?.recent_activity && overview.current_task.recent_activity.length > 0) {
-      return overview.current_task.recent_activity;
-    }
-    if (workset?.recent_activity && workset.recent_activity.trim() !== '' && !workset.recent_activity.includes('No recent activity')) {
-      return [workset.recent_activity];
-    }
-    if (memory?.recent_items && memory.recent_items.length > 0) {
-      return memory.recent_items.slice(0, 3).map((item) => {
-        if (item.title) {
-          return item.title;
-        }
-        return `Saved ${item.item_type} in ${contextName}`;
-      });
-    }
-    return [];
-  }, [overview, memory, workset, contextName]);
-
-  // Memory explanation structures (without raw scores or technical internals)
+  // Memory explanation structures
   const explanation = memory?.explanation || workset?.explanation;
   const whyReasons: string[] = useMemo(() => {
     if (explanation?.why_reasons && explanation.why_reasons.length > 0) {
@@ -467,27 +442,19 @@ function ResumeMemoryOverviewContent({
     const reasons: string[] = [];
     if (worksetItems.length > 0) {
       reasons.push(`${worksetItems.length} active workset item${worksetItems.length === 1 ? '' : 's'}`);
-    } else if (recentItemsCount > 0) {
-      reasons.push(`${recentItemsCount} related recent item${recentItemsCount === 1 ? '' : 's'}`);
-    }
-    if (recentItemsCount > 1 || worksetItems.length > 1) {
-      reasons.push('semantic similarity between active items');
     }
     if (contextName) {
-      reasons.push(`same ${contextName} context`);
+      reasons.push(`working inside ${contextName}`);
     }
     if (isContextReturn) {
       reasons.push(`returned to ${contextName} context`);
     }
-    if (isTaskAvailable && taskProvenance === 'Inferred') {
-      reasons.push('task candidate remained active across sessions');
-    }
     return reasons;
-  }, [explanation, worksetItems.length, recentItemsCount, contextName, isContextReturn, isTaskAvailable, taskProvenance]);
+  }, [explanation, worksetItems.length, contextName, isContextReturn]);
 
   const explanationSummary = explanation?.summary || overview?.current_task?.explanation || memory?.memory_statement || (
     isTaskAvailable
-      ? `Reconstructed from recent activity patterns and related resources in ${contextName}.`
+      ? `Reconstructed from recent activity and related resources in ${contextName}.`
       : `Based on activity signals recorded in ${contextName}.`
   );
 
@@ -497,10 +464,9 @@ function ResumeMemoryOverviewContent({
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
       {/* =================================================================== */}
-      {/* 1. RESUME WHERE I LEFT OFF CARD                                    */}
+      {/* 1. YOU WERE WORKING ON                                              */}
       {/* =================================================================== */}
       <div className="p-5 rounded-xl bg-white border border-gray-200/90 shadow-2xs space-y-4">
-        {/* Muted header */}
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
             You were working on
@@ -513,17 +479,12 @@ function ResumeMemoryOverviewContent({
           )}
         </div>
 
-        {/* Focus & Subtitle & Direct [Why?] Trigger */}
+        {/* Task Title & Direct [Why?] Trigger */}
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
-                {taskTitle}
-              </h3>
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-500 border border-gray-200/60">
-                {isTaskAvailable ? taskProvenance : 'Confirmed'}
-              </span>
-            </div>
+            <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
+              {taskTitle}
+            </h3>
 
             {/* Direct [Why?] trigger button */}
             <button
@@ -578,12 +539,6 @@ function ResumeMemoryOverviewContent({
             )}
           </div>
 
-          {!isTaskAvailable && (
-            <p className="text-xs text-gray-600 pt-0.5">
-              Recent activity suggests you were active here.
-            </p>
-          )}
-
           {/* Explainable Memory Section (Toggled by [Why?]) */}
           {showWhy && (
             <div className="mt-3 p-3.5 bg-slate-50/95 rounded-lg border border-slate-200/90 text-xs space-y-2.5 animate-in fade-in duration-150">
@@ -616,7 +571,7 @@ function ResumeMemoryOverviewContent({
                 </p>
               )}
 
-              {/* Uncertainty Note (Honest epistemic confidence, never overclaiming) */}
+              {/* Uncertainty Note */}
               {uncertaintyNote && (
                 <div className="flex items-start gap-1.5 pt-1 text-[11px] text-amber-800 bg-amber-50/80 p-2 rounded-md border border-amber-200/60">
                   <Info size={12} className="flex-shrink-0 mt-0.5 text-amber-600" />
@@ -628,7 +583,7 @@ function ResumeMemoryOverviewContent({
         </div>
 
         {/* =================================================================== */}
-        {/* CONTINUE WITH (Context Workset Continuation List)                  */}
+        {/* 2. CONTINUE WITH (Context Workset Continuation List)                */}
         {/* =================================================================== */}
         <div className="pt-3 border-t border-gray-100 space-y-2.5">
           <div className="flex items-center justify-between">
@@ -648,7 +603,7 @@ function ResumeMemoryOverviewContent({
 
           {worksetItems.length > 0 ? (
             <div className="space-y-1.5">
-              {(isViewAllWorkset ? worksetItems : worksetItems.slice(0, 3)).map((item) => (
+              {worksetItems.slice(0, 4).map((item) => (
                 <WorksetItemRow
                   key={item.id}
                   item={item}
@@ -656,30 +611,22 @@ function ResumeMemoryOverviewContent({
                 />
               ))}
 
-              <div className="flex items-center justify-between pt-1">
-                {worksetItems.length > 3 && (
+              {worksetItems.length > 4 && (
+                <div className="pt-1 flex justify-end">
                   <button
-                    onClick={() => setIsViewAllWorkset(!isViewAllWorkset)}
+                    onClick={onOpenWorksetDetail}
                     className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer"
                   >
-                    <span>{isViewAllWorkset ? 'Show less' : `View all (${worksetItems.length})`}</span>
-                    {isViewAllWorkset ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    <span>View all {worksetItems.length} items</span>
+                    <ArrowRight size={11} />
                   </button>
-                )}
-
-                <button
-                  onClick={onOpenWorksetDetail}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer ml-auto"
-                >
-                  <span>Working set view</span>
-                  <ArrowRight size={11} />
-                </button>
-              </div>
+                </div>
+              )}
             </div>
-          ) : recentItemsCount > 0 ? (
+          ) : fallbackRecentItems.length > 0 ? (
             /* Fallback to recent items if workset not yet derived */
             <div className="space-y-1.5">
-              {recentItems.slice(0, 3).map((item) => (
+              {fallbackRecentItems.map((item) => (
                 <WorksetItemRow
                   key={item.id}
                   item={{
@@ -704,114 +651,7 @@ function ResumeMemoryOverviewContent({
             <p className="text-xs text-gray-400 italic">No working items recorded yet.</p>
           )}
         </div>
-
-        {/* Action Button: View recent work details toggle */}
-        <div className="pt-1">
-          <button
-            onClick={() => setShowRecentWork(!showRecentWork)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-medium transition-colors cursor-pointer"
-          >
-            <span>{showRecentWork ? 'Hide recent work details' : 'View recent work details'}</span>
-            {showRecentWork ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          </button>
-        </div>
-
-        {/* Revealed Recent Work Details */}
-        {showRecentWork && (
-          <div className="pt-4 border-t border-gray-100 space-y-4 animate-in fade-in duration-150">
-            {/* Recent activity bullet points */}
-            {recentActivityBullets.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="text-xs font-semibold text-gray-700">
-                  Recent activity:
-                </div>
-                <ul className="space-y-1 text-xs text-gray-600 pl-1">
-                  {recentActivityBullets.map((bullet, idx) => (
-                    <li key={idx} className="flex items-start gap-2">
-                      <span className="text-gray-400 font-bold">•</span>
-                      <span className="truncate">{bullet}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Recent items preview (3-5 items) */}
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
-                <span>Recent items ({recentItemsCount})</span>
-              </div>
-              {recentItemsCount > 0 ? (
-                <div className="space-y-1.5">
-                  {recentItems.map((item) => (
-                    <RecentItemRow
-                      key={item.id}
-                      item={item}
-                      onClick={() => onSelectItem(item.id)}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-gray-400 italic">No recent items captured.</p>
-              )}
-            </div>
-
-            {/* Related applications & domains in quiet tags */}
-            {((overview?.related_applications && overview.related_applications.length > 0) ||
-              (overview?.important_domains && overview.important_domains.length > 0)) && (
-              <div className="pt-2 border-t border-gray-100 flex flex-wrap gap-1.5">
-                {overview?.related_applications?.map((app) => (
-                  <span
-                    key={app.name}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-gray-50 border border-gray-200 text-gray-600"
-                  >
-                    <Laptop size={10} className="text-gray-400" />
-                    <span>{app.name}</span>
-                    <span className="text-gray-400">({app.item_count})</span>
-                  </span>
-                ))}
-                {overview?.important_domains?.map((dom) => (
-                  <span
-                    key={dom.domain}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] bg-gray-50 border border-gray-200 text-gray-600"
-                  >
-                    <Globe size={10} className="text-gray-400" />
-                    <span>{dom.domain}</span>
-                    <span className="text-gray-400">({dom.item_count})</span>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
       </div>
-
-      {/* =================================================================== */}
-      {/* 2. CONTEXT ITEMS OVERVIEW (When top is collapsed & no workset)     */}
-      {/* =================================================================== */}
-      {!showRecentWork && worksetItems.length === 0 && recentItemsCount > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-semibold text-gray-900 flex items-center gap-1.5">
-              <FileText size={14} className="text-gray-600" />
-              <span>Recent items</span>
-            </div>
-            <span className="text-[11px] text-gray-400">
-              {recentItemsCount} item{recentItemsCount === 1 ? '' : 's'}
-            </span>
-          </div>
-
-          <div className="space-y-2">
-            {recentItems.map((item) => (
-              <RecentItemRow
-                key={item.id}
-                item={item}
-                onClick={() => onSelectItem(item.id)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* =================================================================== */}
       {/* 3. CONTEXT ACTIONS & TIMELINE LINK                                 */}
@@ -878,11 +718,11 @@ function WorksetItemRow({
   return (
     <div
       onClick={onClick}
-      className="group p-2.5 rounded-lg border border-gray-200/70 bg-gray-50/40 hover:bg-white hover:border-gray-300 hover:shadow-2xs transition-all flex items-center justify-between gap-3 cursor-pointer"
+      className="group p-2.5 rounded-lg border border-gray-100 bg-white hover:border-gray-200 transition-colors flex items-center justify-between gap-3 cursor-pointer"
       title={primaryReason ? `${displayTitle} — ${primaryReason}` : displayTitle}
     >
       <div className="flex items-center gap-2.5 min-w-0">
-        <div className="w-6 h-6 rounded bg-white border border-gray-200 group-hover:border-gray-300 flex items-center justify-center flex-shrink-0 shadow-2xs">
+        <div className="w-6 h-6 rounded bg-gray-50 flex items-center justify-center flex-shrink-0 text-gray-500">
           {getItemIcon(item.item_type, item.app_name)}
         </div>
         <div className="min-w-0">
@@ -918,66 +758,6 @@ function WorksetItemRow({
           </span>
         )}
         <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-600 transition-colors ml-0.5" />
-      </div>
-    </div>
-  );
-}
-
-function RecentItemRow({
-  item,
-  onClick,
-}: {
-  item: TimelineItemSummary;
-  onClick?: () => void;
-}) {
-  const getItemIcon = (type: string) => {
-    switch (type) {
-      case 'url':
-        return <Globe size={13} className="text-gray-500" />;
-      case 'code':
-        return <CodeIcon size={13} className="text-gray-500" />;
-      case 'image':
-        return <ImageIcon size={13} className="text-gray-500" />;
-      default:
-        return <FileText size={13} className="text-gray-500" />;
-    }
-  };
-
-  const displayTitle = item.title || item.content_snippet || 'Untitled Item';
-
-  return (
-    <div
-      onClick={onClick}
-      className={`p-2.5 rounded-lg border border-gray-100 bg-white hover:border-gray-200 transition-colors flex items-center justify-between gap-3 ${onClick ? 'cursor-pointer' : ''}`}
-    >
-      <div className="flex items-center gap-2.5 min-w-0">
-        <div className="w-6 h-6 rounded bg-gray-50 flex items-center justify-center flex-shrink-0">
-          {getItemIcon(item.item_type)}
-        </div>
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-gray-800 truncate">
-            {displayTitle}
-          </div>
-          <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-0.5">
-            {item.app_name && <span>{item.app_name}</span>}
-            {item.domain && <span>{item.domain}</span>}
-            {item.captured_at && <span>{formatRelativeDate(item.captured_at)}</span>}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1.5 flex-shrink-0">
-        {item.membership_type === 'suggested' ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200/60">
-            <Inbox size={9} />
-            Suggested
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200/60">
-            <Folder size={9} />
-            Confirmed
-          </span>
-        )}
       </div>
     </div>
   );

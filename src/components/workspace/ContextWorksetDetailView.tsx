@@ -112,21 +112,21 @@ export function ContextWorksetDetailView({
         </div>
       )}
 
-      {/* Context & Task Metadata Card */}
-      <div className="p-4 rounded-xl bg-gray-50/70 border border-gray-200/80 space-y-3">
+      {/* Context & Task Metadata Block */}
+      <div className="space-y-3">
         <div>
           <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-            Context
+            Context:
           </div>
-          <div className="text-base font-semibold text-gray-900 mt-0.5">
+          <div className="text-lg font-semibold text-gray-900 mt-0.5">
             {effectiveContextName}
           </div>
         </div>
 
         {effectiveTaskTitle && (
-          <div className="pt-2 border-t border-gray-200/60">
+          <div>
             <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-              Current task
+              Current task:
             </div>
             <div className="text-sm font-medium text-gray-800 mt-0.5">
               {effectiveTaskTitle}
@@ -136,8 +136,8 @@ export function ContextWorksetDetailView({
       </div>
 
       {/* WORKING SET SECTION */}
-      <div className="space-y-5">
-        <div className="flex items-center justify-between border-b border-gray-100 pb-2">
+      <div className="space-y-5 pt-2 border-t border-gray-100">
+        <div className="flex items-center justify-between">
           <h3 className="text-xs font-bold text-gray-900 uppercase tracking-wider">
             Working Set
           </h3>
