@@ -26,9 +26,12 @@ import {
   Sparkles,
   Info,
   Check,
+  Copy,
+  Calendar,
 } from 'lucide-react';
-import { db, ContextOverview, TimelineEvent, TimelineItemSummary } from '../../services/db';
+import { db, ContextOverview, TimelineEvent, TimelineItemSummary, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
+import { contextWorksetService, ContextWorkset, WorksetItemReference } from '../../services/contextWorkset';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
 
@@ -44,6 +47,8 @@ export function ContextOverviewPanel() {
 
   const [overview, setOverview] = useState<ContextOverview | null>(null);
   const [memory, setMemory] = useState<ContextMemoryResponse | null>(null);
+  const [workset, setWorkset] = useState<ContextWorkset | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingLifecycle, setIsUpdatingLifecycle] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +63,8 @@ export function ContextOverviewPanel() {
     } else {
       setOverview(null);
       setMemory(null);
+      setWorkset(null);
+      setSelectedItemId(null);
     }
   }, [isOverviewOpen, overviewWorkspaceId]);
 
@@ -65,12 +72,14 @@ export function ContextOverviewPanel() {
     setIsLoading(true);
     setError(null);
     try {
-      const [overviewData, memoryData] = await Promise.all([
+      const [overviewData, memoryData, worksetData] = await Promise.all([
         db.getContextOverview(wsId).catch(() => null),
         contextMemoryService.getContextMemory(wsId).catch(() => null),
+        contextWorksetService.getContextWorkset(wsId).catch(() => null),
       ]);
       setOverview(overviewData);
       setMemory(memoryData);
+      setWorkset(worksetData);
     } catch (err: any) {
       setError(err?.toString() || 'Failed to load context overview');
     } finally {
@@ -81,13 +90,17 @@ export function ContextOverviewPanel() {
   // Close on Escape
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOverviewOpen) {
-        closeOverview();
+      if (e.key === 'Escape') {
+        if (selectedItemId) {
+          setSelectedItemId(null);
+        } else if (isOverviewOpen) {
+          closeOverview();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOverviewOpen, closeOverview]);
+  }, [isOverviewOpen, selectedItemId, closeOverview]);
 
   const handleToggleArchive = async () => {
     if (!overview) return;
@@ -216,9 +229,11 @@ export function ContextOverviewPanel() {
               <ResumeMemoryOverviewContent
                 overview={overview}
                 memory={memory}
+                workset={workset}
                 targetWorkspaceName={targetWorkspace?.name}
                 onToggleArchive={handleToggleArchive}
                 isUpdatingLifecycle={isUpdatingLifecycle}
+                onSelectItem={(itemId) => setSelectedItemId(itemId)}
                 onViewFullTimeline={() => {
                   closeOverview();
                   if (overview) {
@@ -250,6 +265,14 @@ export function ContextOverviewPanel() {
           <span>Context Engine</span>
         </div>
       </div>
+
+      {/* Item Detail Modal Preview */}
+      {selectedItemId && (
+        <ContextItemDetailModal
+          itemId={selectedItemId}
+          onClose={() => setSelectedItemId(null)}
+        />
+      )}
     </div>,
     document.body
   );
@@ -287,9 +310,11 @@ function LifecycleBadge({ state }: { state: 'active' | 'dormant' | 'archived' })
 interface ResumeMemoryOverviewContentProps {
   overview: ContextOverview | null;
   memory: ContextMemoryResponse | null;
+  workset: ContextWorkset | null;
   targetWorkspaceName?: string;
   onToggleArchive: () => void;
   isUpdatingLifecycle: boolean;
+  onSelectItem: (itemId: string) => void;
   onViewFullTimeline: () => void;
   onMemoryFeedbackRecorded?: () => void;
 }
@@ -297,35 +322,39 @@ interface ResumeMemoryOverviewContentProps {
 function ResumeMemoryOverviewContent({
   overview,
   memory,
+  workset,
   targetWorkspaceName,
   onToggleArchive,
   isUpdatingLifecycle,
+  onSelectItem,
   onViewFullTimeline,
   onMemoryFeedbackRecorded,
 }: ResumeMemoryOverviewContentProps) {
   const [showRecentWork, setShowRecentWork] = useState(false);
   const [showWhy, setShowWhy] = useState(false);
+  const [isViewAllWorkset, setIsViewAllWorkset] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'submitting' | 'submitted'>('idle');
 
-  const contextId = overview?.workspace_id || memory?.context_id;
-  const contextName = overview?.name || memory?.context || targetWorkspaceName || 'Workspace';
+  const contextId = overview?.workspace_id || memory?.context_id || workset?.context_id;
+  const contextName = overview?.name || memory?.context || workset?.context_name || targetWorkspaceName || 'Workspace';
 
   // Determine if we have a confident task
-  const rawTask = memory?.task || (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet' ? overview.current_task.title : null);
+  const rawTask = memory?.task || workset?.task_title || (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet' ? overview.current_task.title : null);
   const isTaskAvailable = Boolean(rawTask && rawTask.trim() !== '' && rawTask.toLowerCase() !== 'not clear yet');
   const taskTitle = rawTask || contextName;
 
   // Task provenance
-  const taskProvenance = memory?.recent_task?.provenance === 'confirmed' ? 'Confirmed' : 'Inferred';
+  const taskProvenance = (workset?.provenance === 'confirmed' || memory?.recent_task?.provenance === 'confirmed') ? 'Confirmed' : 'Inferred';
 
   // Context Return indicator
   const isContextReturn = Boolean(
+    workset?.workset_state === 'detour_return' ||
     memory?.is_context_return ||
     memory?.evidence?.some((e) => e.toLowerCase().includes('returned to'))
   );
 
   // Last active timestamp
-  const lastActiveTimestamp = memory?.last_active_at || overview?.recent_activity;
+  const lastActiveTimestamp = workset?.last_active_at || memory?.last_active_at || overview?.recent_activity;
   const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Recently active';
 
   const handleFeedback = async (isPositive: boolean) => {
@@ -335,7 +364,7 @@ function ResumeMemoryOverviewContent({
       await db.submitMemoryFeedback(
         contextId,
         rawTask,
-        memory?.recent_task?.id,
+        memory?.recent_task?.id || workset?.task_id || undefined,
         isPositive
       );
       setFeedbackStatus('submitted');
@@ -348,7 +377,15 @@ function ResumeMemoryOverviewContent({
     }
   };
 
-  // 3-5 Recent items
+  // Workset continuation items
+  const worksetItems: WorksetItemReference[] = useMemo(() => {
+    if (workset?.items && workset.items.length > 0) {
+      return workset.items;
+    }
+    return [];
+  }, [workset]);
+
+  // 3-5 Recent items fallback
   const recentItems: TimelineItemSummary[] = useMemo(() => {
     if (overview?.recent_items && overview.recent_items.length > 0) {
       return overview.recent_items.slice(0, 5);
@@ -375,6 +412,9 @@ function ResumeMemoryOverviewContent({
     if (overview?.current_task?.recent_activity && overview.current_task.recent_activity.length > 0) {
       return overview.current_task.recent_activity;
     }
+    if (workset?.recent_activity && workset.recent_activity.trim() !== '' && !workset.recent_activity.includes('No recent activity')) {
+      return [workset.recent_activity];
+    }
     if (memory?.recent_items && memory.recent_items.length > 0) {
       return memory.recent_items.slice(0, 3).map((item) => {
         if (item.title) {
@@ -384,20 +424,22 @@ function ResumeMemoryOverviewContent({
       });
     }
     return [];
-  }, [overview, memory, contextName]);
+  }, [overview, memory, workset, contextName]);
 
   // Memory explanation structures (without raw scores or technical internals)
-  const explanation = memory?.explanation;
+  const explanation = memory?.explanation || workset?.explanation;
   const whyReasons: string[] = useMemo(() => {
     if (explanation?.why_reasons && explanation.why_reasons.length > 0) {
       return explanation.why_reasons;
     }
     const reasons: string[] = [];
-    if (recentItemsCount > 0) {
+    if (worksetItems.length > 0) {
+      reasons.push(`${worksetItems.length} active workset item${worksetItems.length === 1 ? '' : 's'}`);
+    } else if (recentItemsCount > 0) {
       reasons.push(`${recentItemsCount} related recent item${recentItemsCount === 1 ? '' : 's'}`);
     }
-    if (recentItemsCount > 1) {
-      reasons.push('semantic similarity between recent items');
+    if (recentItemsCount > 1 || worksetItems.length > 1) {
+      reasons.push('semantic similarity between active items');
     }
     if (contextName) {
       reasons.push(`same ${contextName} context`);
@@ -409,7 +451,7 @@ function ResumeMemoryOverviewContent({
       reasons.push('task candidate remained active across sessions');
     }
     return reasons;
-  }, [explanation, recentItemsCount, contextName, isContextReturn, isTaskAvailable, taskProvenance]);
+  }, [explanation, worksetItems.length, recentItemsCount, contextName, isContextReturn, isTaskAvailable, taskProvenance]);
 
   const explanationSummary = explanation?.summary || overview?.current_task?.explanation || memory?.memory_statement || (
     isTaskAvailable
@@ -553,23 +595,79 @@ function ResumeMemoryOverviewContent({
           )}
         </div>
 
-        {/* Item count line */}
-        <div className="text-xs text-gray-500 font-medium flex items-center gap-1.5 pt-1">
-          <FileText size={13} className="text-gray-400" />
-          <span>
-            {recentItemsCount > 0
-              ? `${recentItemsCount} recent item${recentItemsCount === 1 ? '' : 's'}`
-              : 'No recent items'}
-          </span>
+        {/* =================================================================== */}
+        {/* CONTINUE WITH (Context Workset Continuation List)                  */}
+        {/* =================================================================== */}
+        <div className="pt-3 border-t border-gray-100 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              Continue with
+            </span>
+            {worksetItems.length > 0 && (
+              <span className="text-[10px] text-gray-400">
+                {isViewAllWorkset
+                  ? `Showing all ${worksetItems.length}`
+                  : `Top ${Math.min(3, worksetItems.length)} of ${worksetItems.length}`}
+              </span>
+            )}
+          </div>
+
+          {worksetItems.length > 0 ? (
+            <div className="space-y-1.5">
+              {(isViewAllWorkset ? worksetItems : worksetItems.slice(0, 3)).map((item) => (
+                <WorksetItemRow
+                  key={item.id}
+                  item={item}
+                  onClick={() => onSelectItem(item.id)}
+                />
+              ))}
+
+              {worksetItems.length > 3 && (
+                <button
+                  onClick={() => setIsViewAllWorkset(!isViewAllWorkset)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors pt-1 cursor-pointer"
+                >
+                  <span>{isViewAllWorkset ? 'Show less' : `View all (${worksetItems.length})`}</span>
+                  {isViewAllWorkset ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+              )}
+            </div>
+          ) : recentItemsCount > 0 ? (
+            /* Fallback to recent items if workset not yet derived */
+            <div className="space-y-1.5">
+              {recentItems.slice(0, 3).map((item) => (
+                <WorksetItemRow
+                  key={item.id}
+                  item={{
+                    id: item.id,
+                    title: item.title,
+                    item_type: item.item_type,
+                    relevance: 'recent',
+                    relevance_score: 0.5,
+                    reasons: ['recently active in context'],
+                    provenance: item.membership_type === 'confirmed' ? 'confirmed' : 'inferred',
+                    created_at: item.captured_at || '',
+                    app_name: item.app_name,
+                    domain: item.domain,
+                    content_snippet: item.content_snippet || '',
+                    is_suggested_addition: false,
+                  }}
+                  onClick={() => onSelectItem(item.id)}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-gray-400 italic">No working items recorded yet.</p>
+          )}
         </div>
 
-        {/* Action Button: View recent work */}
+        {/* Action Button: View recent work details toggle */}
         <div className="pt-1">
           <button
             onClick={() => setShowRecentWork(!showRecentWork)}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-white text-xs font-medium transition-colors cursor-pointer"
           >
-            <span>{showRecentWork ? 'Hide recent work' : 'View recent work'}</span>
+            <span>{showRecentWork ? 'Hide recent work details' : 'View recent work details'}</span>
             {showRecentWork ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
           </button>
         </div>
@@ -602,7 +700,11 @@ function ResumeMemoryOverviewContent({
               {recentItemsCount > 0 ? (
                 <div className="space-y-1.5">
                   {recentItems.map((item) => (
-                    <RecentItemRow key={item.id} item={item} />
+                    <RecentItemRow
+                      key={item.id}
+                      item={item}
+                      onClick={() => onSelectItem(item.id)}
+                    />
                   ))}
                 </div>
               ) : (
@@ -641,9 +743,9 @@ function ResumeMemoryOverviewContent({
       </div>
 
       {/* =================================================================== */}
-      {/* 2. CONTEXT ITEMS OVERVIEW (When top is collapsed)                  */}
+      {/* 2. CONTEXT ITEMS OVERVIEW (When top is collapsed & no workset)     */}
       {/* =================================================================== */}
-      {!showRecentWork && recentItemsCount > 0 && (
+      {!showRecentWork && worksetItems.length === 0 && recentItemsCount > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="text-xs font-semibold text-gray-900 flex items-center gap-1.5">
@@ -657,7 +759,11 @@ function ResumeMemoryOverviewContent({
 
           <div className="space-y-2">
             {recentItems.map((item) => (
-              <RecentItemRow key={item.id} item={item} />
+              <RecentItemRow
+                key={item.id}
+                item={item}
+                onClick={() => onSelectItem(item.id)}
+              />
             ))}
           </div>
         </div>
@@ -697,7 +803,89 @@ function ResumeMemoryOverviewContent({
   );
 }
 
-function RecentItemRow({ item }: { item: TimelineItemSummary }) {
+function WorksetItemRow({
+  item,
+  onClick,
+}: {
+  item: WorksetItemReference;
+  onClick: () => void;
+}) {
+  const getItemIcon = (type: string, appName?: string | null) => {
+    const lowerApp = (appName || '').toLowerCase();
+    if (lowerApp.includes('figma')) return <Layers size={13} className="text-purple-500" />;
+    if (lowerApp.includes('github') || lowerApp.includes('code') || lowerApp.includes('terminal')) {
+      return <CodeIcon size={13} className="text-gray-700" />;
+    }
+    switch (type) {
+      case 'url':
+        return <Globe size={13} className="text-blue-500" />;
+      case 'code':
+        return <CodeIcon size={13} className="text-emerald-600" />;
+      case 'image':
+        return <ImageIcon size={13} className="text-pink-500" />;
+      default:
+        return <FileText size={13} className="text-gray-500" />;
+    }
+  };
+
+  const displayTitle = item.title || item.content_snippet || 'Untitled Item';
+  const primaryReason = item.reasons && item.reasons.length > 0 ? item.reasons[0] : null;
+
+  return (
+    <div
+      onClick={onClick}
+      className="group p-2.5 rounded-lg border border-gray-200/70 bg-gray-50/40 hover:bg-white hover:border-gray-300 hover:shadow-2xs transition-all flex items-center justify-between gap-3 cursor-pointer"
+      title={primaryReason ? `${displayTitle} — ${primaryReason}` : displayTitle}
+    >
+      <div className="flex items-center gap-2.5 min-w-0">
+        <div className="w-6 h-6 rounded bg-white border border-gray-200 group-hover:border-gray-300 flex items-center justify-center flex-shrink-0 shadow-2xs">
+          {getItemIcon(item.item_type, item.app_name)}
+        </div>
+        <div className="min-w-0">
+          <div className="text-xs font-medium text-gray-800 group-hover:text-gray-900 truncate">
+            {displayTitle}
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-0.5">
+            {item.app_name && <span>{item.app_name}</span>}
+            {item.domain && <span>{item.domain}</span>}
+            {item.last_active_at ? (
+              <span>{formatRelativeDate(item.last_active_at)}</span>
+            ) : item.created_at ? (
+              <span>{formatRelativeDate(item.created_at)}</span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 flex-shrink-0">
+        {item.relevance === 'primary' && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200/60">
+            Primary
+          </span>
+        )}
+        {item.relevance === 'supporting' && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200/60">
+            Supporting
+          </span>
+        )}
+        {item.relevance === 'reference' && (
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200/60">
+            Reference
+          </span>
+        )}
+        <ExternalLink size={12} className="text-gray-300 group-hover:text-gray-600 transition-colors ml-0.5" />
+      </div>
+    </div>
+  );
+}
+
+function RecentItemRow({
+  item,
+  onClick,
+}: {
+  item: TimelineItemSummary;
+  onClick?: () => void;
+}) {
   const getItemIcon = (type: string) => {
     switch (type) {
       case 'url':
@@ -714,7 +902,10 @@ function RecentItemRow({ item }: { item: TimelineItemSummary }) {
   const displayTitle = item.title || item.content_snippet || 'Untitled Item';
 
   return (
-    <div className="p-2.5 rounded-lg border border-gray-100 bg-white hover:border-gray-200 transition-colors flex items-center justify-between gap-3">
+    <div
+      onClick={onClick}
+      className={`p-2.5 rounded-lg border border-gray-100 bg-white hover:border-gray-200 transition-colors flex items-center justify-between gap-3 ${onClick ? 'cursor-pointer' : ''}`}
+    >
       <div className="flex items-center gap-2.5 min-w-0">
         <div className="w-6 h-6 rounded bg-gray-50 flex items-center justify-center flex-shrink-0">
           {getItemIcon(item.item_type)}
@@ -745,6 +936,168 @@ function RecentItemRow({ item }: { item: TimelineItemSummary }) {
         )}
       </div>
     </div>
+  );
+}
+
+function ContextItemDetailModal({
+  itemId,
+  onClose,
+}: {
+  itemId: string;
+  onClose: () => void;
+}) {
+  const [item, setItem] = useState<Item | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoading(true);
+    db.getItem(itemId)
+      .then((data) => {
+        if (isMounted) {
+          setItem(data);
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load item details:', err);
+        if (isMounted) setIsLoading(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [itemId]);
+
+  const handleCopy = () => {
+    if (!item) return;
+    const textToCopy = item.content || item.title || '';
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    toast.success('Copied to clipboard');
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const parseMetadata = (rawMeta?: string | null): Record<string, any> => {
+    if (!rawMeta) return {};
+    try {
+      return JSON.parse(rawMeta);
+    } catch {
+      return {};
+    }
+  };
+
+  const meta = parseMetadata(item?.metadata);
+  const displayTitle = item?.title || meta.title || meta.window_title || 'Untitled Item';
+
+  return createPortal(
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+      <div className="fixed inset-0" onClick={onClose} />
+      <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-150 z-10">
+        {/* Modal Header */}
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-gray-200 text-gray-700">
+              {item?.item_type || 'item'}
+            </span>
+            <h3 className="text-sm font-semibold text-gray-900 truncate">
+              {isLoading ? 'Loading item...' : displayTitle}
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Modal Content */}
+        <div className="p-5 overflow-y-auto space-y-4 flex-1">
+          {isLoading ? (
+            <div className="h-40 flex items-center justify-center text-gray-400">
+              <RefreshCw size={18} className="animate-spin text-gray-500 mr-2" />
+              <span className="text-xs">Loading item details...</span>
+            </div>
+          ) : item ? (
+            <>
+              {/* Metadata tags */}
+              <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                {meta.app_name && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-gray-100 text-gray-700">
+                    <Laptop size={11} />
+                    {meta.app_name}
+                  </span>
+                )}
+                {meta.domain && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-gray-100 text-gray-700">
+                    <Globe size={11} />
+                    {meta.domain}
+                  </span>
+                )}
+                {item.created_at && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-gray-400">
+                    <Calendar size={11} />
+                    {formatRelativeDate(item.created_at)}
+                  </span>
+                )}
+              </div>
+
+              {/* Item Content Preview */}
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-gray-700">Content</div>
+                {item.item_type === 'url' ? (
+                  <div className="p-3 bg-blue-50/50 rounded-lg border border-blue-100 text-xs text-blue-900 break-all font-mono">
+                    <a
+                      href={item.content}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline flex items-center gap-1.5 text-blue-700"
+                    >
+                      <Globe size={13} />
+                      <span>{item.content}</span>
+                      <ExternalLink size={11} />
+                    </a>
+                  </div>
+                ) : item.item_type === 'code' ? (
+                  <pre className="p-3 bg-gray-900 text-gray-100 rounded-lg text-xs font-mono overflow-x-auto max-h-60">
+                    <code>{item.content}</code>
+                  </pre>
+                ) : (
+                  <div className="p-3.5 bg-gray-50 rounded-lg border border-gray-100 text-xs text-gray-800 whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto">
+                    {item.content || 'No text content recorded.'}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="p-4 text-center text-xs text-gray-400">
+              Item details could not be found.
+            </div>
+          )}
+        </div>
+
+        {/* Modal Footer */}
+        <div className="px-5 py-3 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between gap-3">
+          <button
+            onClick={handleCopy}
+            disabled={!item || !item.content}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 hover:bg-white text-gray-700 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {copied ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+            <span>{copied ? 'Copied' : 'Copy Content'}</span>
+          </button>
+
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-900 hover:bg-gray-800 text-white transition-colors cursor-pointer"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -830,6 +1183,7 @@ function formatRelativeDate(dateStr: string): string {
     const diffDays = Math.floor(diffHours / 24);
 
     if (diffSec < 60) return 'Just now';
+    if (diffMin === 1) return '1m ago';
     if (diffMin < 60) return `${diffMin}m ago`;
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays === 1) return 'Yesterday';
