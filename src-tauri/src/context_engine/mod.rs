@@ -122,6 +122,8 @@ pub mod adversarial_tests;
 pub mod task_adversarial_tests;
 #[cfg(test)]
 pub mod memory_e2e_tests;
+#[cfg(test)]
+pub mod workset_e2e_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
