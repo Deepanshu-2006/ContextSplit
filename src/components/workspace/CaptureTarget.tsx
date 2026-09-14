@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useWorkspaceStore } from '../../store/workspaceStore';
-import { Check, X, ArrowDownToLine, Sparkles, PauseCircle } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import { useCursorProximity } from '../../hooks/useCursorProximity';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -57,135 +57,38 @@ export const CaptureTarget: React.FC = () => {
   if (isNotch) {
     const isIdle = notchState === 'idle';
 
-    // Top-flush container for macOS Notch overlay, hidden and retracted when idle
-    const baseNotchContainer = `w-full flex items-start justify-center pointer-events-none origin-top apple-notch-container-transition ${
-      isIdle ? '-translate-y-full opacity-0' : 'translate-y-0 opacity-100'
-    }`;
-    
-    let innerClasses = "flex items-center justify-between px-3.5 apple-notch-pill-transition overflow-hidden origin-top select-none mx-auto ";
-    let content: React.ReactNode = null;
-
-    switch (notchState) {
-      case 'drag_detected':
-        // Global drag detected -> notch expands smoothly from MacBook bezel
-        innerClasses += "w-[240px] h-[42px] rounded-b-[22px] apple-notch-glass border-b border-x border-white/15";
-        content = (
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2.5">
-              <div className="w-6 h-6 rounded-full bg-linear-to-br from-indigo-500/30 to-purple-500/30 border border-indigo-400/40 flex items-center justify-center">
-                <Sparkles size={13} className="text-indigo-300 animate-apple-pulse" />
-              </div>
-              <span className="font-medium text-[13px] tracking-tight text-white/90">ContextSplit</span>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-indigo-400/80 animate-apple-pulse shadow-[0_0_8px_rgba(129,140,248,0.8)]" />
-          </div>
-        );
-        break;
-
-      case 'hover':
-      case 'hovering':
-        // Approaching notch -> expands with drop cue
-        innerClasses += "w-[270px] h-[48px] rounded-b-[24px] apple-notch-glass border-b border-x border-white/20 shadow-2xl ring-1 ring-white/10";
-        content = (
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-full bg-linear-to-b from-indigo-500/40 to-blue-600/40 border border-indigo-400/50 flex items-center justify-center shadow-inner">
-                <ArrowDownToLine size={14} className="text-indigo-300 animate-apple-bounce" />
-              </div>
-              <div className="flex flex-col text-left">
-                <span className="font-semibold text-[13px] tracking-tight text-white">Drop to Capture</span>
-                <span className="font-medium text-[10px] tracking-tight text-white/50">Auto-organize context</span>
-              </div>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.9)]" />
-          </div>
-        );
-        break;
-
-      case 'active':
-      case 'activated':
-        // Inside drop activation zone -> prominent Apple Intelligence aura glow
-        innerClasses += "w-[300px] h-[54px] rounded-b-[26px] apple-notch-glass apple-notch-active-glow border-b border-x border-indigo-400/60 scale-[1.02]";
-        content = (
-          <div className="flex items-center justify-between w-full px-1">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-full bg-linear-to-tr from-indigo-600 to-purple-600 flex items-center justify-center shadow-[0_0_14px_rgba(99,102,241,0.6)] border border-indigo-300/60">
-                <ArrowDownToLine size={16} strokeWidth={2.5} className="text-white animate-apple-bounce" />
-              </div>
-              <div className="flex flex-col text-left">
-                <span className="font-semibold text-[13.5px] tracking-tight text-white">Release to Capture</span>
-                <span className="font-medium text-[10px] tracking-tight text-indigo-300/80">Save to ContextSplit</span>
-              </div>
-            </div>
-            <div className="px-2 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-400/40 text-[10px] font-semibold text-indigo-200">
-              Ready
-            </div>
-          </div>
-        );
-        break;
-
-      case 'paused':
-      case 'pause':
-        innerClasses += "w-[240px] h-[44px] rounded-b-[22px] apple-notch-glass border-b border-x border-amber-500/40";
-        content = (
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2.5">
-              <div className="w-6 h-6 rounded-full bg-amber-500/30 border border-amber-400/40 flex items-center justify-center">
-                <PauseCircle size={14} className="text-amber-300" />
-              </div>
-              <span className="font-medium text-[12.5px] tracking-tight text-white">Capture Paused</span>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-amber-400" />
-          </div>
-        );
-        break;
-
-      case 'captured':
-      case 'success':
-        // Success pill with Apple spring pop animation
-        innerClasses += "w-[270px] h-[48px] rounded-b-[24px] apple-notch-glass apple-notch-success-glow border-b border-x border-emerald-400/60";
-        content = (
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-full bg-linear-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-[0_0_12px_rgba(16,185,129,0.6)] border border-emerald-300/60 animate-apple-pop">
-                <Check size={16} strokeWidth={3} className="text-white" />
-              </div>
-              <div className="flex flex-col text-left">
-                <span className="font-semibold text-[13px] tracking-tight text-white">Captured to Inbox</span>
-                <span className="font-medium text-[10px] tracking-tight text-emerald-300/80">Context updated</span>
-              </div>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.9)]" />
-          </div>
-        );
-        break;
-
-      case 'cancelled':
-      case 'failure':
-        innerClasses += "w-[230px] h-[42px] rounded-b-[22px] apple-notch-glass border-b border-x border-red-500/40";
-        content = (
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded-full bg-red-500/30 border border-red-400/40 flex items-center justify-center">
-                <X size={14} className="text-red-300" />
-              </div>
-              <span className="font-medium text-[12px] tracking-tight text-zinc-300">Cancelled</span>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-red-400/70" />
-          </div>
-        );
-        break;
-
-      default:
-        innerClasses += "w-[170px] h-0 opacity-0 pointer-events-none";
-        content = null;
-        break;
+    let outlineStateClass = "opacity-0";
+    if (notchState === 'drag_detected' || notchState === 'hover' || notchState === 'hovering') {
+      outlineStateClass = "opacity-100 notch-aura-hover";
+    } else if (notchState === 'active' || notchState === 'activated') {
+      outlineStateClass = "opacity-100 notch-aura-active scale-[1.01]";
+    } else if (notchState === 'captured' || notchState === 'success') {
+      outlineStateClass = "opacity-100 notch-aura-success";
+    } else if (notchState === 'cancelled' || notchState === 'failure') {
+      outlineStateClass = "opacity-100 notch-aura-error";
+    } else if (notchState === 'paused' || notchState === 'pause') {
+      outlineStateClass = "opacity-90 border-b-2 border-x-2 border-amber-400/90 shadow-[0_2px_14px_rgba(251,191,36,0.7)]";
     }
 
     return (
-      <div ref={targetRef} className={baseNotchContainer}>
-        <div className={innerClasses}>
-          {content}
+      <div 
+        ref={targetRef} 
+        className="w-full flex items-start justify-center pointer-events-none select-none pt-0 -mt-0.5"
+      >
+        {/* Exact MacBook Notch Silhouette Perimeter Aura (flush to top bezel, behind notch) */}
+        <div 
+          className={`notch-ambient-aura ${outlineStateClass} relative flex items-end justify-center pb-0.5`}
+        >
+          {/* Subtle tiny centered status dot indicator at bottom edge */}
+          {!isIdle && (
+            <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 flex items-center justify-center pointer-events-none">
+              {notchState === 'active' || notchState === 'activated' ? (
+                <div className="w-1.5 h-1.5 rounded-full bg-indigo-300 shadow-[0_0_8px_rgba(165,180,252,1)] animate-pulse" />
+              ) : notchState === 'captured' || notchState === 'success' ? (
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,1)]" />
+              ) : null}
+            </div>
+          )}
         </div>
       </div>
     );

@@ -39,7 +39,7 @@ impl MacOSTarget {
             .accept_first_mouse(true) // Allow drag and drop immediately
             .build()
             .map(|window| {
-                // Position window at top center of primary monitor
+                // Position window at top center of primary monitor above the menu bar
                 if let Ok(Some(monitor)) = window.primary_monitor() {
                     let monitor_size = monitor.size();
                     let window_size = window.outer_size().unwrap_or(PhysicalSize::new(320, 100));
@@ -48,6 +48,42 @@ impl MacOSTarget {
                     let y = 0; // Top of the screen flush against bezel/notch
                     
                     let _ = window.set_position(PhysicalPosition::new(x, y));
+                }
+
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    use cocoa::base::{id, nil, YES};
+                    use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
+                    use cocoa::foundation::{NSRect, NSPoint, NSSize};
+
+                    if let Ok(ns_win_ptr) = window.ns_window() {
+                        let ns_win = ns_win_ptr as id;
+                        if ns_win != nil {
+                            // NSStatusWindowLevel (25) floats directly above the menu bar and notch
+                            ns_win.setLevel_(25);
+                            ns_win.setCollectionBehavior_(
+                                NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle
+                            );
+
+                            if let Ok(Some(monitor)) = window.primary_monitor() {
+                                let monitor_size = monitor.size();
+                                let scale = monitor.scale_factor();
+                                let win_w = 320.0;
+                                let win_h = 100.0;
+                                let screen_w = monitor_size.width as f64 / scale;
+                                let screen_h = monitor_size.height as f64 / scale;
+                                
+                                let x = (screen_w / 2.0) - (win_w / 2.0);
+                                let y = screen_h - win_h;
+                                
+                                let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(win_w, win_h));
+                                ns_win.setFrame_display_(frame, YES);
+                            }
+                        }
+                    }
                 }
 
                 let ctrl_drag = ctrl_drag.clone();

@@ -60,30 +60,53 @@ body {
     inset 0 -1px 1px rgba(16, 185, 129, 0.4);
 }
 
-@keyframes apple-bounce-subtle {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(3px); }
+/* MacBook Notch Silhouette Ambient Highlight Styles */
+.notch-ambient-aura {
+  width: 172px;
+  height: 29px;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+  background: transparent;
+  pointer-events: none;
+  transform-origin: top center;
+  transition: opacity 200ms ease, border-color 200ms ease, box-shadow 200ms ease, transform 200ms var(--apple-spring);
 }
 
-.animate-apple-bounce {
-  animation: apple-bounce-subtle 1.1s var(--apple-smooth) infinite;
+.notch-aura-hover {
+  border-bottom: 2px solid rgba(129, 140, 248, 0.9);
+  border-left: 2px solid rgba(129, 140, 248, 0.9);
+  border-right: 2px solid rgba(129, 140, 248, 0.9);
+  box-shadow: 
+    0 2px 14px rgba(99, 102, 241, 0.7),
+    0 0 28px rgba(129, 140, 248, 0.4),
+    inset 0 -2px 6px rgba(129, 140, 248, 0.3);
 }
 
-@keyframes apple-pop {
-  0% { transform: scale(0.75); opacity: 0; }
-  65% { transform: scale(1.1); opacity: 1; }
-  100% { transform: scale(1); opacity: 1; }
+.notch-aura-active {
+  border-bottom: 2.5px solid rgba(165, 180, 252, 1);
+  border-left: 2.5px solid rgba(165, 180, 252, 1);
+  border-right: 2.5px solid rgba(165, 180, 252, 1);
+  box-shadow: 
+    0 3px 22px rgba(99, 102, 241, 0.95),
+    0 0 45px rgba(168, 85, 247, 0.65),
+    inset 0 -3px 8px rgba(99, 102, 241, 0.5);
 }
 
-.animate-apple-pop {
-  animation: apple-pop 380ms var(--apple-bouncy-spring) forwards;
+.notch-aura-success {
+  border-bottom: 2.5px solid rgba(52, 211, 153, 1);
+  border-left: 2.5px solid rgba(52, 211, 153, 1);
+  border-right: 2.5px solid rgba(52, 211, 153, 1);
+  box-shadow: 
+    0 3px 22px rgba(16, 185, 129, 0.95),
+    0 0 45px rgba(52, 211, 153, 0.65),
+    inset 0 -3px 8px rgba(16, 185, 129, 0.5);
 }
 
-@keyframes apple-pulse-glow {
-  0%, 100% { opacity: 0.7; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.12); }
-}
-
-.animate-apple-pulse {
-  animation: apple-pulse-glow 1.8s ease-in-out infinite;
+.notch-aura-error {
+  border-bottom: 2px solid rgba(248, 113, 113, 0.95);
+  border-left: 2px solid rgba(248, 113, 113, 0.95);
+  border-right: 2px solid rgba(248, 113, 113, 0.95);
+  box-shadow: 
+    0 2px 14px rgba(239, 68, 68, 0.8),
+    inset 0 -2px 6px rgba(239, 68, 68, 0.4);
 }
