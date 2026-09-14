@@ -28,10 +28,12 @@ import {
   Check,
   Copy,
   Calendar,
+  ArrowRight,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, TimelineItemSummary, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset, WorksetItemReference } from '../../services/contextWorkset';
+import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
 
@@ -52,7 +54,7 @@ export function ContextOverviewPanel() {
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingLifecycle, setIsUpdatingLifecycle] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'workset' | 'timeline'>('overview');
   const [timelineSearch, setTimelineSearch] = useState('');
 
   const targetWorkspace = workspaces.find((w) => w.id === overviewWorkspaceId);
@@ -87,12 +89,14 @@ export function ContextOverviewPanel() {
     }
   };
 
-  // Close on Escape
+  // Close on Escape or return to overview
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (selectedItemId) {
           setSelectedItemId(null);
+        } else if (activeTab === 'workset') {
+          setActiveTab('overview');
         } else if (isOverviewOpen) {
           closeOverview();
         }
@@ -100,7 +104,7 @@ export function ContextOverviewPanel() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOverviewOpen, selectedItemId, closeOverview]);
+  }, [isOverviewOpen, selectedItemId, activeTab, closeOverview]);
 
   const handleToggleArchive = async () => {
     if (!overview) return;
@@ -197,6 +201,17 @@ export function ContextOverviewPanel() {
             <span>Resume & Overview</span>
           </button>
           <button
+            onClick={() => setActiveTab('workset')}
+            className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'workset'
+                ? 'border-gray-900 text-gray-900'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            <Layers size={13} />
+            <span>Working Set ({workset?.items.length ?? 0})</span>
+          </button>
+          <button
             onClick={() => setActiveTab('timeline')}
             className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'timeline'
@@ -234,6 +249,7 @@ export function ContextOverviewPanel() {
                 onToggleArchive={handleToggleArchive}
                 isUpdatingLifecycle={isUpdatingLifecycle}
                 onSelectItem={(itemId) => setSelectedItemId(itemId)}
+                onOpenWorksetDetail={() => setActiveTab('workset')}
                 onViewFullTimeline={() => {
                   closeOverview();
                   if (overview) {
@@ -245,6 +261,20 @@ export function ContextOverviewPanel() {
                     loadOverviewAndMemory(overviewWorkspaceId);
                   }
                 }}
+              />
+            ) : activeTab === 'workset' ? (
+              <ContextWorksetDetailView
+                workset={workset}
+                contextName={overview?.name || memory?.context || targetWorkspace?.name || 'Workspace'}
+                currentTaskTitle={
+                  memory?.task ||
+                  workset?.task_title ||
+                  (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet'
+                    ? overview.current_task.title
+                    : null)
+                }
+                onBack={() => setActiveTab('overview')}
+                onSelectItem={(itemId) => setSelectedItemId(itemId)}
               />
             ) : (
               <TimelineTabContent
@@ -315,6 +345,7 @@ interface ResumeMemoryOverviewContentProps {
   onToggleArchive: () => void;
   isUpdatingLifecycle: boolean;
   onSelectItem: (itemId: string) => void;
+  onOpenWorksetDetail: () => void;
   onViewFullTimeline: () => void;
   onMemoryFeedbackRecorded?: () => void;
 }
@@ -327,6 +358,7 @@ function ResumeMemoryOverviewContent({
   onToggleArchive,
   isUpdatingLifecycle,
   onSelectItem,
+  onOpenWorksetDetail,
   onViewFullTimeline,
   onMemoryFeedbackRecorded,
 }: ResumeMemoryOverviewContentProps) {
@@ -604,11 +636,13 @@ function ResumeMemoryOverviewContent({
               Continue with
             </span>
             {worksetItems.length > 0 && (
-              <span className="text-[10px] text-gray-400">
-                {isViewAllWorkset
-                  ? `Showing all ${worksetItems.length}`
-                  : `Top ${Math.min(3, worksetItems.length)} of ${worksetItems.length}`}
-              </span>
+              <button
+                onClick={onOpenWorksetDetail}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+              >
+                <span>Working set detail</span>
+                <ArrowRight size={11} />
+              </button>
             )}
           </div>
 
@@ -622,15 +656,25 @@ function ResumeMemoryOverviewContent({
                 />
               ))}
 
-              {worksetItems.length > 3 && (
+              <div className="flex items-center justify-between pt-1">
+                {worksetItems.length > 3 && (
+                  <button
+                    onClick={() => setIsViewAllWorkset(!isViewAllWorkset)}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer"
+                  >
+                    <span>{isViewAllWorkset ? 'Show less' : `View all (${worksetItems.length})`}</span>
+                    {isViewAllWorkset ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
+                )}
+
                 <button
-                  onClick={() => setIsViewAllWorkset(!isViewAllWorkset)}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors pt-1 cursor-pointer"
+                  onClick={onOpenWorksetDetail}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer ml-auto"
                 >
-                  <span>{isViewAllWorkset ? 'Show less' : `View all (${worksetItems.length})`}</span>
-                  {isViewAllWorkset ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  <span>Working set view</span>
+                  <ArrowRight size={11} />
                 </button>
-              )}
+              </div>
             </div>
           ) : recentItemsCount > 0 ? (
             /* Fallback to recent items if workset not yet derived */
