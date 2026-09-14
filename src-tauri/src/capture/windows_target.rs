@@ -33,7 +33,7 @@ mod tests {
 
         let accepted = controller.on_drop();
         assert!(accepted);
-        assert_eq!(controller.get_state(), TargetState::Idle);
+        assert_eq!(controller.get_state(), TargetState::Captured);
 
         let hist = changes.lock().unwrap();
         assert_eq!(
@@ -43,7 +43,7 @@ mod tests {
                 TargetState::DragDetected,
                 TargetState::Hover,
                 TargetState::Active,
-                TargetState::Idle
+                TargetState::Captured
             ]
         );
     }

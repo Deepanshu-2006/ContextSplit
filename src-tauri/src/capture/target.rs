@@ -158,22 +158,15 @@ where
         }
     }
 
-    /// Content was dropped. Returns `true` if accepted (in `Active` state), `false` if rejected.
+    /// Content was dropped. Returns `true` if accepted (when not paused), `false` if rejected.
     pub fn on_drop(&self) -> bool {
         if self.is_paused() {
             self.transition_to(TargetState::Cancelled);
             self.transition_to(TargetState::Idle);
             return false;
         }
-        let state = self.get_state();
-        if state == TargetState::Active {
-            self.transition_to(TargetState::Idle);
-            true
-        } else {
-            self.transition_to(TargetState::Cancelled);
-            self.transition_to(TargetState::Idle);
-            false
-        }
+        self.transition_to(TargetState::Captured);
+        true
     }
 
     /// Core processing completed successfully -> displays Captured confirmation then returns to Idle.
@@ -372,11 +365,11 @@ mod tests {
 
         let accepted = controller.on_drop();
         assert!(accepted);
-        assert_eq!(controller.get_state(), TargetState::Idle);
+        assert_eq!(controller.get_state(), TargetState::Captured);
     }
 
     #[test]
-    fn test_drop_when_hover_rejected() {
+    fn test_drop_when_hover_accepted() {
         let history = Arc::new(Mutex::new(Vec::new()));
         let hist_clone = history.clone();
 
@@ -387,26 +380,8 @@ mod tests {
         controller.on_drag_enter();
         let accepted = controller.on_drop();
 
-        assert!(!accepted);
-        assert_eq!(controller.get_state(), TargetState::Idle);
-        assert_eq!(
-            *history.lock().unwrap(),
-            vec![
-                TargetState::Idle,
-                TargetState::Hover,
-                TargetState::Cancelled,
-                TargetState::Idle
-            ]
-        );
-    }
-
-    #[test]
-    fn test_drop_when_drag_detected_rejected() {
-        let controller = CaptureTargetController::new(|_| {});
-        controller.on_drag_detected();
-        let accepted = controller.on_drop();
-        assert!(!accepted);
-        assert_eq!(controller.get_state(), TargetState::Idle);
+        assert!(accepted);
+        assert_eq!(controller.get_state(), TargetState::Captured);
     }
 
     #[test]
@@ -491,7 +466,7 @@ mod tests {
                 TargetState::DragDetected,
                 TargetState::Hover,
                 TargetState::Active,
-                TargetState::Idle,
+                TargetState::Captured,
                 TargetState::Captured,
                 TargetState::Idle
             ]

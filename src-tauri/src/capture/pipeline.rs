@@ -580,10 +580,6 @@ impl CapturePipeline {
             }
         }
 
-        if let Some(toast_win) = app_handle.get_webview_window("capture-toast") {
-            let _ = toast_win.show();
-        }
-
         Ok(CaptureResult {
             item,
             signals_emitted,

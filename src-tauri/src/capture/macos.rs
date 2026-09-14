@@ -29,7 +29,7 @@ impl MacOSTarget {
                 WebviewUrl::App("index.html".into())
             )
             .title("ContextSplit Capture Notch")
-            .inner_size(320.0, 100.0) // Adjust based on notch size
+            .inner_size(480.0, 80.0) // Sized for notch + animated sliding wings
             .transparent(true)
             .decorations(false)
             .always_on_top(true)
@@ -42,7 +42,7 @@ impl MacOSTarget {
                 // Position window at top center of primary monitor above the menu bar
                 if let Ok(Some(monitor)) = window.primary_monitor() {
                     let monitor_size = monitor.size();
-                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(320, 100));
+                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(480, 80));
                     
                     let x = (monitor_size.width as i32 / 2) - (window_size.width as i32 / 2);
                     let y = 0; // Top of the screen flush against bezel/notch
@@ -71,8 +71,8 @@ impl MacOSTarget {
                             if let Ok(Some(monitor)) = window.primary_monitor() {
                                 let monitor_size = monitor.size();
                                 let scale = monitor.scale_factor();
-                                let win_w = 320.0;
-                                let win_h = 100.0;
+                                let win_w = 480.0;
+                                let win_h = 80.0;
                                 let screen_w = monitor_size.width as f64 / scale;
                                 let screen_h = monitor_size.height as f64 / scale;
                                 
@@ -93,33 +93,56 @@ impl MacOSTarget {
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { .. }) => {
                             ctrl_drag.on_drag_enter();
                         }
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { position }) => {
-                            let is_near_center = position.x > 30.0 && position.x < 290.0;
-                            ctrl_drag.on_drag_over(is_near_center);
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { .. }) => {
+                            ctrl_drag.on_drag_over(true);
                         }
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
                             if ctrl_drag.on_drop() {
-                                for path in paths {
-                                    let path_str = path.to_string_lossy().to_string();
-                                    let filename = path.file_name().map(|f| f.to_string_lossy().to_string());
-                                    let is_image = path.extension().map(|ext| {
-                                        let e = ext.to_string_lossy().to_lowercase();
-                                        e == "png" || e == "jpg" || e == "jpeg" || e == "webp" || e == "gif" || e == "svg"
-                                    }).unwrap_or(false);
-                                    
-                                    let req = CaptureRequest {
-                                        data_type: if is_image { "image".to_string() } else { "file".to_string() },
-                                        content: path_str.clone(),
-                                        title: filename.clone(),
-                                        source: Some("drag_drop".to_string()),
-                                        filename,
-                                        mime_type: None,
-                                        original_url: None,
-                                        size: std::fs::metadata(path).ok().map(|m| m.len() as usize),
-                                        workspace_id: None,
-                                    };
-                                    let _ = super::engine::process_capture(app_drag.clone(), req);
-                                }
+                                let paths = paths.clone();
+                                let app_drag = app_drag.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    for path in paths {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        let filename = path.file_name().map(|f| f.to_string_lossy().to_string());
+                                        let is_image = path.extension().map(|ext| {
+                                            let e = ext.to_string_lossy().to_lowercase();
+                                            e == "png" || e == "jpg" || e == "jpeg" || e == "webp" || e == "gif" || e == "svg"
+                                        }).unwrap_or(false);
+
+                                        let (content, mime_type) = if is_image {
+                                            if let Ok(bytes) = std::fs::read(&path) {
+                                                let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+                                                    Some("jpg") | Some("jpeg") => "image/jpeg",
+                                                    Some("png") => "image/png",
+                                                    Some("gif") => "image/gif",
+                                                    Some("webp") => "image/webp",
+                                                    Some("svg") => "image/svg+xml",
+                                                    _ => "image/png",
+                                                };
+                                                use base64::{engine::general_purpose, Engine as _};
+                                                let b64 = general_purpose::STANDARD.encode(&bytes);
+                                                (format!("data:{};base64,{}", mime, b64), Some(mime.to_string()))
+                                            } else {
+                                                (path_str.clone(), None)
+                                            }
+                                        } else {
+                                            (path_str.clone(), None)
+                                        };
+                                        
+                                        let req = CaptureRequest {
+                                            data_type: if is_image { "image".to_string() } else { "file".to_string() },
+                                            content,
+                                            title: filename.clone(),
+                                            source: Some("drag_drop".to_string()),
+                                            filename,
+                                            mime_type,
+                                            original_url: None,
+                                            size: std::fs::metadata(path).ok().map(|m| m.len() as usize),
+                                            workspace_id: None,
+                                        };
+                                        let _ = super::engine::process_capture(app_drag.clone(), req);
+                                    }
+                                });
                             }
                         }
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {

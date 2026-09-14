@@ -1299,7 +1299,7 @@ mod tests {
         // User releases inside notch target -> Accepted
         let drop_accepted = notch_controller.on_drop();
         assert!(drop_accepted);
-        assert_eq!(notch_controller.get_state(), TargetState::Idle);
+        assert_eq!(notch_controller.get_state(), TargetState::Captured);
 
         // 3. Construct raw drag request (representing dropped link)
         let drag_req = crate::capture::target::CaptureRequest {
@@ -1372,7 +1372,7 @@ mod tests {
         // User releases inside Windows target -> Accepted
         let drop_accepted = windows_controller.on_drop();
         assert!(drop_accepted);
-        assert_eq!(windows_controller.get_state(), TargetState::Idle);
+        assert_eq!(windows_controller.get_state(), TargetState::Captured);
 
         // 3. Construct raw drag request (representing dropped link)
         let drag_req = crate::capture::target::CaptureRequest {
@@ -1508,7 +1508,7 @@ mod tests {
         // Dropping accepts drag purely at the UI level
         let accepted = controller.on_drop();
         assert!(accepted);
-        assert_eq!(controller.get_state(), TargetState::Idle);
+        assert_eq!(controller.get_state(), TargetState::Captured);
 
         // Core processing and classification remains 100% inside ContextEngine / CaptureCore
         let (conn, _dir) = setup_test_db();
@@ -1681,7 +1681,7 @@ mod tests {
 
         let accepted_now = controller.on_drop();
         assert!(accepted_now, "Drop must be accepted after resume");
-        assert_eq!(controller.get_state(), TargetState::Idle);
+        assert_eq!(controller.get_state(), TargetState::Captured);
     }
 }
 

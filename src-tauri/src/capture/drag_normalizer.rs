@@ -402,6 +402,29 @@ impl DragPayloadNormalizer {
             }
         }
 
+        // 1b. Check if content is already a data URI image
+        if let Some(ref content_str) = payload.content {
+            if content_str.starts_with("data:image/") {
+                let mime = payload.mime_type.clone().or_else(|| {
+                    if let Some(idx) = content_str.find(';') {
+                        Some(content_str[5..idx].to_string())
+                    } else {
+                        Some("image/png".to_string())
+                    }
+                });
+                let filename = payload.file_paths.first().map(|p| {
+                    Path::new(p).file_name().and_then(|f| f.to_str()).unwrap_or("image.png").to_string()
+                }).or_else(|| payload.title.clone());
+                return Ok((
+                    ContentType::Image,
+                    content_str.clone(),
+                    mime,
+                    filename,
+                    None,
+                ));
+            }
+        }
+
         // 2. Check dropped files
         if !payload.file_paths.is_empty() {
             let primary_path = payload.file_paths[0].trim();

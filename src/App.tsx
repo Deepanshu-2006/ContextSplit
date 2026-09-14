@@ -11,7 +11,6 @@ import { ContextOverviewPanel } from "./components/workspace/ContextOverviewPane
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
-import { CaptureToastRenderer } from "./components/workspace/CaptureToastRenderer";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
@@ -24,14 +23,13 @@ function App() {
   const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
   const isNotchTarget = windowLabel === "macos-notch-target";
   const isOrbTarget = windowLabel === "windows-orb-target";
-  const isToastTarget = windowLabel === "capture-toast";
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
 
   useEffect(() => {
     // Only main window loads workspaces and clipboard monitor
-    if (isNotchTarget || isOrbTarget || isToastTarget) {
+    if (isNotchTarget || isOrbTarget) {
       return;
     }
 
@@ -69,7 +67,7 @@ function App() {
         unlisten();
       }
     };
-  }, [loadWorkspaces, listenForClipboard, checkForCandidates, isNotchTarget, isOrbTarget, isToastTarget]);
+  }, [loadWorkspaces, listenForClipboard, checkForCandidates, isNotchTarget, isOrbTarget]);
 
   if (isNotchTarget) {
     return (
@@ -87,21 +85,12 @@ function App() {
     );
   }
 
-  if (isToastTarget) {
-    return (
-      <div className="w-screen h-screen flex justify-end items-end p-4 bg-transparent overflow-hidden pointer-events-none">
-        <CaptureToastRenderer />
-      </div>
-    );
-  }
-
   if (isLoading) {
     return <div className="w-screen h-screen bg-white flex items-center justify-center">Loading...</div>;
   }
 
   return (
     <div className="w-screen h-screen flex overflow-hidden bg-white font-sans text-gray-900">
-      <CaptureTarget />
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
         {activeWorkspaceId !== "inbox" && <TopBar />}

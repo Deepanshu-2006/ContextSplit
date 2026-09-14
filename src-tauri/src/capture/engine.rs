@@ -20,8 +20,10 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     payload.original_url = req.original_url.clone();
     payload.size_bytes = req.size;
     payload.workspace_id = req.workspace_id.clone();
-    if let Some(f) = &req.filename {
-        payload.file_paths = vec![f.clone()];
+    if let Some(_f) = &req.filename {
+        if !req.content.starts_with("data:") {
+            payload.file_paths = vec![req.content.clone()];
+        }
     }
 
     let core = CaptureCore::new();

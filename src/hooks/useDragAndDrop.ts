@@ -4,8 +4,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 export function useDragAndDrop() {
-  const { setCaptureState } = useWorkspaceStore();
-
   useEffect(() => {
     let dragCounter = 0;
     const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
@@ -21,8 +19,6 @@ export function useDragAndDrop() {
           await invoke('notch_drag_enter');
         } else if (isWindowsOrb) {
           await invoke('windows_target_drag_enter');
-        } else {
-          setCaptureState('visible');
         }
       }
     };
@@ -32,8 +28,7 @@ export function useDragAndDrop() {
       e.stopPropagation();
       
       if (isNotch) {
-        // Check if near center (Y axis is less relevant for notch, let's say X is near center)
-        const isNearCenter = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8;
+        const isNearCenter = e.clientX > window.innerWidth * 0.1 && e.clientX < window.innerWidth * 0.9;
         await invoke('notch_drag_over', { isNearCenter });
       } else if (isWindowsOrb) {
         const isInsideTarget = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8 && e.clientY < 120;
@@ -45,13 +40,12 @@ export function useDragAndDrop() {
       e.preventDefault();
       e.stopPropagation();
       dragCounter--;
-      if (dragCounter === 0) {
+      if (dragCounter <= 0) {
+        dragCounter = 0;
         if (isNotch) {
           await invoke('notch_drag_leave');
         } else if (isWindowsOrb) {
           await invoke('windows_target_drag_leave');
-        } else {
-          setCaptureState('hidden');
         }
       }
     };
@@ -67,24 +61,25 @@ export function useDragAndDrop() {
           await invoke('notch_drag_leave');
         } else if (isWindowsOrb) {
           await invoke('windows_target_drag_leave');
-        } else {
-          setCaptureState('hidden');
         }
         return;
       }
 
       if (isNotch) {
-        // For Notch Target, check if drop is accepted (i.e., state is Activated)
         const accepted = await invoke<boolean>('notch_drop');
         if (!accepted) {
           return;
         }
       } else if (isWindowsOrb) {
-        // For Windows Orb Target, check if drop is accepted (i.e., state is Activated)
         const accepted = await invoke<boolean>('windows_target_drop');
         if (!accepted) {
           return;
         }
+      }
+
+      if (isNotch) {
+        // Native Cocoa DragDrop in macos.rs handles drops on the notch target directly and instantly
+        return;
       }
 
       try {
@@ -107,10 +102,10 @@ export function useDragAndDrop() {
           req = {
             data_type: isImage ? 'image' : 'file',
             content: dataUri,
-            title: null,
+            title: file.name,
             source: 'drag_drop',
             filename: file.name,
-            mime_type: file.type || null,
+            mime_type: file.type || (isImage ? 'image/png' : null),
             original_url: null,
             size: file.size,
             workspace_id: targetWs,
@@ -149,22 +144,9 @@ export function useDragAndDrop() {
 
         if (req) {
           await invoke('handle_capture', { req });
-          if (!isNotch && !isWindowsOrb) {
-            setCaptureState('success');
-            setTimeout(() => setCaptureState('hidden'), 2000);
-          }
-        } else {
-          if (!isNotch && !isWindowsOrb) {
-            setCaptureState('failure');
-            setTimeout(() => setCaptureState('hidden'), 2000);
-          }
         }
       } catch (err) {
         console.error('Failed to process drop:', err);
-        if (!isNotch && !isWindowsOrb) {
-          setCaptureState('failure');
-          setTimeout(() => setCaptureState('hidden'), 2000);
-        }
       }
     };
 
@@ -179,5 +161,5 @@ export function useDragAndDrop() {
       window.removeEventListener('dragleave', handleDragLeave);
       window.removeEventListener('drop', handleDrop);
     };
-  }, [setCaptureState]);
+  }, []);
 }
