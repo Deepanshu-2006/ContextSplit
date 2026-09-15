@@ -137,13 +137,17 @@ export function Canvas() {
     [updateItemPositions, activeWorkspaceId, moveItemsToWorkspace]
   );
 
+  const handleMoveToWorkspace = useCallback((itemId: string, wsId: string) => {
+    moveItemsToWorkspace([itemId], wsId);
+  }, [moveItemsToWorkspace]);
+
   // If viewing Inbox, render the clean vertical InboxView
   if (isInbox) {
     return (
       <InboxView
         items={activeItems}
         workspaces={workspaces}
-        onMoveToWorkspace={(itemId, wsId) => moveItemsToWorkspace([itemId], wsId)}
+        onMoveToWorkspace={handleMoveToWorkspace}
       />
     );
   }

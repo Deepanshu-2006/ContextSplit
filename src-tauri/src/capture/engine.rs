@@ -29,12 +29,16 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
     let core = CaptureCore::new();
     let _result = core.process_app(app_handle.clone(), payload).map_err(|e| e.to_string())?;
 
-    // Report success to target overlay if active
+    // Report success to target overlay if active, but ONLY for non-drag-and-drop sources (like hotkeys).
+    // For drag-and-drop, the UI handles the success animation instantly on the window drop event,
+    // so a delayed report_success from the backend would cause a duplicate ghost animation.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        if let Some(system_target) = app_handle.try_state::<super::SystemTarget>() {
-            use super::target::CaptureTarget;
-            let _ = system_target.report_success(&req);
+        if req.source.as_deref() != Some("drag_drop") {
+            if let Some(system_target) = app_handle.try_state::<super::SystemTarget>() {
+                use super::target::CaptureTarget;
+                let _ = system_target.report_success(&req);
+            }
         }
     }
 

@@ -8,6 +8,7 @@ export const CaptureTarget: React.FC = () => {
   const targetRef = useRef<HTMLDivElement>(null);
   const [notchState, setNotchState] = useState<string>('idle');
   const [animState, setAnimState] = useState<AnimState>('idle');
+  const [successKey, setSuccessKey] = useState<number>(0);
   const animStateRef = useRef<AnimState>('idle');
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retractTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -26,6 +27,7 @@ export const CaptureTarget: React.FC = () => {
 
   const triggerSuccess = () => {
     clearAllTimers();
+    setSuccessKey(prev => prev + 1);
     setAnimState('visible');
     animStateRef.current = 'visible';
     setNotchState('captured');
@@ -52,21 +54,23 @@ export const CaptureTarget: React.FC = () => {
       const s = stateStr.toLowerCase();
 
       if (s === 'captured' || s === 'success') {
+        // Always trigger success immediately on drop for rapid-fire support
         triggerSuccess();
       } else if (s === 'cancelled' || s === 'idle') {
         if (animStateRef.current === 'idle') {
           setNotchState('idle');
         }
+      } else if (s === 'hover' || s === 'active' || s === 'drag_detected') {
+        if (animStateRef.current === 'retracting') {
+          clearAllTimers();
+          setAnimState('idle');
+          animStateRef.current = 'idle';
+        }
+        setNotchState(s);
       } else if (animStateRef.current === 'idle') {
         setNotchState(s);
       }
     };
-
-    const handleWindowDrop = () => {
-      triggerSuccess();
-    };
-
-    window.addEventListener('drop', handleWindowDrop);
 
     const unlisten1 = listen('target-state-changed', (event) => {
       handleStateChange(event.payload);
@@ -83,7 +87,6 @@ export const CaptureTarget: React.FC = () => {
     });
 
     return () => {
-      window.removeEventListener('drop', handleWindowDrop);
       clearAllTimers();
       unlisten1.then(f => f());
       unlisten2.then(f => f());
@@ -123,20 +126,18 @@ export const CaptureTarget: React.FC = () => {
         {/* Animated Left Sliding Dynamic Island Wing: "✓ Saved" emerging directly from behind the notch */}
         {animState !== 'idle' && (
           <div 
+            key={`wing-${successKey}`}
             className={`notch-wing-left ${
               isSuccessActive ? 'wing-visible' : 'wing-retracting'
             }`}
           >
             {/* Specular Shimmer Sweep */}
-            {isSuccessActive && (
-              <div className="absolute inset-0 w-1/2 h-full bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none animate-specular-sweep" />
-            )}
+            <div className="absolute inset-0 w-1/2 h-full bg-gradient-to-r from-transparent via-white/25 to-transparent pointer-events-none animate-specular-sweep" />
 
             {/* Animated Clean Glowing Green Tick */}
             <svg 
-              className={`w-4 h-4 text-emerald-400 shrink-0 drop-shadow-[0_0_8px_rgba(52,211,153,0.9)] ${
-                isSuccessActive ? 'animate-tick-elastic' : ''
-              }`}
+              key={`tick-${successKey}`}
+              className="w-4 h-4 text-emerald-400 shrink-0 drop-shadow-[0_0_8px_rgba(52,211,153,0.9)] animate-tick-elastic"
               viewBox="0 0 24 24" 
               fill="none" 
               stroke="currentColor" 
@@ -149,9 +150,7 @@ export const CaptureTarget: React.FC = () => {
 
             {/* Crisp Apple SF Pro Typography with elastic unroll */}
             <div className="flex items-center pr-1.5 z-10">
-              <span className={`text-[13px] font-bold text-white tracking-[-0.01em] leading-none ${
-                isSuccessActive ? 'animate-text-unroll' : ''
-              }`}>
+              <span key={`text-${successKey}`} className="text-[13px] font-bold text-white tracking-[-0.01em] leading-none animate-text-unroll">
                 Saved
               </span>
             </div>

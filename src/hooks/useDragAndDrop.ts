@@ -66,20 +66,14 @@ export function useDragAndDrop() {
       }
 
       if (isNotch) {
-        const accepted = await invoke<boolean>('notch_drop');
-        if (!accepted) {
-          return;
-        }
+        // Native Cocoa DragDrop in macos.rs handles drops on the notch target directly and instantly,
+        // and it manages the notch state machine (including reset). We do not need to invoke 'notch_drop' from JS.
+        return;
       } else if (isWindowsOrb) {
         const accepted = await invoke<boolean>('windows_target_drop');
         if (!accepted) {
           return;
         }
-      }
-
-      if (isNotch) {
-        // Native Cocoa DragDrop in macos.rs handles drops on the notch target directly and instantly
-        return;
       }
 
       try {

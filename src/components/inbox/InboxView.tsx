@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Search,
   Plus,
@@ -69,6 +69,10 @@ export function InboxView({
   const [isCaptureModalOpen, setIsCaptureModalOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const modKey = getModifierKeyName();
+
+  const handleSelectItem = useCallback((id: string) => {
+    setSelectedDetailItemId(id);
+  }, []);
 
   // Load attention and candidate analysis when items change
   useEffect(() => {
@@ -510,7 +514,7 @@ export function InboxView({
                       key={derived.item.id}
                       derived={derived}
                       workspaces={workspaces}
-                      onSelectItem={(id) => setSelectedDetailItemId(id)}
+                      onSelectItem={handleSelectItem}
                       onMoveToWorkspace={onMoveToWorkspace}
                     />
                   ))}

@@ -171,13 +171,17 @@ where
 
     /// Core processing completed successfully -> displays Captured confirmation then returns to Idle.
     pub fn on_capture_success(&self) {
-        self.transition_to(TargetState::Captured);
+        if self.get_state() != TargetState::Captured {
+            self.transition_to(TargetState::Captured);
+        }
         self.transition_to(TargetState::Idle);
     }
 
     /// Core processing failed -> displays Cancelled indicator then returns to Idle.
     pub fn on_capture_failure(&self) {
-        self.transition_to(TargetState::Cancelled);
+        if self.get_state() != TargetState::Cancelled {
+            self.transition_to(TargetState::Cancelled);
+        }
         self.transition_to(TargetState::Idle);
     }
 
@@ -466,7 +470,6 @@ mod tests {
                 TargetState::DragDetected,
                 TargetState::Hover,
                 TargetState::Active,
-                TargetState::Captured,
                 TargetState::Captured,
                 TargetState::Idle
             ]

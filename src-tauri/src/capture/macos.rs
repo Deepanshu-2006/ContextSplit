@@ -33,25 +33,16 @@ impl MacOSTarget {
             .transparent(true)
             .decorations(false)
             .always_on_top(true)
+            .title_bar_style(tauri::TitleBarStyle::Transparent)
             .skip_taskbar(true)
             .visible(true)
             .shadow(false)
             .accept_first_mouse(true) // Allow drag and drop immediately
             .build()
             .map(|window| {
-                // Position window at top center of primary monitor above the menu bar
-                if let Ok(Some(monitor)) = window.primary_monitor() {
-                    let monitor_size = monitor.size();
-                    let window_size = window.outer_size().unwrap_or(PhysicalSize::new(480, 80));
-                    
-                    let x = (monitor_size.width as i32 / 2) - (window_size.width as i32 / 2);
-                    let y = 0; // Top of the screen flush against bezel/notch
-                    
-                    let _ = window.set_position(PhysicalPosition::new(x, y));
-                }
-
                 #[cfg(target_os = "macos")]
                 unsafe {
+                    use objc::{msg_send, sel, sel_impl, class};
                     use cocoa::base::{id, nil, YES};
                     use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
                     use cocoa::foundation::{NSRect, NSPoint, NSSize};
@@ -59,6 +50,10 @@ impl MacOSTarget {
                     if let Ok(ns_win_ptr) = window.ns_window() {
                         let ns_win = ns_win_ptr as id;
                         if ns_win != nil {
+                            // Ensure the window background is COMPLETELY transparent natively
+                            ns_win.setOpaque_(cocoa::base::NO);
+                            ns_win.setBackgroundColor_(cocoa::appkit::NSColor::clearColor(nil));
+
                             // NSStatusWindowLevel (25) floats directly above the menu bar and notch
                             ns_win.setLevel_(25);
                             ns_win.setCollectionBehavior_(
@@ -68,16 +63,15 @@ impl MacOSTarget {
                                 | NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle
                             );
 
-                            if let Ok(Some(monitor)) = window.primary_monitor() {
-                                let monitor_size = monitor.size();
-                                let scale = monitor.scale_factor();
+                            let nsscreen_class = class!(NSScreen);
+                            let screen: id = msg_send![ns_win, screen];
+                            let screen = if screen != nil { screen } else { msg_send![nsscreen_class, mainScreen] };
+                            if screen != nil {
+                                let sf: NSRect = msg_send![screen, frame];
                                 let win_w = 480.0;
                                 let win_h = 80.0;
-                                let screen_w = monitor_size.width as f64 / scale;
-                                let screen_h = monitor_size.height as f64 / scale;
-                                
-                                let x = (screen_w / 2.0) - (win_w / 2.0);
-                                let y = screen_h - win_h;
+                                let x = sf.origin.x + (sf.size.width - win_w) / 2.0;
+                                let y = sf.origin.y + sf.size.height - win_h;
                                 
                                 let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(win_w, win_h));
                                 ns_win.setFrame_display_(frame, YES);
@@ -96,11 +90,17 @@ impl MacOSTarget {
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { .. }) => {
                             ctrl_drag.on_drag_over(true);
                         }
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
+                            ctrl_drag.on_drag_leave();
+                        }
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
                             if ctrl_drag.on_drop() {
+                                // Instantly reset to Idle so the notch is immediately ready for the next rapid-fire drag
+                                ctrl_drag.reset();
+                                
                                 let paths = paths.clone();
                                 let app_drag = app_drag.clone();
-                                tauri::async_runtime::spawn(async move {
+                                std::thread::spawn(move || {
                                     for path in paths {
                                         let path_str = path.to_string_lossy().to_string();
                                         let filename = path.file_name().map(|f| f.to_string_lossy().to_string());
@@ -144,9 +144,6 @@ impl MacOSTarget {
                                     }
                                 });
                             }
-                        }
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
-                            ctrl_drag.on_drag_leave();
                         }
                         _ => {}
                     }

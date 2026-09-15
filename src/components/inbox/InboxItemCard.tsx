@@ -32,17 +32,14 @@ function InboxItemCardComponent({
   onMoveToWorkspace,
 }: InboxItemCardProps) {
   const { item, attention, candidateInfo, inboxState } = derived;
-  const {
-    selectedItemIds,
-    toggleSelectItem,
-    isMultiSelectActive,
-    focusedItemId,
-    setFocusedItemId,
-  } = useInboxStore();
-  const { setIsDraggingCard, setHoveredWorkspaceId } = useWorkspaceStore();
+  const isSelected = useInboxStore((s) => s.selectedItemIds.includes(derived.item.id));
+  const isMultiSelectActive = useInboxStore((s) => s.isMultiSelectActive);
+  const isFocused = useInboxStore((s) => s.focusedItemId === derived.item.id);
+  const toggleSelectItem = useInboxStore((s) => s.toggleSelectItem);
+  const setFocusedItemId = useInboxStore((s) => s.setFocusedItemId);
 
-  const isSelected = selectedItemIds.includes(item.id);
-  const isFocused = focusedItemId === item.id;
+  const setIsDraggingCard = useWorkspaceStore((s) => s.setIsDraggingCard);
+  const setHoveredWorkspaceId = useWorkspaceStore((s) => s.setHoveredWorkspaceId);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
