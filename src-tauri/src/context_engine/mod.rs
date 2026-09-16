@@ -34,7 +34,7 @@ pub mod context_state;
 pub mod snapshot;
 
 pub use snapshot::{
-    ContextSnapshot, ContextSnapshotBuilder, SnapshotActivityReference,
+    ContextSnapshot, ContextSnapshotBuilder, ContextSnapshotService, SnapshotActivityReference,
     SnapshotTaskReference, SnapshotWorksetItemReference, CONTEXTUAL_SNAPSHOT_DISCLAIMER,
 };
 

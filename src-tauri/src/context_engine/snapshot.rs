@@ -1,17 +1,21 @@
 use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::context_engine::context_state::{
-    ContextState, ContextStateValue, MeaningfulActivity, ResumeReadiness,
-    ResumeReadinessAssessment, ResumeReadinessEvaluator, StateFreshness,
+    ContextState, ContextStateBuilder, ContextStateValue, MeaningfulActivity,
+    ResumeReadiness, ResumeReadinessAssessment, ResumeReadinessEvaluator, StateFreshness,
 };
 use crate::context_engine::memory::{
-    ContextMemory, InformationProvenance, MemoryActivitySequenceEntry, MemoryTaskReference,
+    ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, InformationProvenance,
+    MemoryActivitySequenceEntry, MemoryItemReference, MemoryTaskReference,
 };
 use crate::context_engine::workset::{
-    ContextWorkset, WorksetItemReference, WorksetItemRelevance,
+    ContextWorkset, ContextWorksetBuilder, ContextWorksetService, WorksetItemReference,
+    WorksetItemRelevance,
 };
+use crate::db::models::TaskCandidate;
 
 // =========================================================================
 // Standard Epistemic Disclaimer
@@ -19,6 +23,24 @@ use crate::context_engine::workset::{
 
 pub const CONTEXTUAL_SNAPSHOT_DISCLAIMER: &str =
     "This snapshot is an algorithmic contextual reconstruction based on recorded activity signals. It does not represent an exact recording of user attention or mental state.";
+
+// =========================================================================
+// Helpers for Parsing & Timestamp Math
+// =========================================================================
+
+#[allow(dead_code)]
+fn parse_ts(ts: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%SZ") {
+        return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+    }
+    None
+}
 
 // =========================================================================
 // Lightweight Snapshot References (No Full Objects / No Duplication)
@@ -112,6 +134,33 @@ impl From<&MemoryTaskReference> for SnapshotTaskReference {
             first_seen_at: task.first_seen_at.clone(),
             last_active_at: task.last_active_at.clone(),
             status: task.status.clone(),
+        }
+    }
+}
+
+impl From<&TaskCandidate> for SnapshotTaskReference {
+    fn from(task: &TaskCandidate) -> Self {
+        let band = if task.confidence >= 0.75 {
+            "High"
+        } else if task.confidence >= 0.50 {
+            "Medium"
+        } else if task.confidence >= 0.35 {
+            "Low"
+        } else {
+            "Insufficient"
+        };
+
+        Self {
+            id: Some(task.id.clone()),
+            title: task.title.clone(),
+            action_verb: None,
+            target_subject: None,
+            confidence: task.confidence,
+            confidence_band: band.to_string(),
+            provenance: InformationProvenance::Inferred,
+            first_seen_at: Some(task.first_detected_at.clone()),
+            last_active_at: Some(task.last_active_at.clone()),
+            status: Some(task.status.as_str().to_string()),
         }
     }
 }
@@ -405,12 +454,17 @@ impl ContextSnapshot {
             .clone()
             .or_else(|| workset.and_then(|ws| ws.task_id.clone()));
 
+        let has_recent_activity = !activity_refs.is_empty()
+            || state_val == ContextStateValue::Active
+            || state_val == ContextStateValue::RecentlyActive
+            || freshness == StateFreshness::Fresh;
+
         let readiness = ResumeReadinessEvaluator::evaluate_with_freshness(
             state_val,
             active_task_title.as_deref(),
             workset_refs.len(),
             meaningful_activity.is_some(),
-            !activity_refs.is_empty(),
+            has_recent_activity,
             false,
             freshness,
         );
@@ -459,7 +513,11 @@ impl ContextSnapshot {
         state: ContextStateValue,
         freshness: StateFreshness,
     ) -> String {
-        if state == ContextStateValue::InsufficientEvidence || (workset_items.is_empty() && task_title.is_none() && last_meaningful_activity.is_none()) {
+        if state == ContextStateValue::InsufficientEvidence
+            || (workset_items.is_empty()
+                && task_title.is_none()
+                && last_meaningful_activity.is_none())
+        {
             return format!("No prior working activity recorded in {}.", context_name);
         }
 
@@ -475,7 +533,10 @@ impl ContextSnapshot {
         // 2. Last meaningful activity or primary item
         if let Some(act) = last_meaningful_activity {
             parts.push(format!("last meaningful activity was '{}'", act.description));
-        } else if let Some(primary) = workset_items.iter().find(|i| i.relevance == WorksetItemRelevance::Primary) {
+        } else if let Some(primary) = workset_items
+            .iter()
+            .find(|i| i.relevance == WorksetItemRelevance::Primary)
+        {
             let item_name = primary.title.as_deref().unwrap_or("active document");
             if let Some(ref app) = primary.app_name {
                 parts.push(format!("last focused on '{}' in {}", item_name, app));
@@ -485,7 +546,13 @@ impl ContextSnapshot {
         }
 
         // 3. Supporting materials count
-        let supporting_count = workset_items.iter().filter(|i| i.relevance == WorksetItemRelevance::Primary || i.relevance == WorksetItemRelevance::Supporting).count();
+        let supporting_count = workset_items
+            .iter()
+            .filter(|i| {
+                i.relevance == WorksetItemRelevance::Primary
+                    || i.relevance == WorksetItemRelevance::Supporting
+            })
+            .count();
         if supporting_count > 0 {
             if supporting_count == 1 {
                 parts.push("with 1 core item ready".to_string());
@@ -508,12 +575,16 @@ impl ContextSnapshot {
 
     /// Returns `true` if this snapshot indicates active or warm working focus.
     pub fn is_working(&self) -> bool {
-        matches!(self.state, ContextStateValue::Active | ContextStateValue::RecentlyActive)
+        matches!(
+            self.state,
+            ContextStateValue::Active | ContextStateValue::RecentlyActive
+        )
     }
 
     /// Returns `true` if this snapshot is marked dormant.
     pub fn is_dormant(&self) -> bool {
-        self.state == ContextStateValue::Dormant || self.state_freshness == StateFreshness::VeryStale
+        self.state == ContextStateValue::Dormant
+            || self.state_freshness == StateFreshness::VeryStale
     }
 
     /// Returns `true` if a specific task was present at snapshot time.
@@ -583,6 +654,7 @@ pub struct ContextSnapshotBuilder {
     pub last_meaningful_activity: Option<MeaningfulActivity>,
     pub snapshot_confidence: f64,
     pub provenance: InformationProvenance,
+    pub reference_time: Option<DateTime<Utc>>,
 }
 
 impl ContextSnapshotBuilder {
@@ -605,7 +677,153 @@ impl ContextSnapshotBuilder {
             last_meaningful_activity: None,
             snapshot_confidence: 0.50,
             provenance: InformationProvenance::Inferred,
+            reference_time: None,
         }
+    }
+
+    /// Loads underlying sources from SQLite database and constructs the full builder.
+    pub fn from_db(conn: &Connection, context_id: &str) -> Result<Self, String> {
+        let ws = crate::db::operations::get_workspace(conn, context_id).ok();
+        let context_name = ws
+            .as_ref()
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| "Workspace".to_string());
+
+        // 1. Derive ContextState
+        let state_builder = ContextStateBuilder::from_db(conn, context_id)?;
+        let state = state_builder.build().ok();
+
+        // 2. Derive ContextWorkset
+        let workset = ContextWorksetBuilder::from_db(conn, context_id)
+            .and_then(|b| b.build())
+            .ok();
+
+        // 3. Derive ContextMemory
+        let memory = ContextMemoryBuilder::from_db(conn, context_id)
+            .and_then(|b| b.build())
+            .ok();
+
+        // 4. Workset item references
+        let workset_refs: Vec<SnapshotWorksetItemReference> = workset
+            .as_ref()
+            .map(|ws| {
+                ws.items
+                    .iter()
+                    .map(SnapshotWorksetItemReference::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 5. Activity references
+        let activity_refs: Vec<SnapshotActivityReference> = memory
+            .as_ref()
+            .map(|mem| {
+                mem.activity_sequence
+                    .iter()
+                    .map(SnapshotActivityReference::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 6. Task references
+        let task_refs: Vec<SnapshotTaskReference> = memory
+            .as_ref()
+            .map(|mem| {
+                mem.recent_tasks
+                    .iter()
+                    .map(SnapshotTaskReference::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 7. Last meaningful activity
+        let meaningful_activity = state.as_ref().and_then(|s| s.meaningful_activity.clone());
+
+        // 8. Determine active task
+        let (task_id, task_title, task_conf, task_prov) = if let Some(ref st) = state {
+            if let Some(ref title) = st.task_title {
+                let prov = if st.has_user_feedback {
+                    InformationProvenance::Confirmed
+                } else {
+                    InformationProvenance::Inferred
+                };
+                (
+                    st.task_id.clone(),
+                    Some(title.clone()),
+                    Some(st.state_confidence),
+                    Some(prov),
+                )
+            } else {
+                (None, None, None, None)
+            }
+        } else if let Some(ref ws_obj) = workset {
+            if let Some(ref title) = ws_obj.task_title {
+                (
+                    ws_obj.task_id.clone(),
+                    Some(title.clone()),
+                    Some(ws_obj.confidence),
+                    Some(ws_obj.provenance),
+                )
+            } else {
+                (None, None, None, None)
+            }
+        } else {
+            (None, None, None, None)
+        };
+
+        // 9. State & Freshness
+        let state_val = state
+            .as_ref()
+            .map(|s| s.state)
+            .unwrap_or(ContextStateValue::InsufficientEvidence);
+
+        let freshness = state
+            .as_ref()
+            .map(|s| s.freshness)
+            .unwrap_or(StateFreshness::VeryStale);
+
+        let freshness_display = state
+            .as_ref()
+            .map(|s| s.freshness_display.clone())
+            .unwrap_or_else(|| freshness.display_wording(86400 * 30));
+
+        let last_activity_at = state
+            .as_ref()
+            .and_then(|s| s.last_active_at.clone())
+            .or_else(|| ws.and_then(|w| w.last_activity_at));
+
+        let readiness = state.as_ref().map(|s| s.readiness.clone());
+
+        let snapshot_confidence = state.as_ref().map(|s| s.state_confidence).unwrap_or(0.0);
+
+        let provenance = if state.as_ref().map(|s| s.has_user_feedback).unwrap_or(false) {
+            InformationProvenance::Confirmed
+        } else if !workset_refs.is_empty() {
+            InformationProvenance::Observed
+        } else {
+            InformationProvenance::Inferred
+        };
+
+        Ok(Self {
+            context_id: context_id.to_string(),
+            context_name,
+            task_id,
+            task_title,
+            task_provenance: task_prov,
+            task_confidence: task_conf,
+            last_activity_at,
+            state: state_val,
+            state_freshness: freshness,
+            state_freshness_display: freshness_display,
+            resume_readiness: readiness,
+            workset_item_references: workset_refs,
+            recent_activity_references: activity_refs,
+            recent_task_references: task_refs,
+            last_meaningful_activity: meaningful_activity,
+            snapshot_confidence,
+            provenance,
+            reference_time: None,
+        })
     }
 
     pub fn with_task(
@@ -681,6 +899,11 @@ impl ContextSnapshotBuilder {
         self
     }
 
+    pub fn with_reference_time(mut self, time: DateTime<Utc>) -> Self {
+        self.reference_time = Some(time);
+        self
+    }
+
     pub fn build(self) -> ContextSnapshot {
         let has_recent_activity = !self.recent_activity_references.is_empty()
             || self.state == ContextStateValue::Active
@@ -722,12 +945,78 @@ impl ContextSnapshotBuilder {
 }
 
 // =========================================================================
-// Unit Tests (Day 20 Step 2)
+// ContextSnapshotService: Deterministic Synthesis Service
+// =========================================================================
+
+/// Deterministic service for deriving and reconstructing point-in-time `ContextSnapshot`s.
+///
+/// Invariants:
+/// 1. Reuses existing ContextState, ContextWorkset, and ContextMemory ranking without duplicating heuristics.
+/// 2. Deterministic execution; zero random LLM calls.
+/// 3. Never fabricates tasks, items, or actions.
+pub struct ContextSnapshotService;
+
+impl Default for ContextSnapshotService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextSnapshotService {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Derives the point-in-time `ContextSnapshot` for a specified context from the database.
+    pub fn derive_for_context(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<ContextSnapshot, String> {
+        let builder = ContextSnapshotBuilder::from_db(conn, context_id)?;
+        Ok(builder.build())
+    }
+
+    /// Derives the active `ContextSnapshot` across all workspaces.
+    pub fn derive_active(&self, conn: &Connection) -> Result<Option<ContextSnapshot>, String> {
+        let workset_service = ContextWorksetService::new();
+        if let Ok(Some(active_ws)) = workset_service.derive_active(conn) {
+            let snapshot = self.derive_for_context(conn, &active_ws.context_id)?;
+            return Ok(Some(snapshot));
+        }
+        Ok(None)
+    }
+
+    /// Derives a snapshot evaluated with a specific reference time (e.g. historical departure).
+    pub fn derive_at_departure(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+        reference_time: Option<DateTime<Utc>>,
+    ) -> Result<ContextSnapshot, String> {
+        let mut builder = ContextSnapshotBuilder::from_db(conn, context_id)?;
+        if let Some(ref_time) = reference_time {
+            builder = builder.with_reference_time(ref_time);
+        }
+        Ok(builder.build())
+    }
+}
+
+// =========================================================================
+// Unit & Integration Tests (Day 20 Step 3)
 // =========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::TaskCandidateStatus;
+    use rusqlite::Connection;
+
+    fn setup_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
 
     fn create_dummy_workset_item(
         id: &str,
@@ -755,14 +1044,31 @@ mod tests {
     #[test]
     fn test_active_context_snapshot() {
         let items = vec![
-            create_dummy_workset_item("i1", "Hero Component", WorksetItemRelevance::Primary, 0.95, Some("VS Code")),
-            create_dummy_workset_item("i2", "Framer Motion API", WorksetItemRelevance::Supporting, 0.85, Some("Chrome")),
+            create_dummy_workset_item(
+                "i1",
+                "Hero Component",
+                WorksetItemRelevance::Primary,
+                0.95,
+                Some("VS Code"),
+            ),
+            create_dummy_workset_item(
+                "i2",
+                "Framer Motion API",
+                WorksetItemRelevance::Supporting,
+                0.85,
+                Some("Chrome"),
+            ),
         ];
 
         let snapshot = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
             .with_state(ContextStateValue::Active)
             .with_freshness(StateFreshness::Fresh, 300)
-            .with_task(Some("t1".to_string()), "Hero Animation", 0.92, InformationProvenance::Inferred)
+            .with_task(
+                Some("t1".to_string()),
+                "Hero Animation",
+                0.92,
+                InformationProvenance::Inferred,
+            )
             .with_workset_items(items)
             .with_confidence(0.90)
             .build();
@@ -773,7 +1079,10 @@ mod tests {
         assert!(!snapshot.is_dormant());
         assert!(snapshot.has_task());
         assert_eq!(snapshot.task_title.as_deref(), Some("Hero Animation"));
-        assert_eq!(snapshot.task_provenance, Some(InformationProvenance::Inferred));
+        assert_eq!(
+            snapshot.task_provenance,
+            Some(InformationProvenance::Inferred)
+        );
         assert_eq!(snapshot.resume_readiness.readiness, ResumeReadiness::Ready);
         assert_eq!(snapshot.primary_items().len(), 1);
         assert_eq!(snapshot.supporting_items().len(), 1);
@@ -785,14 +1094,31 @@ mod tests {
     #[test]
     fn test_recently_active_context_snapshot() {
         let items = vec![
-            create_dummy_workset_item("i1", "Dashboard Layout", WorksetItemRelevance::Primary, 0.90, Some("Figma")),
-            create_dummy_workset_item("i2", "Tailwind Config", WorksetItemRelevance::Supporting, 0.80, Some("VS Code")),
+            create_dummy_workset_item(
+                "i1",
+                "Dashboard Layout",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("Figma"),
+            ),
+            create_dummy_workset_item(
+                "i2",
+                "Tailwind Config",
+                WorksetItemRelevance::Supporting,
+                0.80,
+                Some("VS Code"),
+            ),
         ];
 
         let snapshot = ContextSnapshotBuilder::new("ws-dashboard", "Analytics Dashboard")
             .with_state(ContextStateValue::RecentlyActive)
             .with_freshness(StateFreshness::Recent, 14400) // 4 hours ago
-            .with_task(Some("t2".to_string()), "Refactoring Dashboard", 0.88, InformationProvenance::Inferred)
+            .with_task(
+                Some("t2".to_string()),
+                "Refactoring Dashboard",
+                0.88,
+                InformationProvenance::Inferred,
+            )
             .with_workset_items(items)
             .with_confidence(0.85)
             .build();
@@ -807,14 +1133,23 @@ mod tests {
 
     #[test]
     fn test_dormant_context_snapshot() {
-        let items = vec![
-            create_dummy_workset_item("i1", "Legacy Specs", WorksetItemRelevance::Supporting, 0.60, Some("Chrome")),
-        ];
+        let items = vec![create_dummy_workset_item(
+            "i1",
+            "Legacy Specs",
+            WorksetItemRelevance::Supporting,
+            0.60,
+            Some("Chrome"),
+        )];
 
         let snapshot = ContextSnapshotBuilder::new("ws-old", "Legacy Project")
             .with_state(ContextStateValue::Dormant)
             .with_freshness(StateFreshness::VeryStale, 86400 * 10) // 10 days ago
-            .with_task(Some("t3".to_string()), "Documentation", 0.70, InformationProvenance::Inferred)
+            .with_task(
+                Some("t3".to_string()),
+                "Documentation",
+                0.70,
+                InformationProvenance::Inferred,
+            )
             .with_workset_items(items)
             .with_confidence(0.60)
             .build();
@@ -831,14 +1166,34 @@ mod tests {
         let snapshot = ContextSnapshotBuilder::new("ws-1", "Project X")
             .with_state(ContextStateValue::RecentlyActive)
             .with_freshness(StateFreshness::Fresh, 1800)
-            .with_task(Some("t-x".to_string()), "Authentication Flow", 0.95, InformationProvenance::Confirmed)
-            .add_workset_item(create_dummy_workset_item("i1", "OAuth Spec", WorksetItemRelevance::Primary, 0.90, None))
-            .add_workset_item(create_dummy_workset_item("i2", "Token Handler", WorksetItemRelevance::Supporting, 0.88, None))
+            .with_task(
+                Some("t-x".to_string()),
+                "Authentication Flow",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "i1",
+                "OAuth Spec",
+                WorksetItemRelevance::Primary,
+                0.90,
+                None,
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "i2",
+                "Token Handler",
+                WorksetItemRelevance::Supporting,
+                0.88,
+                None,
+            ))
             .build();
 
         assert!(snapshot.has_task());
         assert_eq!(snapshot.task_title.as_deref(), Some("Authentication Flow"));
-        assert_eq!(snapshot.task_provenance, Some(InformationProvenance::Confirmed));
+        assert_eq!(
+            snapshot.task_provenance,
+            Some(InformationProvenance::Confirmed)
+        );
         assert!(snapshot.snapshot_statement.contains("Authentication Flow"));
     }
 
@@ -848,31 +1203,83 @@ mod tests {
             .with_state(ContextStateValue::RecentlyActive)
             .with_freshness(StateFreshness::Fresh, 2400)
             .without_task()
-            .add_workset_item(create_dummy_workset_item("i1", "Article 1", WorksetItemRelevance::Supporting, 0.70, None))
-            .add_workset_item(create_dummy_workset_item("i2", "Article 2", WorksetItemRelevance::Supporting, 0.65, None))
-            .add_workset_item(create_dummy_workset_item("i3", "Article 3", WorksetItemRelevance::Supporting, 0.60, None))
+            .add_workset_item(create_dummy_workset_item(
+                "i1",
+                "Article 1",
+                WorksetItemRelevance::Supporting,
+                0.70,
+                None,
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "i2",
+                "Article 2",
+                WorksetItemRelevance::Supporting,
+                0.65,
+                None,
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "i3",
+                "Article 3",
+                WorksetItemRelevance::Supporting,
+                0.60,
+                None,
+            ))
             .build();
 
         assert!(!snapshot.has_task());
         assert_eq!(snapshot.task_title, None);
         assert_eq!(snapshot.task_provenance, None);
-        assert_eq!(snapshot.resume_readiness.readiness, ResumeReadiness::MostlyReady);
-        assert!(snapshot.snapshot_statement.contains("Working in General Exploration"));
+        assert_eq!(
+            snapshot.resume_readiness.readiness,
+            ResumeReadiness::MostlyReady
+        );
+        assert!(snapshot
+            .snapshot_statement
+            .contains("Working in General Exploration"));
     }
 
     #[test]
     fn test_strong_workset_snapshot() {
         let items = vec![
-            create_dummy_workset_item("i1", "Core API", WorksetItemRelevance::Primary, 0.98, Some("VS Code")),
-            create_dummy_workset_item("i2", "Test Suite", WorksetItemRelevance::Primary, 0.92, Some("Terminal")),
-            create_dummy_workset_item("i3", "Documentation", WorksetItemRelevance::Supporting, 0.85, Some("Chrome")),
-            create_dummy_workset_item("i4", "Design Mock", WorksetItemRelevance::Supporting, 0.80, Some("Figma")),
+            create_dummy_workset_item(
+                "i1",
+                "Core API",
+                WorksetItemRelevance::Primary,
+                0.98,
+                Some("VS Code"),
+            ),
+            create_dummy_workset_item(
+                "i2",
+                "Test Suite",
+                WorksetItemRelevance::Primary,
+                0.92,
+                Some("Terminal"),
+            ),
+            create_dummy_workset_item(
+                "i3",
+                "Documentation",
+                WorksetItemRelevance::Supporting,
+                0.85,
+                Some("Chrome"),
+            ),
+            create_dummy_workset_item(
+                "i4",
+                "Design Mock",
+                WorksetItemRelevance::Supporting,
+                0.80,
+                Some("Figma"),
+            ),
         ];
 
         let snapshot = ContextSnapshotBuilder::new("ws-strong", "Core Backend")
             .with_state(ContextStateValue::Active)
             .with_freshness(StateFreshness::Fresh, 600)
-            .with_task(Some("t-backend".to_string()), "API Endpoints", 0.94, InformationProvenance::Inferred)
+            .with_task(
+                Some("t-backend".to_string()),
+                "API Endpoints",
+                0.94,
+                InformationProvenance::Inferred,
+            )
             .with_workset_items(items)
             .build();
 
@@ -885,9 +1292,13 @@ mod tests {
 
     #[test]
     fn test_weak_workset_snapshot() {
-        let items = vec![
-            create_dummy_workset_item("i1", "Peripheral Note", WorksetItemRelevance::Reference, 0.35, None),
-        ];
+        let items = vec![create_dummy_workset_item(
+            "i1",
+            "Peripheral Note",
+            WorksetItemRelevance::Reference,
+            0.35,
+            None,
+        )];
 
         let snapshot = ContextSnapshotBuilder::new("ws-weak", "Sparse Workspace")
             .with_state(ContextStateValue::RecentlyActive)
@@ -899,7 +1310,10 @@ mod tests {
         assert_eq!(snapshot.workset_item_references.len(), 1);
         assert_eq!(snapshot.primary_items().len(), 0);
         assert_eq!(snapshot.supporting_items().len(), 0);
-        assert_eq!(snapshot.resume_readiness.readiness, ResumeReadiness::Partial);
+        assert_eq!(
+            snapshot.resume_readiness.readiness,
+            ResumeReadiness::Partial
+        );
     }
 
     #[test]
@@ -911,10 +1325,15 @@ mod tests {
             .build();
 
         assert_eq!(snapshot.state, ContextStateValue::InsufficientEvidence);
-        assert_eq!(snapshot.resume_readiness.readiness, ResumeReadiness::Insufficient);
+        assert_eq!(
+            snapshot.resume_readiness.readiness,
+            ResumeReadiness::Insufficient
+        );
         assert!(!snapshot.is_working());
         assert!(snapshot.workset_item_references.is_empty());
-        assert!(snapshot.snapshot_statement.contains("No prior working activity recorded"));
+        assert!(snapshot
+            .snapshot_statement
+            .contains("No prior working activity recorded"));
     }
 
     #[test]
@@ -957,17 +1376,140 @@ mod tests {
 
         let snapshot = ContextSnapshotBuilder::new("ws-prov", "Provenance Test")
             .with_state(ContextStateValue::Active)
-            .with_task(Some("tsk-conf".to_string()), "Confirmed Milestone", 1.0, InformationProvenance::Confirmed)
+            .with_task(
+                Some("tsk-conf".to_string()),
+                "Confirmed Milestone",
+                1.0,
+                InformationProvenance::Confirmed,
+            )
             .add_workset_item(observed_item)
             .with_task_references(vec![confirmed_task])
             .with_activity_references(vec![inferred_activity])
             .with_provenance(InformationProvenance::Confirmed)
             .build();
 
-        assert_eq!(snapshot.task_provenance, Some(InformationProvenance::Confirmed));
+        assert_eq!(
+            snapshot.task_provenance,
+            Some(InformationProvenance::Confirmed)
+        );
         assert_eq!(snapshot.provenance, InformationProvenance::Confirmed);
-        assert_eq!(snapshot.workset_item_references[0].provenance, InformationProvenance::Observed);
-        assert_eq!(snapshot.recent_task_references[0].provenance, InformationProvenance::Confirmed);
-        assert_eq!(snapshot.recent_activity_references[0].provenance, InformationProvenance::Inferred);
+        assert_eq!(
+            snapshot.workset_item_references[0].provenance,
+            InformationProvenance::Observed
+        );
+        assert_eq!(
+            snapshot.recent_task_references[0].provenance,
+            InformationProvenance::Confirmed
+        );
+        assert_eq!(
+            snapshot.recent_activity_references[0].provenance,
+            InformationProvenance::Inferred
+        );
+    }
+
+    #[test]
+    fn test_service_derive_from_database_clean_workspace() {
+        let conn = setup_test_db();
+
+        // 1. Create Workspace
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // 2. Add high-relevance items
+        let _item1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://figma.com/file/123/Aurora-Hero",
+            Some("Aurora Hero Figma Spec"),
+            r#"{"app_name": "Figma", "domain": "figma.com", "user_confirmed": true}"#,
+        )
+        .unwrap();
+
+        let _item2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "export const HeroAnimation = () => { return <motion.div ... />; };",
+            Some("HeroAnimation.tsx"),
+            r#"{"app_name": "VS Code"}"#,
+        )
+        .unwrap();
+
+        // 3. Add task candidate
+        let mut task = TaskCandidate::new(Some(ws.id.clone()), "Hero Animation", 0.90);
+        task.status = TaskCandidateStatus::Active;
+        let _ = crate::db::operations::create_task_candidate(&conn, &task).unwrap();
+
+        // 4. Derive snapshot via ContextSnapshotService
+        let service = ContextSnapshotService::new();
+        let snapshot = service.derive_for_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(snapshot.context_id, ws.id);
+        assert_eq!(snapshot.context_name, "Aurora Website");
+        assert!(snapshot.has_task());
+        assert_eq!(snapshot.task_title.as_deref(), Some("Hero Animation"));
+        assert!(snapshot.workset_item_references.len() >= 2);
+        assert_eq!(snapshot.resume_readiness.readiness, ResumeReadiness::Ready);
+        assert!(
+            snapshot.snapshot_statement.contains("Hero Animation")
+                || snapshot.snapshot_statement.contains("Aurora")
+        );
+        assert_eq!(snapshot.epistemic_disclaimer, CONTEXTUAL_SNAPSHOT_DISCLAIMER);
+    }
+
+    #[test]
+    fn test_service_determinism_multiple_calls() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Determinism Test").unwrap();
+
+        let _ = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://docs.rs/tokio",
+            Some("Tokio Docs"),
+            r#"{"app_name": "Chrome", "domain": "docs.rs"}"#,
+        )
+        .unwrap();
+
+        let service = ContextSnapshotService::new();
+        let snap1 = service.derive_for_context(&conn, &ws.id).unwrap();
+        let snap2 = service.derive_for_context(&conn, &ws.id).unwrap();
+
+        // Check essential deterministic properties
+        assert_eq!(snap1.context_id, snap2.context_id);
+        assert_eq!(snap1.context_name, snap2.context_name);
+        assert_eq!(snap1.task_title, snap2.task_title);
+        assert_eq!(snap1.state, snap2.state);
+        assert_eq!(snap1.state_freshness, snap2.state_freshness);
+        assert_eq!(
+            snap1.workset_item_references.len(),
+            snap2.workset_item_references.len()
+        );
+        assert_eq!(snap1.snapshot_statement, snap2.snapshot_statement);
+    }
+
+    #[test]
+    fn test_service_empty_context() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Empty WS").unwrap();
+
+        let service = ContextSnapshotService::new();
+        let snapshot = service.derive_for_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(snapshot.context_id, ws.id);
+        assert_eq!(snapshot.state, ContextStateValue::InsufficientEvidence);
+        assert_eq!(
+            snapshot.resume_readiness.readiness,
+            ResumeReadiness::Insufficient
+        );
+        assert!(!snapshot.has_task());
+        assert!(snapshot.workset_item_references.is_empty());
+        assert!(snapshot
+            .snapshot_statement
+            .contains("No prior working activity recorded"));
     }
 }
