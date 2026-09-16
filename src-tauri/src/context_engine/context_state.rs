@@ -8,6 +8,7 @@ use crate::context_engine::memory::{
     ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryService,
 };
 use crate::context_engine::segments::{ContextActivitySegment, ContextActivitySegmenter};
+use crate::context_engine::task_extractor::is_generic_task_name;
 use crate::context_engine::task_transitions::{
     DetectedTaskTransition, TaskTransitionType,
 };
@@ -523,6 +524,47 @@ impl MeaningfulActivityResolver {
 }
 
 // =========================================================================
+// ContextResumeState: Human-Readable Contextual Resume Representation (Day 19 Step 5)
+// =========================================================================
+
+/// Human-readable resume state representing where the user left off in a context.
+///
+/// Derived from `ContextMemory`, `ContextWorkset`, `MeaningfulActivity`, and recent activity.
+/// Answers: "Where did I leave this work?" in clean, concise, human-ready format.
+///
+/// Invariants:
+/// - Never invent a task if evidence is insufficient or ambiguous.
+/// - Never launch applications or files (pure state reconstruction).
+/// - Deduplicate and clean recent work references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextResumeState {
+    /// Context / Workspace identifier
+    pub context_id: String,
+    /// Context / Workspace display name (e.g. "Aurora Website", "University OS")
+    pub context_name: String,
+    /// Specific task the user left off on (nullable, never invented without evidence)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_off_on: Option<String>,
+    /// Clean title/description of the last meaningful activity (nullable)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_meaningful_activity: Option<String>,
+    /// Classification of the last meaningful activity (nullable)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_type: Option<MeaningfulActivityType>,
+    /// Clean list of recent work items/artifacts (e.g. ["Figma hero design", "React Hero component", "Framer Motion reference"])
+    #[serde(default)]
+    pub recent_work: Vec<String>,
+    /// Formatted human-readable resume summary block
+    pub formatted_resume_summary: String,
+    /// Conservative state of the context
+    pub state: ContextStateValue,
+    /// Calibrated state confidence score [0.0, 1.0]
+    pub confidence: f64,
+    /// ISO-8601 timestamp when this resume state was reconstructed
+    pub reconstructed_at: String,
+}
+
+// =========================================================================
 // ContextState: Derived Contextual Working State Representation
 // =========================================================================
 
@@ -578,6 +620,8 @@ pub struct ContextState {
     /// Structured details of the last meaningful activity (nullable)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meaningful_activity: Option<MeaningfulActivity>,
+    /// Derived human-readable resume state (Day 19 Step 5)
+    pub resume_state: ContextResumeState,
     /// Calibrated state confidence score [0.0, 1.0]
     pub state_confidence: f64,
     /// Epistemic source ("confirmed", "inferred", "observed")
@@ -601,6 +645,10 @@ impl ContextState {
 
     pub fn last_meaningful_workset(&self) -> Option<&ContextWorkset> {
         self.current_workset.as_ref()
+    }
+
+    pub fn get_resume_state(&self) -> &ContextResumeState {
+        &self.resume_state
     }
 }
 
@@ -1222,6 +1270,21 @@ impl ContextStateBuilder {
             &self.items,
         );
 
+        // 11. Derive Human-Readable Resume State (Day 19 Step 5)
+        let resume_state = Self::construct_resume_state(
+            &self.context_id,
+            context_name.as_deref().unwrap_or("Workspace"),
+            state,
+            task_title.as_deref(),
+            &meaningful_activity,
+            last_meaningful_item_title.as_deref(),
+            self.workset.as_ref(),
+            self.memory.as_ref(),
+            &self.items,
+            state_confidence,
+            &reconstructed_at,
+        );
+
         Ok(ContextState {
             context_id: self.context_id,
             context_name,
@@ -1242,6 +1305,7 @@ impl ContextStateBuilder {
             latest_meaningful_action,
             last_meaningful_activity,
             meaningful_activity,
+            resume_state,
             state_confidence,
             provenance,
             has_user_feedback: self.has_user_feedback,
@@ -1495,6 +1559,188 @@ impl ContextStateBuilder {
         // 15 - 30 minutes: Recently active
         (ContextStateValue::RecentlyActive, 0.70)
     }
+
+    /// Derives the human-readable resume state representing where the user left off.
+    ///
+    /// Rules:
+    /// - Strictly ground tasks in evidence. Never invent a task.
+    /// - Extract clean meaningful activity descriptions.
+    /// - Aggregate deduplicated recent work items from workset, memory, and items.
+    /// - Format multi-line summary block faithfully matching user-facing specifications.
+    #[allow(clippy::too_many_arguments)]
+    fn construct_resume_state(
+        context_id: &str,
+        context_name: &str,
+        state: ContextStateValue,
+        task_title: Option<&str>,
+        meaningful_activity: &Option<MeaningfulActivity>,
+        last_meaningful_item_title: Option<&str>,
+        workset: Option<&ContextWorkset>,
+        memory: Option<&ContextMemory>,
+        items: &[Item],
+        confidence: f64,
+        reconstructed_at: &str,
+    ) -> ContextResumeState {
+        // 1. Resolve "left_off_on" (Strict: do NOT invent a task!)
+        let left_off_on = if state == ContextStateValue::InsufficientEvidence
+            || state == ContextStateValue::Uncertain
+        {
+            None
+        } else if let Some(title) = task_title {
+            let trimmed = title.trim();
+            if !trimmed.is_empty()
+                && !is_generic_task_name(trimmed)
+                && !trimmed.eq_ignore_ascii_case("untitled")
+                && !trimmed.eq_ignore_ascii_case("unknown")
+            {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 2. Resolve "last_meaningful_activity"
+        let (last_act_text, last_act_type) = if let Some(act) = meaningful_activity {
+            let title_candidate = act
+                .reference
+                .as_ref()
+                .and_then(|r| r.title.as_deref())
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("untitled"));
+
+            let text = if let Some(title) = title_candidate {
+                title.to_string()
+            } else {
+                act.description.clone()
+            };
+            (Some(text), Some(act.activity_type))
+        } else if let Some(title) = last_meaningful_item_title {
+            let trimmed = title.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("untitled") {
+                (Some(trimmed.to_string()), None)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // 3. Resolve "recent_work"
+        let mut recent_work: Vec<String> = Vec::new();
+        let mut seen_titles: HashSet<String> = HashSet::new();
+
+        // Add from workset items first (ordered by relevance)
+        if let Some(ws) = workset {
+            for item in &ws.items {
+                if let Some(ref title) = item.title {
+                    let clean = title.trim();
+                    if !clean.is_empty()
+                        && !is_generic_noise(Some(clean), &item.content_snippet, true, false)
+                    {
+                        let norm = clean.to_lowercase();
+                        if seen_titles.insert(norm) {
+                            recent_work.push(clean.to_string());
+                            if recent_work.len() >= 5 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add from memory recent items if we need more
+        if recent_work.len() < 5 {
+            if let Some(mem) = memory {
+                for item_ref in &mem.recent_items {
+                    if let Some(ref title) = item_ref.title {
+                        let clean = title.trim();
+                        if !clean.is_empty() {
+                            let norm = clean.to_lowercase();
+                            if seen_titles.insert(norm) {
+                                recent_work.push(clean.to_string());
+                                if recent_work.len() >= 5 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add from items directly if we need more
+        if recent_work.len() < 5 {
+            for item in items {
+                if let Some(ref title) = item.title {
+                    let clean = title.trim();
+                    if !clean.is_empty()
+                        && !is_generic_noise(Some(clean), &item.content, false, false)
+                    {
+                        let norm = clean.to_lowercase();
+                        if seen_titles.insert(norm) {
+                            recent_work.push(clean.to_string());
+                            if recent_work.len() >= 5 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Construct Formatted Resume Summary Block
+        let mut lines = Vec::new();
+        lines.push(context_name.to_string());
+        lines.push(String::new());
+
+        if let Some(ref task) = left_off_on {
+            lines.push("You left off on:".to_string());
+            lines.push(task.clone());
+            lines.push(String::new());
+
+            if let Some(ref act) = last_act_text {
+                lines.push("Last meaningful activity:".to_string());
+                lines.push(act.clone());
+                lines.push(String::new());
+            }
+        } else if let Some(ref act) = last_act_text {
+            lines.push("Last known activity:".to_string());
+            lines.push(act.clone());
+            lines.push(String::new());
+        } else if state == ContextStateValue::InsufficientEvidence {
+            lines.push("No prior activity recorded.".to_string());
+            lines.push(String::new());
+        }
+
+        if !recent_work.is_empty() {
+            lines.push("Recent work:".to_string());
+            for item in &recent_work {
+                lines.push(item.clone());
+            }
+        }
+
+        while lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+
+        let formatted_resume_summary = lines.join("\n");
+
+        ContextResumeState {
+            context_id: context_id.to_string(),
+            context_name: context_name.to_string(),
+            left_off_on,
+            last_meaningful_activity: last_act_text,
+            last_activity_type: last_act_type,
+            recent_work,
+            formatted_resume_summary,
+            state,
+            confidence,
+            reconstructed_at: reconstructed_at.to_string(),
+        }
+    }
 }
 
 // =========================================================================
@@ -1516,6 +1762,19 @@ impl ContextStateService {
         context_id: &str,
     ) -> Result<ContextState, String> {
         ContextStateBuilder::from_db(conn, context_id)?.build()
+    }
+
+    /// Reconstructs the human-readable resume state for a context.
+    ///
+    /// Answers: "Where did I leave this work?" in structured, human-readable format.
+    /// Never launches applications or files (pure state reconstruction).
+    pub fn get_resume_state(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<ContextResumeState, String> {
+        let state = self.derive_for_context(conn, context_id)?;
+        Ok(state.resume_state)
     }
 }
 
@@ -2374,5 +2633,295 @@ mod tests {
         assert_eq!(state.task_title, None);
         assert_eq!(state.last_active_at, None);
         assert!(state.recent_item_ids.is_empty());
+    }
+
+    // =====================================================================
+    // STEP 5 REQUIRED TESTS: Context Resume State
+    // =====================================================================
+
+    #[test]
+    fn test_resume_state_aurora_hero_animation() {
+        let now = Utc::now();
+        let t1 = (now - Duration::minutes(15)).to_rfc3339();
+        let t2 = (now - Duration::minutes(10)).to_rfc3339();
+        let t3 = (now - Duration::minutes(3)).to_rfc3339();
+
+        let item1 = make_test_item("item-1", "Figma hero design", Some("Figma"), &t1);
+        let item2 = make_test_item("item-2", "React Hero component", Some("VSCode"), &t2);
+        let item3 = make_test_item("item-3", "Framer Motion reference", Some("Chrome"), &t3);
+
+        let workset_item1 = WorksetItemReference {
+            id: "item-1".to_string(),
+            title: Some("Figma hero design".to_string()),
+            item_type: "text".to_string(),
+            relevance: WorksetItemRelevance::Supporting,
+            relevance_score: 0.85,
+            reasons: vec!["Hero design mock".to_string()],
+            provenance: InformationProvenance::Observed,
+            created_at: t1.clone(),
+            last_active_at: Some(t1.clone()),
+            app_name: Some("Figma".to_string()),
+            domain: None,
+            content_snippet: "Figma design mock for hero".to_string(),
+            is_suggested_addition: false,
+        };
+
+        let workset_item2 = WorksetItemReference {
+            id: "item-2".to_string(),
+            title: Some("React Hero component".to_string()),
+            item_type: "code".to_string(),
+            relevance: WorksetItemRelevance::Supporting,
+            relevance_score: 0.88,
+            reasons: vec!["React implementation".to_string()],
+            provenance: InformationProvenance::Observed,
+            created_at: t2.clone(),
+            last_active_at: Some(t2.clone()),
+            app_name: Some("VSCode".to_string()),
+            domain: None,
+            content_snippet: "export const Hero = () => ...".to_string(),
+            is_suggested_addition: false,
+        };
+
+        let workset_item3 = WorksetItemReference {
+            id: "item-3".to_string(),
+            title: Some("Framer Motion animation reference".to_string()),
+            item_type: "url".to_string(),
+            relevance: WorksetItemRelevance::Primary,
+            relevance_score: 0.94,
+            reasons: vec!["Animation docs".to_string()],
+            provenance: InformationProvenance::Observed,
+            created_at: t3.clone(),
+            last_active_at: Some(t3.clone()),
+            app_name: Some("Chrome".to_string()),
+            domain: Some("framer.com".to_string()),
+            content_snippet: "https://www.framer.com/motion/animation/".to_string(),
+            is_suggested_addition: false,
+        };
+
+        let workset = ContextWorkset {
+            context_id: "ctx-aurora".to_string(),
+            context_name: "Aurora Website".to_string(),
+            task_id: Some("task-hero".to_string()),
+            task_title: Some("Hero animation".to_string()),
+            generated_at: now.to_rfc3339(),
+            last_active_at: Some(t3.clone()),
+            workset_state: WorksetState::Active,
+            items: vec![workset_item1, workset_item2, workset_item3],
+            recent_activity: "3 active items".to_string(),
+            relevant_items: vec![],
+            important_references: vec![],
+            related_tasks: vec![],
+            confidence: 0.90,
+            confidence_band: "High".to_string(),
+            provenance: InformationProvenance::Observed,
+            explanation: MemoryExplanation {
+                summary: "Hero animation".to_string(),
+                why_reasons: vec![],
+                supporting_evidence: vec![],
+                confidence_band: "High".to_string(),
+                provenance: InformationProvenance::Observed,
+                uncertainty_note: None,
+            },
+        };
+
+        let task = TaskCandidate {
+            id: "task-hero".to_string(),
+            context_id: Some("ctx-aurora".to_string()),
+            title: "Hero animation".to_string(),
+            confidence: 0.90,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t1.clone(),
+            last_active_at: t3.clone(),
+            created_at: t1.clone(),
+            updated_at: t3.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-aurora")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item1, item2, item3])
+            .with_workset(Some(workset))
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        let resume = state.get_resume_state();
+        assert_eq!(resume.context_id, "ctx-aurora");
+        assert_eq!(resume.context_name, "Aurora Website");
+        assert_eq!(resume.left_off_on.as_deref(), Some("Hero animation"));
+        assert!(resume.last_meaningful_activity.is_some());
+        assert!(resume
+            .last_meaningful_activity
+            .as_ref()
+            .unwrap()
+            .contains("Framer Motion animation reference"));
+        assert!(resume.recent_work.len() >= 3);
+        assert!(resume.recent_work.contains(&"Figma hero design".to_string()));
+        assert!(resume.recent_work.contains(&"React Hero component".to_string()));
+
+        let summary = &resume.formatted_resume_summary;
+        assert!(summary.starts_with("Aurora Website"));
+        assert!(summary.contains("You left off on:\nHero animation"));
+        assert!(summary.contains("Last meaningful activity:"));
+        assert!(summary.contains("Recent work:"));
+    }
+
+    #[test]
+    fn test_resume_state_university_os_scheduling() {
+        let now = Utc::now();
+        let t1 = (now - Duration::minutes(20)).to_rfc3339();
+        let t2 = (now - Duration::minutes(5)).to_rfc3339();
+
+        let item = make_test_item("item-rr", "Round Robin implementation", Some("VSCode"), &t2);
+
+        let workset_item = WorksetItemReference {
+            id: "item-rr".to_string(),
+            title: Some("Round Robin implementation".to_string()),
+            item_type: "code".to_string(),
+            relevance: WorksetItemRelevance::Primary,
+            relevance_score: 0.95,
+            reasons: vec!["Primary scheduler code".to_string()],
+            provenance: InformationProvenance::Observed,
+            created_at: t2.clone(),
+            last_active_at: Some(t2.clone()),
+            app_name: Some("VSCode".to_string()),
+            domain: None,
+            content_snippet: "void schedule_round_robin() ...".to_string(),
+            is_suggested_addition: false,
+        };
+
+        let workset = ContextWorkset {
+            context_id: "ctx-os".to_string(),
+            context_name: "University OS".to_string(),
+            task_id: Some("task-sched".to_string()),
+            task_title: Some("Process scheduling assignment".to_string()),
+            generated_at: now.to_rfc3339(),
+            last_active_at: Some(t2.clone()),
+            workset_state: WorksetState::Active,
+            items: vec![workset_item],
+            recent_activity: "Scheduler implemented".to_string(),
+            relevant_items: vec![],
+            important_references: vec![],
+            related_tasks: vec![],
+            confidence: 0.92,
+            confidence_band: "High".to_string(),
+            provenance: InformationProvenance::Observed,
+            explanation: MemoryExplanation {
+                summary: "Process scheduling".to_string(),
+                why_reasons: vec![],
+                supporting_evidence: vec![],
+                confidence_band: "High".to_string(),
+                provenance: InformationProvenance::Observed,
+                uncertainty_note: None,
+            },
+        };
+
+        let task = TaskCandidate {
+            id: "task-sched".to_string(),
+            context_id: Some("ctx-os".to_string()),
+            title: "Process scheduling assignment".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t1.clone(),
+            last_active_at: t2.clone(),
+            created_at: t1.clone(),
+            updated_at: t2.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-os")
+            .with_context_name("University OS")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_workset(Some(workset))
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        let resume = state.get_resume_state();
+        assert_eq!(resume.context_name, "University OS");
+        assert_eq!(resume.left_off_on.as_deref(), Some("Process scheduling assignment"));
+        assert_eq!(
+            resume.last_meaningful_activity.as_deref(),
+            Some("Round Robin implementation")
+        );
+
+        let summary = &resume.formatted_resume_summary;
+        assert!(summary.contains("University OS"));
+        assert!(summary.contains("You left off on:\nProcess scheduling assignment"));
+        assert!(summary.contains("Last meaningful activity:\nRound Robin implementation"));
+    }
+
+    #[test]
+    fn test_resume_state_insufficient_evidence_no_task_invented() {
+        let now = Utc::now();
+        let five_mins_ago = (now - Duration::minutes(5)).to_rfc3339();
+
+        let item = make_test_item("item-figma", "Figma hero design", Some("Figma"), &five_mins_ago);
+
+        let state = ContextStateBuilder::new("ctx-aurora")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .build()
+            .unwrap();
+
+        let resume = state.get_resume_state();
+        assert_eq!(resume.context_name, "Aurora Website");
+        // Strict invariant: Never invent a task without evidence!
+        assert_eq!(resume.left_off_on, None);
+        assert_eq!(
+            resume.last_meaningful_activity.as_deref(),
+            Some("Figma hero design")
+        );
+
+        let summary = &resume.formatted_resume_summary;
+        assert!(summary.contains("Aurora Website"));
+        assert!(!summary.contains("You left off on:"));
+        assert!(summary.contains("Last known activity:\nFigma hero design"));
+    }
+
+    #[test]
+    fn test_resume_state_empty_context() {
+        let now = Utc::now();
+
+        let state = ContextStateBuilder::new("ctx-empty")
+            .with_context_name("Empty Project")
+            .with_reference_time(now)
+            .build()
+            .unwrap();
+
+        let resume = state.get_resume_state();
+        assert_eq!(resume.context_name, "Empty Project");
+        assert_eq!(resume.left_off_on, None);
+        assert_eq!(resume.last_meaningful_activity, None);
+        assert!(resume.recent_work.is_empty());
+        assert_eq!(resume.state, ContextStateValue::InsufficientEvidence);
+        assert!(resume.formatted_resume_summary.contains("No prior activity recorded."));
+    }
+
+    #[test]
+    fn test_get_resume_state_service_end_to_end() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Design System").unwrap();
+
+        let _item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "code",
+            "Button component code",
+            Some("Button Component"),
+            r#"{"app_name":"VSCode"}"#,
+        )
+        .unwrap();
+
+        let service = ContextStateService::new();
+        let resume = service.get_resume_state(&conn, &ws.id).unwrap();
+
+        assert_eq!(resume.context_id, ws.id);
+        assert_eq!(resume.context_name, "Design System");
+        assert_eq!(resume.last_meaningful_activity.as_deref(), Some("Button Component"));
     }
 }
