@@ -524,6 +524,223 @@ impl MeaningfulActivityResolver {
 }
 
 // =========================================================================
+// ResumeReadiness & Evaluator (Day 19 Step 6)
+// =========================================================================
+
+/// Internal classification of how ready ContextSplit is to help the user resume a context.
+///
+/// Invariants:
+/// - Do NOT expose a numerical score to the user.
+/// - Pure internal readiness classification based on evidence completeness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeReadiness {
+    /// Full, rich contextual state available (clear task, quality workset, recent activity).
+    Ready,
+    /// High-confidence context and workset, with minor missing details (e.g. implied task or slightly older activity).
+    MostlyReady,
+    /// Context identified but task uncertain or activity/workset limited.
+    Partial,
+    /// No prior activity or negligible evidence.
+    Insufficient,
+}
+
+impl ResumeReadiness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::MostlyReady => "mostly_ready",
+            Self::Partial => "partial",
+            Self::Insufficient => "insufficient",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::MostlyReady => "Mostly Ready",
+            Self::Partial => "Partial",
+            Self::Insufficient => "Insufficient",
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn is_mostly_ready(&self) -> bool {
+        matches!(self, Self::MostlyReady)
+    }
+
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial)
+    }
+
+    pub fn is_insufficient(&self) -> bool {
+        matches!(self, Self::Insufficient)
+    }
+}
+
+impl std::fmt::Display for ResumeReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+/// Detailed evaluation of resume readiness with human-readable rationale.
+///
+/// Invariant: Does not expose raw numerical scores to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResumeReadinessAssessment {
+    /// Readiness classification
+    pub readiness: ResumeReadiness,
+    /// Explanatory bullet points (e.g., ["current task identified", "5 relevant workset items", "recent activity available"])
+    pub reasons: Vec<String>,
+    /// Human-readable explanation block
+    pub formatted_explanation: String,
+}
+
+/// Evaluator for determining how much information ContextSplit has available to help the user resume.
+pub struct ResumeReadinessEvaluator;
+
+impl ResumeReadinessEvaluator {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Evaluates resume readiness from derived context state attributes.
+    ///
+    /// Evaluates:
+    /// - context confidence
+    /// - task confidence
+    /// - workset quality
+    /// - recent activity
+    /// - last meaningful activity
+    /// - relevant item availability
+    /// - recent state freshness
+    /// - conflicting evidence
+    pub fn evaluate(
+        state: ContextStateValue,
+        left_off_on: Option<&str>,
+        workset_count: usize,
+        has_meaningful_activity: bool,
+        has_recent_activity: bool,
+        _has_user_feedback: bool,
+    ) -> ResumeReadinessAssessment {
+        let is_task_identified = left_off_on.is_some();
+        let is_dormant = state == ContextStateValue::Dormant;
+        let is_uncertain = state == ContextStateValue::Uncertain;
+        let is_insufficient = state == ContextStateValue::InsufficientEvidence;
+
+        let mut reasons: Vec<String> = Vec::new();
+
+        // 1. Insufficient Evidence
+        if is_insufficient || (workset_count == 0 && !is_task_identified && !has_recent_activity) {
+            reasons.push("no prior activity recorded".to_string());
+            reasons.push("insufficient evidence to reconstruct state".to_string());
+
+            let formatted = Self::format_explanation(ResumeReadiness::Insufficient, &reasons);
+            return ResumeReadinessAssessment {
+                readiness: ResumeReadiness::Insufficient,
+                reasons,
+                formatted_explanation: formatted,
+            };
+        }
+
+        // 2. Ready: Current task identified + relevant workset items (>= 2) + recent activity available + not uncertain/dormant
+        if is_task_identified
+            && workset_count >= 2
+            && (has_recent_activity || state == ContextStateValue::Active || state == ContextStateValue::RecentlyActive)
+            && !is_uncertain
+            && !is_dormant
+        {
+            reasons.push("current task identified".to_string());
+            if workset_count > 0 {
+                if workset_count == 1 {
+                    reasons.push("1 relevant workset item".to_string());
+                } else {
+                    reasons.push(format!("{} relevant workset items", workset_count));
+                }
+            }
+            if has_recent_activity {
+                reasons.push("recent activity available".to_string());
+            }
+
+            let formatted = Self::format_explanation(ResumeReadiness::Ready, &reasons);
+            return ResumeReadinessAssessment {
+                readiness: ResumeReadiness::Ready,
+                reasons,
+                formatted_explanation: formatted,
+            };
+        }
+
+        // 3. Mostly Ready:
+        // Case A: Task identified + at least 1 workset item / meaningful activity
+        // Case B: Rich workset (>= 3) + recent activity, but task is general / implied
+        if !is_uncertain && !is_dormant && (
+            (is_task_identified && (workset_count >= 1 || has_meaningful_activity))
+            || (workset_count >= 3 && has_recent_activity)
+        ) {
+            reasons.push("context identified".to_string());
+            if is_task_identified {
+                reasons.push("current task identified".to_string());
+            } else {
+                reasons.push("supporting workset available".to_string());
+            }
+            if workset_count > 0 {
+                if workset_count == 1 {
+                    reasons.push("1 relevant workset item".to_string());
+                } else {
+                    reasons.push(format!("{} relevant workset items", workset_count));
+                }
+            }
+            if has_recent_activity {
+                reasons.push("recent activity available".to_string());
+            }
+
+            let formatted = Self::format_explanation(ResumeReadiness::MostlyReady, &reasons);
+            return ResumeReadinessAssessment {
+                readiness: ResumeReadiness::MostlyReady,
+                reasons,
+                formatted_explanation: formatted,
+            };
+        }
+
+        // 4. Partial:
+        // Context identified, but task uncertain, limited activity, dormant, or competing signals
+        reasons.push("context identified".to_string());
+        if !is_task_identified {
+            reasons.push("task uncertain".to_string());
+        }
+        if is_dormant || !has_recent_activity || workset_count <= 1 {
+            reasons.push("limited recent activity".to_string());
+        }
+        if is_uncertain {
+            reasons.push("competing context signals detected".to_string());
+        }
+
+        let formatted = Self::format_explanation(ResumeReadiness::Partial, &reasons);
+        ResumeReadinessAssessment {
+            readiness: ResumeReadiness::Partial,
+            reasons,
+            formatted_explanation: formatted,
+        }
+    }
+
+    fn format_explanation(readiness: ResumeReadiness, reasons: &[String]) -> String {
+        let mut lines = Vec::new();
+        lines.push("Resume readiness:".to_string());
+        lines.push(readiness.display_name().to_string());
+        lines.push(String::new());
+        lines.push("Because:".to_string());
+        for r in reasons {
+            lines.push(format!("- {}", r));
+        }
+        lines.join("\n")
+    }
+}
+
+// =========================================================================
 // ContextResumeState: Human-Readable Contextual Resume Representation (Day 19 Step 5)
 // =========================================================================
 
@@ -556,6 +773,8 @@ pub struct ContextResumeState {
     pub recent_work: Vec<String>,
     /// Formatted human-readable resume summary block
     pub formatted_resume_summary: String,
+    /// Internal resume readiness assessment (Day 19 Step 6)
+    pub readiness: ResumeReadinessAssessment,
     /// Conservative state of the context
     pub state: ContextStateValue,
     /// Calibrated state confidence score [0.0, 1.0]
@@ -622,6 +841,8 @@ pub struct ContextState {
     pub meaningful_activity: Option<MeaningfulActivity>,
     /// Derived human-readable resume state (Day 19 Step 5)
     pub resume_state: ContextResumeState,
+    /// Internal resume readiness assessment (Day 19 Step 6)
+    pub readiness: ResumeReadinessAssessment,
     /// Calibrated state confidence score [0.0, 1.0]
     pub state_confidence: f64,
     /// Epistemic source ("confirmed", "inferred", "observed")
@@ -1282,8 +1503,11 @@ impl ContextStateBuilder {
             self.memory.as_ref(),
             &self.items,
             state_confidence,
+            self.has_user_feedback,
             &reconstructed_at,
         );
+
+        let readiness = resume_state.readiness.clone();
 
         Ok(ContextState {
             context_id: self.context_id,
@@ -1306,6 +1530,7 @@ impl ContextStateBuilder {
             last_meaningful_activity,
             meaningful_activity,
             resume_state,
+            readiness,
             state_confidence,
             provenance,
             has_user_feedback: self.has_user_feedback,
@@ -1579,6 +1804,7 @@ impl ContextStateBuilder {
         memory: Option<&ContextMemory>,
         items: &[Item],
         confidence: f64,
+        has_user_feedback: bool,
         reconstructed_at: &str,
     ) -> ContextResumeState {
         // 1. Resolve "left_off_on" (Strict: do NOT invent a task!)
@@ -1728,6 +1954,27 @@ impl ContextStateBuilder {
 
         let formatted_resume_summary = lines.join("\n");
 
+        // 5. Evaluate Resume Readiness (Day 19 Step 6)
+        let workset_count = workset.map(|w| w.items.len()).unwrap_or(0);
+        let count_for_readiness = if workset_count > 0 {
+            workset_count
+        } else {
+            recent_work.len()
+        };
+
+        let has_recent_activity = !recent_work.is_empty()
+            || state == ContextStateValue::Active
+            || state == ContextStateValue::RecentlyActive;
+
+        let readiness = ResumeReadinessEvaluator::evaluate(
+            state,
+            left_off_on.as_deref(),
+            count_for_readiness,
+            last_act_text.is_some(),
+            has_recent_activity,
+            has_user_feedback,
+        );
+
         ContextResumeState {
             context_id: context_id.to_string(),
             context_name: context_name.to_string(),
@@ -1736,6 +1983,7 @@ impl ContextStateBuilder {
             last_activity_type: last_act_type,
             recent_work,
             formatted_resume_summary,
+            readiness,
             state,
             confidence,
             reconstructed_at: reconstructed_at.to_string(),
@@ -1775,6 +2023,16 @@ impl ContextStateService {
     ) -> Result<ContextResumeState, String> {
         let state = self.derive_for_context(conn, context_id)?;
         Ok(state.resume_state)
+    }
+
+    /// Evaluates the resume readiness of a context without exposing numerical scores.
+    pub fn evaluate_readiness(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<ResumeReadinessAssessment, String> {
+        let state = self.derive_for_context(conn, context_id)?;
+        Ok(state.readiness)
     }
 }
 
@@ -2923,5 +3181,141 @@ mod tests {
         assert_eq!(resume.context_id, ws.id);
         assert_eq!(resume.context_name, "Design System");
         assert_eq!(resume.last_meaningful_activity.as_deref(), Some("Button Component"));
+    }
+
+    // =====================================================================
+    // STEP 6 REQUIRED TESTS: Resume Readiness Evaluator
+    // =====================================================================
+
+    #[test]
+    fn test_readiness_ready_aurora_website() {
+        let assessment = ResumeReadinessEvaluator::evaluate(
+            ContextStateValue::Active,
+            Some("Hero animation"),
+            5,
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(assessment.readiness, ResumeReadiness::Ready);
+        assert!(assessment.readiness.is_ready());
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                "current task identified".to_string(),
+                "5 relevant workset items".to_string(),
+                "recent activity available".to_string(),
+            ]
+        );
+
+        let formatted = &assessment.formatted_explanation;
+        assert!(formatted.contains("Resume readiness:\nReady"));
+        assert!(formatted.contains("Because:"));
+        assert!(formatted.contains("- current task identified"));
+        assert!(formatted.contains("- 5 relevant workset items"));
+        assert!(formatted.contains("- recent activity available"));
+    }
+
+    #[test]
+    fn test_readiness_partial_random_context() {
+        let assessment = ResumeReadinessEvaluator::evaluate(
+            ContextStateValue::RecentlyActive,
+            None,
+            1,
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(assessment.readiness, ResumeReadiness::Partial);
+        assert!(assessment.readiness.is_partial());
+        assert_eq!(
+            assessment.reasons,
+            vec![
+                "context identified".to_string(),
+                "task uncertain".to_string(),
+                "limited recent activity".to_string(),
+            ]
+        );
+
+        let formatted = &assessment.formatted_explanation;
+        assert!(formatted.contains("Resume readiness:\nPartial"));
+        assert!(formatted.contains("Because:"));
+        assert!(formatted.contains("- context identified"));
+        assert!(formatted.contains("- task uncertain"));
+        assert!(formatted.contains("- limited recent activity"));
+    }
+
+    #[test]
+    fn test_readiness_mostly_ready_with_task_and_single_workset_item() {
+        let assessment = ResumeReadinessEvaluator::evaluate(
+            ContextStateValue::RecentlyActive,
+            Some("Process scheduling assignment"),
+            1,
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(assessment.readiness, ResumeReadiness::MostlyReady);
+        assert!(assessment.readiness.is_mostly_ready());
+        assert!(assessment.reasons.contains(&"current task identified".to_string()));
+    }
+
+    #[test]
+    fn test_readiness_insufficient_empty_context() {
+        let assessment = ResumeReadinessEvaluator::evaluate(
+            ContextStateValue::InsufficientEvidence,
+            None,
+            0,
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(assessment.readiness, ResumeReadiness::Insufficient);
+        assert!(assessment.readiness.is_insufficient());
+        assert!(assessment.reasons.contains(&"no prior activity recorded".to_string()));
+    }
+
+    #[test]
+    fn test_readiness_dormant_context_is_partial() {
+        let assessment = ResumeReadinessEvaluator::evaluate(
+            ContextStateValue::Dormant,
+            Some("Old task"),
+            2,
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(assessment.readiness, ResumeReadiness::Partial);
+        assert!(assessment.reasons.contains(&"limited recent activity".to_string()));
+    }
+
+    #[test]
+    fn test_readiness_service_evaluate_readiness_end_to_end() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        let _item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://www.framer.com/motion/animation/",
+            Some("Framer Motion animation reference"),
+            r#"{"app_name":"Chrome"}"#,
+        )
+        .unwrap();
+
+        let service = ContextStateService::new();
+        let readiness = service.evaluate_readiness(&conn, &ws.id).unwrap();
+
+        assert!(!readiness.reasons.is_empty());
+        assert!(readiness.formatted_explanation.contains("Resume readiness:"));
     }
 }
