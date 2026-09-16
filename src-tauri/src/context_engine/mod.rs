@@ -34,10 +34,11 @@ pub mod context_state;
 pub mod snapshot;
 
 pub use snapshot::{
-    ContextSnapshot, ContextSnapshotBuilder, ContextSnapshotQuality,
-    ContextSnapshotQualityEvaluator, ContextSnapshotService, SnapshotActivityReference,
-    SnapshotQualityRating, SnapshotTaskReference, SnapshotWorksetItemReference,
-    CONTEXTUAL_SNAPSHOT_DISCLAIMER,
+    get_global_snapshot_cache, invalidate_snapshot_cache, ContextSnapshot, ContextSnapshotBuilder,
+    ContextSnapshotCache, ContextSnapshotQuality, ContextSnapshotQualityEvaluator,
+    ContextSnapshotService, SnapshotActivityReference, SnapshotQualityRating,
+    SnapshotTaskReference, SnapshotTrigger, SnapshotTriggerClassifier, SnapshotTriggerCoalescer,
+    SnapshotWorksetItemReference, CONTEXTUAL_SNAPSHOT_DISCLAIMER,
 };
 
 pub use context_state::{

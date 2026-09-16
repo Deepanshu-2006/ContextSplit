@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -1459,6 +1461,464 @@ impl ContextSnapshotBuilder {
 }
 
 // =========================================================================
+// SnapshotTrigger & Classification (Day 20 Step 5)
+// =========================================================================
+
+/// Explicit categories of meaningful events that trigger context snapshot generation.
+///
+/// Invariants:
+/// - Snapshots are refreshed AFTER meaningful events (task transition, context transition,
+///   context return, meaningful segment completion, significant workset change, user confirmation/correction, explicit request).
+/// - NEVER create snapshots for: every clipboard capture, every app switch, every render,
+///   every mouse movement, or trivial duplicate activity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum SnapshotTrigger {
+    /// Task transition detected or confirmed within the context
+    TaskTransition {
+        task_id: Option<String>,
+        task_title: String,
+        transition_type: String,
+    },
+    /// Context transition away from or into this context
+    ContextTransition {
+        from_context_id: Option<String>,
+        to_context_id: Option<String>,
+        transition_type: String,
+    },
+    /// Return to a previously active context after an absence
+    ContextReturn {
+        context_id: String,
+        gap_seconds: u64,
+    },
+    /// Completion of a verified meaningful activity burst / segment
+    MeaningfulSegmentCompletion {
+        segment_id: Option<String>,
+        item_count: usize,
+    },
+    /// Significant evolution in the active workset (e.g., primary item change, >= 2 core additions)
+    SignificantWorksetChange {
+        added_count: usize,
+        removed_count: usize,
+        primary_item_changed: bool,
+    },
+    /// User confirmed context membership, task candidate, or state
+    UserConfirmation {
+        entity_type: String,
+        entity_id: String,
+    },
+    /// User corrected or moved items/tasks between contexts
+    UserCorrection {
+        previous_context_id: Option<String>,
+        corrected_context_id: String,
+    },
+    /// Explicit user or system request to reconstruct state
+    ExplicitRequest {
+        reason: String,
+    },
+    /// Trivial / noisy activity that must NOT create snapshots
+    SuppressedNoise {
+        event_type: String,
+        reason: String,
+    },
+}
+
+impl SnapshotTrigger {
+    /// Returns `true` if this trigger represents a substantive event warranting snapshot creation.
+    pub fn is_meaningful(&self) -> bool {
+        !matches!(self, Self::SuppressedNoise { .. })
+    }
+
+    /// Returns `true` if this trigger requires immediate execution without debouncing delay.
+    pub fn is_high_priority(&self) -> bool {
+        matches!(
+            self,
+            Self::UserConfirmation { .. }
+                | Self::UserCorrection { .. }
+                | Self::ExplicitRequest { .. }
+                | Self::ContextTransition { .. }
+        )
+    }
+
+    /// Returns `true` if this trigger is suppressed noise.
+    pub fn is_suppressed(&self) -> bool {
+        matches!(self, Self::SuppressedNoise { .. })
+    }
+
+    pub fn trigger_name(&self) -> &'static str {
+        match self {
+            Self::TaskTransition { .. } => "task_transition",
+            Self::ContextTransition { .. } => "context_transition",
+            Self::ContextReturn { .. } => "context_return",
+            Self::MeaningfulSegmentCompletion { .. } => "meaningful_segment_completion",
+            Self::SignificantWorksetChange { .. } => "significant_workset_change",
+            Self::UserConfirmation { .. } => "user_confirmation",
+            Self::UserCorrection { .. } => "user_correction",
+            Self::ExplicitRequest { .. } => "explicit_request",
+            Self::SuppressedNoise { .. } => "suppressed_noise",
+        }
+    }
+}
+
+/// Classifier for filtering incoming runtime events into meaningful snapshot triggers vs suppressed noise.
+pub struct SnapshotTriggerClassifier;
+
+impl SnapshotTriggerClassifier {
+    /// Classifies an event by name and optional flags.
+    pub fn classify_event(event_name: &str, is_duplicate: bool) -> SnapshotTrigger {
+        if is_duplicate {
+            return SnapshotTrigger::SuppressedNoise {
+                event_type: event_name.to_string(),
+                reason: "Trivial duplicate capture suppressed".to_string(),
+            };
+        }
+
+        match event_name {
+            "clipboard_capture" | "clipboard_changed" | "clipboard_item" => {
+                SnapshotTrigger::SuppressedNoise {
+                    event_type: event_name.to_string(),
+                    reason: "Raw clipboard capture does not warrant immediate snapshot".to_string(),
+                }
+            }
+            "app_switch" | "window_focus" | "window_switched" => {
+                SnapshotTrigger::SuppressedNoise {
+                    event_type: event_name.to_string(),
+                    reason: "App switch alone does not represent context completion".to_string(),
+                }
+            }
+            "render" | "render_frame" | "draw" => {
+                SnapshotTrigger::SuppressedNoise {
+                    event_type: event_name.to_string(),
+                    reason: "UI rendering event suppressed".to_string(),
+                }
+            }
+            "mouse_move" | "cursor_movement" | "scroll" => {
+                SnapshotTrigger::SuppressedNoise {
+                    event_type: event_name.to_string(),
+                    reason: "Input gesture noise suppressed".to_string(),
+                }
+            }
+            "user_confirm_context" | "user_confirmed_task" | "user_confirmation" => {
+                SnapshotTrigger::UserConfirmation {
+                    entity_type: "context_item".to_string(),
+                    entity_id: String::new(),
+                }
+            }
+            "user_correct_context" | "user_moved_item" | "user_correction" => {
+                SnapshotTrigger::UserCorrection {
+                    previous_context_id: None,
+                    corrected_context_id: String::new(),
+                }
+            }
+            "task_transition" | "task_started" | "task_switched" => {
+                SnapshotTrigger::TaskTransition {
+                    task_id: None,
+                    task_title: "Active Task".to_string(),
+                    transition_type: "inferred".to_string(),
+                }
+            }
+            "context_transition" | "workspace_switched" => {
+                SnapshotTrigger::ContextTransition {
+                    from_context_id: None,
+                    to_context_id: None,
+                    transition_type: "switch".to_string(),
+                }
+            }
+            "context_return" | "returned_to_context" => {
+                SnapshotTrigger::ContextReturn {
+                    context_id: String::new(),
+                    gap_seconds: 300,
+                }
+            }
+            "segment_completed" | "meaningful_segment" => {
+                SnapshotTrigger::MeaningfulSegmentCompletion {
+                    segment_id: None,
+                    item_count: 1,
+                }
+            }
+            "workset_evolved" | "workset_changed" => {
+                SnapshotTrigger::SignificantWorksetChange {
+                    added_count: 1,
+                    removed_count: 0,
+                    primary_item_changed: true,
+                }
+            }
+            "reconstruct_snapshot" | "refresh_snapshot" => {
+                SnapshotTrigger::ExplicitRequest {
+                    reason: "Explicit client reconstruction request".to_string(),
+                }
+            }
+            _ => SnapshotTrigger::SuppressedNoise {
+                event_type: event_name.to_string(),
+                reason: "Unrecognized raw signal suppressed".to_string(),
+            },
+        }
+    }
+}
+
+/// Internal pending trigger entry for a context.
+#[derive(Debug, Clone)]
+struct PendingTriggerEntry {
+    trigger: SnapshotTrigger,
+    #[allow(dead_code)]
+    first_scheduled_at: Instant,
+    last_updated_at: Instant,
+    coalesce_count: usize,
+    is_high_priority: bool,
+}
+
+/// Asynchronous trigger coalescer and debouncer for snapshot generation.
+///
+/// Invariants:
+/// 1. Capture pipeline NEVER waits for snapshot generation (synchronously schedules in memory).
+/// 2. Coalesces rapid successive triggers within the debounce window into a single snapshot generation.
+/// 3. Drops suppressed noise events immediately without locking or queue bloat.
+#[derive(Debug)]
+pub struct SnapshotTriggerCoalescer {
+    pending: Arc<Mutex<HashMap<String, PendingTriggerEntry>>>,
+    total_received: Arc<Mutex<usize>>,
+    total_scheduled: Arc<Mutex<usize>>,
+    total_suppressed: Arc<Mutex<usize>>,
+    total_coalesced: Arc<Mutex<usize>>,
+    default_debounce: Duration,
+}
+
+impl Default for SnapshotTriggerCoalescer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SnapshotTriggerCoalescer {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            total_received: Arc::new(Mutex::new(0)),
+            total_scheduled: Arc::new(Mutex::new(0)),
+            total_suppressed: Arc::new(Mutex::new(0)),
+            total_coalesced: Arc::new(Mutex::new(0)),
+            default_debounce: Duration::from_millis(1500),
+        }
+    }
+
+    pub fn with_debounce(mut self, duration: Duration) -> Self {
+        self.default_debounce = duration;
+        self
+    }
+
+    /// Schedules an incoming trigger for a context.
+    /// Returns `true` if scheduled/coalesced, `false` if dropped as noise.
+    pub fn schedule(&self, context_id: &str, trigger: SnapshotTrigger) -> bool {
+        if let Ok(mut count) = self.total_received.lock() {
+            *count += 1;
+        }
+
+        if trigger.is_suppressed() {
+            if let Ok(mut count) = self.total_suppressed.lock() {
+                *count += 1;
+            }
+            return false;
+        }
+
+        if let Ok(mut count) = self.total_scheduled.lock() {
+            *count += 1;
+        }
+
+        let is_high = trigger.is_high_priority();
+        let now = Instant::now();
+
+        if let Ok(mut guard) = self.pending.lock() {
+            if let Some(entry) = guard.get_mut(context_id) {
+                entry.coalesce_count += 1;
+                entry.last_updated_at = now;
+                if is_high {
+                    entry.is_high_priority = true;
+                }
+                entry.trigger = trigger;
+                if let Ok(mut coalesced) = self.total_coalesced.lock() {
+                    *coalesced += 1;
+                }
+            } else {
+                guard.insert(
+                    context_id.to_string(),
+                    PendingTriggerEntry {
+                        trigger,
+                        first_scheduled_at: now,
+                        last_updated_at: now,
+                        coalesce_count: 1,
+                        is_high_priority: is_high,
+                    },
+                );
+            }
+        }
+
+        true
+    }
+
+    /// Drains and returns all context triggers that have satisfied their debounce window
+    /// or were flagged high priority.
+    pub fn pop_ready(&self) -> Vec<(String, SnapshotTrigger)> {
+        self.pop_ready_with_debounce(self.default_debounce)
+    }
+
+    /// Drains and returns ready triggers using an explicit debounce window.
+    pub fn pop_ready_with_debounce(&self, debounce: Duration) -> Vec<(String, SnapshotTrigger)> {
+        let mut ready = Vec::new();
+        let now = Instant::now();
+
+        if let Ok(mut guard) = self.pending.lock() {
+            let mut keys_to_remove = Vec::new();
+            for (ctx_id, entry) in guard.iter() {
+                if entry.is_high_priority || now.duration_since(entry.last_updated_at) >= debounce {
+                    ready.push((ctx_id.clone(), entry.trigger.clone()));
+                    keys_to_remove.push(ctx_id.clone());
+                }
+            }
+            for k in keys_to_remove {
+                guard.remove(&k);
+            }
+        }
+
+        ready
+    }
+
+    /// Checks if a context has a pending snapshot trigger.
+    pub fn is_pending(&self, context_id: &str) -> bool {
+        self.pending
+            .lock()
+            .map(|g| g.contains_key(context_id))
+            .unwrap_or(false)
+    }
+
+    /// Returns the number of times triggers have been coalesced for a pending context.
+    pub fn coalesce_count(&self, context_id: &str) -> usize {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|g| g.get(context_id).map(|e| e.coalesce_count))
+            .unwrap_or(0)
+    }
+
+    pub fn total_received_count(&self) -> usize {
+        self.total_received.lock().map(|c| *c).unwrap_or(0)
+    }
+
+    pub fn total_scheduled_count(&self) -> usize {
+        self.total_scheduled.lock().map(|c| *c).unwrap_or(0)
+    }
+
+    pub fn total_suppressed_count(&self) -> usize {
+        self.total_suppressed.lock().map(|c| *c).unwrap_or(0)
+    }
+
+    pub fn total_coalesced_count(&self) -> usize {
+        self.total_coalesced.lock().map(|c| *c).unwrap_or(0)
+    }
+
+    pub fn pending_contexts_count(&self) -> usize {
+        self.pending.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.pending.lock() {
+            guard.clear();
+        }
+    }
+}
+
+// =========================================================================
+// ContextSnapshotCache: In-Memory High Performance Cache
+// =========================================================================
+
+#[derive(Debug, Clone)]
+struct CachedSnapshotEntry {
+    snapshot: ContextSnapshot,
+    cached_at: Instant,
+}
+
+/// High-performance thread-safe cache for derived `ContextSnapshot` instances.
+pub struct ContextSnapshotCache {
+    entries: RwLock<HashMap<String, CachedSnapshotEntry>>,
+    ttl: Duration,
+}
+
+impl Default for ContextSnapshotCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextSnapshotCache {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(30),
+        }
+    }
+
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    pub fn get(&self, context_id: &str) -> Option<ContextSnapshot> {
+        if let Ok(guard) = self.entries.read() {
+            if let Some(entry) = guard.get(context_id) {
+                if entry.cached_at.elapsed() < self.ttl {
+                    return Some(entry.snapshot.clone());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn insert(&self, context_id: &str, snapshot: ContextSnapshot) {
+        if let Ok(mut guard) = self.entries.write() {
+            if guard.len() >= 100 {
+                guard.clear();
+            }
+            guard.insert(
+                context_id.to_string(),
+                CachedSnapshotEntry {
+                    snapshot,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    pub fn invalidate(&self, context_id: &str) {
+        if let Ok(mut guard) = self.entries.write() {
+            guard.remove(context_id);
+        }
+    }
+
+    pub fn invalidate_all(&self) {
+        if let Ok(mut guard) = self.entries.write() {
+            guard.clear();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.read().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+static GLOBAL_SNAPSHOT_CACHE: OnceLock<ContextSnapshotCache> = OnceLock::new();
+
+pub fn get_global_snapshot_cache() -> &'static ContextSnapshotCache {
+    GLOBAL_SNAPSHOT_CACHE.get_or_init(ContextSnapshotCache::new)
+}
+
+pub fn invalidate_snapshot_cache(context_id: &str) {
+    get_global_snapshot_cache().invalidate(context_id);
+}
+
+// =========================================================================
 // ContextSnapshotService: Deterministic Synthesis Service
 // =========================================================================
 
@@ -1489,6 +1949,37 @@ impl ContextSnapshotService {
     ) -> Result<ContextSnapshot, String> {
         let builder = ContextSnapshotBuilder::from_db(conn, context_id)?;
         Ok(builder.build())
+    }
+
+    /// Derives the snapshot, utilizing the global cache if valid.
+    pub fn derive_for_context_cached(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<ContextSnapshot, String> {
+        let cache = get_global_snapshot_cache();
+        if let Some(cached) = cache.get(context_id) {
+            return Ok(cached);
+        }
+        let snapshot = self.derive_for_context(conn, context_id)?;
+        cache.insert(context_id, snapshot.clone());
+        Ok(snapshot)
+    }
+
+    /// Handles a snapshot trigger for a context: invalidates cache and triggers update.
+    pub fn handle_trigger(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+        trigger: SnapshotTrigger,
+    ) -> Result<Option<ContextSnapshot>, String> {
+        if trigger.is_suppressed() {
+            return Ok(None);
+        }
+        invalidate_snapshot_cache(context_id);
+        let snapshot = self.derive_for_context(conn, context_id)?;
+        get_global_snapshot_cache().insert(context_id, snapshot.clone());
+        Ok(Some(snapshot))
     }
 
     /// Derives the active `ContextSnapshot` across all workspaces.
@@ -2255,5 +2746,203 @@ mod tests {
         assert!(snapshot.quality.rating == SnapshotQualityRating::Complete || snapshot.quality.rating == SnapshotQualityRating::Useful);
         assert!(snapshot.can_confidently_resume());
         assert!(snapshot.quality.total_workset_count >= 2);
+    }
+
+    // =========================================================================
+    // STEP 5 TESTS: Snapshot Creation Triggers, Coalescing & Caching
+    // =========================================================================
+
+    #[test]
+    fn test_trigger_meaningful_events_classification() {
+        let meaningful_events = vec![
+            "task_transition",
+            "context_transition",
+            "context_return",
+            "segment_completed",
+            "workset_evolved",
+            "user_confirm_context",
+            "user_correct_context",
+            "reconstruct_snapshot",
+        ];
+
+        for event in meaningful_events {
+            let trigger = SnapshotTriggerClassifier::classify_event(event, false);
+            assert!(
+                trigger.is_meaningful(),
+                "Event '{}' must be classified as meaningful",
+                event
+            );
+            assert!(
+                !trigger.is_suppressed(),
+                "Event '{}' must NOT be suppressed",
+                event
+            );
+        }
+    }
+
+    #[test]
+    fn test_trigger_noisy_events_suppressed() {
+        let noisy_events = vec![
+            "clipboard_capture",
+            "clipboard_changed",
+            "app_switch",
+            "window_focus",
+            "render",
+            "render_frame",
+            "mouse_move",
+            "cursor_movement",
+        ];
+
+        for event in noisy_events {
+            let trigger = SnapshotTriggerClassifier::classify_event(event, false);
+            assert!(
+                trigger.is_suppressed(),
+                "Noisy event '{}' must be suppressed",
+                event
+            );
+            assert!(
+                !trigger.is_meaningful(),
+                "Noisy event '{}' must not be meaningful",
+                event
+            );
+        }
+
+        // Trivial duplicate items must also be suppressed unconditionally
+        let dup_trigger = SnapshotTriggerClassifier::classify_event("task_transition", true);
+        assert!(dup_trigger.is_suppressed());
+    }
+
+    #[test]
+    fn test_coalescer_noisy_burst_creates_zero_scheduled_snapshots() {
+        let coalescer = SnapshotTriggerCoalescer::new();
+
+        // Simulate a rapid burst of 200 noisy events (clipboard, mouse, app focus)
+        for _ in 0..100 {
+            let t1 = SnapshotTriggerClassifier::classify_event("clipboard_capture", false);
+            let t2 = SnapshotTriggerClassifier::classify_event("mouse_move", false);
+            assert!(!coalescer.schedule("ws-1", t1));
+            assert!(!coalescer.schedule("ws-1", t2));
+        }
+
+        assert_eq!(coalescer.total_received_count(), 200);
+        assert_eq!(coalescer.total_suppressed_count(), 200);
+        assert_eq!(coalescer.total_scheduled_count(), 0);
+        assert_eq!(coalescer.pending_contexts_count(), 0);
+        assert!(coalescer.pop_ready().is_empty());
+    }
+
+    #[test]
+    fn test_coalescer_meaningful_triggers_coalesce() {
+        let coalescer = SnapshotTriggerCoalescer::new()
+            .with_debounce(Duration::from_millis(500));
+
+        // Schedule 5 rapid meaningful triggers for "ws-aurora"
+        for i in 0..5 {
+            let trigger = SnapshotTrigger::TaskTransition {
+                task_id: Some(format!("t-{}", i)),
+                task_title: format!("Task Version {}", i),
+                transition_type: "inferred".to_string(),
+            };
+            assert!(coalescer.schedule("ws-aurora", trigger));
+        }
+
+        assert_eq!(coalescer.total_scheduled_count(), 5);
+        assert_eq!(coalescer.total_coalesced_count(), 4);
+        assert_eq!(coalescer.pending_contexts_count(), 1);
+        assert_eq!(coalescer.coalesce_count("ws-aurora"), 5);
+
+        // Before debounce window expires, pop_ready should return nothing
+        let immediate_ready = coalescer.pop_ready_with_debounce(Duration::from_secs(10));
+        assert!(immediate_ready.is_empty());
+
+        // With zero debounce window, the coalesced trigger is popped as 1 single snapshot job
+        let ready = coalescer.pop_ready_with_debounce(Duration::from_millis(0));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, "ws-aurora");
+        if let SnapshotTrigger::TaskTransition { ref task_title, .. } = ready[0].1 {
+            assert_eq!(task_title, "Task Version 4");
+        } else {
+            panic!("Expected latest task transition trigger");
+        }
+
+        // Queue is now empty
+        assert_eq!(coalescer.pending_contexts_count(), 0);
+    }
+
+    #[test]
+    fn test_coalescer_high_priority_bypass_debounce() {
+        let coalescer = SnapshotTriggerCoalescer::new()
+            .with_debounce(Duration::from_secs(60)); // Long debounce
+
+        let trigger = SnapshotTrigger::UserConfirmation {
+            entity_type: "context_item".to_string(),
+            entity_id: "item-123".to_string(),
+        };
+
+        assert!(trigger.is_high_priority());
+        assert!(coalescer.schedule("ws-priority", trigger));
+
+        // High priority bypasses the 60s debounce and is immediately ready
+        let ready = coalescer.pop_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, "ws-priority");
+    }
+
+    #[test]
+    fn test_snapshot_cache_invalidation_and_ttl() {
+        let cache = ContextSnapshotCache::new().with_ttl(Duration::from_secs(5));
+        let snapshot = ContextSnapshotBuilder::new("ws-cache", "Cached Workspace")
+            .with_state(ContextStateValue::Active)
+            .build();
+
+        assert_eq!(cache.get("ws-cache"), None);
+
+        cache.insert("ws-cache", snapshot.clone());
+        assert_eq!(cache.get("ws-cache"), Some(snapshot));
+
+        // Test explicit invalidation
+        cache.invalidate("ws-cache");
+        assert_eq!(cache.get("ws-cache"), None);
+    }
+
+    #[test]
+    fn test_service_handle_trigger_e2e() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Trigger Service WS").unwrap();
+
+        let _ = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://react.dev",
+            Some("React Docs"),
+            r#"{"app_name": "Chrome"}"#,
+        )
+        .unwrap();
+
+        let service = ContextSnapshotService::new();
+
+        // 1. Noisy trigger returns None
+        let noise = SnapshotTrigger::SuppressedNoise {
+            event_type: "mouse_move".to_string(),
+            reason: "gesture".to_string(),
+        };
+        let res_noise = service.handle_trigger(&conn, &ws.id, noise).unwrap();
+        assert!(res_noise.is_none());
+
+        // 2. Meaningful trigger produces and caches snapshot
+        let trigger = SnapshotTrigger::UserConfirmation {
+            entity_type: "workspace".to_string(),
+            entity_id: ws.id.clone(),
+        };
+        let res_meaningful = service.handle_trigger(&conn, &ws.id, trigger).unwrap();
+        assert!(res_meaningful.is_some());
+        let snap = res_meaningful.unwrap();
+        assert_eq!(snap.context_id, ws.id);
+
+        // Cached retrieval is immediate
+        let cached = service.derive_for_context_cached(&conn, &ws.id).unwrap();
+        assert_eq!(cached.id, snap.id);
     }
 }
