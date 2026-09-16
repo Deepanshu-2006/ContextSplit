@@ -27,6 +27,7 @@ import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
 import { contextStateService, ContextState, ContextStateValue, StateReason } from '../../services/contextState';
+import { contextSnapshotService, ContextSnapshotDiff } from '../../services/contextSnapshot';
 import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
@@ -432,6 +433,31 @@ function ResumeMemoryOverviewContent({
 
   // 3. WHERE YOU LEFT OFF & Progressive Disclosure
   const [showWhy, setShowWhy] = useState(false);
+  const [showWhatChanged, setShowWhatChanged] = useState(false);
+  const [snapshotDiff, setSnapshotDiff] = useState<ContextSnapshotDiff | null>(null);
+  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+
+  const contextId =
+    contextState?.context_id ||
+    overview?.workspace_id ||
+    memory?.context_id ||
+    workset?.context_id;
+
+  const handleToggleWhatChanged = async () => {
+    const nextState = !showWhatChanged;
+    setShowWhatChanged(nextState);
+    if (nextState && !snapshotDiff && contextId) {
+      setIsLoadingDiff(true);
+      try {
+        const diff = await contextSnapshotService.getSnapshotDiff(contextId);
+        setSnapshotDiff(diff);
+      } catch (err) {
+        console.error('Failed to load snapshot diff:', err);
+      } finally {
+        setIsLoadingDiff(false);
+      }
+    }
+  };
 
   // Conservative derivation: if state is uncertain or no specific activity, do not fabricate.
   const isStateUncertain = stateValue === 'uncertain' || stateValue === 'insufficient_evidence';
@@ -539,8 +565,22 @@ function ResumeMemoryOverviewContent({
 
       {/* 2. YOU WERE WORKING ON */}
       <div className="space-y-1.5">
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-          YOU WERE WORKING ON
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            YOU WERE WORKING ON
+          </div>
+          <button
+            onClick={handleToggleWhatChanged}
+            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer border ${
+              showWhatChanged
+                ? 'bg-gray-100 text-gray-900 border-gray-300'
+                : 'bg-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50 border-gray-200/60'
+            }`}
+            title="What changed since your last session?"
+          >
+            <span>What changed?</span>
+            {showWhatChanged ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          </button>
         </div>
         <div className="flex items-baseline gap-2 flex-wrap">
           <h3 className="text-base font-medium text-gray-900 tracking-tight">
@@ -555,6 +595,68 @@ function ResumeMemoryOverviewContent({
         <div className="text-xs text-gray-500">
           {formattedLastActive}
         </div>
+
+        {/* Progressive Disclosure: "What changed?" Experience */}
+        {showWhatChanged && (
+          <div className="mt-2.5 p-3.5 bg-gray-50/90 rounded-lg border border-gray-200/70 text-xs space-y-2 animate-in fade-in duration-150">
+            <div className="text-[11px] font-medium text-gray-700">
+              Since your last session:
+            </div>
+            {isLoadingDiff ? (
+              <div className="flex items-center gap-2 text-gray-400 text-xs py-1">
+                <RefreshCw size={12} className="animate-spin text-gray-500" />
+                <span>Comparing snapshots...</span>
+              </div>
+            ) : snapshotDiff && snapshotDiff.has_meaningful_changes ? (
+              <ul className="space-y-1.5 pl-0.5">
+                {snapshotDiff.task_changed && snapshotDiff.previous_task && snapshotDiff.current_task && (
+                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>
+                      Task changed from <strong className="font-medium text-gray-900">{snapshotDiff.previous_task}</strong> to <strong className="font-medium text-gray-900">{snapshotDiff.current_task}</strong>
+                    </span>
+                  </li>
+                )}
+                {snapshotDiff.task_changed && !snapshotDiff.previous_task && snapshotDiff.current_task && (
+                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>
+                      Started task <strong className="font-medium text-gray-900">{snapshotDiff.current_task}</strong>
+                    </span>
+                  </li>
+                )}
+                {snapshotDiff.added_items.map((item) => (
+                  <li key={item.id} className="flex items-start gap-1.5 text-xs text-gray-700">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>
+                      <strong className="font-medium text-gray-900">{item.title || item.content_snippet || 'New item'}</strong> became part of the workset
+                    </span>
+                  </li>
+                ))}
+                {snapshotDiff.removed_items.map((item) => (
+                  <li key={item.id} className="flex items-start gap-1.5 text-xs text-gray-500">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>
+                      <strong className="font-medium text-gray-700">{item.title || item.content_snippet || 'Previous item'}</strong> was removed from active workset
+                    </span>
+                  </li>
+                ))}
+                {snapshotDiff.state_changed && snapshotDiff.previous_state && (
+                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>
+                      State transitioned from <span className="font-medium">{formatStateLabel(snapshotDiff.previous_state)}</span> to <span className="font-medium">{formatStateLabel(snapshotDiff.current_state)}</span>
+                    </span>
+                  </li>
+                )}
+              </ul>
+            ) : (
+              <p className="text-xs text-gray-500 italic">
+                Nothing significant changed.
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 3. WHERE YOU LEFT OFF */}

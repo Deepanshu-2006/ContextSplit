@@ -1135,6 +1135,48 @@ fn evaluate_resume_readiness(
     service.evaluate_readiness(&conn, context_id)
 }
 
+// ---------------------------------------------------------------------------
+// Day 20: Context Snapshots & Differential Analysis
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_context_snapshot(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::snapshot::ContextSnapshot, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::snapshot::ContextSnapshotService::new();
+    let snapshot = service.derive_for_context(&conn, context_id)?;
+    service.record_snapshot_history(snapshot.clone());
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn get_context_snapshot_history(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::snapshot::ContextSnapshotHistory>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::snapshot::ContextSnapshotService::new();
+    if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
+        service.record_snapshot_history(snapshot);
+    }
+    Ok(service.get_snapshot_history(context_id))
+}
+
+#[tauri::command]
+fn get_context_snapshot_diff(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<Option<context_engine::snapshot::ContextSnapshotDiff>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::snapshot::ContextSnapshotService::new();
+    if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
+        service.record_snapshot_history(snapshot);
+    }
+    Ok(service.compare_latest_with_previous(context_id))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1336,7 +1378,11 @@ pub fn run() {
             // Context State & Resume (Day 19)
             get_context_state,
             get_resume_state,
-            evaluate_resume_readiness
+            evaluate_resume_readiness,
+            // Context Snapshots & Differential Analysis (Day 20)
+            get_context_snapshot,
+            get_context_snapshot_history,
+            get_context_snapshot_diff
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
