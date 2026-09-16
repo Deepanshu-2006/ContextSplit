@@ -31,6 +31,12 @@ pub mod memory_query;
 pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
+pub mod snapshot;
+
+pub use snapshot::{
+    ContextSnapshot, ContextSnapshotBuilder, SnapshotActivityReference,
+    SnapshotTaskReference, SnapshotWorksetItemReference, CONTEXTUAL_SNAPSHOT_DISCLAIMER,
+};
 
 pub use context_state::{
     ContextResumeState, ContextState, ContextStateBuilder, ContextStateService, ContextStateValue,
@@ -77,7 +83,7 @@ pub use task_transitions::{
 
 pub use transitions::{
     format_duration_human, format_transition_summary, record_context_transition, ContextReference,
-    ContextReturnDetails, ContextSnapshot, ContextTransition, ContextTransitionBuilder,
+    ContextReturnDetails, ContextTransition, ContextTransitionBuilder,
     ContextTransitionDetector, ContextTransitionType, DetectedTransition, PendingTransition,
     TransitionEvaluationResult, TransitionStabilityConfig,
 };
