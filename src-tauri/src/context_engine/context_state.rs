@@ -2199,6 +2199,28 @@ impl ContextStateService {
         let state = self.derive_for_context(conn, context_id)?;
         Ok(state.readiness)
     }
+
+    /// Derives contextual working states for all available contexts/workspaces.
+    pub fn derive_all(&self, conn: &Connection) -> Result<Vec<ContextState>, String> {
+        let workspaces = crate::db::operations::list_workspaces(conn)
+            .map_err(|e| format!("Failed to list workspaces: {}", e))?;
+        let mut states = Vec::new();
+        for ws in workspaces {
+            if let Ok(state) = self.derive_for_context(conn, &ws.id) {
+                states.push(state);
+            }
+        }
+        Ok(states)
+    }
+
+    /// Reconstructs human-readable resume states for all available contexts/workspaces.
+    pub fn get_all_resume_states(
+        &self,
+        conn: &Connection,
+    ) -> Result<Vec<ContextResumeState>, String> {
+        let states = self.derive_all(conn)?;
+        Ok(states.into_iter().map(|s| s.resume_state).collect())
+    }
 }
 
 // =========================================================================
@@ -3738,5 +3760,166 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_multiple_independent_context_states() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let now_str = Utc::now().to_rfc3339();
+
+        // 1. Context A: Aurora Website
+        let ws_aurora = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+        let _item_a1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "url",
+            "https://www.figma.com/design/aurora-hero",
+            Some("Figma hero design"),
+            r#"{"app_name":"Figma"}"#,
+        ).unwrap();
+        let _item_a2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_aurora.id),
+            None,
+            "code",
+            "export const Hero = () => <div>Hero</div>;",
+            Some("React Hero component"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                ws_aurora.id,
+                "Hero animation",
+                0.92,
+                "active",
+                now_str,
+                now_str,
+                now_str,
+                now_str,
+            ],
+        ).unwrap();
+
+        // 2. Context B: University OS
+        let ws_os = crate::db::operations::create_workspace(&conn, "University OS").unwrap();
+        let _item_b1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_os.id),
+            None,
+            "text",
+            "Round robin scheduler algorithm code in C",
+            Some("Round Robin implementation"),
+            r#"{"app_name":"CLion"}"#,
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                ws_os.id,
+                "Process scheduling assignment",
+                0.88,
+                "active",
+                now_str,
+                now_str,
+                now_str,
+                now_str,
+            ],
+        ).unwrap();
+
+        // 3. Context C: Tokyo Trip
+        let ws_tokyo = crate::db::operations::create_workspace(&conn, "Tokyo Trip").unwrap();
+        let _item_c1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_tokyo.id),
+            None,
+            "url",
+            "https://hotel-booking.example.com/tokyo",
+            Some("Tokyo hotel research"),
+            r#"{"app_name":"Safari"}"#,
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                ws_tokyo.id,
+                "7-day itinerary",
+                0.85,
+                "active",
+                now_str,
+                now_str,
+                now_str,
+                now_str,
+            ],
+        ).unwrap();
+
+        let service = ContextStateService::new();
+
+        // Switching sequence: Aurora -> University OS -> Tokyo Trip -> Aurora
+        // Step 1: Aurora
+        let aurora_state_1 = service.derive_for_context(&conn, &ws_aurora.id).unwrap();
+        assert_eq!(aurora_state_1.context_name.as_deref(), Some("Aurora Website"));
+        assert_eq!(aurora_state_1.task_title.as_deref(), Some("Hero animation"));
+        assert_eq!(aurora_state_1.resume_state.left_off_on.as_deref(), Some("Hero animation"));
+        assert!(aurora_state_1.resume_state.recent_work.iter().any(|w| w.contains("Figma hero design")));
+
+        // Step 2: University OS
+        let os_state_1 = service.derive_for_context(&conn, &ws_os.id).unwrap();
+        assert_eq!(os_state_1.context_name.as_deref(), Some("University OS"));
+        assert_eq!(os_state_1.task_title.as_deref(), Some("Process scheduling assignment"));
+        assert_eq!(os_state_1.resume_state.left_off_on.as_deref(), Some("Process scheduling assignment"));
+        assert!(os_state_1.resume_state.recent_work.iter().any(|w| w.contains("Round Robin implementation")));
+
+        // Step 3: Tokyo Trip
+        let tokyo_state_1 = service.derive_for_context(&conn, &ws_tokyo.id).unwrap();
+        assert_eq!(tokyo_state_1.context_name.as_deref(), Some("Tokyo Trip"));
+        assert_eq!(tokyo_state_1.task_title.as_deref(), Some("7-day itinerary"));
+        assert_eq!(tokyo_state_1.resume_state.left_off_on.as_deref(), Some("7-day itinerary"));
+        assert!(tokyo_state_1.resume_state.recent_work.iter().any(|w| w.contains("Tokyo hotel research")));
+
+        // Step 4: Aurora returns with Aurora's previous state (state was NOT overwritten or corrupted)
+        let aurora_state_2 = service.derive_for_context(&conn, &ws_aurora.id).unwrap();
+        assert_eq!(aurora_state_2.context_id, ws_aurora.id);
+        assert_eq!(aurora_state_2.context_name.as_deref(), Some("Aurora Website"));
+        assert_eq!(aurora_state_2.task_title.as_deref(), Some("Hero animation"));
+        assert_eq!(aurora_state_2.resume_state.left_off_on.as_deref(), Some("Hero animation"));
+
+        // Step 5: University OS returns with its own state
+        let os_state_2 = service.derive_for_context(&conn, &ws_os.id).unwrap();
+        assert_eq!(os_state_2.context_id, ws_os.id);
+        assert_eq!(os_state_2.context_name.as_deref(), Some("University OS"));
+        assert_eq!(os_state_2.task_title.as_deref(), Some("Process scheduling assignment"));
+        assert_eq!(os_state_2.resume_state.left_off_on.as_deref(), Some("Process scheduling assignment"));
+
+        // Step 6: Tokyo Trip returns with its own state
+        let tokyo_state_2 = service.derive_for_context(&conn, &ws_tokyo.id).unwrap();
+        assert_eq!(tokyo_state_2.context_id, ws_tokyo.id);
+        assert_eq!(tokyo_state_2.context_name.as_deref(), Some("Tokyo Trip"));
+        assert_eq!(tokyo_state_2.task_title.as_deref(), Some("7-day itinerary"));
+        assert_eq!(tokyo_state_2.resume_state.left_off_on.as_deref(), Some("7-day itinerary"));
+
+        // Batch test: derive_all & get_all_resume_states
+        let all_states = service.derive_all(&conn).unwrap();
+        assert_eq!(all_states.len(), 3);
+        let all_resumes = service.get_all_resume_states(&conn).unwrap();
+        assert_eq!(all_resumes.len(), 3);
+
+        let aurora_resume = all_resumes.iter().find(|r| r.context_id == ws_aurora.id).unwrap();
+        assert_eq!(aurora_resume.context_name, "Aurora Website");
+        assert_eq!(aurora_resume.left_off_on.as_deref(), Some("Hero animation"));
+
+        let os_resume = all_resumes.iter().find(|r| r.context_id == ws_os.id).unwrap();
+        assert_eq!(os_resume.context_name, "University OS");
+        assert_eq!(os_resume.left_off_on.as_deref(), Some("Process scheduling assignment"));
+
+        let tokyo_resume = all_resumes.iter().find(|r| r.context_id == ws_tokyo.id).unwrap();
+        assert_eq!(tokyo_resume.context_name, "Tokyo Trip");
+        assert_eq!(tokyo_resume.left_off_on.as_deref(), Some("7-day itinerary"));
     }
 }
