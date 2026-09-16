@@ -512,6 +512,21 @@ function ResumeMemoryOverviewContent({
     return [];
   }, [workset, contextState, overview]);
 
+  // Last session derivations
+  const lastLeftOffItem = useMemo(() => {
+    const primary = workset?.items.find((i) => i.relevance === 'primary');
+    if (primary?.title) return primary.title;
+    if (primary?.content_snippet) return primary.content_snippet;
+    if (continueWithItems[0]?.title) return continueWithItems[0].title;
+    if (whereLeftOff && whereLeftOff !== `Recent activity in ${contextName}`) return whereLeftOff;
+    return null;
+  }, [workset, continueWithItems, whereLeftOff, contextName]);
+
+  const relevantItemsCount = continueWithItems.length > 0 ? continueWithItems.length : (workset?.items.length ?? 0);
+  const hasMeaningfulSession =
+    !isStateUncertain &&
+    (isTaskAvailable || continueWithItems.length > 0 || (whereLeftOff && whereLeftOff !== `Recent activity in ${contextName}`));
+
   // Reason list for progressive disclosure
   const explanationTitle = contextState?.explanation?.title || 'Why ContextSplit thinks this:';
   const explanationReasons: StateReason[] = useMemo(() => {
@@ -728,7 +743,67 @@ function ResumeMemoryOverviewContent({
         )}
       </div>
 
-      {/* 4. Continue with */}
+      {/* 4. LAST SESSION */}
+      <div className="space-y-2 pt-2 border-t border-gray-100">
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+          LAST SESSION
+        </div>
+
+        {hasMeaningfulSession ? (
+          <div className="p-3.5 bg-gray-50/80 rounded-xl border border-gray-200/70 space-y-2.5 text-xs">
+            {isTaskAvailable && taskTitle && (
+              <h4 className="text-sm font-semibold text-gray-900 tracking-tight">
+                {taskTitle}
+              </h4>
+            )}
+
+            {lastActiveTimestamp && (
+              <div className="space-y-0.5">
+                <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
+                  Last active:
+                </div>
+                <div className="text-xs text-gray-700 font-normal">
+                  {formatSessionTime(lastActiveTimestamp)}
+                </div>
+              </div>
+            )}
+
+            {lastLeftOffItem && (
+              <div className="space-y-0.5">
+                <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
+                  You left off with:
+                </div>
+                <div className="text-xs font-medium text-gray-900 truncate">
+                  {lastLeftOffItem}
+                </div>
+              </div>
+            )}
+
+            {relevantItemsCount > 0 && (
+              <div className="text-xs text-gray-500">
+                {relevantItemsCount} relevant item{relevantItemsCount === 1 ? '' : 's'}
+              </div>
+            )}
+
+            <div className="pt-1.5">
+              <button
+                onClick={onOpenWorksetDetail}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white hover:bg-gray-100 rounded-lg border border-gray-200 shadow-2xs transition-colors cursor-pointer"
+                title="Navigate to existing contextual workset"
+              >
+                <span>Continue</span>
+                <ArrowRight size={12} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400 italic">
+            No meaningful previous session available.
+          </p>
+        )}
+      </div>
+
+      {/* 5. Continue with */}
       <div className="space-y-2.5 pt-1">
         <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
           Continue with
@@ -1037,6 +1112,41 @@ function formatLastActive(dateStr: string): string {
     return `Last active on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
   } catch {
     return `Last active ${dateStr}`;
+  }
+}
+
+function formatSessionTime(dateStr: string): string {
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const now = new Date();
+    const isToday =
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear();
+
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+      d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+
+    const timeStr = d.toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+
+    if (isToday) {
+      return `Today · ${timeStr}`;
+    }
+    if (isYesterday) {
+      return `Yesterday · ${timeStr}`;
+    }
+    const datePart = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `${datePart} · ${timeStr}`;
+  } catch {
+    return dateStr;
   }
 }
 
