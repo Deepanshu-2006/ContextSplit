@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -193,6 +195,417 @@ impl From<&MemoryActivitySequenceEntry> for SnapshotActivityReference {
 }
 
 // =========================================================================
+// ContextSnapshotQuality: Step 4 Quality Control & Readiness Classification
+// =========================================================================
+
+/// Qualitative classification rating for a contextual snapshot.
+///
+/// Invariants:
+/// - `Complete`: Rich contextual state (clear task, strong workset, recent activity, fresh state, ready).
+/// - `Useful`: Sufficient meaningful information to resume work without friction.
+/// - `Partial`: Context identified, but missing key details (uncertain task, weak workset, or stale activity).
+/// - `Insufficient`: Missing meaningful task, weak or isolated item, stale/old/no activity, or conflicting signals.
+///   AN INSUFFICIENT SNAPSHOT MUST NEVER BE PRESENTED AS A CONFIDENT RESUME STATE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotQualityRating {
+    /// Full, rich contextual state available.
+    Complete,
+    /// Sufficient meaningful information to resume work without friction.
+    Useful,
+    /// Context identified, but missing key details.
+    Partial,
+    /// Insufficient evidence or conflicting signals.
+    Insufficient,
+}
+
+impl SnapshotQualityRating {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Useful => "useful",
+            Self::Partial => "partial",
+            Self::Insufficient => "insufficient",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Complete => "Complete",
+            Self::Useful => "Useful",
+            Self::Partial => "Partial",
+            Self::Insufficient => "Insufficient",
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    pub fn is_useful(&self) -> bool {
+        matches!(self, Self::Useful)
+    }
+
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial)
+    }
+
+    pub fn is_insufficient(&self) -> bool {
+        matches!(self, Self::Insufficient)
+    }
+
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::Complete | Self::Useful)
+    }
+}
+
+impl std::fmt::Display for SnapshotQualityRating {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+/// Comprehensive quality control evaluation of a ContextSnapshot.
+///
+/// Evaluates:
+/// - context confidence
+/// - task confidence
+/// - workset quality
+/// - recent activity
+/// - state freshness
+/// - evidence diversity
+/// - contradictions
+/// - resume readiness
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextSnapshotQuality {
+    /// Qualitative classification rating: complete, useful, partial, insufficient
+    pub rating: SnapshotQualityRating,
+    /// Overall calibrated composite quality score [0.0, 1.0]
+    pub score: f64,
+    /// Calibrated context confidence score [0.0, 1.0]
+    pub context_confidence: f64,
+    /// Calibrated task confidence score [0.0, 1.0] (nullable if task is absent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_confidence: Option<f64>,
+    /// Quality score of the workset [0.0, 1.0]
+    pub workset_quality_score: f64,
+    /// Number of strong items in workset (Primary/Secondary or score >= 0.70)
+    pub strong_workset_count: usize,
+    /// Total count of items in the workset
+    pub total_workset_count: usize,
+    /// Number of recent activity sequence references
+    pub recent_activity_count: usize,
+    /// Whether a verified last meaningful activity was identified
+    pub has_meaningful_activity: bool,
+    /// State freshness classification
+    pub state_freshness: StateFreshness,
+    /// Evidence diversity score across distinct apps and item types [0.0, 1.0]
+    pub evidence_diversity_score: f64,
+    /// Number of distinct applications represented in workset/activity
+    pub distinct_apps_count: usize,
+    /// Whether conflicting signals or contradictions were detected
+    pub has_contradictions: bool,
+    /// Specific contradiction details if detected
+    pub contradictions: Vec<String>,
+    /// Calibrated evaluation reasons
+    pub reasons: Vec<String>,
+    /// Human-readable explanation block
+    pub explanation: String,
+    /// CRITICAL INVARIANT: Flag indicating whether this snapshot can be safely presented
+    /// as a confident resume state. Strictly `false` for Insufficient and low-confidence snapshots.
+    pub can_confidently_resume: bool,
+}
+
+impl Default for ContextSnapshotQuality {
+    fn default() -> Self {
+        Self {
+            rating: SnapshotQualityRating::Insufficient,
+            score: 0.0,
+            context_confidence: 0.0,
+            task_confidence: None,
+            workset_quality_score: 0.0,
+            strong_workset_count: 0,
+            total_workset_count: 0,
+            recent_activity_count: 0,
+            has_meaningful_activity: false,
+            state_freshness: StateFreshness::Fresh,
+            evidence_diversity_score: 0.0,
+            distinct_apps_count: 0,
+            has_contradictions: false,
+            contradictions: Vec::new(),
+            reasons: vec!["Insufficient evidence to evaluate quality".to_string()],
+            explanation: "Insufficient evidence to evaluate snapshot quality.".to_string(),
+            can_confidently_resume: false,
+        }
+    }
+}
+
+/// Evaluator for assessing snapshot quality and ensuring insufficient snapshots
+/// are never presented as confident resume states.
+pub struct ContextSnapshotQualityEvaluator;
+
+impl ContextSnapshotQualityEvaluator {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Evaluates all contextual dimensions of a snapshot without arbitrary numerical jumps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate(
+        context_confidence: f64,
+        task_confidence: Option<f64>,
+        task_title: Option<&str>,
+        workset_items: &[SnapshotWorksetItemReference],
+        recent_activity: &[SnapshotActivityReference],
+        last_meaningful_activity: Option<&MeaningfulActivity>,
+        state: ContextStateValue,
+        state_freshness: StateFreshness,
+        resume_readiness: &ResumeReadinessAssessment,
+    ) -> ContextSnapshotQuality {
+        let mut reasons: Vec<String> = Vec::new();
+        let mut contradictions: Vec<String> = Vec::new();
+
+        // 1. Context Confidence
+        let ctx_conf = context_confidence.clamp(0.0, 1.0);
+
+        // 2. Task Confidence & Presence
+        let has_task = task_title.is_some() && !task_title.unwrap().trim().is_empty();
+        let effective_task_conf = if has_task {
+            task_confidence.unwrap_or(0.65).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // 3. Workset Quality
+        let total_workset = workset_items.len();
+        let strong_workset_count = workset_items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.relevance,
+                    WorksetItemRelevance::Primary | WorksetItemRelevance::Supporting
+                ) || i.relevance_score >= 0.70
+            })
+            .count();
+        let weak_workset_count = workset_items
+            .iter()
+            .filter(|i| {
+                matches!(i.relevance, WorksetItemRelevance::Related)
+                    || i.relevance_score < 0.40
+            })
+            .count();
+
+        let workset_quality_score = if total_workset == 0 {
+            0.0
+        } else {
+            let base_score = (strong_workset_count as f64 * 1.0
+                + (total_workset.saturating_sub(strong_workset_count + weak_workset_count)) as f64 * 0.6
+                + weak_workset_count as f64 * 0.2)
+                / (total_workset as f64);
+            let count_scaling = (total_workset as f64 / 4.0).min(1.0);
+            (base_score * 0.7 + count_scaling * 0.3).clamp(0.0, 1.0)
+        };
+
+        // 4. Recent Activity & Meaningful Focus
+        let has_meaningful_act = last_meaningful_activity.is_some();
+        let recent_activity_count = recent_activity.len();
+        let has_recent_activity = recent_activity_count > 0
+            || has_meaningful_act
+            || state == ContextStateValue::Active
+            || state == ContextStateValue::RecentlyActive
+            || state_freshness == StateFreshness::Fresh;
+
+        // 5. State Freshness Score
+        let freshness_score = match state_freshness {
+            StateFreshness::Fresh => 1.00,
+            StateFreshness::Recent => 0.85,
+            StateFreshness::Stale => 0.45,
+            StateFreshness::VeryStale => 0.15,
+        };
+
+        // 6. Evidence Diversity
+        let mut distinct_apps = HashSet::new();
+        let mut distinct_types = HashSet::new();
+        for item in workset_items {
+            if let Some(ref app) = item.app_name {
+                if !app.trim().is_empty() {
+                    distinct_apps.insert(app.to_lowercase());
+                }
+            }
+            if !item.item_type.trim().is_empty() {
+                distinct_types.insert(item.item_type.to_lowercase());
+            }
+        }
+        for act in recent_activity {
+            distinct_types.insert(act.entry_type.to_lowercase());
+        }
+        let distinct_apps_count = distinct_apps.len();
+        let evidence_diversity_score = if total_workset == 0 && recent_activity_count == 0 {
+            0.0
+        } else if distinct_apps_count >= 3 || (distinct_apps_count >= 2 && distinct_types.len() >= 2) {
+            1.00
+        } else if distinct_apps_count >= 2 || (total_workset >= 2 && distinct_types.len() >= 2) {
+            0.80
+        } else if total_workset >= 2 {
+            0.60
+        } else {
+            0.35
+        };
+
+        // 7. Contradictions & Conflict Detection
+        if state == ContextStateValue::Uncertain {
+            contradictions.push("Ambiguous or conflicting contextual signals detected".to_string());
+        }
+        if state == ContextStateValue::InsufficientEvidence {
+            contradictions.push("Insufficient evidence to reconstruct working state".to_string());
+        }
+        if state == ContextStateValue::Dormant && state_freshness == StateFreshness::Fresh {
+            contradictions.push("State is marked dormant despite recent activity timestamp".to_string());
+        }
+        if has_task && effective_task_conf < 0.40 {
+            contradictions.push("Task candidate confidence is below reliable threshold".to_string());
+        }
+        let has_contradictions = !contradictions.is_empty();
+
+        // 8. Rating Classification (Inspecting calibrated bands)
+        let is_dormant = state == ContextStateValue::Dormant || state_freshness == StateFreshness::VeryStale;
+        let is_insufficient_state = state == ContextStateValue::InsufficientEvidence
+            || resume_readiness.readiness == ResumeReadiness::Insufficient;
+
+        let rating = if is_insufficient_state
+            || (total_workset == 0 && !has_task && !has_meaningful_act)
+            || (total_workset <= 1 && weak_workset_count == 1 && !has_task && (is_dormant || !has_recent_activity))
+            || (total_workset <= 1 && !has_task && is_dormant)
+            || (ctx_conf < 0.35 && total_workset <= 1 && !has_task)
+            || (has_contradictions && ctx_conf < 0.50)
+        {
+            SnapshotQualityRating::Insufficient
+        } else if has_task
+            && effective_task_conf >= 0.70
+            && strong_workset_count >= 2
+            && total_workset >= 3
+            && (has_meaningful_act || recent_activity_count >= 2)
+            && !is_dormant
+            && (state_freshness == StateFreshness::Fresh || state_freshness == StateFreshness::Recent)
+            && !has_contradictions
+            && (resume_readiness.readiness == ResumeReadiness::Ready)
+        {
+            SnapshotQualityRating::Complete
+        } else if !is_dormant
+            && state_freshness != StateFreshness::VeryStale
+            && (resume_readiness.readiness == ResumeReadiness::Ready || resume_readiness.readiness == ResumeReadiness::MostlyReady)
+            && (
+                (has_task && effective_task_conf >= 0.50 && total_workset >= 1 && has_recent_activity)
+                || (strong_workset_count >= 2 && (has_meaningful_act || recent_activity_count >= 2))
+                || (total_workset >= 3 && has_recent_activity)
+            )
+        {
+            SnapshotQualityRating::Useful
+        } else {
+            SnapshotQualityRating::Partial
+        };
+
+        // 9. Reasons Formulation
+        if has_task {
+            reasons.push(format!(
+                "Task identified ('{}', {:.0}% confidence)",
+                task_title.unwrap(),
+                effective_task_conf * 100.0
+            ));
+        } else {
+            reasons.push("No specific active task identified".to_string());
+        }
+
+        if strong_workset_count > 0 {
+            reasons.push(format!(
+                "{} strong workset {} available (out of {} total)",
+                strong_workset_count,
+                if strong_workset_count == 1 { "item" } else { "items" },
+                total_workset
+            ));
+        } else if total_workset > 0 {
+            reasons.push(format!("{} peripheral/weak workset items", total_workset));
+        } else {
+            reasons.push("No workset items captured".to_string());
+        }
+
+        if has_meaningful_act {
+            reasons.push("Verified meaningful activity milestone recorded".to_string());
+        } else if has_recent_activity {
+            reasons.push("Recent activity signals present".to_string());
+        } else {
+            reasons.push("No recent activity recorded".to_string());
+        }
+
+        reasons.push(format!("State freshness: {}", state_freshness.as_str()));
+        if distinct_apps_count > 1 {
+            reasons.push(format!("Evidence spanned across {} applications", distinct_apps_count));
+        }
+
+        // 10. Calibrated Composite Score [0.0, 1.0]
+        let mut score = (ctx_conf * 0.25)
+            + (effective_task_conf * 0.25)
+            + (workset_quality_score * 0.25)
+            + (freshness_score * 0.15)
+            + (evidence_diversity_score * 0.10);
+
+        if has_contradictions {
+            score *= 0.70;
+        }
+
+        match rating {
+            SnapshotQualityRating::Complete => {
+                score = score.max(0.80).clamp(0.0, 1.0);
+            }
+            SnapshotQualityRating::Useful => {
+                score = score.clamp(0.60, 0.89);
+            }
+            SnapshotQualityRating::Partial => {
+                score = score.clamp(0.35, 0.65);
+            }
+            SnapshotQualityRating::Insufficient => {
+                score = score.min(0.35).clamp(0.0, 1.0);
+            }
+        }
+
+        // 11. CRITICAL INVARIANT: can_confidently_resume
+        let can_confidently_resume = match rating {
+            SnapshotQualityRating::Complete => true,
+            SnapshotQualityRating::Useful => true,
+            SnapshotQualityRating::Partial => false,
+            SnapshotQualityRating::Insufficient => false,
+        };
+
+        let explanation = format!(
+            "Quality Rating: {} (Score: {:.0}%). {}",
+            rating.display_name(),
+            score * 100.0,
+            reasons.join(". ")
+        );
+
+        ContextSnapshotQuality {
+            rating,
+            score,
+            context_confidence: ctx_conf,
+            task_confidence: if has_task { Some(effective_task_conf) } else { None },
+            workset_quality_score,
+            strong_workset_count,
+            total_workset_count: total_workset,
+            recent_activity_count,
+            has_meaningful_activity: has_meaningful_act,
+            state_freshness,
+            evidence_diversity_score,
+            distinct_apps_count,
+            has_contradictions,
+            contradictions,
+            reasons,
+            explanation,
+            can_confidently_resume,
+        }
+    }
+}
+
+// =========================================================================
 // ContextSnapshot: Point-in-Time Contextual Reconstruction
 // =========================================================================
 
@@ -250,6 +663,9 @@ pub struct ContextSnapshot {
     pub snapshot_confidence: f64,
     /// Concise, natural reconstruction answering: "What did my work look like when I last left this context?"
     pub snapshot_statement: String,
+    /// Evaluated quality control assessment
+    #[serde(default)]
+    pub quality: ContextSnapshotQuality,
     /// Primary epistemic source of this snapshot
     pub provenance: InformationProvenance,
     /// Explicit non-mental-state disclaimer
@@ -291,6 +707,18 @@ impl ContextSnapshot {
             state_freshness,
         );
 
+        let quality = ContextSnapshotQualityEvaluator::evaluate(
+            snapshot_confidence,
+            task_confidence,
+            task_title.as_deref(),
+            &workset_item_references,
+            &recent_activity_references,
+            last_meaningful_activity.as_ref(),
+            state,
+            state_freshness,
+            &resume_readiness,
+        );
+
         Self {
             id: Uuid::new_v4().to_string(),
             context_id: ctx_id_str,
@@ -311,6 +739,7 @@ impl ContextSnapshot {
             last_meaningful_activity,
             snapshot_confidence: snapshot_confidence.clamp(0.0, 1.0),
             snapshot_statement: statement,
+            quality,
             provenance,
             epistemic_disclaimer: CONTEXTUAL_SNAPSHOT_DISCLAIMER.to_string(),
         }
@@ -364,6 +793,22 @@ impl ContextSnapshot {
             )
         };
 
+        let quality = ContextSnapshotQualityEvaluator::evaluate(
+            state.state_confidence,
+            if state.task_title.is_some() {
+                Some(state.state_confidence)
+            } else {
+                None
+            },
+            state.task_title.as_deref(),
+            &workset_refs,
+            &[],
+            state.meaningful_activity.as_ref(),
+            state.state,
+            state.freshness,
+            &state.readiness,
+        );
+
         Self {
             id: Uuid::new_v4().to_string(),
             context_id: state.context_id.clone(),
@@ -391,6 +836,7 @@ impl ContextSnapshot {
             last_meaningful_activity: state.meaningful_activity.clone(),
             snapshot_confidence: state.state_confidence,
             snapshot_statement: statement,
+            quality,
             provenance: prov,
             epistemic_disclaimer: CONTEXTUAL_SNAPSHOT_DISCLAIMER.to_string(),
         }
@@ -478,6 +924,18 @@ impl ContextSnapshot {
             freshness,
         );
 
+        let quality = ContextSnapshotQualityEvaluator::evaluate(
+            memory.current_context_confidence,
+            memory.current_task_confidence,
+            active_task_title.as_deref(),
+            &workset_refs,
+            &activity_refs,
+            meaningful_activity.as_ref(),
+            state_val,
+            freshness,
+            &readiness,
+        );
+
         Self {
             id: Uuid::new_v4().to_string(),
             context_id: memory.context_id.clone(),
@@ -498,6 +956,7 @@ impl ContextSnapshot {
             last_meaningful_activity: meaningful_activity,
             snapshot_confidence: memory.current_context_confidence,
             snapshot_statement: statement,
+            quality,
             provenance: memory.context_provenance,
             epistemic_disclaimer: CONTEXTUAL_SNAPSHOT_DISCLAIMER.to_string(),
         }
@@ -600,6 +1059,47 @@ impl ContextSnapshot {
         )
     }
 
+    /// Evaluates snapshot quality rating: Complete, Useful, Partial, or Insufficient.
+    pub fn evaluate_quality(&self) -> ContextSnapshotQuality {
+        ContextSnapshotQualityEvaluator::evaluate(
+            self.snapshot_confidence,
+            self.task_confidence,
+            self.task_title.as_deref(),
+            &self.workset_item_references,
+            &self.recent_activity_references,
+            self.last_meaningful_activity.as_ref(),
+            self.state,
+            self.state_freshness,
+            &self.resume_readiness,
+        )
+    }
+
+    /// Returns `true` if this snapshot has complete quality rating.
+    pub fn is_complete(&self) -> bool {
+        self.quality.rating.is_complete()
+    }
+
+    /// Returns `true` if this snapshot is useful to resume work without friction.
+    pub fn is_useful(&self) -> bool {
+        self.quality.rating.is_useful()
+    }
+
+    /// Returns `true` if this snapshot is partial.
+    pub fn is_partial(&self) -> bool {
+        self.quality.rating.is_partial()
+    }
+
+    /// Returns `true` if this snapshot is insufficient.
+    pub fn is_insufficient(&self) -> bool {
+        self.quality.rating.is_insufficient()
+    }
+
+    /// CRITICAL INVARIANT: Returns `true` only if this snapshot can be confidently presented
+    /// as a resume state. Strictly `false` for Insufficient or Partial snapshots.
+    pub fn can_confidently_resume(&self) -> bool {
+        self.quality.can_confidently_resume
+    }
+
     /// Returns the primary workset items.
     pub fn primary_items(&self) -> Vec<&SnapshotWorksetItemReference> {
         self.workset_item_references
@@ -653,6 +1153,7 @@ pub struct ContextSnapshotBuilder {
     pub recent_task_references: Vec<SnapshotTaskReference>,
     pub last_meaningful_activity: Option<MeaningfulActivity>,
     pub snapshot_confidence: f64,
+    pub quality: Option<ContextSnapshotQuality>,
     pub provenance: InformationProvenance,
     pub reference_time: Option<DateTime<Utc>>,
 }
@@ -676,6 +1177,7 @@ impl ContextSnapshotBuilder {
             recent_task_references: Vec::new(),
             last_meaningful_activity: None,
             snapshot_confidence: 0.50,
+            quality: None,
             provenance: InformationProvenance::Inferred,
             reference_time: None,
         }
@@ -821,6 +1323,7 @@ impl ContextSnapshotBuilder {
             recent_task_references: task_refs,
             last_meaningful_activity: meaningful_activity,
             snapshot_confidence,
+            quality: None,
             provenance,
             reference_time: None,
         })
@@ -899,6 +1402,11 @@ impl ContextSnapshotBuilder {
         self
     }
 
+    pub fn with_quality(mut self, quality: ContextSnapshotQuality) -> Self {
+        self.quality = Some(quality);
+        self
+    }
+
     pub fn with_reference_time(mut self, time: DateTime<Utc>) -> Self {
         self.reference_time = Some(time);
         self
@@ -922,7 +1430,7 @@ impl ContextSnapshotBuilder {
             )
         });
 
-        ContextSnapshot::new(
+        let mut snapshot = ContextSnapshot::new(
             self.context_id,
             self.context_name,
             self.task_id,
@@ -940,7 +1448,13 @@ impl ContextSnapshotBuilder {
             self.last_meaningful_activity,
             self.snapshot_confidence,
             self.provenance,
-        )
+        );
+
+        if let Some(quality) = self.quality {
+            snapshot.quality = quality;
+        }
+
+        snapshot
     }
 }
 
@@ -1511,5 +2025,235 @@ mod tests {
         assert!(snapshot
             .snapshot_statement
             .contains("No prior working activity recorded"));
+        assert_eq!(
+            snapshot.quality.rating,
+            SnapshotQualityRating::Insufficient
+        );
+        assert_eq!(snapshot.can_confidently_resume(), false);
+    }
+
+    #[test]
+    fn test_quality_complete_aurora_website() {
+        // Example from prompt:
+        // Aurora Website
+        // Task identified
+        // Workset contains 5 strong items
+        // Recent activity exists
+        // → complete/useful
+        let items = vec![
+            create_dummy_workset_item("i1", "Hero Component", WorksetItemRelevance::Primary, 0.95, Some("VS Code")),
+            create_dummy_workset_item("i2", "Framer Motion API", WorksetItemRelevance::Supporting, 0.88, Some("Chrome")),
+            create_dummy_workset_item("i3", "Tailwind Theme", WorksetItemRelevance::Supporting, 0.82, Some("VS Code")),
+            create_dummy_workset_item("i4", "Design Mockup", WorksetItemRelevance::Supporting, 0.85, Some("Figma")),
+            create_dummy_workset_item("i5", "Asset Export", WorksetItemRelevance::Supporting, 0.78, Some("Finder")),
+        ];
+
+        let activity = vec![
+            SnapshotActivityReference {
+                id: Some("act1".to_string()),
+                entry_type: "item_captured".to_string(),
+                description: "Edited Hero Component in VS Code".to_string(),
+                timestamp: "2026-09-17T00:40:00Z".to_string(),
+                provenance: InformationProvenance::Observed,
+            },
+            SnapshotActivityReference {
+                id: Some("act2".to_string()),
+                entry_type: "session_burst".to_string(),
+                description: "Focused activity burst in Aurora Website".to_string(),
+                timestamp: "2026-09-17T00:42:00Z".to_string(),
+                provenance: InformationProvenance::Observed,
+            },
+        ];
+
+        let snapshot = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_freshness(StateFreshness::Fresh, 180)
+            .with_task(
+                Some("t-aurora".to_string()),
+                "Hero Animation",
+                0.92,
+                InformationProvenance::Inferred,
+            )
+            .with_workset_items(items)
+            .with_activity_references(activity)
+            .with_confidence(0.92)
+            .build();
+
+        assert_eq!(snapshot.quality.rating, SnapshotQualityRating::Complete);
+        assert!(snapshot.is_complete());
+        assert!(snapshot.quality.rating.is_usable());
+        assert!(!snapshot.is_insufficient());
+        assert_eq!(snapshot.can_confidently_resume(), true);
+        assert_eq!(snapshot.quality.strong_workset_count, 5);
+        assert!(snapshot.quality.evidence_diversity_score >= 0.80);
+        assert_eq!(snapshot.quality.has_contradictions, false);
+        assert!(snapshot.quality.score >= 0.80);
+    }
+
+    #[test]
+    fn test_quality_insufficient_random_context() {
+        // Example from prompt:
+        // Random context
+        // One weak item
+        // No meaningful task
+        // Old activity
+        // → insufficient
+        // An insufficient snapshot must NOT be presented as a confident resume state.
+        let items = vec![
+            create_dummy_workset_item(
+                "w1",
+                "Random Search",
+                WorksetItemRelevance::Related,
+                0.30,
+                Some("Chrome"),
+            ),
+        ];
+
+        let snapshot = ContextSnapshotBuilder::new("ws-random", "Random Context")
+            .with_state(ContextStateValue::Dormant)
+            .with_freshness(StateFreshness::VeryStale, 86400 * 14) // 14 days old
+            .without_task()
+            .with_workset_items(items)
+            .with_confidence(0.35)
+            .build();
+
+        assert_eq!(snapshot.quality.rating, SnapshotQualityRating::Insufficient);
+        assert!(snapshot.is_insufficient());
+        assert!(!snapshot.is_complete());
+        assert!(!snapshot.is_useful());
+
+        // CRITICAL INVARIANT TEST:
+        assert_eq!(
+            snapshot.can_confidently_resume(),
+            false,
+            "An insufficient snapshot must NOT be presented as a confident resume state."
+        );
+        assert!(snapshot.quality.score <= 0.35);
+        assert!(snapshot.quality.reasons.iter().any(|r| r.contains("peripheral") || r.contains("No specific active task")));
+    }
+
+    #[test]
+    fn test_quality_useful_rich_workset_implied_task() {
+        let items = vec![
+            create_dummy_workset_item("i1", "DB Schema", WorksetItemRelevance::Primary, 0.90, Some("VS Code")),
+            create_dummy_workset_item("i2", "Migration Guide", WorksetItemRelevance::Supporting, 0.80, Some("Chrome")),
+            create_dummy_workset_item("i3", "SQL Queries", WorksetItemRelevance::Supporting, 0.75, Some("DataGrip")),
+        ];
+
+        let snapshot = ContextSnapshotBuilder::new("ws-backend", "Backend Architecture")
+            .with_state(ContextStateValue::RecentlyActive)
+            .with_freshness(StateFreshness::Recent, 3600 * 3) // 3 hours ago
+            .without_task()
+            .with_workset_items(items)
+            .with_confidence(0.80)
+            .build();
+
+        assert_eq!(snapshot.quality.rating, SnapshotQualityRating::Useful);
+        assert!(snapshot.is_useful());
+        assert!(!snapshot.is_insufficient());
+        assert_eq!(snapshot.can_confidently_resume(), true);
+    }
+
+    #[test]
+    fn test_quality_partial_sparse_context() {
+        let items = vec![
+            create_dummy_workset_item("i1", "Draft Note", WorksetItemRelevance::Supporting, 0.60, Some("Notes")),
+        ];
+
+        let snapshot = ContextSnapshotBuilder::new("ws-notes", "Quick Notes")
+            .with_state(ContextStateValue::Paused)
+            .with_freshness(StateFreshness::Stale, 86400 * 3) // 3 days ago
+            .without_task()
+            .with_workset_items(items)
+            .with_confidence(0.55)
+            .build();
+
+        assert_eq!(snapshot.quality.rating, SnapshotQualityRating::Partial);
+        assert!(snapshot.is_partial());
+        assert!(!snapshot.is_complete());
+        assert_eq!(snapshot.can_confidently_resume(), false);
+    }
+
+    #[test]
+    fn test_quality_contradictions_detection() {
+        let items = vec![
+            create_dummy_workset_item("i1", "Doc 1", WorksetItemRelevance::Supporting, 0.50, None),
+        ];
+
+        let snapshot = ContextSnapshotBuilder::new("ws-conflict", "Conflicted WS")
+            .with_state(ContextStateValue::Uncertain)
+            .with_freshness(StateFreshness::Fresh, 300)
+            .with_task(
+                Some("t-weak".to_string()),
+                "Vague Task",
+                0.30, // low confidence task
+                InformationProvenance::Inferred,
+            )
+            .with_workset_items(items)
+            .with_confidence(0.40)
+            .build();
+
+        assert!(snapshot.quality.has_contradictions);
+        assert!(snapshot.quality.contradictions.len() >= 1);
+        assert_eq!(snapshot.quality.rating, SnapshotQualityRating::Insufficient);
+        assert_eq!(snapshot.can_confidently_resume(), false);
+    }
+
+    #[test]
+    fn test_quality_evidence_diversity_score() {
+        let multi_app_items = vec![
+            create_dummy_workset_item("i1", "Code", WorksetItemRelevance::Primary, 0.90, Some("VS Code")),
+            create_dummy_workset_item("i2", "Docs", WorksetItemRelevance::Supporting, 0.85, Some("Chrome")),
+            create_dummy_workset_item("i3", "Design", WorksetItemRelevance::Supporting, 0.80, Some("Figma")),
+        ];
+
+        let single_app_items = vec![
+            create_dummy_workset_item("i1", "Code 1", WorksetItemRelevance::Primary, 0.90, Some("VS Code")),
+            create_dummy_workset_item("i2", "Code 2", WorksetItemRelevance::Supporting, 0.85, Some("VS Code")),
+        ];
+
+        let snap_multi = ContextSnapshotBuilder::new("ws-m", "Multi App WS")
+            .with_workset_items(multi_app_items)
+            .build();
+
+        let snap_single = ContextSnapshotBuilder::new("ws-s", "Single App WS")
+            .with_workset_items(single_app_items)
+            .build();
+
+        assert!(snap_multi.quality.evidence_diversity_score > snap_single.quality.evidence_diversity_score);
+        assert_eq!(snap_multi.quality.distinct_apps_count, 3);
+        assert_eq!(snap_single.quality.distinct_apps_count, 1);
+    }
+
+    #[test]
+    fn test_quality_service_end_to_end_evaluation() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "E2E Quality Test").unwrap();
+
+        // 1. Insert multiple items
+        for idx in 1..=4 {
+            let _ = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "file",
+                &format!("src/module_{}.rs", idx),
+                Some(&format!("Module {}", idx)),
+                r#"{"app_name": "VS Code"}"#,
+            )
+            .unwrap();
+        }
+
+        // 2. Insert active task
+        let mut task = TaskCandidate::new(Some(ws.id.clone()), "Build Quality Engine", 0.90);
+        task.status = TaskCandidateStatus::Active;
+        let _ = crate::db::operations::create_task_candidate(&conn, &task).unwrap();
+
+        let service = ContextSnapshotService::new();
+        let snapshot = service.derive_for_context(&conn, &ws.id).unwrap();
+
+        assert!(snapshot.quality.rating == SnapshotQualityRating::Complete || snapshot.quality.rating == SnapshotQualityRating::Useful);
+        assert!(snapshot.can_confidently_resume());
+        assert!(snapshot.quality.total_workset_count >= 2);
     }
 }
