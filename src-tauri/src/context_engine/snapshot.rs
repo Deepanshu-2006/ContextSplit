@@ -2039,14 +2039,63 @@ impl ContextSnapshotService {
         Ok(builder.build())
     }
 
-    /// Records a derived snapshot into historical tracking for the context.
+    /// Records a derived snapshot into historical tracking for the context (in-memory buffer).
     pub fn record_snapshot_history(&self, snapshot: ContextSnapshot) -> bool {
         get_global_snapshot_history().record_snapshot(snapshot)
     }
 
-    /// Retrieves the chronological snapshot history for a context.
+    /// Records a derived snapshot into both in-memory history and SQLite database with bounded retention.
+    pub fn record_snapshot_history_with_db(
+        &self,
+        conn: &Connection,
+        snapshot: ContextSnapshot,
+    ) -> Result<bool, String> {
+        let recorded = self.record_snapshot_history(snapshot.clone());
+        let _ = crate::db::operations::save_context_snapshot(
+            conn,
+            &snapshot,
+            DEFAULT_MAX_SNAPSHOT_RETENTION,
+        );
+        Ok(recorded)
+    }
+
+    /// Retrieves the chronological snapshot history for a context from memory.
     pub fn get_snapshot_history(&self, context_id: &str) -> Option<ContextSnapshotHistory> {
         get_global_snapshot_history().get_history(context_id)
+    }
+
+    /// Retrieves the chronological snapshot history for a context, falling back to bounded database query.
+    pub fn get_snapshot_history_from_db(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<Option<ContextSnapshotHistory>, String> {
+        if let Some(hist) = self.get_snapshot_history(context_id) {
+            if !hist.is_empty() {
+                return Ok(Some(hist));
+            }
+        }
+        let db_snaps = crate::db::operations::list_context_snapshots_bounded(
+            conn,
+            context_id,
+            DEFAULT_MAX_SNAPSHOT_RETENTION,
+        )
+        .map_err(|e| e.to_string())?;
+
+        if db_snaps.is_empty() {
+            return Ok(None);
+        }
+
+        let ctx_name = db_snaps
+            .first()
+            .map(|s| s.context_name.clone())
+            .unwrap_or_else(|| "Workspace".to_string());
+        let mut history = ContextSnapshotHistory::new(context_id, ctx_name)
+            .with_max_capacity(DEFAULT_MAX_SNAPSHOT_RETENTION);
+        for s in db_snaps {
+            history.add_snapshot(s);
+        }
+        Ok(Some(history))
     }
 
     /// Retrieves the latest snapshot recorded for a context.
@@ -4218,6 +4267,91 @@ mod tests {
         let history = repo.get_history("ws-persist-test").unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history.latest().unwrap().id, snap_id);
+    }
+
+    #[test]
+    fn test_storage_optimization_bounded_history_pruning() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        // Create a workspace and underlying items
+        let ws = crate::db::operations::create_workspace(&conn, "Storage WS").unwrap();
+        let item1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Core item 1",
+            Some("My Important Doc"),
+            "{}",
+        )
+        .unwrap();
+
+        let service = ContextSnapshotService::new();
+
+        // Generate and record 40 snapshots with different tasks
+        for i in 0..40 {
+            let snap = ContextSnapshotBuilder::new(&ws.id, &ws.name)
+                .with_task(
+                    Some(format!("t-{}", i)),
+                    &format!("Task Iteration {}", i),
+                    0.80,
+                    InformationProvenance::Inferred,
+                )
+                .add_workset_item(create_dummy_workset_item(
+                    &item1.id,
+                    "My Important Doc",
+                    WorksetItemRelevance::Primary,
+                    0.95,
+                    Some("Notes"),
+                ))
+                .build();
+
+            let _ = service.record_snapshot_history_with_db(&conn, snap);
+        }
+
+        // 1. Verify DB retention bounded to DEFAULT_MAX_SNAPSHOT_RETENTION (20)
+        let db_snaps = crate::db::operations::list_context_snapshots_bounded(&conn, &ws.id, 100).unwrap();
+        assert_eq!(db_snaps.len(), DEFAULT_MAX_SNAPSHOT_RETENTION);
+
+        // 2. CRITICAL INVARIANT: Underlying Items MUST NEVER be deleted by snapshot retention pruning!
+        let underlying_items = crate::db::operations::list_items(&conn, Some(&ws.id)).unwrap();
+        assert_eq!(underlying_items.len(), 1);
+        assert_eq!(underlying_items[0].id, item1.id);
+    }
+
+    #[test]
+    fn test_storage_performance_benchmark() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Perf WS").unwrap();
+        let service = ContextSnapshotService::new();
+
+        let start = Instant::now();
+
+        // Run 50 snapshot derivations, comparisons, and DB storage cycles
+        for i in 0..50 {
+            let snap = ContextSnapshotBuilder::new(&ws.id, &ws.name)
+                .with_task(
+                    Some(format!("t-perf-{}", i)),
+                    &format!("Performance Task {}", i),
+                    0.85,
+                    InformationProvenance::Inferred,
+                )
+                .build();
+
+            let _ = service.record_snapshot_history_with_db(&conn, snap);
+            let _ = service.compare_latest_with_previous(&ws.id);
+        }
+
+        let elapsed = start.elapsed();
+        // 50 full cycles with SQLite inserts + pruning should complete well under 500ms
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Snapshot storage pipeline took too long: {:?}",
+            elapsed
+        );
     }
 }
 
