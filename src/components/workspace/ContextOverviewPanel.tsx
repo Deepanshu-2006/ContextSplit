@@ -4,10 +4,7 @@ import {
   X,
   Clock,
   Layers,
-  FileText,
   Globe,
-  Image as ImageIcon,
-  Code as CodeIcon,
   Search,
   Activity,
   RefreshCw,
@@ -17,21 +14,16 @@ import {
   Laptop,
   CheckCircle2,
   AlertCircle,
-  ChevronDown,
-  ChevronUp,
-  RotateCcw,
-  HelpCircle,
-  Sparkles,
-  Info,
+  ArrowRight,
+  Calendar,
   Check,
   Copy,
-  Calendar,
-  ArrowRight,
 } from 'lucide-react';
-import { db, ContextOverview, TimelineEvent, TimelineItemSummary, Item } from '../../services/db';
+import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
-import { contextWorksetService, ContextWorkset, WorksetItemReference } from '../../services/contextWorkset';
-import { ContextWorksetDetailView, WorksetItemActionsMenu } from './ContextWorksetDetailView';
+import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
+import { contextStateService, ContextState, ContextStateValue } from '../../services/contextState';
+import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
 
@@ -48,6 +40,7 @@ export function ContextOverviewPanel() {
   const [overview, setOverview] = useState<ContextOverview | null>(null);
   const [memory, setMemory] = useState<ContextMemoryResponse | null>(null);
   const [workset, setWorkset] = useState<ContextWorkset | null>(null);
+  const [contextState, setContextState] = useState<ContextState | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingLifecycle, setIsUpdatingLifecycle] = useState(false);
@@ -64,6 +57,7 @@ export function ContextOverviewPanel() {
       setOverview(null);
       setMemory(null);
       setWorkset(null);
+      setContextState(null);
       setSelectedItemId(null);
     }
   }, [isOverviewOpen, overviewWorkspaceId]);
@@ -72,14 +66,16 @@ export function ContextOverviewPanel() {
     setIsLoading(true);
     setError(null);
     try {
-      const [overviewData, memoryData, worksetData] = await Promise.all([
+      const [overviewData, memoryData, worksetData, stateData] = await Promise.all([
         db.getContextOverview(wsId).catch(() => null),
         contextMemoryService.getContextMemory(wsId).catch(() => null),
         contextWorksetService.getContextWorkset(wsId).catch(() => null),
+        contextStateService.getContextState(wsId).catch(() => null),
       ]);
       setOverview(overviewData);
       setMemory(memoryData);
       setWorkset(worksetData);
+      setContextState(stateData || overviewData?.context_state || null);
     } catch (err: any) {
       setError(err?.toString() || 'Failed to load context overview');
     } finally {
@@ -224,10 +220,10 @@ export function ContextOverviewPanel() {
 
         {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {isLoading && !overview && !memory ? (
+          {isLoading && !overview && !memory && !contextState ? (
             <div className="h-64 flex flex-col items-center justify-center text-gray-400 gap-2">
               <RefreshCw size={20} className="animate-spin text-gray-500" />
-              <p className="text-xs">Reconstructing working memory...</p>
+              <p className="text-xs">Reconstructing working state...</p>
             </div>
           ) : error ? (
             <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200 text-sm flex items-start gap-3">
@@ -243,6 +239,7 @@ export function ContextOverviewPanel() {
                 overview={overview}
                 memory={memory}
                 workset={workset}
+                contextState={contextState}
                 targetWorkspaceName={targetWorkspace?.name}
                 onToggleArchive={handleToggleArchive}
                 isUpdatingLifecycle={isUpdatingLifecycle}
@@ -265,6 +262,7 @@ export function ContextOverviewPanel() {
                 workset={workset}
                 contextName={overview?.name || memory?.context || targetWorkspace?.name || 'Workspace'}
                 currentTaskTitle={
+                  contextState?.task_title ||
                   memory?.task ||
                   workset?.task_title ||
                   (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet'
@@ -293,7 +291,7 @@ export function ContextOverviewPanel() {
         <div className="px-6 py-3 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between text-[11px] text-gray-400">
           <span className="flex items-center gap-1.5">
             <CheckCircle2 size={12} className="text-emerald-500" />
-            Human-readable contextual working memory
+            Human-readable contextual working state
           </span>
           <span>Context Engine</span>
         </div>
@@ -344,6 +342,7 @@ interface ResumeMemoryOverviewContentProps {
   overview: ContextOverview | null;
   memory: ContextMemoryResponse | null;
   workset: ContextWorkset | null;
+  contextState: ContextState | null;
   targetWorkspaceName?: string;
   onToggleArchive: () => void;
   isUpdatingLifecycle: boolean;
@@ -353,332 +352,240 @@ interface ResumeMemoryOverviewContentProps {
   onMemoryFeedbackRecorded?: () => void;
 }
 
+function formatStateLabel(state?: ContextStateValue | string | null): string {
+  switch (state) {
+    case 'active':
+      return 'Active';
+    case 'recently_active':
+      return 'Recently active';
+    case 'paused':
+      return 'Paused';
+    case 'dormant':
+      return 'Dormant';
+    case 'uncertain':
+      return 'Uncertain';
+    case 'insufficient_evidence':
+      return 'Insufficient evidence';
+    default:
+      return 'Active';
+  }
+}
+
 function ResumeMemoryOverviewContent({
   overview,
   memory,
   workset,
+  contextState,
   targetWorkspaceName,
   onToggleArchive,
   isUpdatingLifecycle,
   onSelectItem,
   onOpenWorksetDetail,
   onViewFullTimeline,
-  onMemoryFeedbackRecorded,
 }: ResumeMemoryOverviewContentProps) {
-  const [showWhy, setShowWhy] = useState(false);
-  const [feedbackStatus, setFeedbackStatus] = useState<'idle' | 'submitting' | 'submitted'>('idle');
+  const contextName =
+    contextState?.context_name ||
+    overview?.name ||
+    memory?.context ||
+    workset?.context_name ||
+    targetWorkspaceName ||
+    'Workspace';
 
-  const contextId = overview?.workspace_id || memory?.context_id || workset?.context_id;
-  const contextName = overview?.name || memory?.context || workset?.context_name || targetWorkspaceName || 'Workspace';
+  // 1. Context Working State (Active, Recently active, etc.)
+  const stateValue: ContextStateValue =
+    contextState?.state ||
+    (overview?.lifecycle_state === 'archived' ? 'dormant' : overview?.lifecycle_state === 'dormant' ? 'dormant' : 'active');
+  const stateLabel = formatStateLabel(stateValue);
 
-  // Determine if we have a confident task
-  const rawTask = memory?.task || workset?.task_title || (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet' ? overview.current_task.title : null);
+  // 2. YOU WERE WORKING ON
+  const rawTask =
+    contextState?.task_title ||
+    memory?.task ||
+    workset?.task_title ||
+    (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet'
+      ? overview.current_task.title
+      : null);
   const isTaskAvailable = Boolean(rawTask && rawTask.trim() !== '' && rawTask.toLowerCase() !== 'not clear yet');
-  const taskTitle = rawTask || contextName;
-
-  // Task provenance
-  const taskProvenance = (workset?.provenance === 'confirmed' || memory?.recent_task?.provenance === 'confirmed') ? 'Confirmed' : 'Inferred';
-
-  // Context Return indicator
-  const isContextReturn = Boolean(
-    workset?.workset_state === 'detour_return' ||
-    memory?.is_context_return ||
-    memory?.evidence?.some((e) => e.toLowerCase().includes('returned to'))
+  const taskTitle = isTaskAvailable && rawTask ? rawTask : `Recent work in ${contextName}`;
+  const isTaskInferred = Boolean(
+    isTaskAvailable &&
+      contextState?.provenance !== 'confirmed' &&
+      workset?.provenance !== 'confirmed' &&
+      memory?.recent_task?.provenance !== 'confirmed'
   );
 
   // Last active timestamp
-  const lastActiveTimestamp = workset?.last_active_at || memory?.last_active_at || overview?.recent_activity;
-  const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Recently active';
+  const lastActiveTimestamp =
+    contextState?.last_active_at ||
+    workset?.last_active_at ||
+    memory?.last_active_at ||
+    overview?.recent_activity;
+  const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Active recently';
 
-  const handleFeedback = async (isPositive: boolean) => {
-    if (!contextId || feedbackStatus !== 'idle') return;
-    setFeedbackStatus('submitting');
-    try {
-      await db.submitMemoryFeedback(
-        contextId,
-        rawTask,
-        memory?.recent_task?.id || workset?.task_id || undefined,
-        isPositive
-      );
-      setFeedbackStatus('submitted');
-      if (onMemoryFeedbackRecorded) {
-        onMemoryFeedbackRecorded();
-      }
-    } catch (err) {
-      console.error('Failed to submit memory feedback:', err);
-      setFeedbackStatus('idle');
-    }
-  };
+  // 3. WHERE YOU LEFT OFF
+  // Conservative derivation: if state is uncertain or no specific activity, do not fabricate.
+  const isStateUncertain = stateValue === 'uncertain' || stateValue === 'insufficient_evidence';
+  let whereLeftOff: string;
+  let isLeftOffInferred = false;
 
-  // Workset continuation items
-  const worksetItems: WorksetItemReference[] = useMemo(() => {
+  if (isStateUncertain) {
+    whereLeftOff = `Recent activity in ${contextName}`;
+  } else if (
+    contextState?.last_meaningful_activity &&
+    contextState.last_meaningful_activity.trim().length > 0 &&
+    !contextState.last_meaningful_activity.toLowerCase().includes('unknown') &&
+    contextState.last_meaningful_activity !== `Recent activity in ${contextName}`
+  ) {
+    whereLeftOff = contextState.last_meaningful_activity;
+    isLeftOffInferred =
+      contextState.meaningful_activity?.provenance === 'inferred' || contextState.provenance === 'inferred';
+  } else if (contextState?.resume_state?.last_meaningful_activity) {
+    whereLeftOff = contextState.resume_state.last_meaningful_activity;
+    isLeftOffInferred = true;
+  } else if (contextState?.resume_state?.left_off_on) {
+    whereLeftOff = contextState.resume_state.left_off_on;
+    isLeftOffInferred = true;
+  } else {
+    whereLeftOff = `Recent activity in ${contextName}`;
+  }
+
+  // 4. Continue with items
+  const continueWithItems: { id: string; title: string; app_name?: string | null; domain?: string | null }[] = useMemo(() => {
     if (workset?.items && workset.items.length > 0) {
-      return workset.items;
+      return workset.items.map((item) => ({
+        id: item.id,
+        title: item.title || item.content_snippet || 'Untitled item',
+        app_name: item.app_name,
+        domain: item.domain,
+      }));
     }
-    return [];
-  }, [workset]);
-
-  // Fallback items if workset not yet derived
-  const fallbackRecentItems: TimelineItemSummary[] = useMemo(() => {
+    if (contextState?.resume_state?.recent_work && contextState.resume_state.recent_work.length > 0) {
+      return contextState.resume_state.recent_work.map((title, idx) => ({
+        id: contextState.recent_item_ids[idx] || `recent-${idx}`,
+        title,
+      }));
+    }
     if (overview?.recent_items && overview.recent_items.length > 0) {
-      return overview.recent_items.slice(0, 4);
-    }
-    if (memory?.recent_items && memory.recent_items.length > 0) {
-      return memory.recent_items.slice(0, 4).map((m) => ({
-        id: m.id,
-        item_type: m.item_type,
-        title: m.title || null,
-        content_snippet: m.title || 'Captured item',
-        captured_at: m.timestamp,
-        membership_type: m.provenance === 'confirmed' ? 'confirmed' : 'suggested',
-        app_name: m.app_name || null,
-        domain: m.domain || null,
+      return overview.recent_items.map((item) => ({
+        id: item.id,
+        title: item.title || item.content_snippet || 'Untitled item',
+        app_name: item.app_name,
+        domain: item.domain,
       }));
     }
     return [];
-  }, [overview, memory]);
-
-  // Memory explanation structures
-  const explanation = memory?.explanation || workset?.explanation;
-  const whyReasons: string[] = useMemo(() => {
-    if (explanation?.why_reasons && explanation.why_reasons.length > 0) {
-      return explanation.why_reasons;
-    }
-    const reasons: string[] = [];
-    if (worksetItems.length > 0) {
-      reasons.push(`${worksetItems.length} active workset item${worksetItems.length === 1 ? '' : 's'}`);
-    }
-    if (contextName) {
-      reasons.push(`working inside ${contextName}`);
-    }
-    if (isContextReturn) {
-      reasons.push(`returned to ${contextName} context`);
-    }
-    return reasons;
-  }, [explanation, worksetItems.length, contextName, isContextReturn]);
-
-  const explanationSummary = explanation?.summary || overview?.current_task?.explanation || memory?.memory_statement || (
-    isTaskAvailable
-      ? `Reconstructed from recent activity and related resources in ${contextName}.`
-      : `Based on activity signals recorded in ${contextName}.`
-  );
-
-  const uncertaintyNote = explanation?.uncertainty_note;
-  const confidenceBand = explanation?.confidence_band || (isTaskAvailable ? (taskProvenance === 'Confirmed' ? 'Confirmed' : 'Inferred') : 'Contextual signal');
+  }, [workset, contextState, overview]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
-      {/* =================================================================== */}
-      {/* 1. YOU WERE WORKING ON                                              */}
-      {/* =================================================================== */}
-      <div className="p-5 rounded-xl bg-white border border-gray-200/90 shadow-2xs space-y-4">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-            You were working on
+      {/* 1. Context · State Header */}
+      <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+        <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+          <span>{contextName}</span>
+          <span className="text-gray-300 font-normal">·</span>
+          <span className="text-xs font-medium text-gray-600">
+            {stateLabel}
           </span>
-          {isContextReturn && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200/70">
-              <RotateCcw size={10} />
-              Returned to context
+        </div>
+      </div>
+
+      {/* 2. YOU WERE WORKING ON */}
+      <div className="space-y-1.5">
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+          YOU WERE WORKING ON
+        </div>
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <h3 className="text-base font-medium text-gray-900 tracking-tight">
+            {taskTitle}
+          </h3>
+          {isTaskInferred && taskTitle !== `Recent work in ${contextName}` && (
+            <span className="text-[10px] text-gray-400 font-normal">
+              Inferred
             </span>
           )}
         </div>
-
-        {/* Task Title & Direct [Why?] Trigger */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <h3 className="text-lg font-semibold text-gray-900 tracking-tight leading-snug">
-              {taskTitle}
-            </h3>
-
-            {/* Direct [Why?] trigger button */}
-            <button
-              onClick={() => setShowWhy(!showWhy)}
-              className={`inline-flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-md transition-colors cursor-pointer border ${
-                showWhy
-                  ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                  : 'bg-gray-50 text-gray-600 hover:text-gray-900 hover:bg-gray-100 border-gray-200/80'
-              }`}
-              title="Explain how this memory was inferred"
-            >
-              <HelpCircle size={12} className={showWhy ? 'text-indigo-600' : 'text-gray-400'} />
-              <span>Why?</span>
-              {showWhy ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-            </button>
-          </div>
-
-          <div className="text-xs text-gray-500 flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-medium text-gray-700">{contextName}</span>
-              <span>•</span>
-              <span>{formattedLastActive}</span>
-            </div>
-
-            {/* Subtle Memory Feedback Action */}
-            {isTaskAvailable && (
-              feedbackStatus === 'idle' ? (
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => handleFeedback(true)}
-                    className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 px-2 py-0.5 rounded border border-gray-200/80 hover:border-emerald-300 transition-colors cursor-pointer"
-                    title="Confirm this was what you were working on"
-                  >
-                    <Check size={11} className="text-emerald-600" />
-                    <span>Correct</span>
-                  </button>
-                  <button
-                    onClick={() => handleFeedback(false)}
-                    className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-red-700 hover:bg-red-50 px-2 py-0.5 rounded border border-gray-200/80 hover:border-red-300 transition-colors cursor-pointer"
-                    title="Not what I was doing"
-                  >
-                    <X size={11} className="text-gray-400 hover:text-red-500" />
-                    <span>Not quite</span>
-                  </button>
-                </div>
-              ) : feedbackStatus === 'submitted' ? (
-                <div className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/80 animate-in fade-in duration-150">
-                  <Check size={11} className="text-emerald-600" />
-                  <span>Got it</span>
-                </div>
-              ) : null
-            )}
-          </div>
-
-          {/* Explainable Memory Section (Toggled by [Why?]) */}
-          {showWhy && (
-            <div className="mt-3 p-3.5 bg-slate-50/95 rounded-lg border border-slate-200/90 text-xs space-y-2.5 animate-in fade-in duration-150">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold text-slate-700 tracking-wide uppercase flex items-center gap-1.5">
-                  <Sparkles size={12} className="text-indigo-500" />
-                  Why?
-                </span>
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-white text-slate-600 border border-slate-200 shadow-2xs">
-                  {confidenceBand}
-                </span>
-              </div>
-
-              {/* Supporting Reasons */}
-              {whyReasons.length > 0 && (
-                <ul className="space-y-1 text-slate-700 pl-0.5">
-                  {whyReasons.map((reason, idx) => (
-                    <li key={idx} className="flex items-start gap-2">
-                      <span className="text-indigo-500 font-bold">•</span>
-                      <span>{reason}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              {/* Grounded Summary Text */}
-              {explanationSummary && (
-                <p className="text-[11px] text-slate-600 leading-relaxed pt-1 border-t border-slate-200/70">
-                  {explanationSummary}
-                </p>
-              )}
-
-              {/* Uncertainty Note */}
-              {uncertaintyNote && (
-                <div className="flex items-start gap-1.5 pt-1 text-[11px] text-amber-800 bg-amber-50/80 p-2 rounded-md border border-amber-200/60">
-                  <Info size={12} className="flex-shrink-0 mt-0.5 text-amber-600" />
-                  <span>{uncertaintyNote}</span>
-                </div>
-              )}
-            </div>
-          )}
+        <div className="text-xs text-gray-500">
+          {formattedLastActive}
         </div>
+      </div>
 
-        {/* =================================================================== */}
-        {/* 2. CONTINUE WITH (Context Workset Continuation List)                */}
-        {/* =================================================================== */}
-        <div className="pt-3 border-t border-gray-100 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-              Continue with
+      {/* 3. WHERE YOU LEFT OFF */}
+      <div className="space-y-1.5 pt-1">
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+          WHERE YOU LEFT OFF
+        </div>
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <p className="text-sm font-medium text-gray-800">
+            {whereLeftOff}
+          </p>
+          {isLeftOffInferred && whereLeftOff !== `Recent activity in ${contextName}` && (
+            <span className="text-[10px] text-gray-400 font-normal">
+              Inferred
             </span>
-            {worksetItems.length > 0 && (
-              <button
-                onClick={onOpenWorksetDetail}
-                className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
-              >
-                <span>Working set detail</span>
-                <ArrowRight size={11} />
-              </button>
-            )}
-          </div>
-
-          {worksetItems.length > 0 ? (
-            <div className="space-y-1.5">
-              {worksetItems.slice(0, 4).map((item) => (
-                <WorksetItemRow
-                  key={item.id}
-                  item={item}
-                  contextId={contextId}
-                  onClick={() => onSelectItem(item.id)}
-                  onWorksetUpdated={onMemoryFeedbackRecorded}
-                />
-              ))}
-
-              {worksetItems.length > 4 && (
-                <div className="pt-1 flex justify-end">
-                  <button
-                    onClick={onOpenWorksetDetail}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer"
-                  >
-                    <span>View all {worksetItems.length} items</span>
-                    <ArrowRight size={11} />
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : fallbackRecentItems.length > 0 ? (
-            /* Fallback to recent items if workset not yet derived */
-            <div className="space-y-1.5">
-              {fallbackRecentItems.map((item) => (
-                <WorksetItemRow
-                  key={item.id}
-                  item={{
-                    id: item.id,
-                    title: item.title,
-                    item_type: item.item_type,
-                    relevance: 'recent',
-                    relevance_score: 0.5,
-                    reasons: ['recently active in context'],
-                    provenance: item.membership_type === 'confirmed' ? 'confirmed' : 'inferred',
-                    created_at: item.captured_at || '',
-                    app_name: item.app_name,
-                    domain: item.domain,
-                    content_snippet: item.content_snippet || '',
-                    is_suggested_addition: false,
-                  }}
-                  contextId={contextId}
-                  onClick={() => onSelectItem(item.id)}
-                  onWorksetUpdated={onMemoryFeedbackRecorded}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400 italic">No working items recorded yet.</p>
           )}
         </div>
       </div>
 
-      {/* =================================================================== */}
-      {/* 3. CONTEXT ACTIONS & TIMELINE LINK                                 */}
-      {/* =================================================================== */}
-      <div className="pt-2 border-t border-gray-100 flex items-center justify-between gap-3">
+      {/* 4. Continue with */}
+      <div className="space-y-2.5 pt-1">
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+          Continue with
+        </div>
+        {continueWithItems.length > 0 ? (
+          <div className="space-y-1">
+            {continueWithItems.slice(0, 5).map((item) => (
+              <div
+                key={item.id}
+                onClick={() => onSelectItem(item.id)}
+                className="group flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-gray-50 text-xs text-gray-800 transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-gray-400 text-xs select-none">•</span>
+                  <span className="truncate group-hover:text-gray-900 font-normal">
+                    {item.title}
+                  </span>
+                </div>
+                {(item.app_name || item.domain) && (
+                  <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2">
+                    {item.app_name || item.domain}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-gray-400 italic">
+            No pending items
+          </div>
+        )}
+
+        {/* [ View recent work ] */}
+        <div className="pt-2">
+          <button
+            onClick={onOpenWorksetDetail}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 rounded-lg border border-gray-200/80 transition-colors cursor-pointer"
+          >
+            <span>View recent work</span>
+            <ArrowRight size={12} />
+          </button>
+        </div>
+      </div>
+
+      {/* Bottom Context Actions */}
+      <div className="pt-4 border-t border-gray-100 flex items-center justify-between gap-3 text-xs text-gray-500">
         <button
           onClick={onToggleArchive}
           disabled={isUpdatingLifecycle || !overview}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50"
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50"
         >
           {overview?.lifecycle_state === 'archived' ? (
             <>
-              <ArchiveRestore size={13} />
+              <ArchiveRestore size={12} />
               <span>Restore Context</span>
             </>
           ) : (
             <>
-              <Archive size={13} />
+              <Archive size={12} />
               <span>Archive Context</span>
             </>
           )}
@@ -686,99 +593,17 @@ function ResumeMemoryOverviewContent({
 
         <button
           onClick={onViewFullTimeline}
-          className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-gray-900 transition-colors cursor-pointer"
+          className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors cursor-pointer"
         >
-          <span>View Activity Timeline</span>
-          <ExternalLink size={12} />
+          <span>Timeline</span>
+          <ExternalLink size={11} />
         </button>
       </div>
     </div>
   );
 }
 
-function WorksetItemRow({
-  item,
-  contextId,
-  onClick,
-  onWorksetUpdated,
-}: {
-  item: WorksetItemReference;
-  contextId?: string;
-  onClick: () => void;
-  onWorksetUpdated?: () => void;
-}) {
-  const getItemIcon = (type: string, appName?: string | null) => {
-    const lowerApp = (appName || '').toLowerCase();
-    if (lowerApp.includes('figma')) return <Layers size={13} className="text-purple-500" />;
-    if (lowerApp.includes('github') || lowerApp.includes('code') || lowerApp.includes('terminal')) {
-      return <CodeIcon size={13} className="text-gray-700" />;
-    }
-    switch (type) {
-      case 'url':
-        return <Globe size={13} className="text-blue-500" />;
-      case 'code':
-        return <CodeIcon size={13} className="text-emerald-600" />;
-      case 'image':
-        return <ImageIcon size={13} className="text-pink-500" />;
-      default:
-        return <FileText size={13} className="text-gray-500" />;
-    }
-  };
 
-  const displayTitle = item.title || item.content_snippet || 'Untitled Item';
-  const primaryReason = item.reasons && item.reasons.length > 0 ? item.reasons[0] : null;
-
-  return (
-    <div
-      onClick={onClick}
-      className="group p-2.5 rounded-lg border border-gray-100 bg-white hover:border-gray-200 transition-colors flex items-center justify-between gap-3 cursor-pointer"
-      title={primaryReason ? `${displayTitle} — ${primaryReason}` : displayTitle}
-    >
-      <div className="flex items-center gap-2.5 min-w-0">
-        <div className="w-6 h-6 rounded bg-gray-50 flex items-center justify-center flex-shrink-0 text-gray-500">
-          {getItemIcon(item.item_type, item.app_name)}
-        </div>
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-gray-800 group-hover:text-gray-900 truncate">
-            {displayTitle}
-          </div>
-          <div className="flex items-center gap-2 text-[10px] text-gray-400 mt-0.5">
-            {item.app_name && <span>{item.app_name}</span>}
-            {item.domain && <span>{item.domain}</span>}
-            {item.last_active_at ? (
-              <span>{formatRelativeDate(item.last_active_at)}</span>
-            ) : item.created_at ? (
-              <span>{formatRelativeDate(item.created_at)}</span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1.5 flex-shrink-0">
-        {item.relevance === 'primary' && (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200/60">
-            Primary
-          </span>
-        )}
-        {item.relevance === 'supporting' && (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 border border-gray-200/60">
-            Supporting
-          </span>
-        )}
-        {item.relevance === 'reference' && (
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200/60">
-            Reference
-          </span>
-        )}
-        <WorksetItemActionsMenu
-          itemId={item.id}
-          contextId={contextId}
-          onWorksetUpdated={onWorksetUpdated}
-        />
-      </div>
-    </div>
-  );
-}
 
 function ContextItemDetailModal({
   itemId,

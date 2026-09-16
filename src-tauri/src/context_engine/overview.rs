@@ -235,6 +235,11 @@ pub fn get_context_overview(
         Err(_) => None,
     };
 
+    // 8. Derive Working Context State (Day 19: Context State Reconstruction)
+    let context_state = crate::context_engine::context_state::ContextStateService::new()
+        .derive_for_context(conn, workspace_id)
+        .ok();
+
     Ok(ContextOverview {
         workspace_id: ws.id,
         name: ws.name,
@@ -247,6 +252,7 @@ pub fn get_context_overview(
         recent_items,
         timeline,
         current_task,
+        context_state,
     })
 }
 

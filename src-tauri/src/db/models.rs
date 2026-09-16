@@ -543,6 +543,8 @@ pub struct ContextOverview {
     pub timeline: ContextTimeline,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task: Option<InferredTaskOverview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_state: Option<crate::context_engine::context_state::ContextState>,
 }
 
 /// Day 12: Context-Aware Inbox State Machine states.

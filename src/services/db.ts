@@ -576,6 +576,7 @@ export interface ContextOverview {
   recent_items: TimelineItemSummary[];
   timeline: ContextTimeline;
   current_task?: InferredTaskOverview | null;
+  context_state?: import("./contextState").ContextState | null;
 }
 
 export interface ContextEvidenceItem {
