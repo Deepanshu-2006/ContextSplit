@@ -1,6 +1,10 @@
 use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PrivacySettings {
     pub enable_active_app: bool,
@@ -15,6 +19,8 @@ pub struct PrivacySettings {
     pub ai_gating_confidence_threshold: f64,
     #[serde(default)]
     pub capture_paused: bool,
+    #[serde(default = "default_true")]
+    pub enable_context_snapshots: bool,
 }
 
 impl Default for PrivacySettings {
@@ -31,12 +37,13 @@ impl Default for PrivacySettings {
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.85,
             capture_paused: false,
+            enable_context_snapshots: true,
         }
     }
 }
 
 pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
-    let mut stmt = conn.prepare("SELECT enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold, capture_paused FROM settings WHERE id = 'default'")?;
+    let mut stmt = conn.prepare("SELECT enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold, capture_paused, enable_context_snapshots FROM settings WHERE id = 'default'")?;
     
     let settings = stmt.query_row([], |row| {
         Ok(PrivacySettings {
@@ -51,6 +58,7 @@ pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
             ai_gating_enabled: row.get::<_, i32>(8).unwrap_or(1) != 0,
             ai_gating_confidence_threshold: row.get::<_, f64>(9).unwrap_or(0.85),
             capture_paused: row.get::<_, i32>(10).unwrap_or(0) != 0,
+            enable_context_snapshots: row.get::<_, i32>(11).unwrap_or(1) != 0,
         })
     })?;
     
@@ -60,8 +68,8 @@ pub fn get_settings(conn: &Connection) -> Result<PrivacySettings> {
 pub fn update_settings(conn: &Connection, settings: PrivacySettings) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO settings 
-         (id, enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold, capture_paused)
-         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         (id, enable_active_app, enable_window_title, enable_browser_domain, enable_session_tracking, enable_semantic_processing, semantic_provider, enable_semantic_suggestions, enable_ai_reasoning, ai_gating_enabled, ai_gating_confidence_threshold, capture_paused, enable_context_snapshots)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             settings.enable_active_app,
             settings.enable_window_title,
@@ -73,7 +81,8 @@ pub fn update_settings(conn: &Connection, settings: PrivacySettings) -> Result<(
             settings.enable_ai_reasoning,
             settings.ai_gating_enabled,
             settings.ai_gating_confidence_threshold,
-            if settings.capture_paused { 1 } else { 0 }
+            if settings.capture_paused { 1 } else { 0 },
+            if settings.enable_context_snapshots { 1 } else { 0 }
         ],
     )?;
     

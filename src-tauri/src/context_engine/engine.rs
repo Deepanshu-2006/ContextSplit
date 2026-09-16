@@ -253,6 +253,7 @@ mod tests {
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
             capture_paused: false,
+            enable_context_snapshots: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();
@@ -300,6 +301,7 @@ mod tests {
             ai_gating_enabled: true,
             ai_gating_confidence_threshold: 0.9,
             capture_paused: false,
+            enable_context_snapshots: true,
         }).unwrap();
 
         let mut ce = ContextEngine::new();

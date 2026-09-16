@@ -461,6 +461,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 21;
     }
 
+    if user_version < 22 {
+        let _ = conn.execute("ALTER TABLE settings ADD COLUMN enable_context_snapshots INTEGER DEFAULT 1", []);
+        user_version = 22;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

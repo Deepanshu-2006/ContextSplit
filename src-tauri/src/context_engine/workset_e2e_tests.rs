@@ -35,6 +35,7 @@ mod tests {
             ai_gating_enabled: false,
             ai_gating_confidence_threshold: 0.9,
             capture_paused: false,
+            enable_context_snapshots: true,
         };
         crate::db::settings::update_settings(&conn, settings).unwrap();
 

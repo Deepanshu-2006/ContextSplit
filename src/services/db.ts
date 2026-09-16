@@ -147,6 +147,7 @@ export interface PrivacySettings {
   enable_semantic_suggestions: boolean;
   enable_ai_reasoning: boolean;
   capture_paused?: boolean;
+  enable_context_snapshots?: boolean;
 }
 
 export interface ItemRelationship {

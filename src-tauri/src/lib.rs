@@ -1147,7 +1147,9 @@ fn get_context_snapshot(
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     let service = context_engine::snapshot::ContextSnapshotService::new();
     let snapshot = service.derive_for_context(&conn, context_id)?;
-    service.record_snapshot_history(snapshot.clone());
+    if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
+        service.record_snapshot_history(snapshot.clone());
+    }
     Ok(snapshot)
 }
 
@@ -1158,8 +1160,10 @@ fn get_context_snapshot_history(
 ) -> Result<Option<context_engine::snapshot::ContextSnapshotHistory>, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     let service = context_engine::snapshot::ContextSnapshotService::new();
-    if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
-        service.record_snapshot_history(snapshot);
+    if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
+        if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
+            service.record_snapshot_history(snapshot);
+        }
     }
     Ok(service.get_snapshot_history(context_id))
 }
@@ -1171,8 +1175,10 @@ fn get_context_snapshot_diff(
 ) -> Result<Option<context_engine::snapshot::ContextSnapshotDiff>, String> {
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
     let service = context_engine::snapshot::ContextSnapshotService::new();
-    if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
-        service.record_snapshot_history(snapshot);
+    if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
+        if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
+            service.record_snapshot_history(snapshot);
+        }
     }
     Ok(service.compare_latest_with_previous(context_id))
 }

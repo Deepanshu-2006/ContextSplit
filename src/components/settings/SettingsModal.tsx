@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Shield, LayoutTemplate, Type, Globe, Clock, Info, PauseCircle } from "lucide-react";
+import { X, Shield, LayoutTemplate, Type, Globe, Clock, Info, PauseCircle, Camera } from "lucide-react";
 import { db, PrivacySettings } from "../../services/db";
 
 interface SettingsModalProps {
@@ -18,6 +18,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     enable_semantic_suggestions: false,
     enable_ai_reasoning: true,
     capture_paused: false,
+    enable_context_snapshots: true,
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +127,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 description="Group items captured closely in time into sessions."
                 checked={settings.enable_session_tracking}
                 onChange={() => handleToggle("enable_session_tracking")}
+              />
+
+              <ToggleRow 
+                icon={<Camera size={18} />}
+                title="Context Snapshots"
+                description="Automatically construct lightweight, point-in-time contextual snapshots when working. When disabled, ContextSplit will not generate new snapshots."
+                checked={settings.enable_context_snapshots ?? true}
+                onChange={() => handleToggle("enable_context_snapshots")}
               />
 
               <div className="pt-6 mt-6 border-t border-gray-100">
