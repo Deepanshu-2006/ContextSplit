@@ -30,6 +30,11 @@ pub mod memory;
 pub mod memory_query;
 pub mod work_sequence;
 pub mod workset;
+pub mod context_state;
+
+pub use context_state::{
+    ContextState, ContextStateBuilder, ContextStateService, ContextStateValue,
+};
 
 pub use workset::{
     get_global_workset_cache, invalidate_workset_cache, ContextWorkset, ContextWorksetBuilder,
