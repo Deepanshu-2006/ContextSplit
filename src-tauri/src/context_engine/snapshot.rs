@@ -2005,6 +2005,262 @@ impl ContextSnapshotService {
         }
         Ok(builder.build())
     }
+
+    /// Records a derived snapshot into historical tracking for the context.
+    pub fn record_snapshot_history(&self, snapshot: ContextSnapshot) -> bool {
+        get_global_snapshot_history().record_snapshot(snapshot)
+    }
+
+    /// Retrieves the chronological snapshot history for a context.
+    pub fn get_snapshot_history(&self, context_id: &str) -> Option<ContextSnapshotHistory> {
+        get_global_snapshot_history().get_history(context_id)
+    }
+
+    /// Retrieves the latest snapshot recorded for a context.
+    pub fn get_latest_snapshot(&self, context_id: &str) -> Option<ContextSnapshot> {
+        get_global_snapshot_history().get_latest(context_id)
+    }
+
+    /// Retrieves the previous snapshot before the latest recorded for a context.
+    pub fn get_previous_snapshot(&self, context_id: &str) -> Option<ContextSnapshot> {
+        get_global_snapshot_history().get_previous(context_id)
+    }
+}
+
+// =========================================================================
+// ContextSnapshotHistory: Bounded Lightweight Snapshot Timeline (Day 20 Step 6)
+// =========================================================================
+
+/// Default maximum number of retained snapshots per context to prevent unbounded memory growth.
+pub const DEFAULT_MAX_SNAPSHOT_RETENTION: usize = 20;
+
+/// Bounded chronological history of lightweight snapshots for a specific context.
+///
+/// Invariants:
+/// 1. Represents meaningful working states over time (e.g. Hero design -> Hero animation -> Responsive hero implementation).
+/// 2. Bounded retention ensures history does not grow indefinitely.
+/// 3. Does NOT delete underlying Items or raw activity telemetry.
+/// 4. Snapshot history is derived context history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextSnapshotHistory {
+    /// Context / Workspace identifier
+    pub context_id: String,
+    /// Context display name
+    pub context_name: String,
+    /// Chronological list of retained snapshots (oldest to newest)
+    pub snapshots: Vec<ContextSnapshot>,
+    /// Maximum capacity of snapshots retained for this context
+    pub max_capacity: usize,
+}
+
+impl ContextSnapshotHistory {
+    /// Creates a new empty `ContextSnapshotHistory`.
+    pub fn new(context_id: impl Into<String>, context_name: impl Into<String>) -> Self {
+        Self {
+            context_id: context_id.into(),
+            context_name: context_name.into(),
+            snapshots: Vec::new(),
+            max_capacity: DEFAULT_MAX_SNAPSHOT_RETENTION,
+        }
+    }
+
+    /// Customizes the retention capacity.
+    pub fn with_max_capacity(mut self, capacity: usize) -> Self {
+        self.max_capacity = capacity.max(1);
+        self.enforce_retention();
+        self
+    }
+
+    /// Adds a new snapshot to history if it represents a meaningful state change.
+    /// Returns `true` if added, `false` if skipped as redundant/duplicate.
+    pub fn add_snapshot(&mut self, snapshot: ContextSnapshot) -> bool {
+        if snapshot.context_id != self.context_id {
+            return false;
+        }
+
+        // Anti-duplication: Check if state, task, and core workset are identical to latest snapshot
+        if let Some(latest) = self.snapshots.last() {
+            let same_task = latest.task_title == snapshot.task_title;
+            let same_state = latest.state == snapshot.state;
+            let same_core_items = latest.core_items().len() == snapshot.core_items().len()
+                && latest
+                    .core_items()
+                    .iter()
+                    .all(|i| snapshot.core_items().iter().any(|si| si.id == i.id));
+
+            if same_task && same_state && same_core_items {
+                return false;
+            }
+        }
+
+        self.snapshots.push(snapshot);
+        self.enforce_retention();
+        true
+    }
+
+    /// Enforces bounded retention by dropping oldest snapshots when capacity is exceeded.
+    /// Note: Does NOT delete underlying Items or activities from database.
+    fn enforce_retention(&mut self) {
+        if self.snapshots.len() > self.max_capacity {
+            let excess = self.snapshots.len() - self.max_capacity;
+            self.snapshots.drain(0..excess);
+        }
+    }
+
+    /// Returns a reference to the latest / most recent snapshot.
+    pub fn latest(&self) -> Option<&ContextSnapshot> {
+        self.snapshots.last()
+    }
+
+    /// Returns a reference to the previous snapshot before the latest.
+    pub fn previous(&self) -> Option<&ContextSnapshot> {
+        if self.snapshots.len() >= 2 {
+            self.snapshots.get(self.snapshots.len() - 2)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the snapshot at `n` steps prior to the latest (0 = latest, 1 = previous, 2 = 2nd previous...).
+    pub fn nth_previous(&self, n: usize) -> Option<&ContextSnapshot> {
+        if self.snapshots.is_empty() || n >= self.snapshots.len() {
+            None
+        } else {
+            let idx = self.snapshots.len() - 1 - n;
+            self.snapshots.get(idx)
+        }
+    }
+
+    /// Returns all snapshots in chronological order.
+    pub fn all(&self) -> &[ContextSnapshot] {
+        &self.snapshots
+    }
+
+    /// Finds snapshots associated with a specific task title substring.
+    pub fn find_by_task(&self, task_query: &str) -> Vec<&ContextSnapshot> {
+        let q = task_query.to_lowercase();
+        self.snapshots
+            .iter()
+            .filter(|s| {
+                s.task_title
+                    .as_ref()
+                    .map(|t| t.to_lowercase().contains(&q))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Finds snapshot by ID.
+    pub fn find_by_id(&self, snapshot_id: &str) -> Option<&ContextSnapshot> {
+        self.snapshots.iter().find(|s| s.id == snapshot_id)
+    }
+
+    /// Number of retained snapshots.
+    pub fn len(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.snapshots.clear();
+    }
+}
+
+/// In-memory thread-safe repository for contextual snapshot histories across all workspaces.
+pub struct ContextSnapshotHistoryRepository {
+    histories: RwLock<HashMap<String, ContextSnapshotHistory>>,
+    default_capacity: usize,
+}
+
+impl Default for ContextSnapshotHistoryRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextSnapshotHistoryRepository {
+    pub fn new() -> Self {
+        Self {
+            histories: RwLock::new(HashMap::new()),
+            default_capacity: DEFAULT_MAX_SNAPSHOT_RETENTION,
+        }
+    }
+
+    pub fn with_default_capacity(mut self, capacity: usize) -> Self {
+        self.default_capacity = capacity;
+        self
+    }
+
+    /// Records a snapshot into the appropriate context's history buffer.
+    pub fn record_snapshot(&self, snapshot: ContextSnapshot) -> bool {
+        let ctx_id = snapshot.context_id.clone();
+        let ctx_name = snapshot.context_name.clone();
+
+        if let Ok(mut guard) = self.histories.write() {
+            let history = guard.entry(ctx_id.clone()).or_insert_with(|| {
+                ContextSnapshotHistory::new(ctx_id, ctx_name)
+                    .with_max_capacity(self.default_capacity)
+            });
+            history.add_snapshot(snapshot)
+        } else {
+            false
+        }
+    }
+
+    /// Retrieves the snapshot history for a context.
+    pub fn get_history(&self, context_id: &str) -> Option<ContextSnapshotHistory> {
+        self.histories
+            .read()
+            .ok()
+            .and_then(|g| g.get(context_id).cloned())
+    }
+
+    /// Retrieves the latest snapshot for a context.
+    pub fn get_latest(&self, context_id: &str) -> Option<ContextSnapshot> {
+        self.histories
+            .read()
+            .ok()
+            .and_then(|g| g.get(context_id).and_then(|h| h.latest().cloned()))
+    }
+
+    /// Retrieves the previous snapshot for a context.
+    pub fn get_previous(&self, context_id: &str) -> Option<ContextSnapshot> {
+        self.histories
+            .read()
+            .ok()
+            .and_then(|g| g.get(context_id).and_then(|h| h.previous().cloned()))
+    }
+
+    /// Clears history for a specific context.
+    pub fn clear_context(&self, context_id: &str) {
+        if let Ok(mut guard) = self.histories.write() {
+            guard.remove(context_id);
+        }
+    }
+
+    /// Clears all snapshot histories.
+    pub fn clear_all(&self) {
+        if let Ok(mut guard) = self.histories.write() {
+            guard.clear();
+        }
+    }
+}
+
+static GLOBAL_SNAPSHOT_HISTORY: OnceLock<ContextSnapshotHistoryRepository> = OnceLock::new();
+
+pub fn get_global_snapshot_history() -> &'static ContextSnapshotHistoryRepository {
+    GLOBAL_SNAPSHOT_HISTORY.get_or_init(ContextSnapshotHistoryRepository::new)
+}
+
+pub fn record_snapshot_history(snapshot: ContextSnapshot) -> bool {
+    get_global_snapshot_history().record_snapshot(snapshot)
+}
+
+pub fn get_context_snapshot_history(context_id: &str) -> Option<ContextSnapshotHistory> {
+    get_global_snapshot_history().get_history(context_id)
 }
 
 // =========================================================================
@@ -2945,4 +3201,294 @@ mod tests {
         let cached = service.derive_for_context_cached(&conn, &ws.id).unwrap();
         assert_eq!(cached.id, snap.id);
     }
+
+    // =========================================================================
+    // STEP 6 TESTS: Snapshot History & Bounded Retention
+    // =========================================================================
+
+    #[test]
+    fn test_snapshot_history_progression_aurora_website() {
+        // Example from prompt:
+        // Aurora Website
+        // Snapshot 1: Hero design
+        // Snapshot 2: Hero animation
+        // Snapshot 3: Responsive hero implementation
+        let mut history = ContextSnapshotHistory::new("ws-aurora", "Aurora Website");
+
+        // 1. Snapshot 1: Hero design
+        let snap1 = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_freshness(StateFreshness::Fresh, 3600 * 5)
+            .with_task(
+                Some("t1".to_string()),
+                "Hero design",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-figma-hero",
+                "Hero Layout Design",
+                WorksetItemRelevance::Primary,
+                0.95,
+                Some("Figma"),
+            ))
+            .build();
+
+        assert!(history.add_snapshot(snap1.clone()));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.latest().and_then(|s| s.task_title.as_deref()),
+            Some("Hero design")
+        );
+        assert!(history.previous().is_none());
+
+        // 2. Snapshot 2: Hero animation
+        let snap2 = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_freshness(StateFreshness::Fresh, 3600 * 2)
+            .with_task(
+                Some("t2".to_string()),
+                "Hero animation",
+                0.92,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-figma-hero",
+                "Hero Layout Design",
+                WorksetItemRelevance::Supporting,
+                0.80,
+                Some("Figma"),
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "item-motion-tsx",
+                "HeroAnimation.tsx",
+                WorksetItemRelevance::Primary,
+                0.96,
+                Some("VS Code"),
+            ))
+            .build();
+
+        assert!(history.add_snapshot(snap2.clone()));
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.latest().and_then(|s| s.task_title.as_deref()),
+            Some("Hero animation")
+        );
+        assert_eq!(
+            history.previous().and_then(|s| s.task_title.as_deref()),
+            Some("Hero design")
+        );
+
+        // 3. Snapshot 3: Responsive hero implementation
+        let snap3 = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_freshness(StateFreshness::Fresh, 300)
+            .with_task(
+                Some("t3".to_string()),
+                "Responsive hero implementation",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-motion-tsx",
+                "HeroAnimation.tsx",
+                WorksetItemRelevance::Primary,
+                0.96,
+                Some("VS Code"),
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "item-media-css",
+                "hero-responsive.css",
+                WorksetItemRelevance::Supporting,
+                0.88,
+                Some("VS Code"),
+            ))
+            .build();
+
+        assert!(history.add_snapshot(snap3.clone()));
+        assert_eq!(history.len(), 3);
+
+        // Verify latest, previous, nth_previous
+        let latest = history.latest().unwrap();
+        assert_eq!(
+            latest.task_title.as_deref(),
+            Some("Responsive hero implementation")
+        );
+        assert_eq!(latest.state, ContextStateValue::Active);
+        assert_eq!(latest.core_items().len(), 2);
+        assert!(!latest.created_at.is_empty());
+
+        let previous = history.previous().unwrap();
+        assert_eq!(previous.task_title.as_deref(), Some("Hero animation"));
+
+        let earliest = history.nth_previous(2).unwrap();
+        assert_eq!(earliest.task_title.as_deref(), Some("Hero design"));
+
+        assert!(history.nth_previous(3).is_none());
+
+        // Test search by task
+        let found_animation = history.find_by_task("animation");
+        assert_eq!(found_animation.len(), 1);
+        assert_eq!(
+            found_animation[0].task_title.as_deref(),
+            Some("Hero animation")
+        );
+
+        let found_hero = history.find_by_task("hero");
+        assert_eq!(found_hero.len(), 3);
+    }
+
+    #[test]
+    fn test_snapshot_history_bounded_retention() {
+        let mut history = ContextSnapshotHistory::new("ws-bounded", "Bounded Workspace")
+            .with_max_capacity(3);
+
+        // Add 6 snapshots with distinct task titles
+        for i in 1..=6 {
+            let snap = ContextSnapshotBuilder::new("ws-bounded", "Bounded Workspace")
+                .with_state(ContextStateValue::Active)
+                .with_task(
+                    Some(format!("t-{}", i)),
+                    format!("Task Milestone {}", i),
+                    0.90,
+                    InformationProvenance::Inferred,
+                )
+                .add_workset_item(create_dummy_workset_item(
+                    &format!("item-{}", i),
+                    &format!("Item {}", i),
+                    WorksetItemRelevance::Primary,
+                    0.90,
+                    Some("VS Code"),
+                ))
+                .build();
+            history.add_snapshot(snap);
+        }
+
+        // Capacity is 3, so only the 3 newest snapshots (Milestones 4, 5, 6) should be retained
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history.latest().and_then(|s| s.task_title.as_deref()),
+            Some("Task Milestone 6")
+        );
+        assert_eq!(
+            history.previous().and_then(|s| s.task_title.as_deref()),
+            Some("Task Milestone 5")
+        );
+        assert_eq!(
+            history.nth_previous(2).and_then(|s| s.task_title.as_deref()),
+            Some("Task Milestone 4")
+        );
+        assert!(history.nth_previous(3).is_none());
+
+        // Milestones 1, 2, 3 have been dropped from the history buffer
+        assert!(history.find_by_task("Milestone 1").is_empty());
+        assert!(history.find_by_task("Milestone 2").is_empty());
+        assert!(history.find_by_task("Milestone 3").is_empty());
+        assert!(!history.find_by_task("Milestone 4").is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_history_anti_duplication() {
+        let mut history = ContextSnapshotHistory::new("ws-dup", "Anti Duplication Test");
+
+        let snap1 = ContextSnapshotBuilder::new("ws-dup", "Anti Duplication Test")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t1".to_string()),
+                "Identical Task",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-1",
+                "Item 1",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        // Adding for the first time succeeds
+        assert!(history.add_snapshot(snap1.clone()));
+        assert_eq!(history.len(), 1);
+
+        // Adding identical snapshot with same task, state, and core workset is rejected
+        let snap1_dup = ContextSnapshotBuilder::new("ws-dup", "Anti Duplication Test")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t1".to_string()),
+                "Identical Task",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-1",
+                "Item 1",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        assert!(!history.add_snapshot(snap1_dup));
+        assert_eq!(history.len(), 1);
+
+        // A snapshot with a different task succeeds
+        let snap2 = ContextSnapshotBuilder::new("ws-dup", "Anti Duplication Test")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t2".to_string()),
+                "Different Task",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-1",
+                "Item 1",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        assert!(history.add_snapshot(snap2));
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn test_snapshot_history_repository_and_service() {
+        let repo = ContextSnapshotHistoryRepository::new().with_default_capacity(5);
+
+        let snap = ContextSnapshotBuilder::new("ws-repo", "Repo Test")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t-repo".to_string()),
+                "Repository Task",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-repo",
+                "Repo Doc",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        assert!(repo.record_snapshot(snap.clone()));
+        assert_eq!(
+            repo.get_latest("ws-repo").and_then(|s| s.task_title),
+            Some("Repository Task".to_string())
+        );
+        assert!(repo.get_previous("ws-repo").is_none());
+
+        let history = repo.get_history("ws-repo").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.context_id, "ws-repo");
+
+        repo.clear_context("ws-repo");
+        assert!(repo.get_history("ws-repo").is_none());
+    }
 }
+
