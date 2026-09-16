@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::context_engine::memory::{
     ContextMemory, ContextMemoryActivityState, ContextMemoryBuilder, ContextMemoryService,
@@ -106,12 +106,17 @@ impl std::fmt::Display for ContextStateValue {
 
 /// Derived representation of the user's last known working state inside a context.
 ///
+/// Answering: "Where did I leave this work?"
+///
 /// Combines `ContextMemory`, `ContextWorkset`, `ContextActivitySegments`, `ContextTransitions`,
 /// `TaskCandidates`, `TaskTransitions`, `Items`, and `ContextEvidence` without duplicating data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextState {
     /// Context / Workspace identifier
     pub context_id: String,
+    /// Human-friendly context name (e.g. "Aurora Website", "Portfolio")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_name: Option<String>,
     /// Active or last inferred task ID if known (nullable)
     pub task_id: Option<String>,
     /// Active or last inferred task title if known (nullable)
@@ -124,6 +129,12 @@ pub struct ContextState {
     pub last_activity_segment_id: Option<String>,
     /// ID of the last recorded context transition (nullable)
     pub last_transition_id: Option<String>,
+    /// ID of the last meaningful item captured or interacted with (nullable)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_meaningful_item_id: Option<String>,
+    /// Title or label of the last meaningful item (nullable)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_meaningful_item_title: Option<String>,
     /// Derived contextual workset (nullable)
     pub current_workset: Option<ContextWorkset>,
     /// Relevant recent item IDs associated with this state
@@ -134,17 +145,37 @@ pub struct ContextState {
     pub active_application: Option<String>,
     /// Web domain associated with recent work if known (nullable)
     pub active_domain: Option<String>,
+    /// Applications observed across recent context activity
+    #[serde(default)]
+    pub recent_applications: Vec<String>,
     /// Human-readable description of the latest meaningful action (nullable)
     pub latest_meaningful_action: Option<String>,
+    /// Deterministic reconstruction answering "Where did I leave this work?"
+    #[serde(default)]
+    pub last_meaningful_activity: String,
     /// Calibrated state confidence score [0.0, 1.0]
     pub state_confidence: f64,
+    /// Epistemic source ("confirmed", "inferred", "observed")
+    #[serde(default = "default_inferred_provenance")]
+    pub provenance: String,
+    /// Whether user feedback explicitly grounded this state
+    #[serde(default)]
+    pub has_user_feedback: bool,
     /// ISO-8601 timestamp when this state was reconstructed
     pub reconstructed_at: String,
+}
+
+fn default_inferred_provenance() -> String {
+    "inferred".to_string()
 }
 
 impl ContextState {
     pub fn is_working(&self) -> bool {
         matches!(self.state, ContextStateValue::Active | ContextStateValue::RecentlyActive)
+    }
+
+    pub fn last_meaningful_workset(&self) -> Option<&ContextWorkset> {
+        self.current_workset.as_ref()
     }
 }
 
@@ -173,6 +204,7 @@ fn parse_ts(ts: &str) -> Option<DateTime<Utc>> {
 #[derive(Debug, Clone)]
 pub struct ContextStateBuilder {
     pub context_id: String,
+    pub context_name: Option<String>,
     pub memory: Option<ContextMemory>,
     pub workset: Option<ContextWorkset>,
     pub activity_segments: Vec<ContextActivitySegment>,
@@ -181,6 +213,7 @@ pub struct ContextStateBuilder {
     pub task_transitions: Vec<DetectedTaskTransition>,
     pub items: Vec<Item>,
     pub evidence: Vec<ContextEvidenceItem>,
+    pub has_user_feedback: bool,
     pub reference_time: Option<DateTime<Utc>>,
 }
 
@@ -188,6 +221,7 @@ impl ContextStateBuilder {
     pub fn new(context_id: impl Into<String>) -> Self {
         Self {
             context_id: context_id.into(),
+            context_name: None,
             memory: None,
             workset: None,
             activity_segments: Vec::new(),
@@ -196,16 +230,32 @@ impl ContextStateBuilder {
             task_transitions: Vec::new(),
             items: Vec::new(),
             evidence: Vec::new(),
+            has_user_feedback: false,
             reference_time: None,
         }
     }
 
+    pub fn with_context_name(mut self, name: impl Into<String>) -> Self {
+        self.context_name = Some(name.into());
+        self
+    }
+
     pub fn with_memory(mut self, memory: Option<ContextMemory>) -> Self {
+        if let Some(ref m) = memory {
+            if self.context_name.is_none() && !m.context_name.is_empty() {
+                self.context_name = Some(m.context_name.clone());
+            }
+        }
         self.memory = memory;
         self
     }
 
     pub fn with_workset(mut self, workset: Option<ContextWorkset>) -> Self {
+        if let Some(ref w) = workset {
+            if self.context_name.is_none() && !w.context_name.is_empty() {
+                self.context_name = Some(w.context_name.clone());
+            }
+        }
         self.workset = workset;
         self
     }
@@ -240,6 +290,11 @@ impl ContextStateBuilder {
         self
     }
 
+    pub fn with_user_feedback(mut self, has_feedback: bool) -> Self {
+        self.has_user_feedback = has_feedback;
+        self
+    }
+
     pub fn with_reference_time(mut self, time: DateTime<Utc>) -> Self {
         self.reference_time = Some(time);
         self
@@ -247,6 +302,9 @@ impl ContextStateBuilder {
 
     /// Loads underlying sources from the database and prepares the builder.
     pub fn from_db(conn: &Connection, context_id: &str) -> Result<Self, String> {
+        let ws = crate::db::operations::get_workspace(conn, context_id).ok();
+        let context_name = ws.map(|w| w.name);
+
         let workset = ContextWorksetBuilder::from_db(conn, context_id)
             .and_then(|b| b.build())
             .ok();
@@ -324,8 +382,21 @@ impl ContextStateBuilder {
         let items = crate::db::operations::list_items(conn, Some(context_id))
             .unwrap_or_default();
 
+        let mut has_user_feedback = false;
+        if let Ok(mut mem_stmt) = conn.prepare("SELECT source FROM context_memberships WHERE workspace_id = ?1") {
+            if let Ok(rows) = mem_stmt.query_map(rusqlite::params![context_id], |row| row.get::<_, String>(0)) {
+                for s in rows.flatten() {
+                    if s == "manual" || s == "user_confirmed" {
+                        has_user_feedback = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             context_id: context_id.to_string(),
+            context_name,
             memory,
             workset,
             activity_segments,
@@ -334,14 +405,22 @@ impl ContextStateBuilder {
             task_transitions: Vec::new(),
             items,
             evidence: Vec::new(),
+            has_user_feedback,
             reference_time: None,
         })
     }
 
-    /// Derives the conservative `ContextState` representation.
+    /// Derives the conservative `ContextState` representation answering "Where did I leave this work?".
     pub fn build(self) -> Result<ContextState, String> {
         let now = self.reference_time.unwrap_or_else(Utc::now);
         let reconstructed_at = now.to_rfc3339();
+
+        // Context name resolution
+        let context_name = self.context_name.or_else(|| {
+            self.workset.as_ref().map(|w| w.context_name.clone()).or_else(|| {
+                self.memory.as_ref().map(|m| m.context_name.clone())
+            })
+        });
 
         // 1. Resolve Last Known Activity Timestamp
         let mut latest_ts: Option<DateTime<Utc>> = None;
@@ -427,7 +506,7 @@ impl ContextStateBuilder {
         let latest_transition = sorted_transitions.first();
         let last_transition_id = latest_transition.map(|t| t.id.clone());
 
-        // 3. Resolve Task Candidate (Nullable, zero forced guessing)
+        // 3. Resolve Last Meaningful Task Candidate (Nullable, zero forced guessing)
         let mut task_id: Option<String> = None;
         let mut task_title: Option<String> = None;
 
@@ -469,13 +548,19 @@ impl ContextStateBuilder {
             }
         }
 
-        // 4. Resolve Recent Item IDs (Deduplicated, preserving relevance order)
+        // 4. Resolve Recent Item IDs and Last Meaningful Item
         let mut recent_item_ids = Vec::new();
         let mut seen_items = HashSet::new();
+        let mut last_meaningful_item_id: Option<String> = None;
+        let mut last_meaningful_item_title: Option<String> = None;
 
         if let Some(ws) = &self.workset {
             for item in &ws.items {
                 if seen_items.insert(item.id.clone()) {
+                    if last_meaningful_item_id.is_none() {
+                        last_meaningful_item_id = Some(item.id.clone());
+                        last_meaningful_item_title = item.title.clone();
+                    }
                     recent_item_ids.push(item.id.clone());
                     if recent_item_ids.len() >= 10 {
                         break;
@@ -488,6 +573,10 @@ impl ContextStateBuilder {
             if let Some(seg) = latest_segment {
                 for item_ref in &seg.item_references {
                     if seen_items.insert(item_ref.item_id.clone()) {
+                        if last_meaningful_item_id.is_none() {
+                            last_meaningful_item_id = Some(item_ref.item_id.clone());
+                            last_meaningful_item_title = item_ref.title.clone();
+                        }
                         recent_item_ids.push(item_ref.item_id.clone());
                         if recent_item_ids.len() >= 10 {
                             break;
@@ -500,6 +589,10 @@ impl ContextStateBuilder {
         if recent_item_ids.len() < 10 {
             for item in &self.items {
                 if seen_items.insert(item.id.clone()) {
+                    if last_meaningful_item_id.is_none() {
+                        last_meaningful_item_id = Some(item.id.clone());
+                        last_meaningful_item_title = item.title.clone();
+                    }
                     recent_item_ids.push(item.id.clone());
                     if recent_item_ids.len() >= 10 {
                         break;
@@ -508,49 +601,47 @@ impl ContextStateBuilder {
             }
         }
 
-        // 5. Resolve Active Application & Domain (Metadata attribute, NOT proof of work)
-        let mut active_application: Option<String> = None;
+        // 5. Resolve Active Applications, Domains & Multi-App Tracking
+        let mut app_counts: HashMap<String, usize> = HashMap::new();
         let mut active_domain: Option<String> = None;
 
         if let Some(ws) = &self.workset {
             for item in &ws.items {
-                if active_application.is_none() && item.app_name.is_some() {
-                    active_application = item.app_name.clone();
+                if let Some(ref app) = item.app_name {
+                    if !app.trim().is_empty() && !app.eq_ignore_ascii_case("unknown") {
+                        *app_counts.entry(app.trim().to_string()).or_insert(0) += 1;
+                    }
                 }
                 if active_domain.is_none() && item.domain.is_some() {
                     active_domain = item.domain.clone();
                 }
-                if active_application.is_some() && active_domain.is_some() {
-                    break;
+            }
+        }
+
+        for item in &self.items {
+            if let Ok(metadata) = serde_json::from_str::<Value>(&item.metadata) {
+                if let Some(app) = metadata.get("app_name").and_then(|v| v.as_str()) {
+                    let trimmed = app.trim();
+                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown") {
+                        *app_counts.entry(trimmed.to_string()).or_insert(0) += 1;
+                    }
+                }
+                if active_domain.is_none() {
+                    if let Some(dom) = metadata.get("domain").and_then(|v| v.as_str()) {
+                        let trimmed = dom.trim();
+                        if !trimmed.is_empty() && trimmed != "localhost" {
+                            active_domain = Some(trimmed.to_string());
+                        }
+                    }
                 }
             }
         }
 
-        if active_application.is_none() || active_domain.is_none() {
-            for item in &self.items {
-                if let Ok(metadata) = serde_json::from_str::<Value>(&item.metadata) {
-                    if active_application.is_none() {
-                        if let Some(app) = metadata.get("app_name").and_then(|v| v.as_str()) {
-                            let trimmed = app.trim();
-                            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown") {
-                                active_application = Some(trimmed.to_string());
-                            }
-                        }
-                    }
-                    if active_domain.is_none() {
-                        if let Some(dom) = metadata.get("domain").and_then(|v| v.as_str()) {
-                            let trimmed = dom.trim();
-                            if !trimmed.is_empty() && trimmed != "localhost" {
-                                active_domain = Some(trimmed.to_string());
-                            }
-                        }
-                    }
-                }
-                if active_application.is_some() && active_domain.is_some() {
-                    break;
-                }
-            }
-        }
+        let mut app_list: Vec<(String, usize)> = app_counts.into_iter().collect();
+        app_list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let active_application = app_list.first().map(|(app, _)| app.clone());
+        let recent_applications: Vec<String> = app_list.into_iter().map(|(app, _)| app).collect();
 
         // 6. Resolve Recent Activity Summary
         let recent_activity: Option<String> = if let Some(ws) = &self.workset {
@@ -571,10 +662,10 @@ impl ContextStateBuilder {
             None
         };
 
-        // 7. Resolve Latest Meaningful Action
+        // 7. Resolve Latest Meaningful Action (Factual, grounded, zero fabricated verbs)
         let mut latest_meaningful_action: Option<String> = None;
 
-        // Check task transition first if available
+        // Check task transitions
         if let Some(last_task_trans) = self.task_transitions.last() {
             match last_task_trans.transition_type {
                 TaskTransitionType::TaskStart => {
@@ -598,7 +689,7 @@ impl ContextStateBuilder {
             }
         }
 
-        // Check context transition if meaningful action not yet resolved
+        // Check context transitions
         if latest_meaningful_action.is_none() {
             if let Some(trans) = latest_transition {
                 if trans.to_context_id.as_deref() == Some(&self.context_id) {
@@ -619,12 +710,8 @@ impl ContextStateBuilder {
         if latest_meaningful_action.is_none() {
             if let Some(title) = &task_title {
                 latest_meaningful_action = Some(format!("Working on {}", title));
-            } else if let Some(seg) = latest_segment {
-                if let Some(item_ref) = seg.item_references.first() {
-                    if let Some(t) = &item_ref.title {
-                        latest_meaningful_action = Some(format!("Interacting with {}", t));
-                    }
-                }
+            } else if let Some(title) = &last_meaningful_item_title {
+                latest_meaningful_action = Some(format!("Interacting with {}", title));
             }
         }
 
@@ -638,7 +725,7 @@ impl ContextStateBuilder {
 
         let elapsed_seconds = latest_ts.map(|t| (now - t).num_seconds().max(0));
 
-        let (state, state_confidence) = if has_no_data {
+        let (state, mut state_confidence) = if has_no_data {
             (ContextStateValue::InsufficientEvidence, 0.0)
         } else if self.items.is_empty() && latest_segment.is_none() && self.evidence.is_empty() {
             (ContextStateValue::InsufficientEvidence, 0.0)
@@ -673,23 +760,182 @@ impl ContextStateBuilder {
             )
         };
 
+        // User feedback increases confidence and solidifies state
+        let provenance = if self.has_user_feedback {
+            state_confidence = (state_confidence * 0.30 + 0.70).clamp(0.75, 1.0);
+            "confirmed".to_string()
+        } else if self.items.is_empty() {
+            "observed".to_string()
+        } else {
+            "inferred".to_string()
+        };
+
+        // 9. Reconstruct "Where did I leave this work?" (Deterministic natural phrasing)
+        let last_meaningful_activity = Self::construct_meaningful_activity_statement(
+            context_name.as_deref().unwrap_or("this workspace"),
+            state,
+            task_title.as_deref(),
+            &recent_applications,
+            active_domain.as_deref(),
+            last_meaningful_item_title.as_deref(),
+            latest_transition,
+            self.task_transitions.last(),
+            &self.items,
+        );
+
         Ok(ContextState {
             context_id: self.context_id,
+            context_name,
             task_id,
             task_title,
             state,
             last_active_at,
             last_activity_segment_id,
             last_transition_id,
+            last_meaningful_item_id,
+            last_meaningful_item_title,
             current_workset: self.workset,
             recent_item_ids,
             recent_activity,
             active_application,
             active_domain,
+            recent_applications,
             latest_meaningful_action,
+            last_meaningful_activity,
             state_confidence,
+            provenance,
+            has_user_feedback: self.has_user_feedback,
             reconstructed_at,
         })
+    }
+
+    /// Constructs the deterministic natural working state answer to: "Where did I leave this work?"
+    ///
+    /// Rules:
+    /// - Do NOT infer more than evidence supports.
+    /// - Do NOT fabricate actions (e.g. "editing") unless an explicit signal exists.
+    /// - If task + app: "Last known activity: Hero design in Figma."
+    /// - If only URL captured: "Last known activity: Figma page related to Aurora Website."
+    /// - If multi-app: "Last known activity: Hero design across VSCode and Safari."
+    #[allow(clippy::too_many_arguments)]
+    fn construct_meaningful_activity_statement(
+        context_name: &str,
+        state: ContextStateValue,
+        task_title: Option<&str>,
+        recent_apps: &[String],
+        active_domain: Option<&str>,
+        last_item_title: Option<&str>,
+        latest_transition: Option<&ContextTransition>,
+        last_task_transition: Option<&DetectedTaskTransition>,
+        items: &[Item],
+    ) -> String {
+        // 1. Insufficient Evidence
+        if state == ContextStateValue::InsufficientEvidence {
+            return format!("No prior activity recorded for {}.", context_name);
+        }
+
+        // 2. Uncertain State
+        if state == ContextStateValue::Uncertain {
+            return format!(
+                "Uncertain recent activity in {} with competing context signals.",
+                context_name
+            );
+        }
+
+        // 3. Context Return
+        if let Some(trans) = latest_transition {
+            if trans.transition_type == ContextTransitionType::ContextReturn {
+                if let Some(task) = task_title {
+                    return format!("Returned to {} working on {}.", context_name, task);
+                } else {
+                    return format!("Returned to {} context after interruption.", context_name);
+                }
+            }
+        }
+
+        // 4. Task Transition / Task Switch
+        if let Some(tt) = last_task_transition {
+            if tt.transition_type == TaskTransitionType::TaskSwitch {
+                let from = tt.from_task.as_deref().unwrap_or("previous task");
+                let to = tt.to_task.as_deref().unwrap_or("new task");
+                return format!("Switched task from {} to {}.", from, to);
+            } else if tt.transition_type == TaskTransitionType::TaskStart {
+                let to = tt.to_task.as_deref().unwrap_or("new task");
+                return format!("Started task: {}.", to);
+            }
+        }
+
+        // 5. Context Switch Away / Paused
+        if state == ContextStateValue::Paused {
+            if let Some(trans) = latest_transition {
+                if trans.transition_type == ContextTransitionType::ContextSwitch {
+                    if let Some(task) = task_title {
+                        if let Some(app) = recent_apps.first() {
+                            return format!("Paused work on {} in {}.", task, app);
+                        } else {
+                            return format!("Paused work on {}.", task);
+                        }
+                    } else {
+                        return format!("Paused work in {}.", context_name);
+                    }
+                }
+            }
+        }
+
+        // 6. Dormant Context
+        if state == ContextStateValue::Dormant {
+            if let Some(task) = task_title {
+                return format!(
+                    "Dormant context. Last known activity: {} (no recent activity for over a week).",
+                    task
+                );
+            } else {
+                return format!("Dormant context with no recent activity.");
+            }
+        }
+
+        // 7. Confident Task + App(s)
+        if let Some(task) = task_title {
+            if recent_apps.len() > 1 {
+                return format!(
+                    "Last known activity: {} across {} and {}.",
+                    task, recent_apps[0], recent_apps[1]
+                );
+            } else if let Some(app) = recent_apps.first() {
+                return format!("Last known activity: {} in {}.", task, app);
+            } else {
+                return format!("Last known activity: {}.", task);
+            }
+        }
+
+        // 8. Weak Evidence / Single Capture without clear task
+        // "If only a URL was captured: 'Last known activity: Figma page related to Aurora Website.'"
+        // "Do NOT fabricate actions."
+        if let Some(item_title) = last_item_title {
+            if !item_title.trim().is_empty() && !item_title.eq_ignore_ascii_case("untitled") {
+                if let Some(app) = recent_apps.first() {
+                    return format!("Last known activity: {} in {}.", item_title, app);
+                } else if let Some(dom) = active_domain {
+                    return format!("Last known activity: {} on {}.", item_title, dom);
+                } else {
+                    return format!("Last known activity: {} related to {}.", item_title, context_name);
+                }
+            }
+        }
+
+        if let Some(app) = recent_apps.first() {
+            return format!("Last known activity: {} page related to {}.", app, context_name);
+        }
+
+        if let Some(dom) = active_domain {
+            return format!("Last known activity: {} page related to {}.", dom, context_name);
+        }
+
+        if !items.is_empty() {
+            return format!("Last known activity: viewing items in {}.", context_name);
+        }
+
+        format!("Last known activity in {}.", context_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -707,12 +953,12 @@ impl ContextStateBuilder {
 
         // Check for severe ambiguity or contradictory transitions
         if let Some(t) = latest_transition {
-            if t.transition_type == ContextTransitionType::AmbiguousTransition && t.confidence < 0.35 {
+            if t.transition_type == ContextTransitionType::AmbiguousTransition && t.confidence < 0.40 {
                 return (ContextStateValue::Uncertain, 0.30);
             }
         }
         if let Some(tt) = task_transitions.last() {
-            if tt.transition_type == TaskTransitionType::AmbiguousTaskChange && tt.confidence < 0.35 {
+            if tt.transition_type == TaskTransitionType::AmbiguousTaskChange && tt.confidence < 0.40 {
                 return (ContextStateValue::Uncertain, 0.35);
             }
         }
@@ -766,12 +1012,19 @@ impl ContextStateBuilder {
                 .map(|m| m.activity_state == ContextMemoryActivityState::Active)
                 .unwrap_or(false);
 
+            let has_context_return = latest_transition
+                .map(|t| {
+                    t.to_context_id.as_deref() == Some(context_id)
+                        && t.transition_type == ContextTransitionType::ContextReturn
+                })
+                .unwrap_or(false);
+
             // Conservative: Require at least one active behavioral corroboration
-            if has_active_segment || has_active_workset || has_active_memory {
-                let conf = if has_active_segment && (has_active_workset || has_active_memory) {
+            if has_active_segment || has_active_workset || has_active_memory || has_context_return {
+                let conf = if (has_active_segment || has_context_return) && (has_active_workset || has_active_memory) {
                     0.90
                 } else {
-                    0.75
+                    0.80
                 };
                 return (ContextStateValue::Active, conf);
             }
@@ -786,7 +1039,6 @@ impl ContextStateBuilder {
 
         // Check for Paused (30 min - 7 days after explicit switch or session close)
         if elapsed > 1800 && elapsed < 86400 {
-            // Check if there was an explicit detour or return
             if let Some(ws) = workset {
                 if ws.workset_state == WorksetState::DetourReturn {
                     return (ContextStateValue::RecentlyActive, 0.70);
@@ -859,6 +1111,363 @@ mod tests {
             updated_at: created_at.to_string(),
         }
     }
+
+    // =====================================================================
+    // STEP 3 REQUIRED TESTS:
+    // strong evidence, weak evidence, conflicting evidence,
+    // multiple applications, task transition, context transition,
+    // long inactivity, context return
+    // =====================================================================
+
+    #[test]
+    fn test_strong_evidence() {
+        let now = Utc::now();
+        let recent_ts = (now - Duration::minutes(2)).to_rfc3339();
+
+        let item = make_test_item("item-1", "Hero design", Some("Figma"), &recent_ts);
+        let seg = ContextActivitySegment {
+            id: "seg-1".to_string(),
+            context: Some(ContextReference::workspace("ctx-1", "Aurora Website")),
+            started_at: (now - Duration::minutes(15)).to_rfc3339(),
+            ended_at: recent_ts.clone(),
+            duration_seconds: 780,
+            duration_formatted: "13m".to_string(),
+            confidence: 0.90,
+            session_ids: vec!["sess-1".to_string()],
+            item_references: vec![SegmentItemReference {
+                item_id: "item-1".to_string(),
+                title: Some("Hero design".to_string()),
+                item_type: "text".to_string(),
+                timestamp: recent_ts.clone(),
+                confidence: 0.90,
+            }],
+            transition_in: None,
+            transition_out: None,
+            is_ambiguous: false,
+            item_count: 1,
+            metadata: serde_json::json!({}),
+        };
+
+        let task = TaskCandidate {
+            id: "task-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            title: "Hero design".to_string(),
+            confidence: 0.90,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (now - Duration::minutes(30)).to_rfc3339(),
+            last_active_at: recent_ts.clone(),
+            created_at: (now - Duration::minutes(30)).to_rfc3339(),
+            updated_at: recent_ts.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_activity_segments(vec![seg])
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Active);
+        assert_eq!(state.task_title.as_deref(), Some("Hero design"));
+        assert_eq!(state.active_application.as_deref(), Some("Figma"));
+        assert_eq!(state.last_meaningful_activity, "Last known activity: Hero design in Figma.");
+    }
+
+    #[test]
+    fn test_weak_evidence() {
+        let now = Utc::now();
+        let capture_ts = (now - Duration::minutes(20)).to_rfc3339();
+
+        // Only a URL / application is captured with no confident task or active continuous segment
+        let item = Item {
+            id: "item-url".to_string(),
+            workspace_id: Some("ctx-1".to_string()),
+            session_id: None,
+            item_type: "url".to_string(),
+            content: "https://figma.com/file/12345/Aurora".to_string(),
+            title: None, // No specific title
+            metadata: r#"{"app_name":"Figma","domain":"figma.com"}"#.to_string(),
+            created_at: capture_ts.clone(),
+            updated_at: capture_ts.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.task_title, None);
+        assert_eq!(state.active_application.as_deref(), Some("Figma"));
+        // Factual and grounded: zero fabricated action verbs
+        assert_eq!(state.last_meaningful_activity, "Last known activity: Figma page related to Aurora Website.");
+    }
+
+    #[test]
+    fn test_conflicting_evidence() {
+        let now = Utc::now();
+        let ambiguous_ts = (now - Duration::minutes(5)).to_rfc3339();
+
+        let item = make_test_item("item-1", "Ambiguous signal", None, &ambiguous_ts);
+
+        let ambiguous_trans = ContextTransition {
+            id: "trans-amb".to_string(),
+            from_context_id: Some("ctx-1".to_string()),
+            to_context_id: Some("ctx-2".to_string()),
+            transition_type: ContextTransitionType::AmbiguousTransition,
+            confidence: 0.30,
+            detected_at: ambiguous_ts.clone(),
+            session_id: None,
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: ambiguous_ts.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_context_transitions(vec![ambiguous_trans])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Uncertain);
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Uncertain recent activity in Aurora Website with competing context signals."
+        );
+    }
+
+    #[test]
+    fn test_multiple_applications() {
+        let now = Utc::now();
+        let recent_ts = (now - Duration::minutes(5)).to_rfc3339();
+
+        let item_code = make_test_item("item-1", "Hero component", Some("VSCode"), &recent_ts);
+        let item_browser = make_test_item("item-2", "Hero animation specs", Some("Safari"), &recent_ts);
+
+        let seg = ContextActivitySegment {
+            id: "seg-multi".to_string(),
+            context: Some(ContextReference::workspace("ctx-1", "Portfolio")),
+            started_at: (now - Duration::minutes(20)).to_rfc3339(),
+            ended_at: recent_ts.clone(),
+            duration_seconds: 900,
+            duration_formatted: "15m".to_string(),
+            confidence: 0.88,
+            session_ids: vec!["sess-1".to_string()],
+            item_references: vec![],
+            transition_in: None,
+            transition_out: None,
+            is_ambiguous: false,
+            item_count: 2,
+            metadata: serde_json::json!({}),
+        };
+
+        let task = TaskCandidate {
+            id: "task-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            title: "Hero section".to_string(),
+            confidence: 0.88,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (now - Duration::minutes(30)).to_rfc3339(),
+            last_active_at: recent_ts.clone(),
+            created_at: (now - Duration::minutes(30)).to_rfc3339(),
+            updated_at: recent_ts.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Portfolio")
+            .with_reference_time(now)
+            .with_items(vec![item_code, item_browser])
+            .with_activity_segments(vec![seg])
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Active);
+        assert_eq!(state.recent_applications.len(), 2);
+        assert!(state.recent_applications.contains(&"VSCode".to_string()));
+        assert!(state.recent_applications.contains(&"Safari".to_string()));
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Last known activity: Hero section across Safari and VSCode."
+        );
+    }
+
+    #[test]
+    fn test_task_transition() {
+        let now = Utc::now();
+        let task_shift_time = (now - Duration::minutes(4)).to_rfc3339();
+
+        let item = make_test_item("item-1", "Footer contact form", Some("VSCode"), &task_shift_time);
+
+        let task_trans = DetectedTaskTransition {
+            id: "tt-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            transition_type: TaskTransitionType::TaskSwitch,
+            from_task: Some("Hero Animation".to_string()),
+            to_task: Some("Contact Form Integration".to_string()),
+            confidence: 0.82,
+            timestamp: task_shift_time.clone(),
+            evidence: vec![],
+            trigger_item_id: None,
+            duration_seconds: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_task_transitions(vec![task_trans])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Switched task from Hero Animation to Contact Form Integration."
+        );
+    }
+
+    #[test]
+    fn test_context_transition() {
+        let now = Utc::now();
+        let switch_time = (now - Duration::minutes(25)).to_rfc3339();
+
+        let item = make_test_item("item-1", "Hero design", Some("Figma"), &switch_time);
+
+        let transition = ContextTransition {
+            id: "trans-switch-1".to_string(),
+            from_context_id: Some("ctx-1".to_string()),
+            to_context_id: Some("ctx-2".to_string()),
+            transition_type: ContextTransitionType::ContextSwitch,
+            confidence: 0.90,
+            detected_at: switch_time.clone(),
+            session_id: None,
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: switch_time.clone(),
+        };
+
+        let task = TaskCandidate {
+            id: "task-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            title: "Hero design".to_string(),
+            confidence: 0.85,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (now - Duration::minutes(60)).to_rfc3339(),
+            last_active_at: switch_time.clone(),
+            created_at: (now - Duration::minutes(60)).to_rfc3339(),
+            updated_at: switch_time.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_context_transitions(vec![transition])
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Paused);
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Paused work on Hero design in Figma."
+        );
+    }
+
+    #[test]
+    fn test_long_inactivity() {
+        let now = Utc::now();
+        let two_weeks_ago = (now - Duration::days(14)).to_rfc3339();
+
+        let item = make_test_item("item-old", "Archived database specs", None, &two_weeks_ago);
+
+        let task = TaskCandidate {
+            id: "task-old".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            title: "Database Migration".to_string(),
+            confidence: 0.80,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: two_weeks_ago.clone(),
+            last_active_at: two_weeks_ago.clone(),
+            created_at: two_weeks_ago.clone(),
+            updated_at: two_weeks_ago.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Backend Core")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Dormant);
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Dormant context. Last known activity: Database Migration (no recent activity for over a week)."
+        );
+    }
+
+    #[test]
+    fn test_context_return() {
+        let now = Utc::now();
+        let return_time = (now - Duration::minutes(2)).to_rfc3339();
+
+        let item = make_test_item("item-1", "Hero animation code", Some("Xcode"), &return_time);
+
+        let return_transition = ContextTransition {
+            id: "trans-ret-1".to_string(),
+            from_context_id: Some("ctx-detour".to_string()),
+            to_context_id: Some("ctx-1".to_string()),
+            transition_type: ContextTransitionType::ContextReturn,
+            confidence: 0.88,
+            detected_at: return_time.clone(),
+            session_id: None,
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: return_time.clone(),
+        };
+
+        let task = TaskCandidate {
+            id: "task-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            title: "Hero Animation".to_string(),
+            confidence: 0.88,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (now - Duration::minutes(40)).to_rfc3339(),
+            last_active_at: return_time.clone(),
+            created_at: (now - Duration::minutes(40)).to_rfc3339(),
+            updated_at: return_time.clone(),
+        };
+
+        let state = ContextStateBuilder::new("ctx-1")
+            .with_context_name("Aurora Website")
+            .with_reference_time(now)
+            .with_items(vec![item])
+            .with_context_transitions(vec![return_transition])
+            .with_task_candidates(vec![task])
+            .build()
+            .unwrap();
+
+        assert_eq!(state.state, ContextStateValue::Active);
+        assert_eq!(
+            state.last_meaningful_activity,
+            "Returned to Aurora Website working on Hero Animation."
+        );
+    }
+
+    // =====================================================================
+    // STEP 2 BASELINE REGRESSION TESTS
+    // =====================================================================
 
     #[test]
     fn test_active_context() {
@@ -960,7 +1569,6 @@ mod tests {
 
         let item = make_test_item("item-1", "Database schema", Some("DataGrip"), &switch_time);
 
-        // Transition indicates user switched away from ctx-1 to ctx-2
         let transition = ContextTransition {
             id: "trans-1".to_string(),
             from_context_id: Some("ctx-1".to_string()),
@@ -1035,7 +1643,6 @@ mod tests {
             .with_reference_time(now)
             .with_items(vec![item])
             .with_activity_segments(vec![seg])
-            // No task candidates provided
             .build()
             .unwrap();
 
@@ -1054,7 +1661,7 @@ mod tests {
         let state = ContextStateBuilder::new("ctx-1")
             .with_reference_time(now)
             .with_items(vec![item])
-            .with_workset(None) // Explicitly missing workset
+            .with_workset(None)
             .build()
             .unwrap();
 
@@ -1067,7 +1674,6 @@ mod tests {
     fn test_insufficient_evidence() {
         let now = Utc::now();
 
-        // Completely empty context with zero items, zero segments, zero transitions
         let state = ContextStateBuilder::new("ctx-empty")
             .with_reference_time(now)
             .build()
@@ -1079,93 +1685,5 @@ mod tests {
         assert_eq!(state.task_title, None);
         assert_eq!(state.last_active_at, None);
         assert!(state.recent_item_ids.is_empty());
-    }
-
-    #[test]
-    fn test_context_return() {
-        let now = Utc::now();
-        let return_time = (now - Duration::minutes(2)).to_rfc3339();
-
-        let item = make_test_item("item-1", "Hero animation code", Some("Xcode"), &return_time);
-
-        let return_transition = ContextTransition {
-            id: "trans-ret-1".to_string(),
-            from_context_id: Some("ctx-detour".to_string()),
-            to_context_id: Some("ctx-1".to_string()),
-            transition_type: ContextTransitionType::ContextReturn,
-            confidence: 0.88,
-            detected_at: return_time.clone(),
-            session_id: None,
-            trigger_item_id: None,
-            trigger_signal_id: None,
-            metadata: "{}".to_string(),
-            created_at: return_time.clone(),
-        };
-
-        let seg = ContextActivitySegment {
-            id: "seg-ret".to_string(),
-            context: Some(ContextReference::workspace("ctx-1", "Portfolio")),
-            started_at: return_time.clone(),
-            ended_at: return_time.clone(),
-            duration_seconds: 120,
-            duration_formatted: "2m".to_string(),
-            confidence: 0.85,
-            session_ids: vec![],
-            item_references: vec![],
-            transition_in: None,
-            transition_out: None,
-            is_ambiguous: false,
-            item_count: 1,
-            metadata: serde_json::json!({}),
-        };
-
-        let state = ContextStateBuilder::new("ctx-1")
-            .with_reference_time(now)
-            .with_items(vec![item])
-            .with_activity_segments(vec![seg])
-            .with_context_transitions(vec![return_transition])
-            .build()
-            .unwrap();
-
-        assert_eq!(state.state, ContextStateValue::Active);
-        assert_eq!(state.last_transition_id.as_deref(), Some("trans-ret-1"));
-        assert_eq!(
-            state.latest_meaningful_action.as_deref(),
-            Some("Returned to context after interruption")
-        );
-    }
-
-    #[test]
-    fn test_task_transition() {
-        let now = Utc::now();
-        let task_shift_time = (now - Duration::minutes(4)).to_rfc3339();
-
-        let item = make_test_item("item-1", "Footer contact form", Some("VSCode"), &task_shift_time);
-
-        let task_trans = DetectedTaskTransition {
-            id: "tt-1".to_string(),
-            context_id: Some("ctx-1".to_string()),
-            transition_type: TaskTransitionType::TaskSwitch,
-            from_task: Some("Hero Animation".to_string()),
-            to_task: Some("Contact Form Integration".to_string()),
-            confidence: 0.82,
-            timestamp: task_shift_time.clone(),
-            evidence: vec![],
-            trigger_item_id: None,
-            duration_seconds: None,
-            metadata: serde_json::json!({}),
-        };
-
-        let state = ContextStateBuilder::new("ctx-1")
-            .with_reference_time(now)
-            .with_items(vec![item])
-            .with_task_transitions(vec![task_trans])
-            .build()
-            .unwrap();
-
-        assert_eq!(
-            state.latest_meaningful_action.as_deref(),
-            Some("Switched task from Hero Animation to Contact Form Integration")
-        );
     }
 }
