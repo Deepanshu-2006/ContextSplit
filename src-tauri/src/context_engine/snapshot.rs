@@ -2025,6 +2025,21 @@ impl ContextSnapshotService {
     pub fn get_previous_snapshot(&self, context_id: &str) -> Option<ContextSnapshot> {
         get_global_snapshot_history().get_previous(context_id)
     }
+
+    /// Compares the latest snapshot with the previous snapshot for a context.
+    pub fn compare_latest_with_previous(&self, context_id: &str) -> Option<ContextSnapshotDiff> {
+        let history = self.get_snapshot_history(context_id)?;
+        history.compare_latest_with_previous()
+    }
+
+    /// Compares two snapshots directly.
+    pub fn compare_snapshots(
+        &self,
+        previous: Option<&ContextSnapshot>,
+        current: &ContextSnapshot,
+    ) -> ContextSnapshotDiff {
+        ContextSnapshotComparator::compare(previous, current)
+    }
 }
 
 // =========================================================================
@@ -2167,6 +2182,20 @@ impl ContextSnapshotHistory {
     pub fn clear(&mut self) {
         self.snapshots.clear();
     }
+
+    /// Compares the latest snapshot with the previous snapshot in history.
+    pub fn compare_latest_with_previous(&self) -> Option<ContextSnapshotDiff> {
+        let latest = self.latest()?;
+        let previous = self.previous();
+        Some(ContextSnapshotComparator::compare(previous, latest))
+    }
+
+    /// Compares two specific snapshots in history by their IDs.
+    pub fn compare_snapshots(&self, from_id: &str, to_id: &str) -> Option<ContextSnapshotDiff> {
+        let from = self.find_by_id(from_id);
+        let to = self.find_by_id(to_id)?;
+        Some(ContextSnapshotComparator::compare(from, to))
+    }
 }
 
 /// In-memory thread-safe repository for contextual snapshot histories across all workspaces.
@@ -2261,6 +2290,269 @@ pub fn record_snapshot_history(snapshot: ContextSnapshot) -> bool {
 
 pub fn get_context_snapshot_history(context_id: &str) -> Option<ContextSnapshotHistory> {
     get_global_snapshot_history().get_history(context_id)
+}
+
+// =========================================================================
+// ContextSnapshotDiff & ContextSnapshotComparator (Day 20 Step 7)
+// =========================================================================
+
+/// Structured factual difference between two snapshots of the same context.
+///
+/// Invariants:
+/// 1. Purely factual comparison based directly on recorded snapshot evidence.
+/// 2. Does NOT speculate or infer reasons why the user switched tasks.
+/// 3. Does NOT describe user mental intent beyond tangible evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextSnapshotDiff {
+    /// Context identifier
+    pub context_id: String,
+    /// Context display name
+    pub context_name: String,
+    /// ID of the earlier/baseline snapshot (None if comparing against an empty baseline)
+    pub from_snapshot_id: Option<String>,
+    /// ID of the current/target snapshot
+    pub to_snapshot_id: String,
+    /// Timestamp of baseline snapshot (None if baseline was empty)
+    pub from_timestamp: Option<String>,
+    /// Timestamp of current snapshot
+    pub to_timestamp: String,
+    /// Whether the inferred/confirmed active task changed
+    pub task_changed: bool,
+    /// Previous active task title (None if absent)
+    pub previous_task: Option<String>,
+    /// Current active task title (None if absent)
+    pub current_task: Option<String>,
+    /// Factual description of task change (e.g. "Hero design → Hero animation")
+    pub task_change_summary: Option<String>,
+    /// Whether the working context state changed
+    pub state_changed: bool,
+    /// Previous context state
+    pub previous_state: Option<ContextStateValue>,
+    /// Current context state
+    pub current_state: ContextStateValue,
+    /// Items newly added to the workset in the current snapshot
+    pub added_items: Vec<SnapshotWorksetItemReference>,
+    /// Items present in previous snapshot but no longer in the current workset
+    pub removed_items: Vec<SnapshotWorksetItemReference>,
+    /// Items retained across both snapshots
+    pub retained_items: Vec<SnapshotWorksetItemReference>,
+    /// Whether resume readiness changed
+    pub readiness_changed: bool,
+    /// Previous readiness
+    pub previous_readiness: Option<ResumeReadiness>,
+    /// Current readiness
+    pub current_readiness: ResumeReadiness,
+    /// Confidence score delta (current - previous)
+    pub confidence_delta: f64,
+    /// Deterministic, non-speculative factual summary answering:
+    /// "What changed since I last worked on this?"
+    pub formatted_diff_summary: String,
+    /// True if there are any meaningful differences (task, state, added/removed items, readiness)
+    pub has_meaningful_changes: bool,
+}
+
+impl ContextSnapshotDiff {
+    /// Returns `true` if there are no meaningful changes between snapshots.
+    pub fn is_empty(&self) -> bool {
+        !self.has_meaningful_changes
+    }
+
+    /// Number of items added to the workset.
+    pub fn added_count(&self) -> usize {
+        self.added_items.len()
+    }
+
+    /// Number of items removed from the workset.
+    pub fn removed_count(&self) -> usize {
+        self.removed_items.len()
+    }
+
+    /// Number of items retained in the workset.
+    pub fn retained_count(&self) -> usize {
+        self.retained_items.len()
+    }
+}
+
+/// Purely factual, non-speculative comparator for contextual snapshots.
+///
+/// Invariants:
+/// 1. Determines what changed between two snapshots without guessing user intent.
+/// 2. Does not infer why the user changed tasks.
+/// 3. Does not describe user intent beyond the concrete evidence.
+pub struct ContextSnapshotComparator;
+
+impl ContextSnapshotComparator {
+    /// Compares two snapshots of a context and produces a structured delta.
+    pub fn compare(
+        previous: Option<&ContextSnapshot>,
+        current: &ContextSnapshot,
+    ) -> ContextSnapshotDiff {
+        let (from_id, from_ts, prev_task, prev_state, prev_readiness, prev_items, prev_conf) =
+            if let Some(prev) = previous {
+                (
+                    Some(prev.id.clone()),
+                    Some(prev.created_at.clone()),
+                    prev.task_title.clone(),
+                    Some(prev.state),
+                    Some(prev.resume_readiness.readiness),
+                    &prev.workset_item_references[..],
+                    prev.snapshot_confidence,
+                )
+            } else {
+                (None, None, None, None, None, &[][..], 0.0)
+            };
+
+        // 1. Task change detection
+        let task_changed = prev_task != current.task_title;
+        let task_change_summary = if task_changed {
+            match (&prev_task, &current.task_title) {
+                (Some(p), Some(c)) => Some(format!("{} → {}", p, c)),
+                (None, Some(c)) => Some(format!("Started task: {}", c)),
+                (Some(p), None) => Some(format!("Cleared task (was '{}')", p)),
+                (None, None) => None,
+            }
+        } else {
+            None
+        };
+
+        // 2. State change detection
+        let state_changed = prev_state.map(|s| s != current.state).unwrap_or(false);
+
+        // 3. Workset Item Diffs (match by item ID or matching title+item_type)
+        let mut added_items = Vec::new();
+        let mut retained_items = Vec::new();
+        let mut removed_items = Vec::new();
+
+        for curr_item in &current.workset_item_references {
+            let matched = prev_items.iter().any(|pi| {
+                pi.id == curr_item.id
+                    || (pi.title.is_some()
+                        && pi.title == curr_item.title
+                        && pi.item_type == curr_item.item_type)
+            });
+            if matched {
+                retained_items.push(curr_item.clone());
+            } else {
+                added_items.push(curr_item.clone());
+            }
+        }
+
+        for prev_item in prev_items {
+            let matched = current.workset_item_references.iter().any(|ci| {
+                ci.id == prev_item.id
+                    || (ci.title.is_some()
+                        && ci.title == prev_item.title
+                        && ci.item_type == prev_item.item_type)
+            });
+            if !matched {
+                removed_items.push(prev_item.clone());
+            }
+        }
+
+        // 4. Readiness & Confidence
+        let current_readiness = current.resume_readiness.readiness;
+        let readiness_changed = prev_readiness
+            .map(|r| r != current_readiness)
+            .unwrap_or(false);
+        let confidence_delta = if previous.is_some() {
+            current.snapshot_confidence - prev_conf
+        } else {
+            0.0
+        };
+
+        // 5. Meaningful changes flag
+        let has_meaningful_changes = task_changed
+            || state_changed
+            || !added_items.is_empty()
+            || !removed_items.is_empty()
+            || readiness_changed;
+
+        // 6. Formatted Summary (Deterministic factual explanation)
+        let formatted_diff_summary = Self::format_summary(
+            &current.context_name,
+            task_change_summary.as_deref(),
+            &added_items,
+            &removed_items,
+            state_changed,
+            prev_state,
+            current.state,
+        );
+
+        ContextSnapshotDiff {
+            context_id: current.context_id.clone(),
+            context_name: current.context_name.clone(),
+            from_snapshot_id: from_id,
+            to_snapshot_id: current.id.clone(),
+            from_timestamp: from_ts,
+            to_timestamp: current.created_at.clone(),
+            task_changed,
+            previous_task: prev_task,
+            current_task: current.task_title.clone(),
+            task_change_summary,
+            state_changed,
+            previous_state: prev_state,
+            current_state: current.state,
+            added_items,
+            removed_items,
+            retained_items,
+            readiness_changed,
+            previous_readiness: prev_readiness,
+            current_readiness,
+            confidence_delta,
+            formatted_diff_summary,
+            has_meaningful_changes,
+        }
+    }
+
+    /// Formats a concise, factual diff summary answering:
+    /// "What changed since I last worked on this?"
+    fn format_summary(
+        context_name: &str,
+        task_change_summary: Option<&str>,
+        added_items: &[SnapshotWorksetItemReference],
+        removed_items: &[SnapshotWorksetItemReference],
+        state_changed: bool,
+        prev_state: Option<ContextStateValue>,
+        current_state: ContextStateValue,
+    ) -> String {
+        let mut sections = Vec::new();
+
+        if let Some(task_summary) = task_change_summary {
+            sections.push(format!("Task changed:\n{}", task_summary));
+        }
+
+        if !added_items.is_empty() {
+            let item_names: Vec<String> = added_items
+                .iter()
+                .map(|i| i.title.clone().unwrap_or_else(|| i.id.clone()))
+                .collect();
+            sections.push(format!("Added:\n{}", item_names.join("\n")));
+        }
+
+        if !removed_items.is_empty() {
+            let item_names: Vec<String> = removed_items
+                .iter()
+                .map(|i| i.title.clone().unwrap_or_else(|| i.id.clone()))
+                .collect();
+            sections.push(format!("Removed:\n{}", item_names.join("\n")));
+        }
+
+        if state_changed {
+            if let Some(ps) = prev_state {
+                sections.push(format!(
+                    "State changed:\n{} → {}",
+                    ps.display_name(),
+                    current_state.display_name()
+                ));
+            }
+        }
+
+        if sections.is_empty() {
+            format!("No significant changes recorded for {}.", context_name)
+        } else {
+            sections.join("\n\n")
+        }
+    }
 }
 
 // =========================================================================
@@ -3490,5 +3782,322 @@ mod tests {
         repo.clear_context("ws-repo");
         assert!(repo.get_history("ws-repo").is_none());
     }
+
+    // =========================================================================
+    // STEP 7 TESTS: Snapshot Comparison & Differential Analysis
+    // =========================================================================
+
+    #[test]
+    fn test_snapshot_comparison_example_aurora_website() {
+        // Example from prompt:
+        // Previous:
+        // Task: Hero design
+        // Workset: Figma design, Hero reference
+        //
+        // Current:
+        // Task: Hero animation
+        // Workset: React Hero component, Framer Motion reference, GitHub repository
+        //
+        // Output:
+        // Task changed: Hero design → Hero animation
+        // Added: React Hero component, Framer Motion reference, GitHub repository
+        // Removed: Figma design, Hero reference (Old hero reference)
+        let prev_snap = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t1".to_string()),
+                "Hero design",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-figma",
+                "Figma design",
+                WorksetItemRelevance::Primary,
+                0.95,
+                Some("Figma"),
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "item-hero-ref",
+                "Hero reference",
+                WorksetItemRelevance::Supporting,
+                0.80,
+                Some("Chrome"),
+            ))
+            .build();
+
+        let curr_snap = ContextSnapshotBuilder::new("ws-aurora", "Aurora Website")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t2".to_string()),
+                "Hero animation",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-react-hero",
+                "React Hero component",
+                WorksetItemRelevance::Primary,
+                0.98,
+                Some("VS Code"),
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "item-framer-motion",
+                "Framer Motion reference",
+                WorksetItemRelevance::Supporting,
+                0.88,
+                Some("Chrome"),
+            ))
+            .add_workset_item(create_dummy_workset_item(
+                "item-github-repo",
+                "GitHub repository",
+                WorksetItemRelevance::Supporting,
+                0.85,
+                Some("Chrome"),
+            ))
+            .build();
+
+        let diff = ContextSnapshotComparator::compare(Some(&prev_snap), &curr_snap);
+
+        assert_eq!(diff.context_id, "ws-aurora");
+        assert_eq!(diff.context_name, "Aurora Website");
+        assert_eq!(diff.from_snapshot_id, Some(prev_snap.id.clone()));
+        assert_eq!(diff.to_snapshot_id, curr_snap.id.clone());
+
+        // 1. Task changed
+        assert!(diff.task_changed);
+        assert_eq!(diff.previous_task.as_deref(), Some("Hero design"));
+        assert_eq!(diff.current_task.as_deref(), Some("Hero animation"));
+        assert_eq!(
+            diff.task_change_summary.as_deref(),
+            Some("Hero design → Hero animation")
+        );
+
+        // 2. Added items
+        assert_eq!(diff.added_count(), 3);
+        let added_titles: Vec<&str> = diff
+            .added_items
+            .iter()
+            .filter_map(|i| i.title.as_deref())
+            .collect();
+        assert!(added_titles.contains(&"React Hero component"));
+        assert!(added_titles.contains(&"Framer Motion reference"));
+        assert!(added_titles.contains(&"GitHub repository"));
+
+        // 3. Removed items
+        assert_eq!(diff.removed_count(), 2);
+        let removed_titles: Vec<&str> = diff
+            .removed_items
+            .iter()
+            .filter_map(|i| i.title.as_deref())
+            .collect();
+        assert!(removed_titles.contains(&"Figma design"));
+        assert!(removed_titles.contains(&"Hero reference"));
+
+        // 4. Formatted summary checks
+        assert!(diff
+            .formatted_diff_summary
+            .contains("Task changed:\nHero design → Hero animation"));
+        assert!(diff.formatted_diff_summary.contains("Added:"));
+        assert!(diff.formatted_diff_summary.contains("React Hero component"));
+        assert!(diff.formatted_diff_summary.contains("Removed:"));
+        assert!(diff.formatted_diff_summary.contains("Figma design"));
+
+        // 5. Invariant check: Pure factual statement without mental speculation
+        assert!(diff.has_meaningful_changes);
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_comparison_no_changes() {
+        let snap1 = ContextSnapshotBuilder::new("ws-static", "Static Workspace")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t1".to_string()),
+                "Ongoing Task",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "i1",
+                "Spec Doc",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("Chrome"),
+            ))
+            .build();
+
+        let snap2 = snap1.clone();
+
+        let diff = ContextSnapshotComparator::compare(Some(&snap1), &snap2);
+
+        assert!(!diff.task_changed);
+        assert!(!diff.state_changed);
+        assert!(!diff.readiness_changed);
+        assert_eq!(diff.added_count(), 0);
+        assert_eq!(diff.removed_count(), 0);
+        assert_eq!(diff.retained_count(), 1);
+        assert!(!diff.has_meaningful_changes);
+        assert!(diff.is_empty());
+        assert!(diff
+            .formatted_diff_summary
+            .contains("No significant changes recorded"));
+    }
+
+    #[test]
+    fn test_snapshot_comparison_state_and_readiness_changes() {
+        let snap1 = ContextSnapshotBuilder::new("ws-dormant-switch", "Project Delta")
+            .with_state(ContextStateValue::Active)
+            .with_freshness(StateFreshness::Fresh, 300)
+            .with_task(
+                Some("t-delta".to_string()),
+                "Feature Delta",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .with_confidence(0.95)
+            .add_workset_item(create_dummy_workset_item(
+                "item-1",
+                "Shared Item",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        let snap2 = ContextSnapshotBuilder::new("ws-dormant-switch", "Project Delta")
+            .with_state(ContextStateValue::Dormant)
+            .with_freshness(StateFreshness::VeryStale, 86400 * 10)
+            .with_task(
+                Some("t-delta".to_string()),
+                "Feature Delta",
+                0.60,
+                InformationProvenance::Inferred,
+            )
+            .with_confidence(0.60)
+            .add_workset_item(create_dummy_workset_item(
+                "item-1",
+                "Shared Item",
+                WorksetItemRelevance::Supporting,
+                0.60,
+                Some("VS Code"),
+            ))
+            .build();
+
+        let diff = ContextSnapshotComparator::compare(Some(&snap1), &snap2);
+
+        assert!(!diff.task_changed);
+        assert!(diff.state_changed);
+        assert_eq!(diff.previous_state, Some(ContextStateValue::Active));
+        assert_eq!(diff.current_state, ContextStateValue::Dormant);
+        assert!(diff.readiness_changed);
+        assert_eq!(diff.retained_count(), 1);
+        assert_eq!(diff.added_count(), 0);
+        assert_eq!(diff.removed_count(), 0);
+        assert!(diff.confidence_delta < 0.0);
+        assert!(diff.formatted_diff_summary.contains("State changed:"));
+    }
+
+    #[test]
+    fn test_snapshot_comparison_baseline_none() {
+        let curr = ContextSnapshotBuilder::new("ws-first", "First Snapshot")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t-init".to_string()),
+                "Initial Setup",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "i1",
+                "Init Config",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("VS Code"),
+            ))
+            .build();
+
+        let diff = ContextSnapshotComparator::compare(None, &curr);
+
+        assert_eq!(diff.from_snapshot_id, None);
+        assert_eq!(diff.from_timestamp, None);
+        assert!(diff.task_changed);
+        assert_eq!(
+            diff.task_change_summary.as_deref(),
+            Some("Started task: Initial Setup")
+        );
+        assert_eq!(diff.added_count(), 1);
+        assert_eq!(diff.removed_count(), 0);
+        assert!(diff.has_meaningful_changes);
+    }
+
+    #[test]
+    fn test_snapshot_history_and_service_comparison_convenience_methods() {
+        let mut history = ContextSnapshotHistory::new("ws-history-diff", "History Diff WS");
+
+        let snap1 = ContextSnapshotBuilder::new("ws-history-diff", "History Diff WS")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t1".to_string()),
+                "Design Phase",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-a",
+                "Mockup A",
+                WorksetItemRelevance::Primary,
+                0.90,
+                Some("Figma"),
+            ))
+            .build();
+
+        let snap2 = ContextSnapshotBuilder::new("ws-history-diff", "History Diff WS")
+            .with_state(ContextStateValue::Active)
+            .with_task(
+                Some("t2".to_string()),
+                "Implementation Phase",
+                0.95,
+                InformationProvenance::Confirmed,
+            )
+            .add_workset_item(create_dummy_workset_item(
+                "item-b",
+                "Component B",
+                WorksetItemRelevance::Primary,
+                0.95,
+                Some("VS Code"),
+            ))
+            .build();
+
+        let id1 = snap1.id.clone();
+        let id2 = snap2.id.clone();
+
+        history.add_snapshot(snap1);
+        history.add_snapshot(snap2);
+
+        // 1. compare_latest_with_previous
+        let latest_diff = history.compare_latest_with_previous().unwrap();
+        assert!(latest_diff.task_changed);
+        assert_eq!(
+            latest_diff.task_change_summary.as_deref(),
+            Some("Design Phase → Implementation Phase")
+        );
+        assert_eq!(latest_diff.added_count(), 1);
+        assert_eq!(latest_diff.removed_count(), 1);
+
+        // 2. compare_snapshots by ID
+        let id_diff = history.compare_snapshots(&id1, &id2).unwrap();
+        assert_eq!(id_diff.from_snapshot_id, Some(id1));
+        assert_eq!(id_diff.to_snapshot_id, id2);
+
+        // 3. Service direct comparison
+        let service = ContextSnapshotService::new();
+        let s_diff = service.compare_snapshots(
+            history.nth_previous(1),
+            history.latest().unwrap(),
+        );
+        assert_eq!(s_diff.task_change_summary, latest_diff.task_change_summary);
+    }
 }
+
 
