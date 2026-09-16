@@ -784,6 +784,41 @@ pub struct ContextResumeState {
 }
 
 // =========================================================================
+// StateExplanation & Progressive Disclosure (Day 19 Step 8)
+// =========================================================================
+
+/// Single grounded reason explaining why ContextSplit reconstructed this state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StateReason {
+    /// Human-readable explanation sentence (e.g., "Hero animation was the most recent active task")
+    pub text: String,
+    /// Classification distinguishing "Observed" vs "Inferred"
+    pub provenance: String,
+}
+
+/// Structured explanation for ContextState reasoning with progressive disclosure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StateExplanation {
+    /// Header summary (e.g. "Why ContextSplit thinks this:")
+    pub title: String,
+    /// List of grounded reasons distinguishing Observed vs Inferred
+    pub reasons: Vec<StateReason>,
+    /// Optional subtle uncertainty note if evidence is sparse or conflicting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertainty_note: Option<String>,
+}
+
+impl Default for StateExplanation {
+    fn default() -> Self {
+        Self {
+            title: "Why ContextSplit thinks this:".to_string(),
+            reasons: Vec::new(),
+            uncertainty_note: None,
+        }
+    }
+}
+
+// =========================================================================
 // ContextState: Derived Contextual Working State Representation
 // =========================================================================
 
@@ -843,6 +878,9 @@ pub struct ContextState {
     pub resume_state: ContextResumeState,
     /// Internal resume readiness assessment (Day 19 Step 6)
     pub readiness: ResumeReadinessAssessment,
+    /// Progressive disclosure state explanation (Day 19 Step 8)
+    #[serde(default)]
+    pub explanation: StateExplanation,
     /// Calibrated state confidence score [0.0, 1.0]
     pub state_confidence: f64,
     /// Epistemic source ("confirmed", "inferred", "observed")
@@ -1509,6 +1547,21 @@ impl ContextStateBuilder {
 
         let readiness = resume_state.readiness.clone();
 
+        // 12. Derive Progressive Disclosure State Explanation (Day 19 Step 8)
+        let is_task_confirmed = self.has_user_feedback
+            || self.workset.as_ref().map(|w| matches!(w.provenance, crate::context_engine::memory::InformationProvenance::Confirmed)).unwrap_or(false);
+        let explanation = Self::construct_state_explanation(
+            context_name.as_deref().unwrap_or("Workspace"),
+            state,
+            task_title.as_deref(),
+            is_task_confirmed,
+            self.workset.as_ref(),
+            meaningful_activity.as_ref(),
+            active_application.as_deref(),
+            latest_transition,
+            &self.items,
+        );
+
         Ok(ContextState {
             context_id: self.context_id,
             context_name,
@@ -1531,11 +1584,123 @@ impl ContextStateBuilder {
             meaningful_activity,
             resume_state,
             readiness,
+            explanation,
             state_confidence,
             provenance,
             has_user_feedback: self.has_user_feedback,
             reconstructed_at,
         })
+    }
+
+    /// Constructs the progressive disclosure explanation for why ContextSplit reconstructed this state.
+    ///
+    /// Distinguishes:
+    /// - "Observed" (factual event, confirmed task, observed app context, verified return)
+    /// - "Inferred" (statistical candidate, predicted activity)
+    ///
+    /// Example:
+    /// Why ContextSplit thinks this:
+    /// • Hero animation was the most recent active task (Inferred)
+    /// • 3 related items were recently active (Observed)
+    /// • Aurora Website remained the active context (Observed)
+    /// • Figma was the latest recorded application context (Observed)
+    #[allow(clippy::too_many_arguments)]
+    fn construct_state_explanation(
+        context_name: &str,
+        state: ContextStateValue,
+        task_title: Option<&str>,
+        task_confirmed: bool,
+        workset: Option<&ContextWorkset>,
+        meaningful_activity: Option<&MeaningfulActivity>,
+        active_app: Option<&str>,
+        latest_transition: Option<&ContextTransition>,
+        items: &[Item],
+    ) -> StateExplanation {
+        let mut reasons = Vec::new();
+
+        // 1. Task reasoning
+        if let Some(task) = task_title {
+            if !task.trim().is_empty() && !task.eq_ignore_ascii_case("not clear yet") {
+                let prov = if task_confirmed { "Observed" } else { "Inferred" };
+                reasons.push(StateReason {
+                    text: format!("{} was the most recent active task", task),
+                    provenance: prov.to_string(),
+                });
+            }
+        }
+
+        // 2. Related items count
+        let item_count = workset.map(|w| w.items.len()).unwrap_or(items.len());
+        if item_count > 0 {
+            reasons.push(StateReason {
+                text: format!(
+                    "{} related item{} recently active",
+                    item_count,
+                    if item_count == 1 { " was" } else { "s were" }
+                ),
+                provenance: "Observed".to_string(),
+            });
+        }
+
+        // 3. Context presence
+        if let Some(trans) = latest_transition {
+            if trans.transition_type == ContextTransitionType::ContextReturn {
+                reasons.push(StateReason {
+                    text: format!("Returned to '{}' context after temporary detour", context_name),
+                    provenance: "Observed".to_string(),
+                });
+            } else {
+                reasons.push(StateReason {
+                    text: format!("{} remained the active context", context_name),
+                    provenance: "Observed".to_string(),
+                });
+            }
+        } else {
+            reasons.push(StateReason {
+                text: format!("{} remained the active context", context_name),
+                provenance: "Observed".to_string(),
+            });
+        }
+
+        // 4. Recorded application
+        if let Some(app) = active_app {
+            if !app.trim().is_empty() && !app.eq_ignore_ascii_case("unknown") {
+                reasons.push(StateReason {
+                    text: format!("{} was the latest recorded application context", app),
+                    provenance: "Observed".to_string(),
+                });
+            }
+        }
+
+        // 5. Meaningful activity if distinct
+        if let Some(act) = meaningful_activity {
+            if !act.description.trim().is_empty()
+                && !reasons.iter().any(|r| r.text.contains(&act.description))
+            {
+                let prov = if act.provenance == "observed" || act.provenance == "confirmed" {
+                    "Observed"
+                } else {
+                    "Inferred"
+                };
+                reasons.push(StateReason {
+                    text: format!("Last activity: {}", act.description),
+                    provenance: prov.to_string(),
+                });
+            }
+        }
+
+        // 6. Uncertainty Note if sparse or uncertain
+        let uncertainty_note = if state == ContextStateValue::Uncertain || state == ContextStateValue::InsufficientEvidence {
+            Some("Context signals are emerging or sparse. State will update as more activity occurs.".to_string())
+        } else {
+            None
+        };
+
+        StateExplanation {
+            title: "Why ContextSplit thinks this:".to_string(),
+            reasons,
+            uncertainty_note,
+        }
     }
 
     /// Constructs the deterministic natural working state answer to: "Where did I leave this work?"
@@ -3317,5 +3482,50 @@ mod tests {
 
         assert!(!readiness.reasons.is_empty());
         assert!(readiness.formatted_explanation.contains("Resume readiness:"));
+    }
+
+    #[test]
+    fn test_state_explanation_distinguishes_observed_and_inferred() {
+        let explanation = ContextStateBuilder::construct_state_explanation(
+            "Aurora Website",
+            ContextStateValue::Active,
+            Some("Hero animation"),
+            false, // Inferred task
+            None,
+            None,
+            Some("Figma"),
+            None,
+            &[],
+        );
+
+        assert_eq!(explanation.title, "Why ContextSplit thinks this:");
+        assert!(!explanation.reasons.is_empty());
+
+        let task_reason = explanation.reasons.iter().find(|r| r.text.contains("Hero animation")).unwrap();
+        assert_eq!(task_reason.provenance, "Inferred");
+
+        let app_reason = explanation.reasons.iter().find(|r| r.text.contains("Figma")).unwrap();
+        assert_eq!(app_reason.provenance, "Observed");
+
+        let ws_reason = explanation.reasons.iter().find(|r| r.text.contains("Aurora Website")).unwrap();
+        assert_eq!(ws_reason.provenance, "Observed");
+    }
+
+    #[test]
+    fn test_state_explanation_uncertain_context_has_uncertainty_note() {
+        let explanation = ContextStateBuilder::construct_state_explanation(
+            "TripWise",
+            ContextStateValue::Uncertain,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        );
+
+        assert!(explanation.uncertainty_note.is_some());
+        assert!(explanation.uncertainty_note.unwrap().contains("emerging or sparse"));
     }
 }
