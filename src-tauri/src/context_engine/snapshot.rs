@@ -83,17 +83,35 @@ pub struct SnapshotWorksetItemReference {
 
 impl From<&WorksetItemReference> for SnapshotWorksetItemReference {
     fn from(item: &WorksetItemReference) -> Self {
+        let title = item
+            .title
+            .as_ref()
+            .map(|t| crate::context_engine::reasoning::privacy::scrub_private_data(t));
+
+        let mut snippet =
+            crate::context_engine::reasoning::privacy::scrub_private_data(&item.content_snippet);
+        if snippet.chars().count() > 250 {
+            let truncated: String = snippet.chars().take(250).collect();
+            snippet = format!("{}...", truncated);
+        }
+
+        let reasons = item
+            .reasons
+            .iter()
+            .map(|r| crate::context_engine::reasoning::privacy::scrub_private_data(r))
+            .collect();
+
         Self {
             id: item.id.clone(),
-            title: item.title.clone(),
+            title,
             item_type: item.item_type.clone(),
             relevance: item.relevance,
             relevance_score: item.relevance_score,
             provenance: item.provenance,
             app_name: item.app_name.clone(),
             domain: item.domain.clone(),
-            content_snippet: item.content_snippet.clone(),
-            reasons: item.reasons.clone(),
+            content_snippet: snippet,
+            reasons,
             created_at: item.created_at.clone(),
             last_active_at: item.last_active_at.clone(),
         }
@@ -129,9 +147,15 @@ impl From<&MemoryTaskReference> for SnapshotTaskReference {
     fn from(task: &MemoryTaskReference) -> Self {
         Self {
             id: task.id.clone(),
-            title: task.title.clone(),
-            action_verb: task.action_verb.clone(),
-            target_subject: task.target_subject.clone(),
+            title: crate::context_engine::reasoning::privacy::scrub_private_data(&task.title),
+            action_verb: task
+                .action_verb
+                .as_ref()
+                .map(|v| crate::context_engine::reasoning::privacy::scrub_private_data(v)),
+            target_subject: task
+                .target_subject
+                .as_ref()
+                .map(|s| crate::context_engine::reasoning::privacy::scrub_private_data(s)),
             confidence: task.confidence,
             confidence_band: task.confidence_band.clone(),
             provenance: task.provenance,
@@ -156,7 +180,7 @@ impl From<&TaskCandidate> for SnapshotTaskReference {
 
         Self {
             id: Some(task.id.clone()),
-            title: task.title.clone(),
+            title: crate::context_engine::reasoning::privacy::scrub_private_data(&task.title),
             action_verb: None,
             target_subject: None,
             confidence: task.confidence,
@@ -189,7 +213,9 @@ impl From<&MemoryActivitySequenceEntry> for SnapshotActivityReference {
         Self {
             id: entry.reference_id.clone(),
             entry_type: entry.entry_type.clone(),
-            description: entry.description.clone(),
+            description: crate::context_engine::reasoning::privacy::scrub_private_data(
+                &entry.description,
+            ),
             timestamp: entry.timestamp.clone(),
             provenance: entry.provenance,
         }
@@ -1941,6 +1967,13 @@ impl ContextSnapshotService {
         Self
     }
 
+    /// Checks whether contextual snapshots are enabled in the user's PrivacySettings.
+    pub fn is_snapshots_enabled(conn: &Connection) -> bool {
+        crate::db::settings::get_settings(conn)
+            .map(|s| s.enable_context_snapshots)
+            .unwrap_or(true)
+    }
+
     /// Derives the point-in-time `ContextSnapshot` for a specified context from the database.
     pub fn derive_for_context(
         &self,
@@ -1966,14 +1999,14 @@ impl ContextSnapshotService {
         Ok(snapshot)
     }
 
-    /// Handles a snapshot trigger for a context: invalidates cache and triggers update.
+    /// Handles a snapshot trigger for a context: invalidates cache and triggers update if enabled.
     pub fn handle_trigger(
         &self,
         conn: &Connection,
         context_id: &str,
         trigger: SnapshotTrigger,
     ) -> Result<Option<ContextSnapshot>, String> {
-        if trigger.is_suppressed() {
+        if trigger.is_suppressed() || !Self::is_snapshots_enabled(conn) {
             return Ok(None);
         }
         invalidate_snapshot_cache(context_id);
@@ -4097,6 +4130,94 @@ mod tests {
             history.latest().unwrap(),
         );
         assert_eq!(s_diff.task_change_summary, latest_diff.task_change_summary);
+    }
+
+    #[test]
+    fn test_privacy_scrubbing_on_snapshot_references() {
+        use crate::context_engine::workset::WorksetItemReference;
+
+        // 1. WorksetItemReference with secrets
+        let item_with_secret = WorksetItemReference {
+            id: "item-secret-1".to_string(),
+            title: Some("Database config: postgres://admin:secretpass123@db.example.com/mydb".to_string()),
+            item_type: "text".to_string(),
+            relevance: WorksetItemRelevance::Primary,
+            relevance_score: 0.95,
+            provenance: InformationProvenance::Observed,
+            app_name: Some("Terminal".to_string()),
+            domain: None,
+            content_snippet: "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDsk_sample and API key sk-abcdef1234567890abcdef1234567890".to_string(),
+            reasons: vec!["password: mySuperSecretPassword!".to_string()],
+            created_at: Utc::now().to_rfc3339(),
+            last_active_at: Some(Utc::now().to_rfc3339()),
+            is_suggested_addition: false,
+        };
+
+        let snapshot_ref = SnapshotWorksetItemReference::from(&item_with_secret);
+
+        assert!(!snapshot_ref.title.as_ref().unwrap().contains("secretpass123"));
+        assert!(snapshot_ref.title.as_ref().unwrap().contains("[CONNECTION_STRING_REDACTED]"));
+        assert!(!snapshot_ref.content_snippet.contains("Bearer eyJ"));
+        assert!(!snapshot_ref.content_snippet.contains("sk-abcdef1234567890"));
+        assert!(snapshot_ref.content_snippet.contains("[REDACTED]") || snapshot_ref.content_snippet.contains("[API_KEY_REDACTED]"));
+        assert!(!snapshot_ref.reasons[0].contains("mySuperSecretPassword"));
+
+        // 2. Task reference with credentials
+        let task_cand = TaskCandidate {
+            id: "tc-1".to_string(),
+            context_id: Some("ws-1".to_string()),
+            title: "Fix bug with token Bearer abcdef1234567890~+=".to_string(),
+            confidence: 0.85,
+            status: crate::db::models::TaskCandidateStatus::Detected,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        let snap_task = SnapshotTaskReference::from(&task_cand);
+        assert!(!snap_task.title.contains("abcdef1234567890"));
+        assert!(snap_task.title.contains("Bearer [REDACTED]"));
+    }
+
+    #[test]
+    fn test_privacy_setting_disabled_suppresses_snapshots() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        // Explicitly disable context snapshots in settings
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_context_snapshots = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        assert!(!ContextSnapshotService::is_snapshots_enabled(&conn));
+
+        let service = ContextSnapshotService::new();
+        let trigger = SnapshotTrigger::TaskTransition {
+            task_id: Some("t-code".to_string()),
+            task_title: "Code".to_string(),
+            transition_type: "switch".to_string(),
+        };
+
+        // When disabled, handle_trigger must return Ok(None) and not generate snapshots
+        let result = service.handle_trigger(&conn, "test-ws", trigger).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_privacy_setting_disabled_preserves_existing_history() {
+        let repo = ContextSnapshotHistoryRepository::new();
+        let snap = ContextSnapshotBuilder::new("ws-persist-test", "Persist WS")
+            .with_state(ContextStateValue::Active)
+            .build();
+
+        let snap_id = snap.id.clone();
+        assert!(repo.record_snapshot(snap));
+
+        // When setting is disabled, existing history remains intact
+        let history = repo.get_history("ws-persist-test").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.latest().unwrap().id, snap_id);
     }
 }
 
