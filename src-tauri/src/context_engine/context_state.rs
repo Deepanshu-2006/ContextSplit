@@ -3528,4 +3528,215 @@ mod tests {
         assert!(explanation.uncertainty_note.is_some());
         assert!(explanation.uncertainty_note.unwrap().contains("emerging or sparse"));
     }
+
+    // =========================================================================
+    // Day 19 Step 9: Restore Context State After App Restart
+    // =========================================================================
+
+    #[test]
+    fn test_context_state_restored_across_app_restart() {
+        // Setup a persistent SQLite file on disk
+        let db_path = format!(
+            "{}/contextsplit_restart_test_{}.db",
+            std::env::temp_dir().display(),
+            uuid::Uuid::new_v4()
+        );
+
+        let ws_id: String;
+
+        // Session 1: User works in context and closes app
+        {
+            let conn1 = Connection::open(&db_path).unwrap();
+            crate::db::run_migrations(&conn1).unwrap();
+
+            let ws = crate::db::operations::create_workspace(&conn1, "Aurora Website").unwrap();
+            ws_id = ws.id.clone();
+
+            // Create items in workspace
+            let _item1 = crate::db::operations::create_item(
+                &conn1,
+                Some(&ws.id),
+                None,
+                "url",
+                "https://www.figma.com/design/aurora-hero",
+                Some("Figma hero design"),
+                r#"{"app_name":"Figma"}"#,
+            )
+            .unwrap();
+
+            let _item2 = crate::db::operations::create_item(
+                &conn1,
+                Some(&ws.id),
+                None,
+                "code",
+                "export const Hero = () => <div>Hero</div>;",
+                Some("React Hero component"),
+                r#"{"app_name":"VS Code"}"#,
+            )
+            .unwrap();
+
+            let _item3 = crate::db::operations::create_item(
+                &conn1,
+                Some(&ws.id),
+                None,
+                "url",
+                "https://framer.com/motion",
+                Some("Framer Motion reference"),
+                r#"{"app_name":"Chrome"}"#,
+            )
+            .unwrap();
+
+            // Create active task candidate
+            let now_str = Utc::now().to_rfc3339();
+            conn1.execute(
+                "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    ws.id,
+                    "Hero animation",
+                    0.92,
+                    "active",
+                    now_str,
+                    now_str,
+                    now_str,
+                    now_str,
+                ],
+            ).unwrap();
+
+            // Explicit context transition
+            let trans_id = uuid::Uuid::new_v4().to_string();
+            conn1.execute(
+                "INSERT INTO context_transitions (id, from_context_id, to_context_id, transition_type, confidence, detected_at, created_at)
+                 VALUES (?1, NULL, ?2, 'context_start', 0.90, ?3, ?3)",
+                rusqlite::params![trans_id, ws.id, now_str],
+            ).unwrap();
+
+            // Verify state is derivable in Session 1
+            let state1 = ContextStateService::new().derive_for_context(&conn1, &ws.id).unwrap();
+            assert_eq!(state1.context_name.as_deref(), Some("Aurora Website"));
+            assert_eq!(state1.task_title.as_deref(), Some("Hero animation"));
+            assert!(state1.is_working());
+
+            // Drop conn1 -> simulates application termination / restart
+        }
+
+        // Session 2: ContextSplit restarts with a completely fresh connection
+        {
+            let conn2 = Connection::open(&db_path).unwrap();
+
+            // Reconstruct ContextState entirely from persisted data
+            let service = ContextStateService::new();
+            let state2 = service.derive_for_context(&conn2, &ws_id).unwrap();
+
+            // 1. Context identity
+            assert_eq!(state2.context_id, ws_id);
+            assert_eq!(state2.context_name.as_deref(), Some("Aurora Website"));
+
+            // 2. You were working on: Hero animation
+            assert_eq!(state2.task_title.as_deref(), Some("Hero animation"));
+
+            // 3. Last active timestamp preserved
+            assert!(state2.last_active_at.is_some());
+
+            // 4. Continue with: relevant items preserved
+            assert_eq!(state2.recent_item_ids.len(), 3);
+            let resume = state2.resume_state;
+            assert_eq!(resume.left_off_on.as_deref(), Some("Hero animation"));
+            assert!(!resume.recent_work.is_empty());
+
+            // 5. State explanation with progressive disclosure intact
+            assert_eq!(state2.explanation.title, "Why ContextSplit thinks this:");
+            assert!(!state2.explanation.reasons.is_empty());
+            assert!(state2.explanation.reasons.iter().any(|r| r.text.contains("Hero animation")));
+
+            // 6. Integrated Context Overview also works seamlessly
+            let overview = crate::context_engine::overview::get_context_overview(&conn2, &ws_id).unwrap();
+            assert_eq!(overview.name, "Aurora Website");
+            assert!(overview.context_state.is_some());
+            let overview_state = overview.context_state.unwrap();
+            assert_eq!(overview_state.task_title.as_deref(), Some("Hero animation"));
+        }
+
+        // Clean up temporary database file
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_stale_context_not_falsely_active_after_restart() {
+        let db_path = format!(
+            "{}/contextsplit_stale_test_{}.db",
+            std::env::temp_dir().display(),
+            uuid::Uuid::new_v4()
+        );
+
+        let ws_id: String;
+
+        // Session 1: Create workspace with activity 14 days ago
+        {
+            let conn1 = Connection::open(&db_path).unwrap();
+            crate::db::run_migrations(&conn1).unwrap();
+
+            let ws = crate::db::operations::create_workspace(&conn1, "University OS").unwrap();
+            ws_id = ws.id.clone();
+
+            let old_time = (Utc::now() - chrono::Duration::days(14)).to_rfc3339();
+
+            let item = crate::db::operations::create_item(
+                &conn1,
+                Some(&ws.id),
+                None,
+                "text",
+                "Round robin scheduling algorithm notes",
+                Some("Process scheduling notes"),
+                r#"{"app_name":"Notes"}"#,
+            )
+            .unwrap();
+
+            // Update item creation time to 14 days ago
+            conn1.execute(
+                "UPDATE items SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_time, item.id],
+            ).unwrap();
+
+            // Task candidate from 14 days ago
+            conn1.execute(
+                "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    ws.id,
+                    "Process scheduling assignment",
+                    0.80,
+                    "detected",
+                    old_time,
+                    old_time,
+                    old_time,
+                    old_time,
+                ],
+            ).unwrap();
+        }
+
+        // Session 2: Fresh restart
+        {
+            let conn2 = Connection::open(&db_path).unwrap();
+
+            let state = ContextStateService::new().derive_for_context(&conn2, &ws_id).unwrap();
+
+            // Invariant: Stale context must NOT be falsely marked active
+            assert_ne!(state.state, ContextStateValue::Active);
+            assert!(
+                state.state == ContextStateValue::Dormant
+                    || state.state == ContextStateValue::Paused
+                    || state.state == ContextStateValue::RecentlyActive
+            );
+
+            // Reconstructed resume memory is still intact for when the user decides to continue
+            assert_eq!(state.context_name.as_deref(), Some("University OS"));
+            assert_eq!(state.task_title.as_deref(), Some("Process scheduling assignment"));
+            assert!(state.resume_state.left_off_on.is_some());
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }
