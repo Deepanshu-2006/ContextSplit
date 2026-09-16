@@ -33,7 +33,7 @@ pub mod workset;
 pub mod context_state;
 
 pub use context_state::{
-    ContextState, ContextStateBuilder, ContextStateService, ContextStateValue,
+    ContextResumeState, ContextState, ContextStateBuilder, ContextStateService, ContextStateValue,
     MeaningfulActivity, MeaningfulActivityResolver, MeaningfulActivityType,
     MeaningfulEntityReference,
 };
