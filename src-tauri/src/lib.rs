@@ -1125,6 +1125,16 @@ fn get_resume_state(
     service.get_resume_state(&conn, context_id)
 }
 
+#[tauri::command]
+fn evaluate_resume_readiness(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::context_state::ResumeReadinessAssessment, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let service = context_engine::context_state::ContextStateService::new();
+    service.evaluate_readiness(&conn, context_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1325,7 +1335,8 @@ pub fn run() {
             submit_workset_feedback,
             // Context State & Resume (Day 19)
             get_context_state,
-            get_resume_state
+            get_resume_state,
+            evaluate_resume_readiness
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

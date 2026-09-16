@@ -35,7 +35,8 @@ pub mod context_state;
 pub use context_state::{
     ContextResumeState, ContextState, ContextStateBuilder, ContextStateService, ContextStateValue,
     MeaningfulActivity, MeaningfulActivityResolver, MeaningfulActivityType,
-    MeaningfulEntityReference,
+    MeaningfulEntityReference, ResumeReadiness, ResumeReadinessAssessment,
+    ResumeReadinessEvaluator,
 };
 
 pub use workset::{
