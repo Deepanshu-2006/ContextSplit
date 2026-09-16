@@ -424,7 +424,11 @@ function ResumeMemoryOverviewContent({
     workset?.last_active_at ||
     memory?.last_active_at ||
     overview?.recent_activity;
-  const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Active recently';
+  const formattedLastActive =
+    (contextState?.freshness_display && contextState.freshness_display !== 'No prior activity'
+      ? contextState.freshness_display
+      : null) ||
+    (lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Active recently');
 
   // 3. WHERE YOU LEFT OFF & Progressive Disclosure
   const [showWhy, setShowWhy] = useState(false);

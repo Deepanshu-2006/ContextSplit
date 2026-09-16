@@ -68,6 +68,11 @@ export interface MeaningfulActivity {
 }
 
 /**
+ * State freshness classification based on contextual activity timestamps.
+ */
+export type StateFreshness = "fresh" | "recent" | "stale" | "very_stale";
+
+/**
  * Human-readable resume state representing where the user left off in a context.
  *
  * Derived from ContextMemory + ContextWorkset + activity without launching apps/files.
@@ -82,6 +87,8 @@ export interface ContextResumeState {
   formatted_resume_summary: string;
   readiness: ResumeReadinessAssessment;
   state: ContextStateValue;
+  freshness: StateFreshness;
+  freshness_display: string;
   confidence: number;
   reconstructed_at: string;
 }
@@ -112,6 +119,8 @@ export interface ContextState {
   task_id?: string | null;
   task_title?: string | null;
   state: ContextStateValue;
+  freshness: StateFreshness;
+  freshness_display: string;
   last_active_at?: string | null;
   last_activity_segment_id?: string | null;
   last_transition_id?: string | null;

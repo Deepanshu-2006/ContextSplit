@@ -103,6 +103,124 @@ impl std::fmt::Display for ContextStateValue {
 }
 
 // =========================================================================
+// State Freshness (Day 19 Step 11)
+// =========================================================================
+
+/// State freshness classification based on contextual activity timestamps.
+///
+/// Invariants:
+/// - Classifies as: fresh, recent, stale, very_stale.
+/// - Does NOT make arbitrary claims such as exact user attention (e.g. "You focused for 2 hours").
+/// - UI wording uses defensible phrasing: "Active recently", "Last active yesterday", "Last active 5 days ago".
+/// - Influences resume readiness, current context display, and workset prioritization.
+/// - NEVER deletes old state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateFreshness {
+    /// Active within the last 2 hours.
+    Fresh,
+    /// Active within the last 48 hours (today or yesterday).
+    Recent,
+    /// Active within the last 2 to 7 days.
+    Stale,
+    /// Inactive for more than 7 days, or no recorded activity history.
+    VeryStale,
+}
+
+impl StateFreshness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Recent => "recent",
+            Self::Stale => "stale",
+            Self::VeryStale => "very_stale",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Fresh => "Fresh",
+            Self::Recent => "Recent",
+            Self::Stale => "Stale",
+            Self::VeryStale => "Very Stale",
+        }
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+
+    pub fn is_recent(&self) -> bool {
+        matches!(self, Self::Recent)
+    }
+
+    pub fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale)
+    }
+
+    pub fn is_very_stale(&self) -> bool {
+        matches!(self, Self::VeryStale)
+    }
+
+    /// Classifies freshness from elapsed seconds since last active contextual event.
+    pub fn classify(elapsed_seconds: i64) -> Self {
+        if elapsed_seconds < 7200 {
+            // < 2 hours
+            Self::Fresh
+        } else if elapsed_seconds < 172800 {
+            // < 48 hours (today / yesterday)
+            Self::Recent
+        } else if elapsed_seconds < 604800 {
+            // 2 - 7 days
+            Self::Stale
+        } else {
+            // > 7 days
+            Self::VeryStale
+        }
+    }
+
+    /// Generates defensible, non-arbitrary display wording for the UI.
+    ///
+    /// Avoids unsupported attention claims like "You focused for 2 hours".
+    pub fn display_wording(&self, elapsed_seconds: i64) -> String {
+        if elapsed_seconds < 300 {
+            "Active now".to_string()
+        } else if elapsed_seconds < 3600 {
+            let mins = (elapsed_seconds / 60).max(1);
+            format!("Active {}m ago", mins)
+        } else if elapsed_seconds < 7200 {
+            "Active recently".to_string()
+        } else if elapsed_seconds < 86400 {
+            let hours = (elapsed_seconds / 3600).max(1);
+            if hours == 1 {
+                "Last active 1 hour ago".to_string()
+            } else {
+                format!("Last active {} hours ago", hours)
+            }
+        } else if elapsed_seconds < 172800 {
+            "Last active yesterday".to_string()
+        } else {
+            let days = elapsed_seconds / 86400;
+            if days <= 1 {
+                "Last active yesterday".to_string()
+            } else {
+                format!("Last active {} days ago", days)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for StateFreshness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+fn default_state_freshness() -> StateFreshness {
+    StateFreshness::Fresh
+}
+
+// =========================================================================
 // Meaningful Activity Models & Classification (Day 19 Step 4)
 // =========================================================================
 
@@ -625,7 +743,28 @@ impl ResumeReadinessEvaluator {
         workset_count: usize,
         has_meaningful_activity: bool,
         has_recent_activity: bool,
+        has_user_feedback: bool,
+    ) -> ResumeReadinessAssessment {
+        Self::evaluate_with_freshness(
+            state,
+            left_off_on,
+            workset_count,
+            has_meaningful_activity,
+            has_recent_activity,
+            has_user_feedback,
+            StateFreshness::Fresh,
+        )
+    }
+
+    /// Evaluates resume readiness taking state freshness into account.
+    pub fn evaluate_with_freshness(
+        state: ContextStateValue,
+        left_off_on: Option<&str>,
+        workset_count: usize,
+        has_meaningful_activity: bool,
+        has_recent_activity: bool,
         _has_user_feedback: bool,
+        freshness: StateFreshness,
     ) -> ResumeReadinessAssessment {
         let is_task_identified = left_off_on.is_some();
         let is_dormant = state == ContextStateValue::Dormant;
@@ -647,12 +786,13 @@ impl ResumeReadinessEvaluator {
             };
         }
 
-        // 2. Ready: Current task identified + relevant workset items (>= 2) + recent activity available + not uncertain/dormant
+        // 2. Ready: Current task identified + relevant workset items (>= 2) + recent activity available + not uncertain/dormant + fresh/recent
         if is_task_identified
             && workset_count >= 2
             && (has_recent_activity || state == ContextStateValue::Active || state == ContextStateValue::RecentlyActive)
             && !is_uncertain
             && !is_dormant
+            && (freshness == StateFreshness::Fresh || freshness == StateFreshness::Recent)
         {
             reasons.push("current task identified".to_string());
             if workset_count > 0 {
@@ -675,11 +815,13 @@ impl ResumeReadinessEvaluator {
         }
 
         // 3. Mostly Ready:
-        // Case A: Task identified + at least 1 workset item / meaningful activity
+        // Case A: Task identified + at least 1 workset item / meaningful activity (and not very stale)
         // Case B: Rich workset (>= 3) + recent activity, but task is general / implied
+        // Case C: Task identified + workset >= 2, but state is stale (older than 48h)
         if !is_uncertain && !is_dormant && (
-            (is_task_identified && (workset_count >= 1 || has_meaningful_activity))
-            || (workset_count >= 3 && has_recent_activity)
+            (is_task_identified && (workset_count >= 1 || has_meaningful_activity) && freshness != StateFreshness::VeryStale)
+            || (workset_count >= 3 && has_recent_activity && freshness != StateFreshness::VeryStale)
+            || (is_task_identified && workset_count >= 2 && freshness == StateFreshness::Stale)
         ) {
             reasons.push("context identified".to_string());
             if is_task_identified {
@@ -697,6 +839,9 @@ impl ResumeReadinessEvaluator {
             if has_recent_activity {
                 reasons.push("recent activity available".to_string());
             }
+            if freshness == StateFreshness::Stale {
+                reasons.push("state is stale (last active several days ago)".to_string());
+            }
 
             let formatted = Self::format_explanation(ResumeReadiness::MostlyReady, &reasons);
             return ResumeReadinessAssessment {
@@ -707,7 +852,7 @@ impl ResumeReadinessEvaluator {
         }
 
         // 4. Partial:
-        // Context identified, but task uncertain, limited activity, dormant, or competing signals
+        // Context identified, but task uncertain, limited activity, dormant, stale/very stale, or competing signals
         reasons.push("context identified".to_string());
         if !is_task_identified {
             reasons.push("task uncertain".to_string());
@@ -717,6 +862,9 @@ impl ResumeReadinessEvaluator {
         }
         if is_uncertain {
             reasons.push("competing context signals detected".to_string());
+        }
+        if freshness == StateFreshness::VeryStale {
+            reasons.push("state is stale (inactive for over a week)".to_string());
         }
 
         let formatted = Self::format_explanation(ResumeReadiness::Partial, &reasons);
@@ -777,6 +925,12 @@ pub struct ContextResumeState {
     pub readiness: ResumeReadinessAssessment,
     /// Conservative state of the context
     pub state: ContextStateValue,
+    /// State freshness classification (Day 19 Step 11)
+    #[serde(default = "default_state_freshness")]
+    pub freshness: StateFreshness,
+    /// Defensible relative display wording (e.g. "Active recently", "Last active yesterday")
+    #[serde(default)]
+    pub freshness_display: String,
     /// Calibrated state confidence score [0.0, 1.0]
     pub confidence: f64,
     /// ISO-8601 timestamp when this resume state was reconstructed
@@ -841,6 +995,12 @@ pub struct ContextState {
     pub task_title: Option<String>,
     /// Conservative working state classification
     pub state: ContextStateValue,
+    /// State freshness classification (Day 19 Step 11)
+    #[serde(default = "default_state_freshness")]
+    pub freshness: StateFreshness,
+    /// Defensible relative display wording (e.g. "Active recently", "Last active yesterday")
+    #[serde(default)]
+    pub freshness_display: String,
     /// ISO-8601 timestamp of last known activity in this context (nullable)
     pub last_active_at: Option<String>,
     /// ID of the last continuous activity segment (nullable)
@@ -1211,7 +1371,7 @@ impl ContextStateBuilder {
             consider_ts(&item.updated_at);
         }
 
-        let last_active_at = latest_ts_str;
+        let last_active_at = latest_ts_str.clone();
 
         // 2. Identify Latest Activity Segment and Transition IDs
         let mut context_segments: Vec<&ContextActivitySegment> = self
@@ -1456,6 +1616,14 @@ impl ContextStateBuilder {
             && self.evidence.is_empty();
 
         let elapsed_seconds = latest_ts.map(|t| (now - t).num_seconds().max(0));
+        let freshness = match elapsed_seconds {
+            Some(secs) => StateFreshness::classify(secs),
+            None => StateFreshness::VeryStale,
+        };
+        let freshness_display = match elapsed_seconds {
+            Some(secs) => freshness.display_wording(secs),
+            None => "No prior activity".to_string(),
+        };
 
         let (state, mut state_confidence) = if has_no_data {
             (ContextStateValue::InsufficientEvidence, 0.0)
@@ -1534,6 +1702,8 @@ impl ContextStateBuilder {
             &self.context_id,
             context_name.as_deref().unwrap_or("Workspace"),
             state,
+            freshness,
+            &freshness_display,
             task_title.as_deref(),
             &meaningful_activity,
             last_meaningful_item_title.as_deref(),
@@ -1568,6 +1738,8 @@ impl ContextStateBuilder {
             task_id,
             task_title,
             state,
+            freshness,
+            freshness_display,
             last_active_at,
             last_activity_segment_id,
             last_transition_id,
@@ -1962,6 +2134,8 @@ impl ContextStateBuilder {
         context_id: &str,
         context_name: &str,
         state: ContextStateValue,
+        freshness: StateFreshness,
+        freshness_display: &str,
         task_title: Option<&str>,
         meaningful_activity: &Option<MeaningfulActivity>,
         last_meaningful_item_title: Option<&str>,
@@ -2119,7 +2293,7 @@ impl ContextStateBuilder {
 
         let formatted_resume_summary = lines.join("\n");
 
-        // 5. Evaluate Resume Readiness (Day 19 Step 6)
+        // 5. Evaluate Resume Readiness (Day 19 Step 6) with State Freshness (Day 19 Step 11)
         let workset_count = workset.map(|w| w.items.len()).unwrap_or(0);
         let count_for_readiness = if workset_count > 0 {
             workset_count
@@ -2131,13 +2305,14 @@ impl ContextStateBuilder {
             || state == ContextStateValue::Active
             || state == ContextStateValue::RecentlyActive;
 
-        let readiness = ResumeReadinessEvaluator::evaluate(
+        let readiness = ResumeReadinessEvaluator::evaluate_with_freshness(
             state,
             left_off_on.as_deref(),
             count_for_readiness,
             last_act_text.is_some(),
             has_recent_activity,
             has_user_feedback,
+            freshness,
         );
 
         ContextResumeState {
@@ -2150,6 +2325,8 @@ impl ContextStateBuilder {
             formatted_resume_summary,
             readiness,
             state,
+            freshness,
+            freshness_display: freshness_display.to_string(),
             confidence,
             reconstructed_at: reconstructed_at.to_string(),
         }
@@ -3921,5 +4098,157 @@ mod tests {
         let tokyo_resume = all_resumes.iter().find(|r| r.context_id == ws_tokyo.id).unwrap();
         assert_eq!(tokyo_resume.context_name, "Tokyo Trip");
         assert_eq!(tokyo_resume.left_off_on.as_deref(), Some("7-day itinerary"));
+    }
+
+    #[test]
+    fn test_state_freshness_classification_and_wording() {
+        // 1. Fresh (< 2 hours)
+        let fresh_secs_now = 60; // 1 min ago
+        let f_now = StateFreshness::classify(fresh_secs_now);
+        assert_eq!(f_now, StateFreshness::Fresh);
+        assert_eq!(f_now.display_wording(fresh_secs_now), "Active now");
+
+        let fresh_secs_mins = 15 * 60; // 15 mins ago
+        let f_mins = StateFreshness::classify(fresh_secs_mins);
+        assert_eq!(f_mins, StateFreshness::Fresh);
+        assert_eq!(f_mins.display_wording(fresh_secs_mins), "Active 15m ago");
+
+        let fresh_secs_recent = 90 * 60; // 1.5 hours ago
+        let f_recent = StateFreshness::classify(fresh_secs_recent);
+        assert_eq!(f_recent, StateFreshness::Fresh);
+        assert_eq!(f_recent.display_wording(fresh_secs_recent), "Active recently");
+
+        // 2. Recent (< 48 hours)
+        let recent_secs_hours = 5 * 3600; // 5 hours ago
+        let r_hours = StateFreshness::classify(recent_secs_hours);
+        assert_eq!(r_hours, StateFreshness::Recent);
+        assert_eq!(r_hours.display_wording(recent_secs_hours), "Last active 5 hours ago");
+
+        let recent_secs_yesterday = 28 * 3600; // 28 hours ago
+        let r_yesterday = StateFreshness::classify(recent_secs_yesterday);
+        assert_eq!(r_yesterday, StateFreshness::Recent);
+        assert_eq!(r_yesterday.display_wording(recent_secs_yesterday), "Last active yesterday");
+
+        // 3. Stale (2 - 7 days)
+        let stale_secs = 5 * 86400; // 5 days ago
+        let s_days = StateFreshness::classify(stale_secs);
+        assert_eq!(s_days, StateFreshness::Stale);
+        assert_eq!(s_days.display_wording(stale_secs), "Last active 5 days ago");
+
+        // 4. Very Stale (> 7 days)
+        let very_stale_secs = 14 * 86400; // 14 days ago
+        let vs_days = StateFreshness::classify(very_stale_secs);
+        assert_eq!(vs_days, StateFreshness::VeryStale);
+        assert_eq!(vs_days.display_wording(very_stale_secs), "Last active 14 days ago");
+    }
+
+    #[test]
+    fn test_state_freshness_influences_readiness_and_workset_prioritization() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Items created at different times
+        let now = Utc::now();
+        let time_fresh = now.to_rfc3339();
+        let time_stale = (now - chrono::Duration::days(5)).to_rfc3339();
+        let time_very_stale = (now - chrono::Duration::days(14)).to_rfc3339();
+
+        let item_old = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://old-link.com",
+            Some("Old initial reference"),
+            r#"{"app_name":"Safari"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_very_stale, item_old.id]).unwrap();
+        conn.execute("UPDATE context_memberships SET created_at = ?1, updated_at = ?1 WHERE item_id = ?2", rusqlite::params![time_very_stale, item_old.id]).unwrap();
+
+        let item_medium = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "code",
+            "const stale = true;",
+            Some("Medium reference"),
+            r#"{"app_name":"VS Code"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_stale, item_medium.id]).unwrap();
+        conn.execute("UPDATE context_memberships SET created_at = ?1, updated_at = ?1 WHERE item_id = ?2", rusqlite::params![time_stale, item_medium.id]).unwrap();
+
+        let item_fresh = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://framer.com/motion",
+            Some("Latest Framer reference"),
+            r#"{"app_name":"Chrome"}"#,
+        ).unwrap();
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_fresh, item_fresh.id]).unwrap();
+        conn.execute("UPDATE context_memberships SET created_at = ?1, updated_at = ?1 WHERE item_id = ?2", rusqlite::params![time_fresh, item_fresh.id]).unwrap();
+
+        conn.execute(
+            "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                ws.id,
+                "Hero animation",
+                0.92,
+                "active",
+                time_fresh,
+                time_fresh,
+                time_fresh,
+                time_fresh,
+            ],
+        ).unwrap();
+
+        let service = ContextStateService::new();
+        let state = service.derive_for_context(&conn, &ws.id).unwrap();
+
+        // 1. Freshness classification
+        assert_eq!(state.freshness, StateFreshness::Fresh);
+        assert!(state.freshness_display.contains("Active"));
+
+        // 2. Workset / Recency prioritization: Fresh item is prioritized over very stale item
+        assert!(!state.recent_item_ids.is_empty());
+        assert_eq!(state.recent_item_ids[0], item_fresh.id);
+
+        // 3. Old state is NEVER deleted: All 3 items remain safely stored in DB
+        let all_items = crate::db::operations::list_items(&conn, Some(&ws.id)).unwrap();
+        assert_eq!(all_items.len(), 3);
+        assert!(all_items.iter().any(|i| i.id == item_old.id));
+        assert!(all_items.iter().any(|i| i.id == item_medium.id));
+        assert!(all_items.iter().any(|i| i.id == item_fresh.id));
+
+        // 4. Stale context test: Modify timestamp of workspace, task and latest items to 5 days ago
+        conn.execute("UPDATE workspaces SET last_activity_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_stale, ws.id]).unwrap();
+        conn.execute("UPDATE task_candidates SET last_active_at = ?1, first_detected_at = ?1, created_at = ?1, updated_at = ?1 WHERE context_id = ?2", rusqlite::params![time_stale, ws.id]).unwrap();
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_stale, item_fresh.id]).unwrap();
+        conn.execute("UPDATE context_memberships SET created_at = ?1, updated_at = ?1 WHERE item_id = ?2", rusqlite::params![time_stale, item_fresh.id]).unwrap();
+
+        crate::context_engine::memory::invalidate_memory_cache(Some(&ws.id));
+        let stale_state = service.derive_for_context(&conn, &ws.id).unwrap();
+        assert_eq!(stale_state.freshness, StateFreshness::Stale);
+        assert_eq!(stale_state.freshness_display, "Last active 5 days ago");
+        assert_eq!(stale_state.resume_state.freshness, StateFreshness::Stale);
+        assert_eq!(stale_state.resume_state.freshness_display, "Last active 5 days ago");
+
+        // 5. Very stale context test: Modify timestamp of workspace, task and all items to 14 days ago
+        conn.execute("UPDATE workspaces SET last_activity_at = ?1, updated_at = ?1 WHERE id = ?2", rusqlite::params![time_very_stale, ws.id]).unwrap();
+        conn.execute("UPDATE task_candidates SET last_active_at = ?1, first_detected_at = ?1, created_at = ?1, updated_at = ?1 WHERE context_id = ?2", rusqlite::params![time_very_stale, ws.id]).unwrap();
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE workspace_id = ?2", rusqlite::params![time_very_stale, ws.id]).unwrap();
+        conn.execute("UPDATE context_memberships SET created_at = ?1, updated_at = ?1 WHERE workspace_id = ?2", rusqlite::params![time_very_stale, ws.id]).unwrap();
+
+        crate::context_engine::memory::invalidate_memory_cache(Some(&ws.id));
+        let very_stale_state = service.derive_for_context(&conn, &ws.id).unwrap();
+        assert_eq!(very_stale_state.freshness, StateFreshness::VeryStale);
+        assert_eq!(very_stale_state.freshness_display, "Last active 14 days ago");
+        assert_eq!(very_stale_state.readiness.readiness, ResumeReadiness::Partial);
+        assert!(very_stale_state.readiness.reasons.iter().any(|r| r.contains("over a week")));
     }
 }
