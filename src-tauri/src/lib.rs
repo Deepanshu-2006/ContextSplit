@@ -1148,7 +1148,7 @@ fn get_context_snapshot(
     let service = context_engine::snapshot::ContextSnapshotService::new();
     let snapshot = service.derive_for_context(&conn, context_id)?;
     if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
-        service.record_snapshot_history(snapshot.clone());
+        let _ = service.record_snapshot_history_with_db(&conn, snapshot.clone());
     }
     Ok(snapshot)
 }
@@ -1162,10 +1162,10 @@ fn get_context_snapshot_history(
     let service = context_engine::snapshot::ContextSnapshotService::new();
     if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
         if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
-            service.record_snapshot_history(snapshot);
+            let _ = service.record_snapshot_history_with_db(&conn, snapshot);
         }
     }
-    Ok(service.get_snapshot_history(context_id))
+    service.get_snapshot_history_from_db(&conn, context_id)
 }
 
 #[tauri::command]
@@ -1177,7 +1177,7 @@ fn get_context_snapshot_diff(
     let service = context_engine::snapshot::ContextSnapshotService::new();
     if context_engine::snapshot::ContextSnapshotService::is_snapshots_enabled(&conn) {
         if let Ok(snapshot) = service.derive_for_context(&conn, context_id) {
-            service.record_snapshot_history(snapshot);
+            let _ = service.record_snapshot_history_with_db(&conn, snapshot);
         }
     }
     Ok(service.compare_latest_with_previous(context_id))

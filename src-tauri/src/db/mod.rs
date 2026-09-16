@@ -466,6 +466,38 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 22;
     }
 
+    if user_version < 23 {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_snapshots (
+                id TEXT PRIMARY KEY,
+                context_id TEXT NOT NULL,
+                context_name TEXT NOT NULL,
+                task_id TEXT,
+                task_title TEXT,
+                created_at TEXT NOT NULL,
+                last_activity_at TEXT,
+                state TEXT NOT NULL,
+                snapshot_confidence REAL NOT NULL DEFAULT 0.0,
+                quality_rating TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                FOREIGN KEY(context_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_snapshots_context_created ON context_snapshots(context_id, created_at DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_snapshots_task ON context_snapshots(context_id, task_title)",
+            [],
+        )?;
+
+        user_version = 23;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

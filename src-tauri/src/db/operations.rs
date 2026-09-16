@@ -2048,6 +2048,120 @@ pub fn delete_task_candidate(
     Ok(())
 }
 
+pub fn save_context_snapshot(
+    conn: &Connection,
+    snapshot: &crate::context_engine::snapshot::ContextSnapshot,
+    max_retention: usize,
+) -> Result<()> {
+    let snapshot_json = serde_json::to_string(snapshot).unwrap_or_else(|_| "{}".to_string());
+    let quality_str = match snapshot.quality.rating {
+        crate::context_engine::snapshot::SnapshotQualityRating::Complete => "complete",
+        crate::context_engine::snapshot::SnapshotQualityRating::Useful => "useful",
+        crate::context_engine::snapshot::SnapshotQualityRating::Partial => "partial",
+        crate::context_engine::snapshot::SnapshotQualityRating::Insufficient => "insufficient",
+    };
+
+    conn.execute(
+        "INSERT OR REPLACE INTO context_snapshots
+         (id, context_id, context_name, task_id, task_title, created_at, last_activity_at, state, snapshot_confidence, quality_rating, snapshot_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            snapshot.id,
+            snapshot.context_id,
+            snapshot.context_name,
+            snapshot.task_id,
+            snapshot.task_title,
+            snapshot.created_at,
+            snapshot.last_activity_at,
+            snapshot.state.as_str(),
+            snapshot.snapshot_confidence,
+            quality_str,
+            snapshot_json
+        ],
+    )?;
+
+    // Retention cleanup: Prune old snapshot records exceeding max_retention for this context ONLY.
+    // Invariant: Never deletes items, task candidates, or other contextual evidence!
+    prune_context_snapshots(conn, &snapshot.context_id, max_retention)?;
+
+    Ok(())
+}
+
+pub fn prune_context_snapshots(
+    conn: &Connection,
+    context_id: &str,
+    max_retention: usize,
+) -> Result<usize> {
+    if max_retention == 0 {
+        return Ok(0);
+    }
+    let deleted = conn.execute(
+        "DELETE FROM context_snapshots
+         WHERE context_id = ?1
+           AND id NOT IN (
+               SELECT id FROM context_snapshots
+               WHERE context_id = ?1
+               ORDER BY created_at DESC
+               LIMIT ?2
+           )",
+        params![context_id, max_retention as i64],
+    )?;
+    Ok(deleted)
+}
+
+pub fn list_context_snapshots_bounded(
+    conn: &Connection,
+    context_id: &str,
+    limit: usize,
+) -> Result<Vec<crate::context_engine::snapshot::ContextSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT snapshot_json FROM context_snapshots
+         WHERE context_id = ?1
+         ORDER BY created_at ASC
+         LIMIT ?2",
+    )?;
+
+    let rows = stmt.query_map(params![context_id, limit as i64], |row| {
+        let json_str: String = row.get(0)?;
+        Ok(json_str)
+    })?;
+
+    let mut list = Vec::new();
+    for r in rows {
+        if let Ok(json_str) = r {
+            if let Ok(snap) =
+                serde_json::from_str::<crate::context_engine::snapshot::ContextSnapshot>(&json_str)
+            {
+                list.push(snap);
+            }
+        }
+    }
+    Ok(list)
+}
+
+pub fn get_latest_context_snapshot(
+    conn: &Connection,
+    context_id: &str,
+) -> Result<Option<crate::context_engine::snapshot::ContextSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT snapshot_json FROM context_snapshots
+         WHERE context_id = ?1
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query(params![context_id])?;
+    if let Some(row) = rows.next()? {
+        let json_str: String = row.get(0)?;
+        if let Ok(snap) =
+            serde_json::from_str::<crate::context_engine::snapshot::ContextSnapshot>(&json_str)
+        {
+            return Ok(Some(snap));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
