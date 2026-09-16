@@ -6,19 +6,16 @@ import {
   Layers,
   Globe,
   Search,
-  Activity,
   RefreshCw,
   Archive,
   ArchiveRestore,
   ExternalLink,
   Laptop,
-  CheckCircle2,
   AlertCircle,
   ArrowRight,
   Calendar,
   Check,
   Copy,
-  HelpCircle,
   ChevronDown,
   ChevronUp,
   Info,
@@ -26,7 +23,7 @@ import {
 import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
-import { contextStateService, ContextState, ContextStateValue, StateReason } from '../../services/contextState';
+import { contextStateService, ContextState, ContextStateValue } from '../../services/contextState';
 import { contextSnapshotService, ContextSnapshotDiff } from '../../services/contextSnapshot';
 import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -159,11 +156,6 @@ export function ContextOverviewPanel() {
                   <LifecycleBadge state={overview.lifecycle_state} />
                 )}
               </div>
-              <p className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                <span>Working Context Overview</span>
-                <span>•</span>
-                <span>Resume & Memory</span>
-              </p>
             </div>
           </div>
 
@@ -174,52 +166,49 @@ export function ContextOverviewPanel() {
               className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
               title="Refresh Overview"
             >
-              <RefreshCw size={15} className={isLoading ? 'animate-spin text-gray-700' : ''} />
+              <RefreshCw size={14} className={isLoading ? 'animate-spin text-gray-700' : ''} />
             </button>
             <button
               onClick={closeOverview}
               className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
               title="Close panel (Esc)"
             >
-              <X size={17} />
+              <X size={16} />
             </button>
           </div>
         </div>
 
         {/* Tab switcher */}
-        <div className="flex border-b border-gray-100 px-6 bg-white">
+        <div className="flex border-b border-gray-100 px-6 bg-white text-xs">
           <button
             onClick={() => setActiveTab('overview')}
-            className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+            className={`py-2.5 px-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'overview'
                 ? 'border-gray-900 text-gray-900'
-                : 'border-transparent text-gray-500 hover:text-gray-800'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            <Activity size={13} />
-            <span>Resume & Overview</span>
+            <span>Overview</span>
           </button>
           <button
             onClick={() => setActiveTab('workset')}
-            className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+            className={`py-2.5 px-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'workset'
                 ? 'border-gray-900 text-gray-900'
-                : 'border-transparent text-gray-500 hover:text-gray-800'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            <Layers size={13} />
-            <span>Working Set ({workset?.items.length ?? 0})</span>
+            <span>Working Set</span>
           </button>
           <button
             onClick={() => setActiveTab('timeline')}
-            className={`py-2.5 px-3 text-xs font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+            className={`py-2.5 px-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'timeline'
                 ? 'border-gray-900 text-gray-900'
-                : 'border-transparent text-gray-500 hover:text-gray-800'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            <Clock size={13} />
-            <span>Activity Timeline ({overview?.timeline.chronological_activity.length ?? 0})</span>
+            <span>Timeline</span>
           </button>
         </div>
 
@@ -227,8 +216,8 @@ export function ContextOverviewPanel() {
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {isLoading && !overview && !memory && !contextState ? (
             <div className="h-64 flex flex-col items-center justify-center text-gray-400 gap-2">
-              <RefreshCw size={20} className="animate-spin text-gray-500" />
-              <p className="text-xs">Reconstructing working state...</p>
+              <RefreshCw size={18} className="animate-spin text-gray-400" />
+              <p className="text-xs">Loading context...</p>
             </div>
           ) : error ? (
             <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200 text-sm flex items-start gap-3">
@@ -290,15 +279,6 @@ export function ContextOverviewPanel() {
               />
             )
           )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-3 border-t border-gray-100 bg-gray-50/50 flex items-center justify-between text-[11px] text-gray-400">
-          <span className="flex items-center gap-1.5">
-            <CheckCircle2 size={12} className="text-emerald-500" />
-            Human-readable contextual working state
-          </span>
-          <span>Context Engine</span>
         </div>
       </div>
 
@@ -396,7 +376,7 @@ function ResumeMemoryOverviewContent({
     targetWorkspaceName ||
     'Workspace';
 
-  // 1. Context Working State (Active, Recently active, etc.)
+  // 1. Context Working State
   const stateValue: ContextStateValue =
     contextState?.state ||
     (overview?.lifecycle_state === 'archived' ? 'dormant' : overview?.lifecycle_state === 'dormant' ? 'dormant' : 'active');
@@ -412,12 +392,6 @@ function ResumeMemoryOverviewContent({
       : null);
   const isTaskAvailable = Boolean(rawTask && rawTask.trim() !== '' && rawTask.toLowerCase() !== 'not clear yet');
   const taskTitle = isTaskAvailable && rawTask ? rawTask : `Recent work in ${contextName}`;
-  const isTaskInferred = Boolean(
-    isTaskAvailable &&
-      contextState?.provenance !== 'confirmed' &&
-      workset?.provenance !== 'confirmed' &&
-      memory?.recent_task?.provenance !== 'confirmed'
-  );
 
   // Last active timestamp
   const lastActiveTimestamp =
@@ -429,9 +403,9 @@ function ResumeMemoryOverviewContent({
     (contextState?.freshness_display && contextState.freshness_display !== 'No prior activity'
       ? contextState.freshness_display
       : null) ||
-    (lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Active recently');
+    (lastActiveTimestamp ? formatSessionTime(lastActiveTimestamp) : 'Active recently');
 
-  // 3. WHERE YOU LEFT OFF & Progressive Disclosure
+  // Progressive Disclosure: "What changed?" and "Why?"
   const [showWhy, setShowWhy] = useState(false);
   const [showWhatChanged, setShowWhatChanged] = useState(false);
   const [snapshotDiff, setSnapshotDiff] = useState<ContextSnapshotDiff | null>(null);
@@ -459,13 +433,15 @@ function ResumeMemoryOverviewContent({
     }
   };
 
-  // Conservative derivation: if state is uncertain or no specific activity, do not fabricate.
+  // 3. WHERE YOU LEFT OFF
   const isStateUncertain = stateValue === 'uncertain' || stateValue === 'insufficient_evidence';
+  const primaryWorksetItem = workset?.items.find((i) => i.relevance === 'primary');
+  
   let whereLeftOff: string;
-  let isLeftOffInferred = false;
-
   if (isStateUncertain) {
     whereLeftOff = `Recent activity in ${contextName}`;
+  } else if (primaryWorksetItem?.title || primaryWorksetItem?.content_snippet) {
+    whereLeftOff = primaryWorksetItem.title || primaryWorksetItem.content_snippet;
   } else if (
     contextState?.last_meaningful_activity &&
     contextState.last_meaningful_activity.trim().length > 0 &&
@@ -473,19 +449,15 @@ function ResumeMemoryOverviewContent({
     contextState.last_meaningful_activity !== `Recent activity in ${contextName}`
   ) {
     whereLeftOff = contextState.last_meaningful_activity;
-    isLeftOffInferred =
-      contextState.meaningful_activity?.provenance === 'inferred' || contextState.provenance === 'inferred';
   } else if (contextState?.resume_state?.last_meaningful_activity) {
     whereLeftOff = contextState.resume_state.last_meaningful_activity;
-    isLeftOffInferred = true;
   } else if (contextState?.resume_state?.left_off_on) {
     whereLeftOff = contextState.resume_state.left_off_on;
-    isLeftOffInferred = true;
   } else {
     whereLeftOff = `Recent activity in ${contextName}`;
   }
 
-  // 4. Continue with items
+  // 4. CONTINUE WITH items
   const continueWithItems: { id: string; title: string; app_name?: string | null; domain?: string | null }[] = useMemo(() => {
     if (workset?.items && workset.items.length > 0) {
       return workset.items.map((item) => ({
@@ -512,52 +484,21 @@ function ResumeMemoryOverviewContent({
     return [];
   }, [workset, contextState, overview]);
 
-  // Last session derivations
-  const lastLeftOffItem = useMemo(() => {
-    const primary = workset?.items.find((i) => i.relevance === 'primary');
-    if (primary?.title) return primary.title;
-    if (primary?.content_snippet) return primary.content_snippet;
-    if (continueWithItems[0]?.title) return continueWithItems[0].title;
-    if (whereLeftOff && whereLeftOff !== `Recent activity in ${contextName}`) return whereLeftOff;
-    return null;
-  }, [workset, continueWithItems, whereLeftOff, contextName]);
-
-  const relevantItemsCount = continueWithItems.length > 0 ? continueWithItems.length : (workset?.items.length ?? 0);
-  const hasMeaningfulSession =
-    !isStateUncertain &&
-    (isTaskAvailable || continueWithItems.length > 0 || (whereLeftOff && whereLeftOff !== `Recent activity in ${contextName}`));
-
-  // Reason list for progressive disclosure
-  const explanationTitle = contextState?.explanation?.title || 'Why ContextSplit thinks this:';
-  const explanationReasons: StateReason[] = useMemo(() => {
+  // Clean explanation reasons without badge clutter
+  const explanationReasons = useMemo(() => {
     if (contextState?.explanation?.reasons && contextState.explanation.reasons.length > 0) {
-      return contextState.explanation.reasons;
+      return contextState.explanation.reasons.map(r => r.text);
     }
-    const list: StateReason[] = [];
+    const list: string[] = [];
     if (taskTitle && taskTitle !== `Recent work in ${contextName}`) {
-      list.push({
-        text: `${taskTitle} was the most recent active task`,
-        provenance: isTaskInferred ? 'Inferred' : 'Observed',
-      });
+      list.push(`${taskTitle} was the most recent active task`);
     }
     if (continueWithItems.length > 0) {
-      list.push({
-        text: `${continueWithItems.length} related item${continueWithItems.length === 1 ? ' was' : 's were'} recently active`,
-        provenance: 'Observed',
-      });
+      list.push(`${continueWithItems.length} relevant item${continueWithItems.length === 1 ? ' was' : 's were'} recently active`);
     }
-    list.push({
-      text: `${contextName} remained the active context`,
-      provenance: 'Observed',
-    });
-    if (contextState?.active_application) {
-      list.push({
-        text: `${contextState.active_application} was the latest recorded application context`,
-        provenance: 'Observed',
-      });
-    }
+    list.push(`${contextName} remained the active context`);
     return list;
-  }, [contextState, taskTitle, isTaskInferred, continueWithItems.length, contextName]);
+  }, [contextState, taskTitle, continueWithItems.length, contextName]);
 
   const uncertaintyNote =
     contextState?.explanation?.uncertainty_note ||
@@ -566,13 +507,13 @@ function ResumeMemoryOverviewContent({
       : null);
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-150">
-      {/* 1. Context · State Header */}
+    <div className="space-y-7 animate-in fade-in duration-150">
+      {/* 1. Context & Subtle Status */}
       <div className="flex items-center justify-between pb-3 border-b border-gray-100">
         <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
           <span>{contextName}</span>
           <span className="text-gray-300 font-normal">·</span>
-          <span className="text-xs font-medium text-gray-600">
+          <span className="text-xs font-normal text-gray-500">
             {stateLabel}
           </span>
         </div>
@@ -581,15 +522,15 @@ function ResumeMemoryOverviewContent({
       {/* 2. YOU WERE WORKING ON */}
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
-          <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-            YOU WERE WORKING ON
-          </div>
+          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            You were working on
+          </span>
           <button
             onClick={handleToggleWhatChanged}
-            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer border ${
+            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer ${
               showWhatChanged
-                ? 'bg-gray-100 text-gray-900 border-gray-300'
-                : 'bg-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50 border-gray-200/60'
+                ? 'bg-gray-100 text-gray-900'
+                : 'text-gray-400 hover:text-gray-700 hover:bg-gray-50'
             }`}
             title="What changed since your last session?"
           >
@@ -597,23 +538,17 @@ function ResumeMemoryOverviewContent({
             {showWhatChanged ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
           </button>
         </div>
-        <div className="flex items-baseline gap-2 flex-wrap">
-          <h3 className="text-base font-medium text-gray-900 tracking-tight">
-            {taskTitle}
-          </h3>
-          {isTaskInferred && taskTitle !== `Recent work in ${contextName}` && (
-            <span className="text-[10px] text-gray-400 font-normal">
-              Inferred
-            </span>
-          )}
+
+        <div className="text-base font-medium text-gray-900 tracking-tight">
+          {taskTitle}
         </div>
-        <div className="text-xs text-gray-500">
-          {formattedLastActive}
+        <div className="text-xs text-gray-400 font-normal">
+          Last active: {formattedLastActive}
         </div>
 
-        {/* Progressive Disclosure: "What changed?" Experience */}
+        {/* Progressive Disclosure: "What changed?" */}
         {showWhatChanged && (
-          <div className="mt-2.5 p-3.5 bg-gray-50/90 rounded-lg border border-gray-200/70 text-xs space-y-2 animate-in fade-in duration-150">
+          <div className="mt-3 p-3.5 bg-gray-50/80 rounded-lg border border-gray-100 text-xs space-y-2 animate-in fade-in duration-150">
             <div className="text-[11px] font-medium text-gray-700">
               Since your last session:
             </div>
@@ -623,9 +558,9 @@ function ResumeMemoryOverviewContent({
                 <span>Comparing snapshots...</span>
               </div>
             ) : snapshotDiff && snapshotDiff.has_meaningful_changes ? (
-              <ul className="space-y-1.5 pl-0.5">
+              <ul className="space-y-1.5 pl-0.5 text-xs text-gray-700">
                 {snapshotDiff.task_changed && snapshotDiff.previous_task && snapshotDiff.current_task && (
-                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                  <li className="flex items-start gap-1.5">
                     <span className="text-gray-400 select-none">•</span>
                     <span>
                       Task changed from <strong className="font-medium text-gray-900">{snapshotDiff.previous_task}</strong> to <strong className="font-medium text-gray-900">{snapshotDiff.current_task}</strong>
@@ -633,7 +568,7 @@ function ResumeMemoryOverviewContent({
                   </li>
                 )}
                 {snapshotDiff.task_changed && !snapshotDiff.previous_task && snapshotDiff.current_task && (
-                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                  <li className="flex items-start gap-1.5">
                     <span className="text-gray-400 select-none">•</span>
                     <span>
                       Started task <strong className="font-medium text-gray-900">{snapshotDiff.current_task}</strong>
@@ -641,7 +576,7 @@ function ResumeMemoryOverviewContent({
                   </li>
                 )}
                 {snapshotDiff.added_items.map((item) => (
-                  <li key={item.id} className="flex items-start gap-1.5 text-xs text-gray-700">
+                  <li key={item.id} className="flex items-start gap-1.5">
                     <span className="text-gray-400 select-none">•</span>
                     <span>
                       <strong className="font-medium text-gray-900">{item.title || item.content_snippet || 'New item'}</strong> became part of the workset
@@ -649,7 +584,7 @@ function ResumeMemoryOverviewContent({
                   </li>
                 ))}
                 {snapshotDiff.removed_items.map((item) => (
-                  <li key={item.id} className="flex items-start gap-1.5 text-xs text-gray-500">
+                  <li key={item.id} className="flex items-start gap-1.5 text-gray-500">
                     <span className="text-gray-400 select-none">•</span>
                     <span>
                       <strong className="font-medium text-gray-700">{item.title || item.content_snippet || 'Previous item'}</strong> was removed from active workset
@@ -657,7 +592,7 @@ function ResumeMemoryOverviewContent({
                   </li>
                 ))}
                 {snapshotDiff.state_changed && snapshotDiff.previous_state && (
-                  <li className="flex items-start gap-1.5 text-xs text-gray-700">
+                  <li className="flex items-start gap-1.5">
                     <span className="text-gray-400 select-none">•</span>
                     <span>
                       State transitioned from <span className="font-medium">{formatStateLabel(snapshotDiff.previous_state)}</span> to <span className="font-medium">{formatStateLabel(snapshotDiff.current_state)}</span>
@@ -675,67 +610,48 @@ function ResumeMemoryOverviewContent({
       </div>
 
       {/* 3. WHERE YOU LEFT OFF */}
-      <div className="space-y-1.5 pt-1">
+      <div className="space-y-1.5">
         <div className="flex items-center justify-between">
-          <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-            WHERE YOU LEFT OFF
-          </div>
+          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            Where you left off
+          </span>
           <button
             onClick={() => setShowWhy(!showWhy)}
-            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer border ${
+            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer ${
               showWhy
-                ? 'bg-gray-100 text-gray-900 border-gray-300'
-                : 'bg-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50 border-gray-200/60'
+                ? 'bg-gray-100 text-gray-900'
+                : 'text-gray-400 hover:text-gray-700 hover:bg-gray-50'
             }`}
-            title="Explain why ContextSplit reconstructed this state"
+            title="Explain why ContextSplit suggests this"
           >
-            <HelpCircle size={11} className={showWhy ? 'text-gray-700' : 'text-gray-400'} />
             <span>Why?</span>
             {showWhy ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
           </button>
         </div>
 
-        <div className="flex items-baseline gap-2 flex-wrap">
-          <p className="text-sm font-medium text-gray-800">
-            {whereLeftOff}
-          </p>
-          {isLeftOffInferred && whereLeftOff !== `Recent activity in ${contextName}` && (
-            <span className="text-[10px] text-gray-400 font-normal">
-              Inferred
-            </span>
-          )}
+        <div className="text-sm font-medium text-gray-800">
+          {whereLeftOff}
         </div>
 
-        {/* Progressive Disclosure: Compact State Explanation */}
+        {/* Progressive Disclosure: "Why?" */}
         {showWhy && (
-          <div className="mt-2.5 p-3.5 bg-gray-50/90 rounded-lg border border-gray-200/70 text-xs space-y-2.5 animate-in fade-in duration-150">
+          <div className="mt-3 p-3.5 bg-gray-50/80 rounded-lg border border-gray-100 text-xs space-y-2 animate-in fade-in duration-150">
             <div className="text-[11px] font-medium text-gray-700">
-              {explanationTitle}
+              Why ContextSplit suggests this:
             </div>
 
             <ul className="space-y-1.5 pl-0.5">
-              {explanationReasons.map((reason, idx) => (
-                <li key={idx} className="flex items-start justify-between gap-2 text-xs text-gray-700">
-                  <div className="flex items-start gap-1.5 min-w-0">
-                    <span className="text-gray-400 select-none">•</span>
-                    <span>{reason.text}</span>
-                  </div>
-                  <span
-                    className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 ${
-                      reason.provenance.toLowerCase() === 'observed'
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
-                        : 'bg-amber-50 text-amber-700 border border-amber-200/60'
-                    }`}
-                  >
-                    {reason.provenance}
-                  </span>
+              {explanationReasons.map((text, idx) => (
+                <li key={idx} className="flex items-start gap-1.5 text-xs text-gray-700">
+                  <span className="text-gray-400 select-none">•</span>
+                  <span>{text}</span>
                 </li>
               ))}
             </ul>
 
             {uncertaintyNote && (
-              <div className="pt-2 border-t border-gray-200/60 text-[11px] text-amber-700 flex items-start gap-1.5">
-                <Info size={12} className="flex-shrink-0 mt-0.5" />
+              <div className="pt-2 border-t border-gray-100 text-[11px] text-gray-500 flex items-start gap-1.5">
+                <Info size={12} className="flex-shrink-0 mt-0.5 text-gray-400" />
                 <span>{uncertaintyNote}</span>
               </div>
             )}
@@ -743,87 +659,35 @@ function ResumeMemoryOverviewContent({
         )}
       </div>
 
-      {/* 4. LAST SESSION */}
-      <div className="space-y-2 pt-2 border-t border-gray-100">
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-          LAST SESSION
+      {/* 4. CONTINUE WITH */}
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            Continue with
+          </span>
+          {continueWithItems.length > 0 && (
+            <span className="text-[11px] text-gray-400 font-normal">
+              {continueWithItems.length} relevant item{continueWithItems.length === 1 ? '' : 's'}
+            </span>
+          )}
         </div>
 
-        {hasMeaningfulSession ? (
-          <div className="p-3.5 bg-gray-50/80 rounded-xl border border-gray-200/70 space-y-2.5 text-xs">
-            {isTaskAvailable && taskTitle && (
-              <h4 className="text-sm font-semibold text-gray-900 tracking-tight">
-                {taskTitle}
-              </h4>
-            )}
-
-            {lastActiveTimestamp && (
-              <div className="space-y-0.5">
-                <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
-                  Last active:
-                </div>
-                <div className="text-xs text-gray-700 font-normal">
-                  {formatSessionTime(lastActiveTimestamp)}
-                </div>
-              </div>
-            )}
-
-            {lastLeftOffItem && (
-              <div className="space-y-0.5">
-                <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
-                  You left off with:
-                </div>
-                <div className="text-xs font-medium text-gray-900 truncate">
-                  {lastLeftOffItem}
-                </div>
-              </div>
-            )}
-
-            {relevantItemsCount > 0 && (
-              <div className="text-xs text-gray-500">
-                {relevantItemsCount} relevant item{relevantItemsCount === 1 ? '' : 's'}
-              </div>
-            )}
-
-            <div className="pt-1.5">
-              <button
-                onClick={onOpenWorksetDetail}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-900 bg-white hover:bg-gray-100 rounded-lg border border-gray-200 shadow-2xs transition-colors cursor-pointer"
-                title="Navigate to existing contextual workset"
-              >
-                <span>Continue</span>
-                <ArrowRight size={12} />
-              </button>
-            </div>
-          </div>
-        ) : (
-          <p className="text-xs text-gray-400 italic">
-            No meaningful previous session available.
-          </p>
-        )}
-      </div>
-
-      {/* 5. Continue with */}
-      <div className="space-y-2.5 pt-1">
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-          Continue with
-        </div>
         {continueWithItems.length > 0 ? (
           <div className="space-y-1">
-            {continueWithItems.slice(0, 5).map((item) => (
+            {continueWithItems.slice(0, 4).map((item) => (
               <div
                 key={item.id}
                 onClick={() => onSelectItem(item.id)}
                 className="group flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-gray-50 text-xs text-gray-800 transition-colors cursor-pointer"
               >
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-gray-400 text-xs select-none">•</span>
+                  <span className="text-gray-300 text-xs select-none">•</span>
                   <span className="truncate group-hover:text-gray-900 font-normal">
                     {item.title}
                   </span>
                 </div>
                 {(item.app_name || item.domain) && (
-                  <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2">
+                  <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2 font-normal">
                     {item.app_name || item.domain}
                   </span>
                 )}
@@ -836,43 +700,44 @@ function ResumeMemoryOverviewContent({
           </div>
         )}
 
-        {/* [ View recent work ] */}
-        <div className="pt-2">
+        {/* Primary Continue Action */}
+        <div className="pt-2 flex items-center gap-2">
           <button
             onClick={onOpenWorksetDetail}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 rounded-lg border border-gray-200/80 transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-900 bg-gray-50 hover:bg-gray-100 rounded-md border border-gray-200 transition-colors cursor-pointer"
+            title="Navigate to existing contextual workset"
           >
-            <span>View recent work</span>
+            <span>Continue</span>
             <ArrowRight size={12} />
           </button>
         </div>
       </div>
 
-      {/* Bottom Context Actions */}
+      {/* Secondary Actions & View Timeline */}
       <div className="pt-4 border-t border-gray-100 flex items-center justify-between gap-3 text-xs text-gray-500">
         <button
           onClick={onToggleArchive}
           disabled={isUpdatingLifecycle || !overview}
-          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-gray-200 hover:bg-gray-50 text-gray-600 transition-colors cursor-pointer disabled:opacity-50"
+          className="flex items-center gap-1.5 px-2 py-1 text-xs font-normal text-gray-500 hover:text-gray-800 transition-colors cursor-pointer disabled:opacity-50"
         >
           {overview?.lifecycle_state === 'archived' ? (
             <>
               <ArchiveRestore size={12} />
-              <span>Restore Context</span>
+              <span>Restore context</span>
             </>
           ) : (
             <>
               <Archive size={12} />
-              <span>Archive Context</span>
+              <span>Archive context</span>
             </>
           )}
         </button>
 
         <button
           onClick={onViewFullTimeline}
-          className="flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-800 transition-colors cursor-pointer"
+          className="flex items-center gap-1 text-xs font-normal text-gray-500 hover:text-gray-800 transition-colors cursor-pointer"
         >
-          <span>Timeline</span>
+          <span>View timeline</span>
           <ExternalLink size={11} />
         </button>
       </div>
@@ -1090,29 +955,6 @@ function TimelineTabContent({
       )}
     </div>
   );
-}
-
-function formatLastActive(dateStr: string): string {
-  try {
-    const d = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - d.getTime();
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHours = Math.floor(diffMin / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffSec < 60) return 'Active just now';
-    if (diffMin === 1) return 'Last active 1 minute ago';
-    if (diffMin < 60) return `Last active ${diffMin}m ago`;
-    if (diffHours === 1) return 'Last active 1h ago';
-    if (diffHours < 24) return `Last active ${diffHours}h ago`;
-    if (diffDays === 1) return 'Last active yesterday';
-    if (diffDays < 7) return `Last active ${diffDays}d ago`;
-    return `Last active on ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
-  } catch {
-    return `Last active ${dateStr}`;
-  }
 }
 
 function formatSessionTime(dateStr: string): string {
