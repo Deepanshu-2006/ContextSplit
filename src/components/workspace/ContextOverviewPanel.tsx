@@ -18,11 +18,15 @@ import {
   Calendar,
   Check,
   Copy,
+  HelpCircle,
+  ChevronDown,
+  ChevronUp,
+  Info,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
 import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
-import { contextStateService, ContextState, ContextStateValue } from '../../services/contextState';
+import { contextStateService, ContextState, ContextStateValue, StateReason } from '../../services/contextState';
 import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
@@ -422,7 +426,9 @@ function ResumeMemoryOverviewContent({
     overview?.recent_activity;
   const formattedLastActive = lastActiveTimestamp ? formatLastActive(lastActiveTimestamp) : 'Active recently';
 
-  // 3. WHERE YOU LEFT OFF
+  // 3. WHERE YOU LEFT OFF & Progressive Disclosure
+  const [showWhy, setShowWhy] = useState(false);
+
   // Conservative derivation: if state is uncertain or no specific activity, do not fabricate.
   const isStateUncertain = stateValue === 'uncertain' || stateValue === 'insufficient_evidence';
   let whereLeftOff: string;
@@ -476,6 +482,44 @@ function ResumeMemoryOverviewContent({
     return [];
   }, [workset, contextState, overview]);
 
+  // Reason list for progressive disclosure
+  const explanationTitle = contextState?.explanation?.title || 'Why ContextSplit thinks this:';
+  const explanationReasons: StateReason[] = useMemo(() => {
+    if (contextState?.explanation?.reasons && contextState.explanation.reasons.length > 0) {
+      return contextState.explanation.reasons;
+    }
+    const list: StateReason[] = [];
+    if (taskTitle && taskTitle !== `Recent work in ${contextName}`) {
+      list.push({
+        text: `${taskTitle} was the most recent active task`,
+        provenance: isTaskInferred ? 'Inferred' : 'Observed',
+      });
+    }
+    if (continueWithItems.length > 0) {
+      list.push({
+        text: `${continueWithItems.length} related item${continueWithItems.length === 1 ? ' was' : 's were'} recently active`,
+        provenance: 'Observed',
+      });
+    }
+    list.push({
+      text: `${contextName} remained the active context`,
+      provenance: 'Observed',
+    });
+    if (contextState?.active_application) {
+      list.push({
+        text: `${contextState.active_application} was the latest recorded application context`,
+        provenance: 'Observed',
+      });
+    }
+    return list;
+  }, [contextState, taskTitle, isTaskInferred, continueWithItems.length, contextName]);
+
+  const uncertaintyNote =
+    contextState?.explanation?.uncertainty_note ||
+    (isStateUncertain
+      ? 'Context signals are emerging or sparse. State will update as more activity occurs.'
+      : null);
+
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
       {/* 1. Context · State Header */}
@@ -511,9 +555,25 @@ function ResumeMemoryOverviewContent({
 
       {/* 3. WHERE YOU LEFT OFF */}
       <div className="space-y-1.5 pt-1">
-        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-          WHERE YOU LEFT OFF
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            WHERE YOU LEFT OFF
+          </div>
+          <button
+            onClick={() => setShowWhy(!showWhy)}
+            className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded transition-colors cursor-pointer border ${
+              showWhy
+                ? 'bg-gray-100 text-gray-900 border-gray-300'
+                : 'bg-transparent text-gray-500 hover:text-gray-800 hover:bg-gray-50 border-gray-200/60'
+            }`}
+            title="Explain why ContextSplit reconstructed this state"
+          >
+            <HelpCircle size={11} className={showWhy ? 'text-gray-700' : 'text-gray-400'} />
+            <span>Why?</span>
+            {showWhy ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          </button>
         </div>
+
         <div className="flex items-baseline gap-2 flex-wrap">
           <p className="text-sm font-medium text-gray-800">
             {whereLeftOff}
@@ -524,6 +584,42 @@ function ResumeMemoryOverviewContent({
             </span>
           )}
         </div>
+
+        {/* Progressive Disclosure: Compact State Explanation */}
+        {showWhy && (
+          <div className="mt-2.5 p-3.5 bg-gray-50/90 rounded-lg border border-gray-200/70 text-xs space-y-2.5 animate-in fade-in duration-150">
+            <div className="text-[11px] font-medium text-gray-700">
+              {explanationTitle}
+            </div>
+
+            <ul className="space-y-1.5 pl-0.5">
+              {explanationReasons.map((reason, idx) => (
+                <li key={idx} className="flex items-start justify-between gap-2 text-xs text-gray-700">
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <span className="text-gray-400 select-none">•</span>
+                    <span>{reason.text}</span>
+                  </div>
+                  <span
+                    className={`text-[10px] font-medium px-1.5 py-0.5 rounded flex-shrink-0 ${
+                      reason.provenance.toLowerCase() === 'observed'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60'
+                        : 'bg-amber-50 text-amber-700 border border-amber-200/60'
+                    }`}
+                  >
+                    {reason.provenance}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            {uncertaintyNote && (
+              <div className="pt-2 border-t border-gray-200/60 text-[11px] text-amber-700 flex items-start gap-1.5">
+                <Info size={12} className="flex-shrink-0 mt-0.5" />
+                <span>{uncertaintyNote}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 4. Continue with */}

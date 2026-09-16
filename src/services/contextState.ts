@@ -87,6 +87,23 @@ export interface ContextResumeState {
 }
 
 /**
+ * Single grounded reason explaining why ContextSplit reconstructed this state.
+ */
+export interface StateReason {
+  text: string;
+  provenance: "Observed" | "Inferred" | string;
+}
+
+/**
+ * Structured progressive explanation for ContextState reasoning.
+ */
+export interface StateExplanation {
+  title: string;
+  reasons: StateReason[];
+  uncertainty_note?: string | null;
+}
+
+/**
  * Derived representation of the user's last known working state inside a context.
  */
 export interface ContextState {
@@ -111,6 +128,7 @@ export interface ContextState {
   meaningful_activity?: MeaningfulActivity | null;
   resume_state: ContextResumeState;
   readiness: ResumeReadinessAssessment;
+  explanation: StateExplanation;
   state_confidence: number;
   provenance: string;
   has_user_feedback: boolean;
