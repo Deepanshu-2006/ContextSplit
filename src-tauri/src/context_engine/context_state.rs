@@ -15,7 +15,8 @@ use crate::context_engine::transitions::{
     ContextTransition, ContextTransitionType,
 };
 use crate::context_engine::workset::{
-    ContextWorkset, ContextWorksetBuilder, ContextWorksetService, WorksetState,
+    is_accidental_capture, is_generic_noise, ContextWorkset, ContextWorksetBuilder,
+    ContextWorksetService, WorksetItemRelevance, WorksetState,
 };
 use crate::db::models::{ContextEvidenceItem, Item, TaskCandidate, TaskCandidateStatus};
 
@@ -101,6 +102,427 @@ impl std::fmt::Display for ContextStateValue {
 }
 
 // =========================================================================
+// Meaningful Activity Models & Classification (Day 19 Step 4)
+// =========================================================================
+
+/// Activity type classification for a meaningful contextual event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeaningfulActivityType {
+    /// User explicitly created, saved, moved, or organized an item in this context.
+    UserOrganization,
+    /// User confirmed workspace membership, relationship, or task candidate.
+    ConfirmedActivity,
+    /// Decisive task transition (e.g. task started, resumed, or switched).
+    TaskTransition,
+    /// Contextual shift (e.g. context return, context switch, or session initiated).
+    ContextTransition,
+    /// High-confidence or primary task-grounded item capture (e.g., component, spec, doc).
+    TaskRelatedItem,
+    /// Strongly related or graph-connected supporting item.
+    StronglyRelatedItem,
+    /// Continuous, coherent contextual activity burst/segment.
+    ActivitySegment,
+    /// Generic or weak peripheral item (suppressed if higher quality activities exist).
+    PeripheralCapture,
+}
+
+impl MeaningfulActivityType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserOrganization => "user_organization",
+            Self::ConfirmedActivity => "confirmed_activity",
+            Self::TaskTransition => "task_transition",
+            Self::ContextTransition => "context_transition",
+            Self::TaskRelatedItem => "task_related_item",
+            Self::StronglyRelatedItem => "strongly_related_item",
+            Self::ActivitySegment => "activity_segment",
+            Self::PeripheralCapture => "peripheral_capture",
+        }
+    }
+
+    pub fn priority_weight(&self) -> f64 {
+        match self {
+            Self::UserOrganization => 1.00,
+            Self::ConfirmedActivity => 0.95,
+            Self::TaskTransition => 0.88,
+            Self::ContextTransition => 0.82,
+            Self::TaskRelatedItem => 0.78,
+            Self::StronglyRelatedItem => 0.68,
+            Self::ActivitySegment => 0.58,
+            Self::PeripheralCapture => 0.20,
+        }
+    }
+}
+
+impl std::fmt::Display for MeaningfulActivityType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Entity reference associated with a meaningful activity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeaningfulEntityReference {
+    /// "item", "task", "context", "segment", "transition"
+    pub entity_type: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// Detailed structured representation of the last meaningful activity.
+///
+/// Filters out raw application launches, window focus events, duplicate captures,
+/// and technical internal events in favor of grounded, substantive user focus.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeaningfulActivity {
+    /// Meaningful activity classification
+    pub activity_type: MeaningfulActivityType,
+    /// ISO-8601 timestamp when this activity took place
+    pub timestamp: String,
+    /// Associated entity reference (item, task, transition, context)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<MeaningfulEntityReference>,
+    /// Epistemic classification ("observed", "inferred", "confirmed")
+    pub provenance: String,
+    /// Calibrated activity confidence [0.0, 1.0]
+    pub confidence: f64,
+    /// Concise, factual human-readable headline (e.g. "Saved Framer Motion animation reference")
+    pub description: String,
+    /// Detailed natural explanation answering why this activity was chosen
+    pub explanation: String,
+}
+
+// =========================================================================
+// MeaningfulActivityResolver: Candidate Scoring & Selection Engine
+// =========================================================================
+
+/// Resolver responsible for extracting and ranking meaningful contextual activity.
+///
+/// Strictly ignores:
+/// - application launch alone
+/// - window switch alone
+/// - weak semantic match without corroboration
+/// - duplicate captures
+/// - unrelated clipboard items
+/// - technical/internal events
+pub struct MeaningfulActivityResolver;
+
+impl MeaningfulActivityResolver {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Resolves the last meaningful activity for a context from available evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_last_meaningful_activity(
+        context_id: &str,
+        context_name: Option<&str>,
+        items: &[Item],
+        workset: Option<&ContextWorkset>,
+        _memory: Option<&ContextMemory>,
+        segments: &[ContextActivitySegment],
+        transitions: &[ContextTransition],
+        _task_candidates: &[TaskCandidate],
+        task_transitions: &[DetectedTaskTransition],
+        has_user_feedback: bool,
+    ) -> Option<MeaningfulActivity> {
+        let ws_name = context_name.unwrap_or("this workspace");
+        let mut candidates: Vec<MeaningfulActivity> = Vec::new();
+        let mut seen_keys: HashSet<String> = HashSet::new();
+
+        // 1. User Organization / Confirmed Activity
+        for item in items {
+            let is_user_confirmed = has_user_feedback
+                || item.metadata.contains("user_confirmed")
+                || item.metadata.contains("manual");
+
+            let title_clean = item.title.as_deref().unwrap_or("").trim();
+            if is_user_confirmed && !title_clean.is_empty() {
+                let key = format!("user_org:{}", item.id);
+                if seen_keys.insert(key) {
+                    candidates.push(MeaningfulActivity {
+                        activity_type: MeaningfulActivityType::UserOrganization,
+                        timestamp: item.updated_at.clone(),
+                        reference: Some(MeaningfulEntityReference {
+                            entity_type: "item".to_string(),
+                            id: item.id.clone(),
+                            title: Some(title_clean.to_string()),
+                        }),
+                        provenance: "confirmed".to_string(),
+                        confidence: 0.95,
+                        description: format!("Organized {}", title_clean),
+                        explanation: format!("Explicit user action organizing '{}' in {}.", title_clean, ws_name),
+                    });
+                }
+            }
+        }
+
+        // 2. Task Transitions
+        for tt in task_transitions {
+            if tt.context_id.as_deref() == Some(context_id) || tt.context_id.is_none() {
+                let (desc, expl) = match tt.transition_type {
+                    TaskTransitionType::TaskStart => {
+                        let target = tt.to_task.as_deref().unwrap_or("new task");
+                        (
+                            format!("Started task: {}", target),
+                            format!("Began focused activity on '{}' in {}.", target, ws_name),
+                        )
+                    }
+                    TaskTransitionType::TaskSwitch => {
+                        let from = tt.from_task.as_deref().unwrap_or("previous task");
+                        let to = tt.to_task.as_deref().unwrap_or("new task");
+                        (
+                            format!("Switched task from {} to {}", from, to),
+                            format!("Transitioned working focus from '{}' to '{}'.", from, to),
+                        )
+                    }
+                    TaskTransitionType::TaskReturn => {
+                        let target = tt.to_task.as_deref().unwrap_or("task");
+                        (
+                            format!("Resumed task: {}", target),
+                            format!("Resumed previous working task '{}' in {}.", target, ws_name),
+                        )
+                    }
+                    TaskTransitionType::TaskEnd => {
+                        let target = tt.from_task.as_deref().unwrap_or("active task");
+                        (
+                            format!("Completed or paused task: {}", target),
+                            format!("Concluded active segment for task '{}'.", target),
+                        )
+                    }
+                    TaskTransitionType::AmbiguousTaskChange => continue,
+                };
+
+                let key = format!("task_trans:{}", tt.id);
+                if seen_keys.insert(key) {
+                    candidates.push(MeaningfulActivity {
+                        activity_type: MeaningfulActivityType::TaskTransition,
+                        timestamp: tt.timestamp.clone(),
+                        reference: Some(MeaningfulEntityReference {
+                            entity_type: "task_transition".to_string(),
+                            id: tt.id.clone(),
+                            title: tt.to_task.clone().or_else(|| tt.from_task.clone()),
+                        }),
+                        provenance: "inferred".to_string(),
+                        confidence: tt.confidence,
+                        description: desc,
+                        explanation: expl,
+                    });
+                }
+            }
+        }
+
+        // 3. Context Transitions
+        for trans in transitions {
+            if trans.to_context_id.as_deref() == Some(context_id) {
+                if trans.transition_type == ContextTransitionType::ContextReturn {
+                    let key = format!("ctx_trans:{}", trans.id);
+                    if seen_keys.insert(key) {
+                        candidates.push(MeaningfulActivity {
+                            activity_type: MeaningfulActivityType::ContextTransition,
+                            timestamp: trans.detected_at.clone(),
+                            reference: Some(MeaningfulEntityReference {
+                                entity_type: "context_transition".to_string(),
+                                id: trans.id.clone(),
+                                title: Some(ws_name.to_string()),
+                            }),
+                            provenance: "inferred".to_string(),
+                            confidence: trans.confidence,
+                            description: format!("Returned to {} after interruption", ws_name),
+                            explanation: format!("Detected return to '{}' context after temporary detour.", ws_name),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 4. Task-Related Items from Workset (Primary and Supporting tiers)
+        if let Some(ws) = workset {
+            for w_item in &ws.items {
+                // Filter out generic noise or accidental captures
+                if is_generic_noise(w_item.title.as_deref(), &w_item.content_snippet, true, false)
+                    || is_accidental_capture(&w_item.item_type, w_item.title.as_deref(), &w_item.content_snippet, false)
+                {
+                    continue;
+                }
+
+                let is_primary = w_item.relevance == WorksetItemRelevance::Primary;
+                let is_supporting = w_item.relevance == WorksetItemRelevance::Supporting;
+
+                if is_primary || is_supporting {
+                    let act_type = if is_primary {
+                        MeaningfulActivityType::TaskRelatedItem
+                    } else {
+                        MeaningfulActivityType::StronglyRelatedItem
+                    };
+
+                    let title_text = w_item.title.as_deref().unwrap_or("content");
+                    let app_text = w_item.app_name.as_deref();
+
+                    let desc = if let Some(app) = app_text {
+                        format!("Saved {} in {}", title_text, app)
+                    } else if let Some(ref dom) = w_item.domain {
+                        format!("Saved {} on {}", title_text, dom)
+                    } else {
+                        format!("Saved {}", title_text)
+                    };
+
+                    let expl = if !w_item.reasons.is_empty() {
+                        w_item.reasons.join(". ")
+                    } else {
+                        format!("High-relevance {} item supporting current work in {}.", w_item.relevance.display_name(), ws_name)
+                    };
+
+                    let key = format!("workset_item:{}", w_item.id);
+                    if seen_keys.insert(key) {
+                        candidates.push(MeaningfulActivity {
+                            activity_type: act_type,
+                            timestamp: w_item.last_active_at.clone().unwrap_or_else(|| w_item.created_at.clone()),
+                            reference: Some(MeaningfulEntityReference {
+                                entity_type: "item".to_string(),
+                                id: w_item.id.clone(),
+                                title: w_item.title.clone(),
+                            }),
+                            provenance: w_item.provenance.as_str().to_string(),
+                            confidence: w_item.relevance_score.max(0.65),
+                            description: desc,
+                            explanation: expl,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 5. Items directly from Item table (Quality filtered)
+        for item in items {
+            let title = item.title.as_deref().unwrap_or("").trim();
+            if is_generic_noise(Some(title), &item.content, false, false)
+                || is_accidental_capture(&item.item_type, Some(title), &item.content, false)
+            {
+                continue;
+            }
+
+            let mut app_name: Option<String> = None;
+            let mut domain: Option<String> = None;
+            if let Ok(meta) = serde_json::from_str::<Value>(&item.metadata) {
+                if let Some(app) = meta.get("app_name").and_then(|v| v.as_str()) {
+                    let trimmed = app.trim();
+                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("unknown") {
+                        app_name = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(dom) = meta.get("domain").and_then(|v| v.as_str()) {
+                    let trimmed = dom.trim();
+                    if !trimmed.is_empty() && trimmed != "localhost" {
+                        domain = Some(trimmed.to_string());
+                    }
+                }
+            }
+
+            let desc = if !title.is_empty() {
+                if let Some(ref app) = app_name {
+                    format!("Saved {} in {}", title, app)
+                } else if let Some(ref dom) = domain {
+                    format!("Saved {} on {}", title, dom)
+                } else {
+                    format!("Saved {}", title)
+                }
+            } else if let Some(ref app) = app_name {
+                format!("Saved {} reference", app)
+            } else if let Some(ref dom) = domain {
+                format!("Saved {} reference", dom)
+            } else {
+                "Captured contextual reference".to_string()
+            };
+
+            let key = format!("item:{}", item.id);
+            if seen_keys.insert(key) {
+                candidates.push(MeaningfulActivity {
+                    activity_type: MeaningfulActivityType::PeripheralCapture,
+                    timestamp: item.created_at.clone(),
+                    reference: Some(MeaningfulEntityReference {
+                        entity_type: "item".to_string(),
+                        id: item.id.clone(),
+                        title: item.title.clone(),
+                    }),
+                    provenance: "observed".to_string(),
+                    confidence: 0.55,
+                    description: desc,
+                    explanation: format!("Observed contextual capture in {}.", ws_name),
+                });
+            }
+        }
+
+        // 6. Meaningful Activity Segments
+        for seg in segments {
+            if seg.context.as_ref().map(|c| c.id.as_str()) == Some(context_id) && !seg.is_ambiguous && seg.confidence >= 0.50 {
+                let count = seg.item_count;
+                let desc = if count > 1 {
+                    format!("Active work session ({} items)", count)
+                } else {
+                    "Active work session".to_string()
+                };
+
+                let key = format!("segment:{}", seg.id);
+                if seen_keys.insert(key) {
+                    candidates.push(MeaningfulActivity {
+                        activity_type: MeaningfulActivityType::ActivitySegment,
+                        timestamp: seg.ended_at.clone(),
+                        reference: Some(MeaningfulEntityReference {
+                            entity_type: "segment".to_string(),
+                            id: seg.id.clone(),
+                            title: Some(seg.duration_formatted.clone()),
+                        }),
+                        provenance: "observed".to_string(),
+                        confidence: seg.confidence,
+                        description: desc,
+                        explanation: format!("Continuous activity segment lasting {} in {}.", seg.duration_formatted, ws_name),
+                    });
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Rank candidates: Composite score = type weight (65%) + confidence (20%) + recency (15%)
+        let now = Utc::now();
+        candidates.sort_by(|a, b| {
+            let score_a = Self::compute_composite_score(a, now);
+            let score_b = Self::compute_composite_score(b, now);
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        candidates.into_iter().next()
+    }
+
+    fn compute_composite_score(activity: &MeaningfulActivity, now: DateTime<Utc>) -> f64 {
+        let type_weight = activity.activity_type.priority_weight();
+        let conf = activity.confidence.clamp(0.0, 1.0);
+
+        let recency_factor = if let Some(dt) = parse_ts(&activity.timestamp) {
+            let elapsed_hours = (now - dt).num_seconds().max(0) as f64 / 3600.0;
+            if elapsed_hours <= 1.0 {
+                1.0
+            } else if elapsed_hours <= 24.0 {
+                0.85
+            } else if elapsed_hours <= 168.0 {
+                0.60
+            } else {
+                0.35
+            }
+        } else {
+            0.50
+        };
+
+        (type_weight * 0.65) + (conf * 0.20) + (recency_factor * 0.15)
+    }
+}
+
+// =========================================================================
 // ContextState: Derived Contextual Working State Representation
 // =========================================================================
 
@@ -150,9 +572,12 @@ pub struct ContextState {
     pub recent_applications: Vec<String>,
     /// Human-readable description of the latest meaningful action (nullable)
     pub latest_meaningful_action: Option<String>,
-    /// Deterministic reconstruction answering "Where did I leave this work?"
+    /// Deterministic natural reconstruction answering "Where did I leave this work?"
     #[serde(default)]
     pub last_meaningful_activity: String,
+    /// Structured details of the last meaningful activity (nullable)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meaningful_activity: Option<MeaningfulActivity>,
     /// Calibrated state confidence score [0.0, 1.0]
     pub state_confidence: f64,
     /// Epistemic source ("confirmed", "inferred", "observed")
@@ -770,7 +1195,21 @@ impl ContextStateBuilder {
             "inferred".to_string()
         };
 
-        // 9. Reconstruct "Where did I leave this work?" (Deterministic natural phrasing)
+        // 9. Resolve Meaningful Activity using MeaningfulActivityResolver (Day 19 Step 4)
+        let meaningful_activity = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            &self.context_id,
+            context_name.as_deref(),
+            &self.items,
+            self.workset.as_ref(),
+            self.memory.as_ref(),
+            &self.activity_segments,
+            &self.context_transitions,
+            &self.task_candidates,
+            &self.task_transitions,
+            self.has_user_feedback,
+        );
+
+        // 10. Reconstruct "Where did I leave this work?" (Deterministic natural phrasing)
         let last_meaningful_activity = Self::construct_meaningful_activity_statement(
             context_name.as_deref().unwrap_or("this workspace"),
             state,
@@ -802,6 +1241,7 @@ impl ContextStateBuilder {
             recent_applications,
             latest_meaningful_action,
             last_meaningful_activity,
+            meaningful_activity,
             state_confidence,
             provenance,
             has_user_feedback: self.has_user_feedback,
@@ -816,7 +1256,7 @@ impl ContextStateBuilder {
     /// - Do NOT fabricate actions (e.g. "editing") unless an explicit signal exists.
     /// - If task + app: "Last known activity: Hero design in Figma."
     /// - If only URL captured: "Last known activity: Figma page related to Aurora Website."
-    /// - If multi-app: "Last known activity: Hero design across VSCode and Safari."
+    /// - If multi-app: "Last known activity: Hero design across Safari and VSCode."
     #[allow(clippy::too_many_arguments)]
     fn construct_meaningful_activity_statement(
         context_name: &str,
@@ -1086,10 +1526,14 @@ impl ContextStateService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_engine::memory::{InformationProvenance, MemoryExplanation};
     use crate::context_engine::segments::{ContextActivitySegment, SegmentItemReference};
     use crate::context_engine::task_transitions::{DetectedTaskTransition, TaskTransitionType};
     use crate::context_engine::transitions::{
         ContextReference, ContextTransition, ContextTransitionType,
+    };
+    use crate::context_engine::workset::{
+        ContextWorkset, WorksetItemReference, WorksetItemRelevance, WorksetState,
     };
     use crate::db::models::{Item, TaskCandidate, TaskCandidateStatus};
     use chrono::{Duration, Utc};
@@ -1113,10 +1557,256 @@ mod tests {
     }
 
     // =====================================================================
-    // STEP 3 REQUIRED TESTS:
-    // strong evidence, weak evidence, conflicting evidence,
-    // multiple applications, task transition, context transition,
-    // long inactivity, context return
+    // STEP 4 REQUIRED TESTS: Meaningful Activity Resolver
+    // =====================================================================
+
+    #[test]
+    fn test_resolve_saved_item_over_application_launch() {
+        let now = Utc::now();
+        let item_time = (now - Duration::minutes(3)).to_rfc3339();
+
+        let item = Item {
+            id: "item-framer".to_string(),
+            workspace_id: Some("ctx-1".to_string()),
+            session_id: None,
+            item_type: "url".to_string(),
+            content: "https://www.framer.com/motion/animation/".to_string(),
+            title: Some("Saved Framer Motion animation reference".to_string()),
+            metadata: r#"{"app_name":"Chrome","domain":"framer.com"}"#.to_string(),
+            created_at: item_time.clone(),
+            updated_at: item_time.clone(),
+        };
+
+        let workset_item = WorksetItemReference {
+            id: "item-framer".to_string(),
+            title: Some("Framer Motion animation reference".to_string()),
+            item_type: "url".to_string(),
+            relevance: WorksetItemRelevance::Primary,
+            relevance_score: 0.92,
+            reasons: vec!["Core animation reference".to_string()],
+            provenance: InformationProvenance::Observed,
+            created_at: item_time.clone(),
+            last_active_at: Some(item_time.clone()),
+            app_name: Some("Chrome".to_string()),
+            domain: Some("framer.com".to_string()),
+            content_snippet: "https://www.framer.com/motion/animation/".to_string(),
+            is_suggested_addition: false,
+        };
+
+        let workset = ContextWorkset {
+            context_id: "ctx-1".to_string(),
+            context_name: "Aurora Website".to_string(),
+            task_id: Some("task-1".to_string()),
+            task_title: Some("Hero animation".to_string()),
+            generated_at: now.to_rfc3339(),
+            last_active_at: Some(item_time.clone()),
+            workset_state: WorksetState::Active,
+            items: vec![workset_item],
+            recent_activity: "1 animation item saved".to_string(),
+            relevant_items: vec![],
+            important_references: vec![],
+            related_tasks: vec![],
+            confidence: 0.92,
+            confidence_band: "High".to_string(),
+            provenance: InformationProvenance::Observed,
+            explanation: MemoryExplanation {
+                summary: "Hero animation workset".to_string(),
+                why_reasons: vec![],
+                supporting_evidence: vec![],
+                confidence_band: "High".to_string(),
+                provenance: InformationProvenance::Observed,
+                uncertainty_note: None,
+            },
+        };
+
+        let meaningful = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            "ctx-1",
+            Some("Aurora Website"),
+            &[item],
+            Some(&workset),
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+
+        assert!(meaningful.is_some());
+        let act = meaningful.unwrap();
+        // Explicit meaningful description rather than generic "Chrome was active"
+        assert!(act.description.contains("Framer Motion animation reference"));
+        assert!(act.description.contains("Chrome"));
+        assert_eq!(act.activity_type, MeaningfulActivityType::TaskRelatedItem);
+        assert!(act.confidence >= 0.85);
+    }
+
+    #[test]
+    fn test_resolve_user_organization_highest_priority() {
+        let now = Utc::now();
+        let org_time = (now - Duration::minutes(10)).to_rfc3339();
+
+        let item = Item {
+            id: "item-org".to_string(),
+            workspace_id: Some("ctx-1".to_string()),
+            session_id: None,
+            item_type: "file".to_string(),
+            content: "docs/architecture.md".to_string(),
+            title: Some("Architecture Specs".to_string()),
+            metadata: r#"{"source":"user_confirmed","user_action":"organized"}"#.to_string(),
+            created_at: org_time.clone(),
+            updated_at: org_time.clone(),
+        };
+
+        let meaningful = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            "ctx-1",
+            Some("Backend Core"),
+            &[item],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            true, // user feedback confirmed
+        );
+
+        assert!(meaningful.is_some());
+        let act = meaningful.unwrap();
+        assert_eq!(act.activity_type, MeaningfulActivityType::UserOrganization);
+        assert_eq!(act.provenance, "confirmed");
+        assert_eq!(act.description, "Organized Architecture Specs");
+    }
+
+    #[test]
+    fn test_resolve_task_transition_meaningful_activity() {
+        let now = Utc::now();
+        let tt_time = (now - Duration::minutes(4)).to_rfc3339();
+
+        let task_trans = DetectedTaskTransition {
+            id: "tt-1".to_string(),
+            context_id: Some("ctx-1".to_string()),
+            transition_type: TaskTransitionType::TaskSwitch,
+            from_task: Some("Hero Animation".to_string()),
+            to_task: Some("Contact Form Integration".to_string()),
+            confidence: 0.88,
+            timestamp: tt_time.clone(),
+            evidence: vec!["Observed submit handlers in form.tsx".to_string()],
+            trigger_item_id: None,
+            duration_seconds: None,
+            metadata: serde_json::json!({}),
+        };
+
+        let meaningful = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            "ctx-1",
+            Some("Aurora Website"),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[task_trans],
+            false,
+        );
+
+        assert!(meaningful.is_some());
+        let act = meaningful.unwrap();
+        assert_eq!(act.activity_type, MeaningfulActivityType::TaskTransition);
+        assert_eq!(
+            act.description,
+            "Switched task from Hero Animation to Contact Form Integration"
+        );
+        assert_eq!(act.reference.unwrap().id, "tt-1");
+    }
+
+    #[test]
+    fn test_resolve_context_transition_meaningful_activity() {
+        let now = Utc::now();
+        let ret_time = (now - Duration::minutes(2)).to_rfc3339();
+
+        let transition = ContextTransition {
+            id: "trans-ret-1".to_string(),
+            from_context_id: Some("ctx-detour".to_string()),
+            to_context_id: Some("ctx-1".to_string()),
+            transition_type: ContextTransitionType::ContextReturn,
+            confidence: 0.90,
+            detected_at: ret_time.clone(),
+            session_id: None,
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: ret_time.clone(),
+        };
+
+        let meaningful = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            "ctx-1",
+            Some("Portfolio"),
+            &[],
+            None,
+            None,
+            &[],
+            &[transition],
+            &[],
+            &[],
+            false,
+        );
+
+        assert!(meaningful.is_some());
+        let act = meaningful.unwrap();
+        assert_eq!(act.activity_type, MeaningfulActivityType::ContextTransition);
+        assert_eq!(act.description, "Returned to Portfolio after interruption");
+    }
+
+    #[test]
+    fn test_resolve_avoids_duplicate_captures_and_window_switches() {
+        let now = Utc::now();
+        let time = (now - Duration::minutes(5)).to_rfc3339();
+
+        // Generic noise item and duplicate captures
+        let noise_item = Item {
+            id: "item-noise".to_string(),
+            workspace_id: Some("ctx-1".to_string()),
+            session_id: None,
+            item_type: "url".to_string(),
+            content: "chrome://newtab".to_string(),
+            title: Some("New Tab".to_string()),
+            metadata: "{}".to_string(),
+            created_at: time.clone(),
+            updated_at: time.clone(),
+        };
+
+        let empty_item = Item {
+            id: "item-empty".to_string(),
+            workspace_id: Some("ctx-1".to_string()),
+            session_id: None,
+            item_type: "text".to_string(),
+            content: "".to_string(),
+            title: Some("Untitled".to_string()),
+            metadata: "{}".to_string(),
+            created_at: time.clone(),
+            updated_at: time.clone(),
+        };
+
+        let meaningful = MeaningfulActivityResolver::resolve_last_meaningful_activity(
+            "ctx-1",
+            Some("Aurora Website"),
+            &[noise_item, empty_item],
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+
+        // Noise and empty items are filtered out completely
+        assert!(meaningful.is_none());
+    }
+
+    // =====================================================================
+    // STEP 3 TESTS: Context State Reconstruction
     // =====================================================================
 
     #[test]
@@ -1173,6 +1863,7 @@ mod tests {
         assert_eq!(state.task_title.as_deref(), Some("Hero design"));
         assert_eq!(state.active_application.as_deref(), Some("Figma"));
         assert_eq!(state.last_meaningful_activity, "Last known activity: Hero design in Figma.");
+        assert!(state.meaningful_activity.is_some());
     }
 
     #[test]
@@ -1180,14 +1871,13 @@ mod tests {
         let now = Utc::now();
         let capture_ts = (now - Duration::minutes(20)).to_rfc3339();
 
-        // Only a URL / application is captured with no confident task or active continuous segment
         let item = Item {
             id: "item-url".to_string(),
             workspace_id: Some("ctx-1".to_string()),
             session_id: None,
             item_type: "url".to_string(),
             content: "https://figma.com/file/12345/Aurora".to_string(),
-            title: None, // No specific title
+            title: None,
             metadata: r#"{"app_name":"Figma","domain":"figma.com"}"#.to_string(),
             created_at: capture_ts.clone(),
             updated_at: capture_ts.clone(),
@@ -1202,7 +1892,6 @@ mod tests {
 
         assert_eq!(state.task_title, None);
         assert_eq!(state.active_application.as_deref(), Some("Figma"));
-        // Factual and grounded: zero fabricated action verbs
         assert_eq!(state.last_meaningful_activity, "Last known activity: Figma page related to Aurora Website.");
     }
 
