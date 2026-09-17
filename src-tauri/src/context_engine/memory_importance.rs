@@ -298,8 +298,13 @@ impl ContextMemoryImportanceEvaluator {
         // Dimension 3: Task Relevance
         // -------------------------------------------------------------
         scores.task_relevance_score = if input.is_active_task {
-            why_reasons.push("Current active task guiding focus.".to_string());
-            (input.task_relevance.max(0.85)).clamp(0.0, 1.0)
+            if input.task_relevance >= 0.50 {
+                why_reasons.push("Current active task guiding focus.".to_string());
+                input.task_relevance.max(0.75).clamp(0.0, 1.0)
+            } else {
+                why_reasons.push("Low-confidence task candidate.".to_string());
+                input.task_relevance.clamp(0.0, 1.0)
+            }
         } else if input.is_completed_task {
             why_reasons.push("Completed task with historical reference value.".to_string());
             0.50
@@ -427,8 +432,8 @@ impl ContextMemoryImportanceEvaluator {
                 + (scores.task_relevance_score * 0.10)
                 + (scores.session_recurrence_score * 0.10)
                 + (scores.relationship_graph_score * 0.10);
-        } else if input.is_active_task {
-            // Active tasks are critical/important while active
+        } else if input.is_active_task && input.task_relevance >= 0.50 {
+            // Active tasks with solid relevance are critical/important while active
             base_score = 0.65
                 + (scores.task_relevance_score * 0.15)
                 + (scores.evidence_diversity_score * 0.10)
@@ -463,7 +468,7 @@ impl ContextMemoryImportanceEvaluator {
         // -------------------------------------------------------------
         // Tier Determination
         // -------------------------------------------------------------
-        let tier = if final_score >= 0.85
+        let initial_tier = if final_score >= 0.85
             && (input.is_user_confirmed
                 || input.is_active_task
                 || input.session_count >= 3
@@ -484,12 +489,42 @@ impl ContextMemoryImportanceEvaluator {
             (scores.evidence_diversity_score * 0.50 + final_score * 0.50).clamp(0.40, 0.95)
         };
 
-        let is_retained_as_important = tier.is_retained();
+        // -------------------------------------------------------------
+        // Quality Guard Verification
+        // -------------------------------------------------------------
+        let preliminary_eval = MemoryImportanceEvaluation {
+            entity_id: input.entity_id.to_string(),
+            score: final_score,
+            tier: initial_tier,
+            confidence,
+            dimension_scores: scores.clone(),
+            why_reasons: why_reasons.clone(),
+            is_retained_as_important: initial_tier.is_retained(),
+        };
+
+        let guard_result = ContextMemoryQualityGuard::verify_candidate(input, &preliminary_eval);
+
+        let (final_tier, is_retained_as_important) = if !guard_result.is_accepted {
+            for reason in &guard_result.failure_reasons {
+                why_reasons.push(format!("Quality Guard: {}", reason));
+            }
+            // Downgrade to Temporary/Useful if guard fails
+            let downgraded = if initial_tier == MemoryImportanceTier::Critical
+                || initial_tier == MemoryImportanceTier::Important
+            {
+                MemoryImportanceTier::Temporary
+            } else {
+                initial_tier
+            };
+            (downgraded, false)
+        } else {
+            (initial_tier, initial_tier.is_retained())
+        };
 
         MemoryImportanceEvaluation {
             entity_id: input.entity_id.to_string(),
             score: final_score,
-            tier,
+            tier: final_tier,
             confidence,
             dimension_scores: scores,
             why_reasons,
@@ -638,6 +673,272 @@ fn compute_recency_score(timestamp: &str) -> f64 {
         0.50
     } else {
         0.30
+    }
+}
+
+// =========================================================================
+// ContextMemoryQualityGuard (Step 10)
+// =========================================================================
+
+/// Returns true if an entity's title or content is solely an application name
+/// without specific document, file, URL, or project context.
+pub fn is_app_name_only(title: Option<&str>, content: &str) -> bool {
+    let t = title.unwrap_or("").trim().to_lowercase();
+    let c = content.trim().to_lowercase();
+
+    let app_names = [
+        "google chrome", "chrome", "safari", "firefox", "arc", "brave", "edge",
+        "visual studio code", "vs code", "vscode", "code", "cursor", "sublime text",
+        "sublime", "xcode", "intellij", "webstorm", "pycharm", "clion",
+        "terminal", "iterm", "iterm2", "alacritty", "kitty", "warp", "bash", "zsh", "fish",
+        "slack", "discord", "zoom", "microsoft teams", "teams", "messages", "telegram", "whatsapp",
+        "figma", "notion", "notes", "apple notes", "obsidian", "linear", "jira",
+        "finder", "preview", "system settings", "settings", "calculator", "mail", "outlook",
+    ];
+
+    let t_is_app = app_names.iter().any(|&a| t == a);
+    let c_is_app = app_names.iter().any(|&a| c == a);
+
+    (t_is_app && (c.is_empty() || c_is_app)) || (c_is_app && (t.is_empty() || t_is_app))
+}
+
+/// Returns true if a URL is an unrelated generic homepage or popular domain lookup
+/// without dedicated repository or contextual depth.
+pub fn is_unrelated_popular_domain(content: &str, title: Option<&str>) -> bool {
+    let c = content.trim().to_lowercase();
+    let t = title.unwrap_or("").trim().to_lowercase();
+
+    let generic_domains = [
+        "https://google.com", "https://google.com/", "https://www.google.com", "https://www.google.com/",
+        "http://google.com", "http://google.com/", "http://www.google.com", "http://www.google.com/",
+        "https://youtube.com", "https://youtube.com/", "https://www.youtube.com", "https://www.youtube.com/",
+        "https://reddit.com", "https://reddit.com/", "https://www.reddit.com", "https://www.reddit.com/",
+        "https://twitter.com", "https://twitter.com/", "https://www.twitter.com", "https://www.twitter.com/",
+        "https://x.com", "https://x.com/", "https://www.x.com", "https://www.x.com/",
+        "https://bing.com", "https://bing.com/", "https://www.bing.com", "https://www.bing.com/",
+        "https://duckduckgo.com", "https://duckduckgo.com/", "https://www.duckduckgo.com", "https://www.duckduckgo.com/",
+        "https://netflix.com", "https://netflix.com/", "https://www.netflix.com", "https://www.netflix.com/",
+        "https://spotify.com", "https://spotify.com/", "https://open.spotify.com", "https://open.spotify.com/",
+        "https://wikipedia.org", "https://wikipedia.org/", "https://en.wikipedia.org", "https://en.wikipedia.org/",
+    ];
+
+    generic_domains.iter().any(|&d| c == d)
+        || (c.starts_with("https://www.google.com/search") && t.starts_with("google search"))
+}
+
+/// Evaluation verdict produced by the `ContextMemoryQualityGuard`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryQualityGuardResult {
+    /// Whether the candidate passed all quality checks
+    pub is_accepted: bool,
+    /// Detailed failure reasons if rejected
+    pub failure_reasons: Vec<String>,
+    /// Quality score [0.0, 1.0]
+    pub quality_score: f64,
+}
+
+impl MemoryQualityGuardResult {
+    pub fn accepted(score: f64) -> Self {
+        Self {
+            is_accepted: true,
+            failure_reasons: Vec::new(),
+            quality_score: score.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn rejected(reasons: Vec<String>) -> Self {
+        Self {
+            is_accepted: false,
+            failure_reasons: reasons,
+            quality_score: 0.0,
+        }
+    }
+}
+
+/// Final guardrail engine verifying contextual memories before they become retained as important memory.
+///
+/// Core principle:
+/// Prefer **"No important memory"** over **"Confidently remember something wrong."**
+///
+/// Verifies the 9 Core Quality Invariants:
+/// 1. Evidence exists.
+/// 2. Evidence is sufficiently diverse.
+/// 3. The information is relevant to the context.
+/// 4. It is not contradicted by stronger evidence.
+/// 5. It is not simply a duplicate.
+/// 6. It is not obviously generic.
+/// 7. It is not solely based on application name.
+/// 8. It is not solely based on one weak semantic match.
+/// 9. It has not been explicitly rejected by the user.
+pub struct ContextMemoryQualityGuard;
+
+impl ContextMemoryQualityGuard {
+    /// Evaluates an inferred candidate memory input and its preliminary score against all 9 quality invariants.
+    pub fn verify_candidate(
+        input: &MemoryImportanceInput,
+        evaluation: &MemoryImportanceEvaluation,
+    ) -> MemoryQualityGuardResult {
+        let mut failure_reasons = Vec::new();
+
+        // 9. Check: Not explicitly rejected by the user
+        if input.user_feedback == Some("dismiss")
+            || input.user_feedback == Some("remove")
+            || input.user_feedback == Some("forget")
+            || input.user_feedback == Some("rejected")
+        {
+            failure_reasons.push("Explicitly rejected or dismissed by user feedback.".to_string());
+            return MemoryQualityGuardResult::rejected(failure_reasons);
+        }
+
+        // User confirmed memories always pass with maximum score
+        if input.is_user_confirmed || input.provenance == InformationProvenance::Confirmed {
+            return MemoryQualityGuardResult::accepted(1.0);
+        }
+
+        // 1. Check: Evidence exists
+        let title_clean = input.title.unwrap_or("").trim();
+        let content_clean = input.content.trim();
+        if title_clean.is_empty() && content_clean.is_empty() {
+            failure_reasons.push("Missing evidence: entity has neither title nor content.".to_string());
+        }
+
+        // 6. Check: Not obviously generic
+        if is_generic_noise(input.title, input.content, input.is_active_task, input.is_user_confirmed)
+            || is_generic_task_name(title_clean)
+        {
+            failure_reasons.push("Entity is generic noise or a placeholder without specific context.".to_string());
+        }
+
+        // 7. Check: Not solely based on application name
+        if is_app_name_only(input.title, input.content) {
+            failure_reasons.push("Entity is solely an application name without project or document grounding.".to_string());
+        }
+
+        // Check: Unrelated popular domain without multi-session grounding
+        if is_unrelated_popular_domain(input.content, input.title) && input.session_count <= 2 {
+            failure_reasons.push("Generic popular domain lookup without specific context relevance.".to_string());
+        }
+
+        // 2. Check: Evidence is sufficiently diverse
+        if input.signal_diversity_count < 2
+            && input.session_count <= 1
+            && input.relationship_degree == 0
+            && input.workset_relevance != Some(WorksetItemRelevance::Primary)
+            && !input.is_active_task
+        {
+            failure_reasons.push("Insufficient evidence diversity: single isolated capture without multi-session or relationship corroboration.".to_string());
+        }
+
+        // 3. Check: The information is relevant to the context
+        if input.context_relevance < 0.35 && input.workset_relevance.is_none() && !input.is_active_task {
+            failure_reasons.push(format!("Insufficient context relevance score ({:.2} < 0.35).", input.context_relevance));
+        }
+
+        // 8. Check: Not solely based on one weak semantic match
+        if input.task_relevance > 0.0
+            && input.task_relevance < 0.60
+            && input.relationship_degree == 0
+            && input.session_count <= 1
+            && input.signal_diversity_count <= 1
+            && input.workset_relevance != Some(WorksetItemRelevance::Primary)
+        {
+            failure_reasons.push("Solely based on a weak, isolated semantic match without temporal or relational support.".to_string());
+        }
+
+        // 4. Check: Not contradicted by stronger evidence or low task confidence
+        if input.is_active_task && (input.task_relevance < 0.50 || evaluation.confidence < 0.50) {
+            failure_reasons.push("Task candidate has insufficient confidence (< 0.50) to be considered active context memory.".to_string());
+        }
+
+        if failure_reasons.is_empty() {
+            let quality_score = (evaluation.score * 0.50 + evaluation.confidence * 0.50).clamp(0.0, 1.0);
+            MemoryQualityGuardResult::accepted(quality_score)
+        } else {
+            MemoryQualityGuardResult::rejected(failure_reasons)
+        }
+    }
+
+    /// Evaluates a `ContextImportantMemory` against quality guard invariants.
+    pub fn verify_memory(
+        memory: &crate::context_engine::important_memory::ContextImportantMemory,
+    ) -> MemoryQualityGuardResult {
+        // User confirmed memories always pass
+        if memory.provenance == InformationProvenance::Confirmed {
+            return MemoryQualityGuardResult::accepted(memory.importance);
+        }
+
+        let mut failure_reasons = Vec::new();
+
+        // 1. Evidence exists
+        if memory.title.trim().is_empty() {
+            failure_reasons.push("Missing memory title.".to_string());
+        }
+
+        // 6. Generic noise
+        let snippet = memory.detail.as_deref().unwrap_or("");
+        if is_generic_noise(
+            Some(&memory.title),
+            snippet,
+            memory.memory_type == crate::context_engine::important_memory::ImportantMemoryType::ActiveTask,
+            false,
+        ) || is_generic_task_name(&memory.title)
+        {
+            failure_reasons.push("Generic placeholder or noise.".to_string());
+        }
+
+        // 7. Solely app name
+        if is_app_name_only(Some(&memory.title), snippet) {
+            failure_reasons.push("Solely an application name.".to_string());
+        }
+
+        // Unrelated popular domain
+        if is_unrelated_popular_domain(snippet, Some(&memory.title))
+            && memory.metadata.session_count.unwrap_or(1) <= 2
+        {
+            failure_reasons.push("Unrelated popular domain lookup.".to_string());
+        }
+
+        // 8. Weak semantic match without corroboration
+        if memory.confidence < 0.45 && memory.importance < 0.60 {
+            failure_reasons.push("Insufficient confidence and importance.".to_string());
+        }
+
+        // Low importance threshold
+        if memory.importance < 0.50 {
+            failure_reasons.push("Importance score below 0.50 minimum guard threshold.".to_string());
+        }
+
+        if failure_reasons.is_empty() {
+            MemoryQualityGuardResult::accepted(memory.importance)
+        } else {
+            MemoryQualityGuardResult::rejected(failure_reasons)
+        }
+    }
+
+    /// Filters candidate memories, ensuring only guard-verified memories are retained.
+    pub fn filter_memories(
+        memories: Vec<crate::context_engine::important_memory::ContextImportantMemory>,
+    ) -> Vec<crate::context_engine::important_memory::ContextImportantMemory> {
+        let mut seen_titles = HashSet::new();
+        let mut seen_source_ids = HashSet::new();
+        let mut filtered = Vec::new();
+
+        for mem in memories {
+            // 5. Check: Duplicate prevention
+            let title_key = mem.title.trim().to_lowercase();
+            if seen_titles.contains(&title_key) || seen_source_ids.contains(&mem.source_id) {
+                continue;
+            }
+
+            let verdict = Self::verify_memory(&mem);
+            if verdict.is_accepted {
+                seen_titles.insert(title_key);
+                seen_source_ids.insert(mem.source_id.clone());
+                filtered.push(mem);
+            }
+        }
+
+        filtered
     }
 }
 
@@ -909,5 +1210,388 @@ mod tests {
         let res2 = ContextMemoryImportanceEvaluator::evaluate(&generic);
         assert_eq!(res2.tier, MemoryImportanceTier::Temporary);
         assert!(res2.score <= 0.20);
+    }
+
+    // =========================================================================
+    // Adversarial Quality Guard Tests (Step 10)
+    // =========================================================================
+
+    #[test]
+    fn test_guard_adversarial_repeated_generic_text() {
+        // Scenario 1: Repeated generic text like "New Tab", "Untitled", "Search..."
+        // Even if captured 10 times across 4 sessions, it MUST NOT become important memory.
+        let input = MemoryImportanceInput {
+            entity_id: "generic-repeated-1",
+            title: Some("New Tab"),
+            content: "chrome://newtab",
+            item_type: "url",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.10,
+            context_relevance: 0.20,
+            workset_relevance: None,
+            session_count: 5,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-10T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert_eq!(eval.tier, MemoryImportanceTier::Temporary);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("generic noise")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_same_website_used_by_multiple_contexts() {
+        // Scenario 2: Same website (e.g. stackoverflow.com or search engine) used casually
+        // across multiple contexts without specific context grounding.
+        let input = MemoryImportanceInput {
+            entity_id: "shared-so-lookup",
+            title: Some("Stack Overflow - Where Developers Learn"),
+            content: "https://stackoverflow.com",
+            item_type: "url",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.20,
+            context_relevance: 0.25, // Low specific context relevance
+            workset_relevance: None,
+            session_count: 3,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-10T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("context relevance")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_same_app_across_multiple_tasks() {
+        // Scenario 3: Item solely represents an application name (e.g. "Terminal" or "VS Code")
+        // without document/project payload.
+        let input = MemoryImportanceInput {
+            entity_id: "app-terminal-only",
+            title: Some("Terminal"),
+            content: "Terminal",
+            item_type: "app",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.50,
+            context_relevance: 0.50,
+            workset_relevance: None,
+            session_count: 4,
+            relationship_degree: 1,
+            relationship_strength: 0.40,
+            first_seen_at: Some("2026-09-10T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 2,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("application name")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_duplicate_captures() {
+        // Scenario 4: Duplicate captures of the same URL in the same context.
+        use crate::context_engine::important_memory::{
+            ContextImportantMemory, ImportantMemoryExplanation, ImportantMemoryMetadata,
+            ImportantMemoryType,
+        };
+
+        let mem1 = ContextImportantMemory::new(
+            "mem-1".to_string(),
+            "ws-1",
+            "item-dup-1".to_string(),
+            ImportantMemoryType::ImportantReference,
+            0.85,
+            0.90,
+            Some("2026-09-18T00:00:00Z".to_string()),
+            Some("2026-09-18T01:00:00Z".to_string()),
+            InformationProvenance::Observed,
+            "Aurora Architecture RFC".to_string(),
+            Some("Detailed design documentation".to_string()),
+            ImportantMemoryExplanation::new(
+                "Primary doc".to_string(),
+                vec!["Architecture doc".to_string()],
+                vec!["item-dup-1".to_string()],
+                0.90,
+                InformationProvenance::Observed,
+                None,
+            ),
+            ImportantMemoryMetadata::default(),
+        );
+
+        // Duplicate item with same title
+        let mem2 = ContextImportantMemory::new(
+            "mem-2".to_string(),
+            "ws-1",
+            "item-dup-2".to_string(),
+            ImportantMemoryType::ImportantReference,
+            0.82,
+            0.88,
+            Some("2026-09-18T00:05:00Z".to_string()),
+            Some("2026-09-18T01:05:00Z".to_string()),
+            InformationProvenance::Observed,
+            "Aurora Architecture RFC".to_string(),
+            Some("Detailed design documentation duplicate".to_string()),
+            ImportantMemoryExplanation::new(
+                "Duplicate doc".to_string(),
+                vec!["Architecture doc duplicate".to_string()],
+                vec!["item-dup-2".to_string()],
+                0.88,
+                InformationProvenance::Observed,
+                None,
+            ),
+            ImportantMemoryMetadata::default(),
+        );
+
+        let filtered = ContextMemoryQualityGuard::filter_memories(vec![mem1.clone(), mem2]);
+        assert_eq!(filtered.len(), 1, "Duplicate memory must be deduplicated by Quality Guard");
+        assert_eq!(filtered[0].id, "mem-1");
+    }
+
+    #[test]
+    fn test_guard_adversarial_unrelated_popular_domain() {
+        // Scenario 5: Random popular domain (e.g. YouTube / Reddit / Google homepage)
+        let input = MemoryImportanceInput {
+            entity_id: "url-yt-home",
+            title: Some("YouTube"),
+            content: "https://youtube.com",
+            item_type: "url",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.10,
+            context_relevance: 0.15,
+            workset_relevance: None,
+            session_count: 1,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-18T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("popular domain") || r.contains("generic noise")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_old_stale_memory() {
+        // Scenario 6: Unconfirmed memory with zero multi-session grounding that has decayed over 30 days
+        let input = MemoryImportanceInput {
+            entity_id: "old-transient-item",
+            title: Some("Old transient lookup note"),
+            content: "Some temporary lookup text from 30 days ago",
+            item_type: "text",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.10,
+            context_relevance: 0.40,
+            workset_relevance: None,
+            session_count: 1,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-08-18T00:00:00Z"),
+            last_seen_at: Some("2026-08-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert_eq!(eval.tier, MemoryImportanceTier::Temporary);
+    }
+
+    #[test]
+    fn test_guard_adversarial_conflicting_user_feedback() {
+        // Scenario 7: Inferred item had strong signals, but user explicitly clicked "dismiss" / "remove"
+        let input = MemoryImportanceInput {
+            entity_id: "item-dismissed",
+            title: Some("Potentially relevant API specification"),
+            content: "REST endpoints for user management service",
+            item_type: "text",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: Some("dismiss"), // User feedback contradicts inferred importance
+            task_relevance: 0.90,
+            context_relevance: 0.95,
+            workset_relevance: Some(WorksetItemRelevance::Primary),
+            session_count: 3,
+            relationship_degree: 4,
+            relationship_strength: 0.85,
+            first_seen_at: Some("2026-09-10T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 2,
+            signal_diversity_count: 3,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("rejected or dismissed by user")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_weak_semantic_similarity() {
+        // Scenario 8: Weak semantic match (0.42) with no relational or multi-session backing
+        let input = MemoryImportanceInput {
+            entity_id: "weak-semantic-doc",
+            title: Some("Random loosely matching document"),
+            content: "Contains a single keyword match with low relevance",
+            item_type: "text",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.42, // Weak semantic score
+            context_relevance: 0.40,
+            workset_relevance: None,
+            session_count: 1,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-18T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("weak, isolated semantic match")));
+    }
+
+    #[test]
+    fn test_guard_adversarial_single_item_context() {
+        // Scenario 9: Workspace has only 1 captured item from a single glance lookup
+        let input = MemoryImportanceInput {
+            entity_id: "lone-item-1",
+            title: Some("Quick calculation in terminal"),
+            content: "echo $((42 * 100))",
+            item_type: "text",
+            provenance: InformationProvenance::Observed,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.10,
+            context_relevance: 0.30,
+            workset_relevance: None,
+            session_count: 1,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-18T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: false,
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        assert!(!eval.is_retained_as_important);
+        assert_eq!(eval.tier, MemoryImportanceTier::Temporary);
+    }
+
+    #[test]
+    fn test_guard_adversarial_multiple_competing_tasks() {
+        // Scenario 10: Task candidate with low confidence (0.35) competing with ambiguous signals
+        let input = MemoryImportanceInput {
+            entity_id: "task-competing-1",
+            title: Some("Uncertain background indexing"),
+            content: "Background indexing task candidate with low confidence",
+            item_type: "task",
+            provenance: InformationProvenance::Inferred,
+            is_user_confirmed: false,
+            user_feedback: None,
+            task_relevance: 0.35,
+            context_relevance: 0.40,
+            workset_relevance: None,
+            session_count: 1,
+            relationship_degree: 0,
+            relationship_strength: 0.0,
+            first_seen_at: Some("2026-09-18T00:00:00Z"),
+            last_seen_at: Some("2026-09-18T00:00:00Z"),
+            is_active_task: true, // Marked as active candidate, but confidence is too low
+            is_completed_task: false,
+            snapshot_presence_count: 0,
+            signal_diversity_count: 1,
+        };
+
+        let eval = ContextMemoryImportanceEvaluator::evaluate(&input);
+        let guard_verdict = ContextMemoryQualityGuard::verify_candidate(&input, &eval);
+
+        assert!(!guard_verdict.is_accepted);
+        assert!(!eval.is_retained_as_important);
+        assert!(guard_verdict
+            .failure_reasons
+            .iter()
+            .any(|r| r.contains("insufficient confidence")));
     }
 }

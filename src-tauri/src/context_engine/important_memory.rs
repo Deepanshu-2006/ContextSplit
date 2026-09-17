@@ -1028,7 +1028,10 @@ impl ContextImportantMemoryBuilder {
             }
         }
 
-        // 8. Sort memories by importance descending, with Confirmed facts prioritized
+        // 8. Quality Guard Verification (Filter out noise, duplicates, generic lookups, and weak signals)
+        let mut memories = crate::context_engine::memory_importance::ContextMemoryQualityGuard::filter_memories(memories);
+
+        // 8.5 Sort memories by importance descending, with Confirmed facts prioritized
         memories.sort_by(|a, b| {
             b.importance
                 .partial_cmp(&a.importance)

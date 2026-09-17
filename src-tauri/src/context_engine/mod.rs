@@ -47,8 +47,9 @@ pub use memory_promotion::{
 };
 
 pub use memory_importance::{
-    ContextMemoryImportanceEvaluator, MemoryDimensionScores, MemoryImportanceEvaluation,
-    MemoryImportanceInput, MemoryImportanceTier,
+    is_app_name_only, is_unrelated_popular_domain, ContextMemoryImportanceEvaluator,
+    ContextMemoryQualityGuard, MemoryDimensionScores, MemoryImportanceEvaluation,
+    MemoryImportanceInput, MemoryImportanceTier, MemoryQualityGuardResult,
 };
 
 pub use important_memory::{
