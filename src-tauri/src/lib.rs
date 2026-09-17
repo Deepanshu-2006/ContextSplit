@@ -1133,6 +1133,74 @@ fn get_context_important_memories(
 }
 
 #[tauri::command]
+fn search_context_memory(
+    context_id: String,
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::important_memory::ContextImportantMemory>, String> {
+    let ce = state.context_engine.lock().map_err(|_| "Context engine lock poisoned".to_string())?;
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let semantic_provider = ce.get_semantic_provider();
+    let provider_ref = semantic_provider.as_ref().map(|p| p.as_ref().as_ref());
+    context_engine::important_memory::ContextMemoryQueryService::search_context_memory(
+        &conn,
+        &context_id,
+        &query,
+        limit,
+        provider_ref,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn find_important_memory(
+    context_id: String,
+    query: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::important_memory::ContextImportantMemory>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::important_memory::ContextMemoryQueryService::find_important_memory(
+        &conn,
+        &context_id,
+        &query,
+        limit,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_important_memories(
+    context_id: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::important_memory::ContextImportantMemory>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::important_memory::ContextMemoryQueryService::get_important_memories(
+        &conn,
+        &context_id,
+        limit,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_recent_memories(
+    context_id: String,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::important_memory::ContextImportantMemory>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::important_memory::ContextMemoryQueryService::get_recent_memories(
+        &conn,
+        &context_id,
+        limit,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_context_state(
     context_id: &str,
     state: State<'_, AppState>,
@@ -1410,6 +1478,10 @@ pub fn run() {
             submit_workset_feedback,
             submit_context_memory_control,
             get_context_important_memories,
+            search_context_memory,
+            find_important_memory,
+            get_important_memories,
+            get_recent_memories,
             // Context State & Resume (Day 19)
             get_context_state,
             get_resume_state,
