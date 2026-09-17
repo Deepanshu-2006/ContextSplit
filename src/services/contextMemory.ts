@@ -335,6 +335,82 @@ export const contextMemoryService = {
       return null;
     }
   },
+
+  /**
+   * Searches contextual memories and items within a context.
+   */
+  async searchContextMemory(
+    contextId: string,
+    query: string,
+    limit?: number
+  ): Promise<ContextImportantMemory[]> {
+    try {
+      return await invoke<ContextImportantMemory[]>("search_context_memory", {
+        contextId,
+        query,
+        limit: limit ?? null,
+      });
+    } catch (err) {
+      console.error(`Failed to search context memory for '${contextId}':`, err);
+      return [];
+    }
+  },
+
+  /**
+   * Finds matching important memories within a context.
+   */
+  async findImportantMemory(
+    contextId: string,
+    query: string,
+    limit?: number
+  ): Promise<ContextImportantMemory[]> {
+    try {
+      return await invoke<ContextImportantMemory[]>("find_important_memory", {
+        contextId,
+        query,
+        limit: limit ?? null,
+      });
+    } catch (err) {
+      console.error(`Failed to find important memory for '${contextId}':`, err);
+      return [];
+    }
+  },
+
+  /**
+   * Retrieves important memories for a context ordered by importance.
+   */
+  async getImportantMemories(
+    contextId: string,
+    limit?: number
+  ): Promise<ContextImportantMemory[]> {
+    try {
+      return await invoke<ContextImportantMemory[]>("get_important_memories", {
+        contextId,
+        limit: limit ?? null,
+      });
+    } catch (err) {
+      console.error(`Failed to get important memories for '${contextId}':`, err);
+      return [];
+    }
+  },
+
+  /**
+   * Retrieves recent memories for a context ordered by recency.
+   */
+  async getRecentMemories(
+    contextId: string,
+    limit?: number
+  ): Promise<ContextImportantMemory[]> {
+    try {
+      return await invoke<ContextImportantMemory[]>("get_recent_memories", {
+        contextId,
+        limit: limit ?? null,
+      });
+    } catch (err) {
+      console.error(`Failed to get recent memories for '${contextId}':`, err);
+      return [];
+    }
+  },
 };
 
 export type ImportantMemoryType =
@@ -405,5 +481,9 @@ export const getHistoricalMemoryForDate = contextMemoryService.getHistoricalMemo
 export const getRecentHistoricalMemories = contextMemoryService.getRecentHistoricalMemories;
 export const submitMemoryFeedback = contextMemoryService.submitMemoryFeedback;
 export const getContextImportantMemories = contextMemoryService.getContextImportantMemories;
+export const searchContextMemory = contextMemoryService.searchContextMemory;
+export const findImportantMemory = contextMemoryService.findImportantMemory;
+export const getImportantMemories = contextMemoryService.getImportantMemories;
+export const getRecentMemories = contextMemoryService.getRecentMemories;
 
 
