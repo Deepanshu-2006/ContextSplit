@@ -28,10 +28,17 @@ pub mod task_ranking;
 pub mod task_transitions;
 pub mod memory;
 pub mod memory_query;
+pub mod important_memory;
 pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
 pub mod snapshot;
+
+pub use important_memory::{
+    ContextImportantMemory, ContextImportantMemoryBuilder, ContextImportantMemorySet,
+    ImportantMemoryConfig, ImportantMemoryExplanation, ImportantMemoryMetadata,
+    ImportantMemoryType, MemoryImportanceBand,
+};
 
 pub use snapshot::{
     get_context_snapshot_history, get_global_snapshot_cache, get_global_snapshot_history,
