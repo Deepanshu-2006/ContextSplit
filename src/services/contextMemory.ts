@@ -321,7 +321,76 @@ export const contextMemoryService = {
       return false;
     }
   },
+
+  /**
+   * Reconstructs derived important contextual memories for a context.
+   */
+  async getContextImportantMemories(contextId: string): Promise<ContextImportantMemorySet | null> {
+    try {
+      return await invoke<ContextImportantMemorySet>("get_context_important_memories", {
+        contextId,
+      });
+    } catch (err) {
+      console.error(`Failed to fetch important memories for '${contextId}':`, err);
+      return null;
+    }
+  },
 };
+
+export type ImportantMemoryType =
+  | 'important_item'
+  | 'important_reference'
+  | 'recurring_reference'
+  | 'confirmed_context_fact'
+  | 'active_task'
+  | 'recent_task'
+  | 'meaningful_state';
+
+export type MemoryImportanceBand = 'critical' | 'high' | 'medium' | 'low';
+
+export interface ImportantMemoryMetadata {
+  item_type?: string | null;
+  app_name?: string | null;
+  domain?: string | null;
+  action_verb?: string | null;
+  target_subject?: string | null;
+  session_count?: number | null;
+  streak_count?: number | null;
+  state_value?: string | null;
+  tags?: string[];
+}
+
+export interface ContextImportantMemory {
+  id: string;
+  context_id: string;
+  source_id: string;
+  memory_type: ImportantMemoryType;
+  importance: number;
+  importance_band: MemoryImportanceBand;
+  confidence: number;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  provenance: InformationProvenance;
+  title: string;
+  detail?: string | null;
+  explanation: {
+    summary: string;
+    why_reasons: string[];
+    supporting_evidence: string[];
+    confidence_band: string;
+    provenance: InformationProvenance;
+    uncertainty_note?: string | null;
+  };
+  metadata: ImportantMemoryMetadata;
+}
+
+export interface ContextImportantMemorySet {
+  context_id: string;
+  context_name: string;
+  memories: ContextImportantMemory[];
+  summary_statement: string;
+  generated_at: string;
+}
 
 // Standalone function exports matching the required method names
 export const getCurrentMemory = contextMemoryService.getCurrentMemory;
@@ -335,4 +404,6 @@ export const getYesterdayMemory = contextMemoryService.getYesterdayMemory;
 export const getHistoricalMemoryForDate = contextMemoryService.getHistoricalMemoryForDate;
 export const getRecentHistoricalMemories = contextMemoryService.getRecentHistoricalMemories;
 export const submitMemoryFeedback = contextMemoryService.submitMemoryFeedback;
+export const getContextImportantMemories = contextMemoryService.getContextImportantMemories;
+
 

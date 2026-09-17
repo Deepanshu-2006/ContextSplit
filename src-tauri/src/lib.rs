@@ -1123,6 +1123,16 @@ fn submit_context_memory_control(
 }
 
 #[tauri::command]
+fn get_context_important_memories(
+    context_id: &str,
+    state: State<'_, AppState>,
+) -> Result<context_engine::important_memory::ContextImportantMemorySet, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::important_memory::ContextImportantMemoryBuilder::build(&conn, context_id, None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_context_state(
     context_id: &str,
     state: State<'_, AppState>,
@@ -1399,6 +1409,7 @@ pub fn run() {
             get_active_workset,
             submit_workset_feedback,
             submit_context_memory_control,
+            get_context_important_memories,
             // Context State & Resume (Day 19)
             get_context_state,
             get_resume_state,
