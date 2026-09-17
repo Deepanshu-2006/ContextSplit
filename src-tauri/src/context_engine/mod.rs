@@ -29,10 +29,16 @@ pub mod task_transitions;
 pub mod memory;
 pub mod memory_query;
 pub mod important_memory;
+pub mod memory_importance;
 pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
 pub mod snapshot;
+
+pub use memory_importance::{
+    ContextMemoryImportanceEvaluator, MemoryDimensionScores, MemoryImportanceEvaluation,
+    MemoryImportanceInput, MemoryImportanceTier,
+};
 
 pub use important_memory::{
     ContextImportantMemory, ContextImportantMemoryBuilder, ContextImportantMemorySet,
