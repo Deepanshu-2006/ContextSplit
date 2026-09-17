@@ -21,7 +21,11 @@ import {
   Info,
 } from 'lucide-react';
 import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
-import { contextMemoryService, ContextMemoryResponse } from '../../services/contextMemory';
+import {
+  contextMemoryService,
+  ContextMemoryResponse,
+  ContextImportantMemorySet,
+} from '../../services/contextMemory';
 import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
 import { contextStateService, ContextState, ContextStateValue } from '../../services/contextState';
 import { contextSnapshotService, ContextSnapshotDiff } from '../../services/contextSnapshot';
@@ -43,6 +47,7 @@ export function ContextOverviewPanel() {
   const [memory, setMemory] = useState<ContextMemoryResponse | null>(null);
   const [workset, setWorkset] = useState<ContextWorkset | null>(null);
   const [contextState, setContextState] = useState<ContextState | null>(null);
+  const [importantMemories, setImportantMemories] = useState<ContextImportantMemorySet | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingLifecycle, setIsUpdatingLifecycle] = useState(false);
@@ -60,6 +65,7 @@ export function ContextOverviewPanel() {
       setMemory(null);
       setWorkset(null);
       setContextState(null);
+      setImportantMemories(null);
       setSelectedItemId(null);
     }
   }, [isOverviewOpen, overviewWorkspaceId]);
@@ -68,16 +74,18 @@ export function ContextOverviewPanel() {
     setIsLoading(true);
     setError(null);
     try {
-      const [overviewData, memoryData, worksetData, stateData] = await Promise.all([
+      const [overviewData, memoryData, worksetData, stateData, importantData] = await Promise.all([
         db.getContextOverview(wsId).catch(() => null),
         contextMemoryService.getContextMemory(wsId).catch(() => null),
         contextWorksetService.getContextWorkset(wsId).catch(() => null),
         contextStateService.getContextState(wsId).catch(() => null),
+        contextMemoryService.getContextImportantMemories(wsId).catch(() => null),
       ]);
       setOverview(overviewData);
       setMemory(memoryData);
       setWorkset(worksetData);
       setContextState(stateData || overviewData?.context_state || null);
+      setImportantMemories(importantData);
     } catch (err: any) {
       setError(err?.toString() || 'Failed to load context overview');
     } finally {
@@ -234,6 +242,7 @@ export function ContextOverviewPanel() {
                 memory={memory}
                 workset={workset}
                 contextState={contextState}
+                importantMemories={importantMemories}
                 targetWorkspaceName={targetWorkspace?.name}
                 onToggleArchive={handleToggleArchive}
                 isUpdatingLifecycle={isUpdatingLifecycle}
@@ -328,6 +337,7 @@ interface ResumeMemoryOverviewContentProps {
   memory: ContextMemoryResponse | null;
   workset: ContextWorkset | null;
   contextState: ContextState | null;
+  importantMemories?: ContextImportantMemorySet | null;
   targetWorkspaceName?: string;
   onToggleArchive: () => void;
   isUpdatingLifecycle: boolean;
@@ -361,6 +371,7 @@ function ResumeMemoryOverviewContent({
   memory,
   workset,
   contextState,
+  importantMemories,
   targetWorkspaceName,
   onToggleArchive,
   isUpdatingLifecycle,
@@ -483,6 +494,29 @@ function ResumeMemoryOverviewContent({
     }
     return [];
   }, [workset, contextState, overview]);
+
+  // 5. IMPORTANT contextual memories (quiet reference, 3-5 items max)
+  const displayedImportantMemories = useMemo(() => {
+    if (!importantMemories?.memories || importantMemories.memories.length === 0) return [];
+    const currentTaskLower = taskTitle?.toLowerCase().trim();
+    return importantMemories.memories
+      .filter((m) => {
+        // Exclude root workspace fact itself
+        if (m.source_id === contextId || m.id === `mem_fact_ws_${contextId}`) {
+          return false;
+        }
+        // Exclude internal meaningful state indicators
+        if (m.memory_type === 'meaningful_state') {
+          return false;
+        }
+        // Exclude active task if identical to the primary active task displayed above
+        if (m.memory_type === 'active_task' && m.title.toLowerCase().trim() === currentTaskLower) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, 4);
+  }, [importantMemories, contextId, taskTitle]);
 
   // Clean explanation reasons without badge clutter
   const explanationReasons = useMemo(() => {
@@ -712,6 +746,46 @@ function ResumeMemoryOverviewContent({
           </button>
         </div>
       </div>
+
+      {/* 5. IMPORTANT */}
+      {displayedImportantMemories.length > 0 && (
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              Important
+            </span>
+            <button
+              onClick={onOpenWorksetDetail}
+              className="text-[11px] font-normal text-gray-400 hover:text-gray-700 transition-colors cursor-pointer"
+              title="View all contextual memories"
+            >
+              View all
+            </button>
+          </div>
+
+          <div className="space-y-1">
+            {displayedImportantMemories.map((mem) => (
+              <div
+                key={mem.id}
+                onClick={() => onSelectItem(mem.source_id)}
+                className="group flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-gray-50 text-xs text-gray-800 transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-gray-300 text-xs select-none">•</span>
+                  <span className="truncate group-hover:text-gray-900 font-normal">
+                    {mem.title}
+                  </span>
+                </div>
+                {(mem.metadata?.app_name || mem.metadata?.domain) && (
+                  <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2 font-normal">
+                    {mem.metadata.app_name || mem.metadata.domain}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Secondary Actions & View Timeline */}
       <div className="pt-4 border-t border-gray-100 flex items-center justify-between gap-3 text-xs text-gray-500">
