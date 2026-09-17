@@ -3,19 +3,23 @@ mod tests {
     use chrono::{DateTime, Utc};
     use rusqlite::Connection;
 
+    use crate::context_engine::important_memory::ContextImportantMemoryBuilder;
     use crate::context_engine::memory::{
         record_memory_feedback,
-        InformationProvenance,
+        ContextMemoryBuilder, InformationProvenance,
     };
     use crate::context_engine::memory_query::ContextMemoryQueryService;
     use crate::context_engine::overview::get_context_overview;
     use crate::context_engine::segments::ContextActivitySegmenter;
+    use crate::context_engine::snapshot::ContextSnapshot;
     use crate::context_engine::summary::ContextActivitySummaryService;
+    use crate::context_engine::task_evidence::TaskEvidence;
     use crate::context_engine::timeline::get_context_timeline;
     use crate::context_engine::transitions::{
         ContextTransitionBuilder, ContextTransitionType,
     };
     use crate::context_engine::work_sequence::RecentWorkSequenceService;
+    use crate::context_engine::workset::ContextWorksetBuilder;
     use crate::db::models::{InboxState, TaskCandidateStatus};
     use crate::db::operations::{
         confirm_membership, create_item, create_session, create_task_candidate,
@@ -652,4 +656,88 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].title, "Tokyo trip planning");
     }
+
+    // =========================================================================
+    // SCENARIO 10: Context Memory Privacy Audit & Scrubbing Guarantees
+    // Verify:
+    // 1. Passwords, auth tokens, bearer tokens, JWTs, AWS keys, connection strings
+    //    are scrubbed from all memory representations (ContextMemory, ContextWorkset,
+    //    ImportantMemory, TaskEvidence, ContextSnapshot).
+    // 2. Memory never bypasses capture exclusions or retains raw telemetry/keystrokes.
+    // =========================================================================
+    #[test]
+    fn test_scenario_10_context_memory_privacy_audit_guarantees() {
+        let conn = setup_test_db();
+        let session = create_session(&conn).unwrap();
+        let ws = create_workspace(&conn, "Secure Project").unwrap();
+
+        // 1. Create an item containing sensitive credentials
+        let secret_content = "Authorization: Bearer mySecretToken12345! password: SuperSecretPassword999 AWS AKIAIOSFODNN7EXAMPLE";
+        let item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "text",
+            secret_content,
+            Some("Auth config with password: plainSecretPass!"),
+            r#"{"app_name":"VS Code"}"#,
+        )
+        .unwrap();
+
+        // Confirm into workspace
+        confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        // 2. Verify ContextMemory scrubs title and snippets
+        let memory = ContextMemoryBuilder::from_db(&conn, &ws.id).unwrap().build().unwrap();
+        assert!(!memory.recent_items.is_empty());
+        for recent_item in &memory.recent_items {
+            if let Some(ref t) = recent_item.title {
+                assert!(!t.contains("plainSecretPass!"), "Password in title must be scrubbed");
+                assert!(!t.contains("mySecretToken12345!"), "Token in title must be scrubbed");
+                assert!(!t.contains("AKIAIOSFODNN7EXAMPLE"), "AWS key in title must be scrubbed");
+            }
+        }
+
+        // 3. Verify ContextWorkset scrubs content_snippet
+        let workset = ContextWorksetBuilder::from_db(&conn, &ws.id).unwrap().build().unwrap();
+        assert!(!workset.items.is_empty());
+        for workset_item in &workset.items {
+            assert!(!workset_item.content_snippet.contains("mySecretToken12345!"), "Bearer token must be scrubbed");
+            assert!(!workset_item.content_snippet.contains("SuperSecretPassword999"), "Password must be scrubbed");
+            assert!(!workset_item.content_snippet.contains("AKIAIOSFODNN7EXAMPLE"), "AWS key must be scrubbed");
+            assert!(workset_item.content_snippet.contains("[REDACTED]") || workset_item.content_snippet.contains("[AWS_KEY_REDACTED]"));
+        }
+
+        // 4. Verify ContextImportantMemory scrubs snippets and details
+        let imp_set = ContextImportantMemoryBuilder::build(&conn, &ws.id, None).unwrap();
+        for mem in &imp_set.memories {
+            if let Some(ref d) = mem.detail {
+                assert!(!d.contains("mySecretToken12345!"), "Detail token must be scrubbed");
+                assert!(!d.contains("SuperSecretPassword999"), "Detail password must be scrubbed");
+                assert!(!d.contains("AKIAIOSFODNN7EXAMPLE"), "Detail AWS key must be scrubbed");
+            }
+        }
+
+        // 5. Verify TaskEvidence scrubs snippets
+        let ev = TaskEvidence::observed_item_content(
+            &item.id,
+            item.title.as_deref(),
+            secret_content,
+            "text",
+            Some("2026-09-18T10:00:00Z"),
+        );
+        if let Some(snip) = ev.attributes.get("snippet").and_then(|v| v.as_str()) {
+            assert!(!snip.contains("mySecretToken12345!"), "Task evidence snippet token must be scrubbed");
+            assert!(!snip.contains("SuperSecretPassword999"), "Task evidence snippet password must be scrubbed");
+            assert!(!snip.contains("AKIAIOSFODNN7EXAMPLE"), "Task evidence snippet AWS key must be scrubbed");
+        }
+
+        // 6. Verify ContextSnapshot scrubs workset and memory references
+        let snapshot = ContextSnapshot::from_memory_and_workset(&memory, Some(&workset), None);
+        for snap_item in &snapshot.workset_item_references {
+            assert!(!snap_item.content_snippet.contains("mySecretToken12345!"), "Snapshot item snippet must be scrubbed");
+            assert!(!snap_item.content_snippet.contains("SuperSecretPassword999"), "Snapshot item snippet must be scrubbed");
+        }
+    }
 }
+

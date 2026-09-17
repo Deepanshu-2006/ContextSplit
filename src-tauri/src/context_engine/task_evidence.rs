@@ -318,8 +318,10 @@ impl TaskEvidence {
         item_type: &str,
         timestamp: Option<&str>,
     ) -> Self {
-        let bounded_snippet = truncate_snippet(snippet, 150);
-        let summary = match title {
+        let scrubbed = crate::context_engine::reasoning::privacy::scrub_private_data(snippet);
+        let title_scrubbed = title.map(|t| crate::context_engine::reasoning::privacy::scrub_private_data(t));
+        let bounded_snippet = truncate_snippet(&scrubbed, 150);
+        let summary = match &title_scrubbed {
             Some(t) if !t.trim().is_empty() => format!("Item: {}", t.trim()),
             _ => format!("{} item ({})", item_type, &bounded_snippet[..bounded_snippet.len().min(30)]),
         };
@@ -340,8 +342,8 @@ impl TaskEvidence {
         ev.attributes.insert("item_id".to_string(), Value::String(item_id.to_string()));
         ev.attributes.insert("item_type".to_string(), Value::String(item_type.to_string()));
         ev.attributes.insert("snippet".to_string(), Value::String(bounded_snippet));
-        if let Some(t) = title {
-            ev.attributes.insert("title".to_string(), Value::String(t.to_string()));
+        if let Some(t) = title_scrubbed {
+            ev.attributes.insert("title".to_string(), Value::String(t));
         }
         ev
     }

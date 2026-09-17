@@ -1215,7 +1215,7 @@ impl ContextMemoryBuilder {
                 } else {
                     None
                 }
-            });
+            }).map(|s| crate::context_engine::reasoning::privacy::scrub_private_data(&s));
 
             if !recent_items.iter().any(|existing| existing.id == item.id) {
                 recent_items.push(MemoryItemReference {

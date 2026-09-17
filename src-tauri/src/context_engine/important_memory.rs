@@ -573,23 +573,20 @@ impl ContextImportantMemoryBuilder {
 
                 confirmed_item_ids.insert(item_id.clone());
 
-                let title = title_opt.unwrap_or_else(|| {
+                let raw_title = title_opt.unwrap_or_else(|| {
                     if item_type == "url" {
                         content.clone()
                     } else {
                         "Untitled Note".to_string()
                     }
                 });
+                let title = crate::context_engine::reasoning::privacy::scrub_private_data(&raw_title);
 
                 let parsed_meta: Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
                 let app_name = parsed_meta.get("app_name").and_then(|v| v.as_str()).map(String::from);
                 let domain = parsed_meta.get("domain").and_then(|v| v.as_str()).map(String::from);
 
-                let snippet = if content.len() > 100 {
-                    format!("{}...", &content[..97])
-                } else {
-                    content
-                };
+                let snippet = create_snippet(&content);
 
                 let memory = ContextImportantMemory::new(
                     format!("mem_item_conf_{}", item_id),
@@ -1066,11 +1063,11 @@ impl ContextImportantMemoryBuilder {
 }
 
 fn create_snippet(content: &str) -> String {
-    let trimmed = content.trim();
-    if trimmed.len() > 100 {
-        format!("{}...", &trimmed[..97])
+    let scrubbed = crate::context_engine::reasoning::privacy::scrub_private_data(content.trim());
+    if scrubbed.len() > 100 {
+        format!("{}...", &scrubbed[..97])
     } else {
-        trimmed.to_string()
+        scrubbed
     }
 }
 

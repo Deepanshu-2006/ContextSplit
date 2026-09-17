@@ -56,10 +56,11 @@ fn create_content_snippet(content: &str, item_type: &str) -> String {
             _ => "Empty content".to_string(),
         };
     }
-    if trimmed.len() > 120 {
-        format!("{}...", &trimmed[..117])
+    let scrubbed = crate::context_engine::reasoning::privacy::scrub_private_data(trimmed);
+    if scrubbed.len() > 120 {
+        format!("{}...", &scrubbed[..117])
     } else {
-        trimmed.to_string()
+        scrubbed
     }
 }
 
