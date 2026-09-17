@@ -1106,6 +1106,23 @@ fn submit_workset_feedback(
 }
 
 #[tauri::command]
+fn submit_context_memory_control(
+    context_id: String,
+    item_id: String,
+    action: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let control_action = match action.as_str() {
+        "keep_important" => context_engine::important_memory::UserMemoryControlAction::KeepImportant,
+        "remove_important" => context_engine::important_memory::UserMemoryControlAction::RemoveFromImportant,
+        "remove_from_context" | "forget_association" => context_engine::important_memory::UserMemoryControlAction::RemoveFromContext,
+        other => return Err(format!("Unknown context memory control action: {}", other)),
+    };
+    context_engine::important_memory::record_context_memory_control(&conn, &context_id, &item_id, control_action)
+}
+
+#[tauri::command]
 fn get_context_state(
     context_id: &str,
     state: State<'_, AppState>,
@@ -1377,10 +1394,11 @@ pub fn run() {
             get_historical_memory_for_date,
             get_recent_historical_memories,
             submit_memory_feedback,
-            // Context Workset (Day 18)
+            // Context Workset & Memory Controls (Day 18-21)
             get_context_workset,
             get_active_workset,
             submit_workset_feedback,
+            submit_context_memory_control,
             // Context State & Resume (Day 19)
             get_context_state,
             get_resume_state,

@@ -15,9 +15,15 @@ import {
   Sparkles,
   MoreHorizontal,
   BookmarkCheck,
+  BookmarkMinus,
   EyeOff,
 } from 'lucide-react';
-import { ContextWorkset, WorksetItemReference, contextWorksetService } from '../../services/contextWorkset';
+import {
+  ContextWorkset,
+  WorksetItemReference,
+  ContextMemoryControlAction,
+  contextWorksetService,
+} from '../../services/contextWorkset';
 import { toast } from 'sonner';
 
 interface ContextWorksetDetailViewProps {
@@ -452,22 +458,28 @@ export function WorksetItemActionsMenu({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const handleAction = async (isPositive: boolean, e: React.MouseEvent) => {
+  const handleAction = async (action: ContextMemoryControlAction, e: React.MouseEvent) => {
     e.stopPropagation();
     setIsOpen(false);
     if (!contextId) return;
 
     try {
-      await contextWorksetService.submitWorksetFeedback(contextId, itemId, isPositive);
-      if (isPositive) {
-        toast.success('Kept in workset');
+      const ok = await contextWorksetService.controlContextMemory(contextId, itemId, action);
+      if (ok) {
+        if (action === 'keep_important') {
+          toast.success('Kept as important memory');
+        } else if (action === 'remove_important') {
+          toast.success('Removed from important memory');
+        } else if (action === 'remove_from_context') {
+          toast.success('Removed from context (item remains saved)');
+        }
+        onWorksetUpdated?.();
       } else {
-        toast.success('Removed from workset (item remains saved)');
+        toast.error('Failed to update contextual memory');
       }
-      onWorksetUpdated?.();
     } catch (err) {
-      console.error('Failed to submit workset feedback:', err);
-      toast.error('Failed to update workset feedback');
+      console.error('Failed to update context memory control:', err);
+      toast.error('Failed to update contextual memory');
     }
   };
 
@@ -479,7 +491,7 @@ export function WorksetItemActionsMenu({
           setIsOpen(!isOpen);
         }}
         className="p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors cursor-pointer"
-        title="Workset options"
+        title="Context memory options"
       >
         <MoreHorizontal size={14} />
       </button>
@@ -487,21 +499,28 @@ export function WorksetItemActionsMenu({
       {isOpen && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-full mt-1 w-44 bg-white rounded-lg border border-gray-200 shadow-lg py-1 z-30 text-xs animate-in fade-in-0 zoom-in-95 duration-100"
+          className="absolute right-0 top-full mt-1 w-48 bg-white rounded-lg border border-gray-200 shadow-lg py-1 z-30 text-xs animate-in fade-in-0 zoom-in-95 duration-100"
         >
           <button
-            onClick={(e) => handleAction(true, e)}
+            onClick={(e) => handleAction('keep_important', e)}
             className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors cursor-pointer"
           >
             <BookmarkCheck size={13} className="text-emerald-600" />
-            <span>Keep in workset</span>
+            <span>Keep important</span>
           </button>
           <button
-            onClick={(e) => handleAction(false, e)}
-            className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors cursor-pointer"
+            onClick={(e) => handleAction('remove_important', e)}
+            className="w-full text-left px-3 py-1.5 text-amber-700 hover:bg-amber-50/70 flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <BookmarkMinus size={13} className="text-amber-500" />
+            <span>Remove from important</span>
+          </button>
+          <button
+            onClick={(e) => handleAction('remove_from_context', e)}
+            className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors cursor-pointer border-t border-gray-100 mt-0.5 pt-1.5"
           >
             <EyeOff size={13} className="text-red-500" />
-            <span>Remove from workset</span>
+            <span>Remove from context</span>
           </button>
         </div>
       )}

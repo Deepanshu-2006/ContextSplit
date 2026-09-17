@@ -1053,11 +1053,17 @@ impl ContextWorksetBuilder {
                             || val.get("action").and_then(|v| v.as_str()) == Some("dismiss")
                             || val.get("action").and_then(|v| v.as_str()) == Some("reject")
                             || val.get("action").and_then(|v| v.as_str()) == Some("remove_from_workset")
+                            || val.get("action").and_then(|v| v.as_str()) == Some("remove_from_context")
+                            || val.get("action").and_then(|v| v.as_str()) == Some("forget_association")
                         {
                             rejected_item_ids.insert(i_id.clone());
+                            confirmed_by_user_item_ids.remove(i_id);
+                        } else if val.get("action").and_then(|v| v.as_str()) == Some("remove_important") {
+                            confirmed_by_user_item_ids.remove(i_id);
                         } else if val.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(false)
                             || val.get("is_positive").and_then(|v| v.as_bool()) == Some(true)
                             || val.get("action").and_then(|v| v.as_str()) == Some("keep_in_workset")
+                            || val.get("action").and_then(|v| v.as_str()) == Some("keep_important")
                         {
                             confirmed_by_user_item_ids.insert(i_id.clone());
                         }

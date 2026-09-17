@@ -52,9 +52,10 @@ pub use memory_importance::{
 };
 
 pub use important_memory::{
-    ContextImportantMemory, ContextImportantMemoryBuilder, ContextImportantMemorySet,
-    ImportantMemoryConfig, ImportantMemoryExplanation, ImportantMemoryMetadata,
-    ImportantMemoryType, MemoryImportanceBand,
+    record_context_memory_control, ContextImportantMemory, ContextImportantMemoryBuilder,
+    ContextImportantMemorySet, ImportantMemoryConfig, ImportantMemoryExplanation,
+    ImportantMemoryMetadata, ImportantMemoryType, MemoryImportanceBand,
+    UserMemoryControlAction,
 };
 
 pub use snapshot::{

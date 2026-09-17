@@ -122,6 +122,29 @@ export const contextWorksetService = {
   },
 
   /**
+   * Submits explicit user control on contextual memory:
+   * - 'keep_important': Pin as permanent important contextual memory
+   * - 'remove_important': Unpin and remove from important memory
+   * - 'remove_from_context': Forget contextual association without deleting the original item
+   */
+  async controlContextMemory(
+    contextId: string,
+    itemId: string,
+    action: ContextMemoryControlAction
+  ): Promise<boolean> {
+    try {
+      return await invoke<boolean>("submit_context_memory_control", {
+        contextId,
+        itemId,
+        action,
+      });
+    } catch (err) {
+      console.error("Failed to submit context memory control:", err);
+      return false;
+    }
+  },
+
+  /**
    * Returns items partitioned by relevance category.
    */
   getItemsByRelevance(
@@ -150,6 +173,13 @@ export const contextWorksetService = {
   },
 };
 
+export type ContextMemoryControlAction =
+  | "keep_important"
+  | "remove_important"
+  | "remove_from_context";
+
 export const getContextWorkset = contextWorksetService.getContextWorkset;
 export const getActiveWorkset = contextWorksetService.getActiveWorkset;
 export const submitWorksetFeedback = contextWorksetService.submitWorksetFeedback;
+export const controlContextMemory = contextWorksetService.controlContextMemory;
+
