@@ -7,19 +7,22 @@ import {
   Inbox,
   Sparkles,
 } from 'lucide-react';
-import { Item, Workspace } from '../../services/db';
+import { Item, Workspace, db } from '../../services/db';
 import {
   useInboxStore,
   deriveItemSection,
   DerivedInboxItem,
   getModifierKeyName,
 } from '../../store/inboxStore';
+import { useWorkspaceStore } from '../../store/workspaceStore';
 import { useDiscoveryStore } from '../../store/discoveryStore';
 import { InboxItemCard } from './InboxItemCard';
 import { InboxDetailDrawer } from './InboxDetailDrawer';
 import { InboxFilterPopover } from './InboxFilterPopover';
 import { QuickCaptureModal } from './QuickCaptureModal';
 import { BulkActionsBar } from './BulkActionsBar';
+import { showUndoToast } from './UndoToast';
+import { toast } from 'sonner';
 
 interface InboxViewProps {
   items: Item[];
@@ -353,7 +356,33 @@ export function InboxView({
   };
 
   const handleBulkClear = async () => {
+    const itemsToRestore = items.filter((i) => selectedItemIds.includes(i.id));
     await bulkArchiveOrClear();
+    if (itemsToRestore.length > 0) {
+      showUndoToast({
+        message: itemsToRestore.length === 1 ? 'Item deleted' : `${itemsToRestore.length} items deleted`,
+        onUndo: async () => {
+          try {
+            for (const it of itemsToRestore) {
+              const restored = await db.createItem(
+                it.workspace_id,
+                it.item_type,
+                it.content,
+                it.title,
+                it.metadata
+              );
+              useWorkspaceStore.setState((s) => ({
+                activeItems: [restored, ...s.activeItems],
+                inboxCount: s.inboxCount + (it.workspace_id ? 0 : 1),
+              }));
+            }
+            toast.success(itemsToRestore.length === 1 ? 'Item restored' : `${itemsToRestore.length} items restored`);
+          } catch {
+            toast.error('Failed to restore items');
+          }
+        },
+      });
+    }
   };
 
   const detectedCandidateCount = candidates.filter((c) => c.status === 'detected').length;

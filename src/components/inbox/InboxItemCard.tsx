@@ -20,6 +20,8 @@ import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { toast } from 'sonner';
 
+import { showUndoToast } from './UndoToast';
+
 interface InboxItemCardProps {
   derived: DerivedInboxItem;
   workspaces: Workspace[];
@@ -89,6 +91,7 @@ function InboxItemCardComponent({
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setMenuOpen(false);
+    const itemToRestore = { ...item };
     try {
       await db.deleteItem(item.id);
       const currentActive = useWorkspaceStore.getState().activeItems;
@@ -96,7 +99,27 @@ function InboxItemCardComponent({
         activeItems: currentActive.filter((i) => i.id !== item.id),
         inboxCount: Math.max(0, useWorkspaceStore.getState().inboxCount - 1),
       });
-      toast.success('Item deleted');
+      showUndoToast({
+        message: 'Item deleted',
+        onUndo: async () => {
+          try {
+            const restored = await db.createItem(
+              itemToRestore.workspace_id,
+              itemToRestore.item_type,
+              itemToRestore.content,
+              itemToRestore.title,
+              itemToRestore.metadata
+            );
+            useWorkspaceStore.setState((s) => ({
+              activeItems: [restored, ...s.activeItems],
+              inboxCount: s.inboxCount + (itemToRestore.workspace_id ? 0 : 1),
+            }));
+            toast.success('Item restored');
+          } catch {
+            toast.error('Failed to restore item');
+          }
+        },
+      });
     } catch {
       toast.error('Failed to delete item');
     }

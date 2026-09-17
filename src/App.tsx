@@ -100,7 +100,22 @@ function App() {
       <CandidateReviewModal />
       <ContextTimelineDrawer />
       <ContextOverviewPanel />
-      <Toaster position="bottom-right" />
+      <Toaster
+        position="bottom-right"
+        toastOptions={{
+          className: "!bg-gray-950/95 !backdrop-blur-xl !text-white !border !border-white/10 !rounded-2xl !shadow-2xl !text-[13px] !font-medium",
+          actionButtonStyle: {
+            background: "rgba(255, 255, 255, 0.12)",
+            color: "#ffffff",
+            borderRadius: "9999px",
+            fontSize: "12px",
+            fontWeight: "500",
+            padding: "4px 12px",
+            border: "1px solid rgba(255, 255, 255, 0.18)",
+            cursor: "pointer",
+          },
+        }}
+      />
     </div>
   );
 }
