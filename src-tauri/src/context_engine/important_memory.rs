@@ -631,8 +631,8 @@ impl ContextImportantMemoryBuilder {
         if let Ok(workset_builder) = ContextWorksetBuilder::from_db(conn, workspace_id) {
             if let Ok(workset) = workset_builder.build() {
                 for item_ref in &workset.items {
-                    // Skip if user explicitly removed this item from context
-                    if forgotten_from_context_ids.contains(&item_ref.id) {
+                    // Skip if user explicitly removed this item from context or from important memory
+                    if forgotten_from_context_ids.contains(&item_ref.id) || unpinned_from_important_ids.contains(&item_ref.id) {
                         continue;
                     }
 
@@ -762,6 +762,10 @@ impl ContextImportantMemoryBuilder {
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
                         let (item_id, title_opt, item_type, content, meta_str, session_cnt, first_seen, last_seen) = row;
+
+                        if forgotten_from_context_ids.contains(&item_id) || unpinned_from_important_ids.contains(&item_id) {
+                            continue;
+                        }
 
                         // Check if we already have a memory for this item
                         let existing_idx = memories.iter().position(|m| m.source_id == item_id);
