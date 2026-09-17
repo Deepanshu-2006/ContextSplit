@@ -30,10 +30,16 @@ pub mod memory;
 pub mod memory_query;
 pub mod important_memory;
 pub mod memory_importance;
+pub mod memory_promotion;
 pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
 pub mod snapshot;
+
+pub use memory_promotion::{
+    ContextMemoryPromotionEvaluator, MemoryPromotionAction, MemoryPromotionDecision,
+    MemoryPromotionInput,
+};
 
 pub use memory_importance::{
     ContextMemoryImportanceEvaluator, MemoryDimensionScores, MemoryImportanceEvaluation,
