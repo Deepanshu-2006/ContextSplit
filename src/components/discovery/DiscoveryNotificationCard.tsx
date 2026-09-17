@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Sparkles, X, ArrowRight } from 'lucide-react';
+import { Layers, X, ArrowRight } from 'lucide-react';
 import { useDiscoveryStore } from '../../store/discoveryStore';
 
 export function DiscoveryNotificationCard() {
@@ -41,7 +41,7 @@ export function DiscoveryNotificationCard() {
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-1.5 text-gray-500">
           <div className="w-5 h-5 rounded-md bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-            <Sparkles size={11} className="text-indigo-600" />
+            <Layers size={11} className="text-indigo-600" />
           </div>
           <span className="text-[11px] font-semibold text-gray-600 tracking-tight">
             Suggested Context

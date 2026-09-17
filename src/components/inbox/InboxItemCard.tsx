@@ -12,6 +12,8 @@ import {
   Trash2,
   FolderPlus,
   BoxSelect,
+  Layers,
+  Folder,
 } from 'lucide-react';
 import { db, Workspace } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
@@ -31,7 +33,7 @@ function InboxItemCardComponent({
   onSelectItem,
   onMoveToWorkspace,
 }: InboxItemCardProps) {
-  const { item, attention, candidateInfo, inboxState } = derived;
+  const { item, attention, candidateInfo } = derived;
   const isSelected = useInboxStore((s) => s.selectedItemIds.includes(derived.item.id));
   const isMultiSelectActive = useInboxStore((s) => s.isMultiSelectActive);
   const isFocused = useInboxStore((s) => s.focusedItemId === derived.item.id);
@@ -119,10 +121,9 @@ function InboxItemCardComponent({
       const diffHours = Math.floor(diffMins / 60);
 
       if (diffMins < 1) return 'Just now';
-      if (diffMins < 60) return `${diffMins} min ago`;
-      if (diffHours < 24) return `${diffHours} hr ago`;
+      if (diffMins < 60) return `${diffMins}m ago`;
+      if (diffHours < 24) return `${diffHours}h ago`;
 
-      // If older, show time of day if today, otherwise date
       const isToday = date.toDateString() === now.toDateString();
       if (isToday) {
         return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -133,7 +134,7 @@ function InboxItemCardComponent({
     }
   };
 
-  // Generate clean snippet and title
+  // Generate clean snippet and title without clutter
   let displayTitle = item.title;
   let snippet = '';
 
@@ -141,7 +142,7 @@ function InboxItemCardComponent({
     try {
       const url = new URL(item.content);
       displayTitle = item.title || `Link from ${url.hostname.replace(/^www\./, '')}`;
-      snippet = url.hostname + url.pathname;
+      snippet = url.hostname + (url.pathname !== '/' ? url.pathname : '');
     } catch {
       displayTitle = item.title || 'Link';
       snippet = item.content;
@@ -150,79 +151,92 @@ function InboxItemCardComponent({
     displayTitle = item.title || 'Image capture';
     try {
       const meta = JSON.parse(item.metadata || '{}');
-      snippet = meta.file_size ? `Image · ${meta.file_size}` : 'Image';
+      if (meta.file_size || meta.dimensions) {
+        snippet = [meta.dimensions, meta.file_size].filter(Boolean).join(' · ');
+      } else {
+        snippet = '';
+      }
     } catch {
-      snippet = 'Image';
+      snippet = '';
     }
   } else {
     // Text / Note
     const lines = item.content.trim().split('\n');
     if (!displayTitle) {
       displayTitle = lines[0] || 'Note';
-      snippet = lines.slice(1).join(' ').trim() || lines[0];
+      snippet = lines.slice(1).join(' ').trim();
     } else {
       snippet = lines.join(' ').trim();
     }
   }
 
-  // Determine ONE subtle context pill
+  // Refined context badge (neatly aligned and formatted)
   const suggestedWsId = attention?.factors?.suggested_workspace_id;
   const suggestedWs = workspaces.find((w) => w.id === suggestedWsId);
   const currentWs = workspaces.find((w) => w.id === item.workspace_id);
 
-  const isNeedsReview = Boolean(
-    attention?.factors?.is_ambiguous || derived.section === 'needs_attention' || inboxState?.state === 'needs_review'
-  );
-
   const renderContextPill = () => {
     if (currentWs) {
       return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-700 bg-gray-100/90 px-2 py-0.5 rounded-md shrink-0 border border-black/5">
-          {currentWs.name}
-        </span>
-      );
-    }
-    if (isNeedsReview) {
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md shrink-0 border border-amber-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-          <span>Needs review</span>
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-700 bg-gray-100/90 border border-gray-200/70 px-2.5 py-0.5 rounded-full shrink-0">
+          <Folder size={11} className="text-gray-400" />
+          <span className="truncate max-w-[140px]">{currentWs.name}</span>
         </span>
       );
     }
     if (suggestedWs) {
       return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-700 bg-gray-100/90 px-2 py-0.5 rounded-md shrink-0 border border-black/5">
-          <span className="text-gray-400">Suggested:</span>
-          <span className="font-semibold text-gray-800">{suggestedWs.name}</span>
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-indigo-700 bg-indigo-50/80 border border-indigo-200/60 px-2.5 py-0.5 rounded-full shrink-0">
+          <Layers size={11} className="text-indigo-500" />
+          <span className="truncate max-w-[140px]">{suggestedWs.name}</span>
         </span>
       );
     }
     if (candidateInfo) {
       return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-800 bg-cyan-50 px-2 py-0.5 rounded-md shrink-0 border border-cyan-200/60">
-          <span className="text-cyan-600 font-normal">Candidate:</span>
-          <span className="font-semibold">{candidateInfo.candidateName}</span>
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-700 bg-gray-100/90 hover:bg-gray-200/70 border border-gray-200/60 px-2.5 py-0.5 rounded-full shrink-0 transition-colors">
+          <Layers size={11} className="text-indigo-500" />
+          <span className="truncate max-w-[140px]">{candidateInfo.candidateName}</span>
         </span>
       );
     }
-    return (
-      <span className="inline-flex items-center text-[11px] font-normal text-gray-400 bg-gray-50 px-2 py-0.5 rounded-md shrink-0">
-        No context yet
-      </span>
-    );
+    if (attention?.factors?.is_ambiguous) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-800 bg-amber-50/90 border border-amber-200/60 px-2.5 py-0.5 rounded-full shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+          <span>Needs review</span>
+        </span>
+      );
+    }
+    return null;
   };
 
   const getItemIcon = () => {
     switch (item.item_type) {
       case 'image':
-        return <ImageIcon size={14} className="text-purple-500 shrink-0" />;
+        return (
+          <div className="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center shrink-0 border border-purple-100/60 group-hover:bg-purple-100/60 transition-colors">
+            <ImageIcon size={13} />
+          </div>
+        );
       case 'url':
-        return <Link2 size={14} className="text-blue-500 shrink-0" />;
+        return (
+          <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 border border-blue-100/60 group-hover:bg-blue-100/60 transition-colors">
+            <Link2 size={13} />
+          </div>
+        );
       case 'file':
-        return <FileCode size={14} className="text-gray-500 shrink-0" />;
+        return (
+          <div className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 border border-emerald-100/60 group-hover:bg-emerald-100/60 transition-colors">
+            <FileCode size={13} />
+          </div>
+        );
       default:
-        return <FileText size={14} className="text-gray-500 shrink-0" />;
+        return (
+          <div className="w-7 h-7 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center shrink-0 border border-gray-200/60 group-hover:bg-gray-200/60 transition-colors">
+            <FileText size={13} />
+          </div>
+        );
     }
   };
 
@@ -245,15 +259,15 @@ function InboxItemCardComponent({
       }}
       onDoubleClick={handleDoubleClick}
       onContextMenu={(e) => openMenu(e)}
-      className={`group relative flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50/70 border-b border-black/5 transition-all duration-100 select-none cursor-pointer ${
+      className={`group relative flex items-center justify-between px-3.5 py-2.5 bg-white hover:bg-gray-50/80 border-b border-gray-100 transition-colors duration-100 select-none cursor-pointer ${
         isSelected
-          ? 'bg-blue-50/30'
+          ? 'bg-indigo-50/40'
           : isFocused
-          ? 'bg-gray-50/80 ring-1 ring-black/10'
+          ? 'bg-gray-50 ring-1 ring-black/10'
           : ''
       }`}
     >
-      {/* Left Column: Selection Checkbox + Type Icon + Title & Snippet */}
+      {/* Left Column: Selection Checkbox + Styled Type Icon Badge + Title & Snippet */}
       <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
         {/* Selection Checkbox */}
         <button
@@ -264,47 +278,51 @@ function InboxItemCardComponent({
           }}
           className={`w-4 h-4 rounded border flex items-center justify-center transition-all cursor-pointer shrink-0 ${
             isSelected
-              ? 'bg-gray-900 border-gray-900 text-white'
-              : 'border-gray-300 hover:border-gray-500 bg-white opacity-0 group-hover:opacity-100'
+              ? 'bg-gray-950 border-gray-950 text-white'
+              : 'border-gray-200 hover:border-gray-400 bg-white opacity-0 group-hover:opacity-100'
           } ${isMultiSelectActive ? '!opacity-100' : ''}`}
           title={isSelected ? 'Deselect' : 'Select (X)'}
         >
-          {isSelected && <Check size={11} strokeWidth={3} />}
+          {isSelected && <Check size={10} strokeWidth={3} />}
         </button>
 
-        {/* Content Icon */}
-        <div className="w-5 flex items-center justify-center shrink-0">
-          {getItemIcon()}
-        </div>
+        {/* Content Icon Badge */}
+        {getItemIcon()}
 
-        {/* Text Details & Context Pill */}
-        <div className="flex flex-col min-w-0 flex-1 gap-0.5">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[13px] font-semibold text-gray-900 truncate">
-              {displayTitle}
-            </span>
-            {renderContextPill()}
-          </div>
+        {/* Title & Optional Snippet */}
+        <div className="flex flex-col min-w-0 flex-1 justify-center">
+          <span className="text-[13px] font-medium text-gray-900 group-hover:text-black truncate tracking-tight">
+            {displayTitle}
+          </span>
 
-          <p className="text-[12px] text-gray-500 truncate leading-normal">
-            {snippet}
-          </p>
+          {snippet ? (
+            <p className="text-[11.5px] text-gray-400 truncate leading-normal mt-0.5">
+              {snippet}
+            </p>
+          ) : null}
         </div>
       </div>
 
-      {/* Right Column: Relative Timestamp & Subtle Hover Menu */}
-      <div className="flex items-center gap-2 shrink-0">
-        <span className="text-[11px] text-gray-400 font-mono">
+      {/* Center/Right: Neatly Aligned Context Chip */}
+      <div className="flex items-center shrink-0 px-2">
+        {renderContextPill()}
+      </div>
+
+      {/* Far Right: Relative Timestamp & Subtle Hover Menu */}
+      <div className="flex items-center gap-2 shrink-0 pl-2">
+        <span className="text-[11.5px] text-gray-400 font-normal tracking-tight w-14 text-right">
           {getRelativeTime(item.created_at)}
         </span>
 
         <button
           ref={menuBtnRef}
           onClick={openMenu}
-          className="p-1 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-md transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+          className={`p-1 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-all cursor-pointer ${
+            menuOpen ? 'opacity-100 bg-gray-100 text-gray-700' : 'opacity-0 group-hover:opacity-100'
+          }`}
           title="More options"
         >
-          <MoreVertical size={14} />
+          <MoreVertical size={13} />
         </button>
       </div>
 
@@ -313,7 +331,7 @@ function InboxItemCardComponent({
         <div
           ref={menuRef}
           style={{ top: menuPos.top, right: menuPos.right }}
-          className="fixed w-48 bg-white rounded-xl shadow-xl border border-black/10 py-1.5 z-50 text-[12px] overflow-hidden animate-in fade-in-0 duration-100"
+          className="fixed w-48 bg-white rounded-xl shadow-xl border border-gray-200/80 py-1.5 z-50 text-[12px] overflow-hidden animate-in fade-in-0 duration-100 select-none"
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -322,7 +340,7 @@ function InboxItemCardComponent({
               setMenuOpen(false);
               onSelectItem?.(item.id);
             }}
-            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100 flex items-center gap-2 transition-colors cursor-pointer"
           >
             <FolderPlus size={13} className="text-gray-500" />
             <span>View Context Details</span>
@@ -330,7 +348,7 @@ function InboxItemCardComponent({
 
           <button
             onClick={handleCopy}
-            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+            className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100 flex items-center gap-2 transition-colors cursor-pointer"
           >
             <Copy size={13} className="text-gray-500" />
             <span>Copy Content</span>
@@ -343,14 +361,14 @@ function InboxItemCardComponent({
                 setMenuOpen(false);
                 window.open(item.content, '_blank');
               }}
-              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100 flex items-center gap-2 transition-colors cursor-pointer"
             >
               <ExternalLink size={13} className="text-gray-500" />
               <span>Open in Browser</span>
             </button>
           )}
 
-          <div className="my-1 border-t border-black/5" />
+          <div className="my-1 border-t border-gray-100" />
 
           <div className="px-3 py-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
             Move to Workspace
@@ -363,20 +381,20 @@ function InboxItemCardComponent({
                 setMenuOpen(false);
                 onMoveToWorkspace(item.id, ws.id);
               }}
-              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+              className="w-full text-left px-3 py-1.5 text-gray-700 hover:bg-gray-100 flex items-center gap-2 transition-colors cursor-pointer"
             >
               <BoxSelect size={12} className="text-gray-400" />
               <span className="truncate">{ws.name}</span>
             </button>
           ))}
 
-          <div className="my-1 border-t border-black/5" />
+          <div className="my-1 border-t border-gray-100" />
 
           <button
             onClick={handleDelete}
-            className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors cursor-pointer"
+            className="w-full text-left px-3 py-1.5 text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition-colors cursor-pointer"
           >
-            <Trash2 size={13} className="text-red-500" />
+            <Trash2 size={13} className="text-rose-500" />
             <span>Delete Item</span>
           </button>
         </div>,
