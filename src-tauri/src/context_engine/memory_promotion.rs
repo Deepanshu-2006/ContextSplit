@@ -337,10 +337,11 @@ impl ContextMemoryPromotionEvaluator {
 
 fn tier_rank(tier: MemoryImportanceTier) -> usize {
     match tier {
-        MemoryImportanceTier::Temporary => 0,
-        MemoryImportanceTier::Useful => 1,
-        MemoryImportanceTier::Important => 2,
-        MemoryImportanceTier::Critical => 3,
+        MemoryImportanceTier::Stale => 0,
+        MemoryImportanceTier::Temporary => 1,
+        MemoryImportanceTier::Useful => 2,
+        MemoryImportanceTier::Important => 3,
+        MemoryImportanceTier::Critical => 4,
     }
 }
 

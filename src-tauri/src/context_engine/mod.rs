@@ -31,10 +31,15 @@ pub mod memory_query;
 pub mod important_memory;
 pub mod memory_importance;
 pub mod memory_promotion;
+pub mod memory_decay;
 pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
 pub mod snapshot;
+
+pub use memory_decay::{
+    ContextMemoryDecayEvaluator, MemoryDecayInput, MemoryDecayPolicy, MemoryDecayResult,
+};
 
 pub use memory_promotion::{
     ContextMemoryPromotionEvaluator, MemoryPromotionAction, MemoryPromotionDecision,

@@ -14,13 +14,13 @@ use crate::context_engine::workset::{
 // MemoryImportanceTier: The 4 Core Tiers
 // =========================================================================
 
-/// Four-tier qualitative classification for contextual memory importance.
+/// Five-tier qualitative classification for contextual memory importance.
 ///
 /// Invariants:
 /// - System is strictly conservative.
 /// - Recency alone NEVER grants `Critical` or `Important` status.
 /// - Accidental captures and generic noise are filtered to `Temporary`.
-/// - Temporary items are never deleted; only their memory importance is classified.
+/// - Temporary and Stale items are never deleted; only their memory importance is classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryImportanceTier {
@@ -32,6 +32,8 @@ pub enum MemoryImportanceTier {
     Useful,
     /// Ephemeral/transient item (single glance, unconfirmed single lookup, low-attention capture).
     Temporary,
+    /// Inactive, unreinforced item that has aged past decay thresholds without multi-session grounding.
+    Stale,
 }
 
 impl MemoryImportanceTier {
@@ -41,6 +43,7 @@ impl MemoryImportanceTier {
             Self::Important => "important",
             Self::Useful => "useful",
             Self::Temporary => "temporary",
+            Self::Stale => "stale",
         }
     }
 
@@ -50,6 +53,7 @@ impl MemoryImportanceTier {
             Self::Important => "Important",
             Self::Useful => "Useful",
             Self::Temporary => "Temporary",
+            Self::Stale => "Stale",
         }
     }
 
@@ -63,6 +67,10 @@ impl MemoryImportanceTier {
 
     pub fn is_useful(&self) -> bool {
         matches!(self, Self::Useful)
+    }
+
+    pub fn is_stale(&self) -> bool {
+        matches!(self, Self::Stale)
     }
 }
 
