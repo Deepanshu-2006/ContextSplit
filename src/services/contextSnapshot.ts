@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ContextStateValue, ResumeReadiness, ResumeReadinessAssessment, StateFreshness } from "./contextState";
+import { ImportantMemoryType, MemoryImportanceBand } from "./contextMemory";
 
 /**
  * Epistemic provenance of contextual snapshot information.
@@ -80,6 +81,25 @@ export interface SnapshotTaskReference {
 }
 
 /**
+ * Lightweight reference to an important contextual memory in a snapshot.
+ */
+export interface SnapshotImportantMemoryReference {
+  id: string;
+  source_id: string;
+  memory_type: ImportantMemoryType;
+  title: string;
+  detail?: string | null;
+  importance: number;
+  importance_band: MemoryImportanceBand;
+  confidence: number;
+  provenance: InformationProvenance;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  app_name?: string | null;
+  domain?: string | null;
+}
+
+/**
  * Point-in-time contextual snapshot representing what a user's work looked like inside a context.
  */
 export interface ContextSnapshot {
@@ -99,6 +119,7 @@ export interface ContextSnapshot {
   workset_item_references: SnapshotWorksetItemReference[];
   recent_activity_references: SnapshotActivityReference[];
   recent_task_references: SnapshotTaskReference[];
+  important_memory_references?: SnapshotImportantMemoryReference[];
   snapshot_confidence: number;
   snapshot_statement: string;
   quality: ContextSnapshotQuality;

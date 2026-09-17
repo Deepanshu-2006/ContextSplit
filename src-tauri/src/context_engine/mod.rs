@@ -63,9 +63,10 @@ pub use snapshot::{
     invalidate_snapshot_cache, record_snapshot_history, ContextSnapshot, ContextSnapshotBuilder,
     ContextSnapshotCache, ContextSnapshotComparator, ContextSnapshotDiff, ContextSnapshotHistory,
     ContextSnapshotHistoryRepository, ContextSnapshotQuality, ContextSnapshotQualityEvaluator,
-    ContextSnapshotService, SnapshotActivityReference, SnapshotQualityRating,
-    SnapshotTaskReference, SnapshotTrigger, SnapshotTriggerClassifier, SnapshotTriggerCoalescer,
-    SnapshotWorksetItemReference, CONTEXTUAL_SNAPSHOT_DISCLAIMER, DEFAULT_MAX_SNAPSHOT_RETENTION,
+    ContextSnapshotService, SnapshotActivityReference, SnapshotImportantMemoryReference,
+    SnapshotQualityRating, SnapshotTaskReference, SnapshotTrigger, SnapshotTriggerClassifier,
+    SnapshotTriggerCoalescer, SnapshotWorksetItemReference, CONTEXTUAL_SNAPSHOT_DISCLAIMER,
+    DEFAULT_MAX_SNAPSHOT_RETENTION,
 };
 
 pub use context_state::{

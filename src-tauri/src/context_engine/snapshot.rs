@@ -222,6 +222,71 @@ impl From<&MemoryActivitySequenceEntry> for SnapshotActivityReference {
     }
 }
 
+/// Lightweight reference to an important contextual memory in a snapshot.
+///
+/// Invariants:
+/// - Does NOT copy full heavy memory payloads; stores lightweight reference metadata.
+/// - Distinguishes durable historical memory from current dynamic working state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotImportantMemoryReference {
+    /// Unique memory identifier (e.g. "mem_item_123", "mem_ref_456")
+    pub id: String,
+    /// Source reference identifier (item_id, task_id, workspace_id)
+    pub source_id: String,
+    /// Semantic category of the memory
+    pub memory_type: crate::context_engine::important_memory::ImportantMemoryType,
+    /// Human-friendly title or label
+    pub title: String,
+    /// Optional concise detail or snippet
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Calibrated importance score [0.0, 1.0]
+    pub importance: f64,
+    /// Qualitative importance band
+    pub importance_band: crate::context_engine::important_memory::MemoryImportanceBand,
+    /// Confidence score [0.0, 1.0]
+    pub confidence: f64,
+    /// Epistemic source
+    pub provenance: InformationProvenance,
+    /// First seen ISO-8601 timestamp
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen_at: Option<String>,
+    /// Last seen ISO-8601 timestamp
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+    /// Associated application name if known
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    /// Associated web domain if known
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl From<&crate::context_engine::important_memory::ContextImportantMemory>
+    for SnapshotImportantMemoryReference
+{
+    fn from(mem: &crate::context_engine::important_memory::ContextImportantMemory) -> Self {
+        Self {
+            id: mem.id.clone(),
+            source_id: mem.source_id.clone(),
+            memory_type: mem.memory_type,
+            title: crate::context_engine::reasoning::privacy::scrub_private_data(&mem.title),
+            detail: mem
+                .detail
+                .as_ref()
+                .map(|d| crate::context_engine::reasoning::privacy::scrub_private_data(d)),
+            importance: mem.importance,
+            importance_band: mem.importance_band,
+            confidence: mem.confidence,
+            provenance: mem.provenance,
+            first_seen_at: mem.first_seen_at.clone(),
+            last_seen_at: mem.last_seen_at.clone(),
+            app_name: mem.metadata.app_name.clone(),
+            domain: mem.metadata.domain.clone(),
+        }
+    }
+}
+
 // =========================================================================
 // ContextSnapshotQuality: Step 4 Quality Control & Readiness Classification
 // =========================================================================
@@ -684,6 +749,9 @@ pub struct ContextSnapshot {
     pub recent_activity_references: Vec<SnapshotActivityReference>,
     /// Lightweight references to recent tasks in this context
     pub recent_task_references: Vec<SnapshotTaskReference>,
+    /// Lightweight references to important contextual memories (e.g. project repositories, Figma projects, design specs)
+    #[serde(default)]
+    pub important_memory_references: Vec<SnapshotImportantMemoryReference>,
     /// Structured representation of the last meaningful activity (nullable)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_meaningful_activity: Option<MeaningfulActivity>,
@@ -718,6 +786,7 @@ impl ContextSnapshot {
         workset_item_references: Vec<SnapshotWorksetItemReference>,
         recent_activity_references: Vec<SnapshotActivityReference>,
         recent_task_references: Vec<SnapshotTaskReference>,
+        important_memory_references: Vec<SnapshotImportantMemoryReference>,
         last_meaningful_activity: Option<MeaningfulActivity>,
         snapshot_confidence: f64,
         provenance: InformationProvenance,
@@ -764,6 +833,7 @@ impl ContextSnapshot {
             workset_item_references,
             recent_activity_references,
             recent_task_references,
+            important_memory_references,
             last_meaningful_activity,
             snapshot_confidence: snapshot_confidence.clamp(0.0, 1.0),
             snapshot_statement: statement,
@@ -861,6 +931,7 @@ impl ContextSnapshot {
             workset_item_references: workset_refs,
             recent_activity_references: Vec::new(),
             recent_task_references: recent_tasks,
+            important_memory_references: Vec::new(),
             last_meaningful_activity: state.meaningful_activity.clone(),
             snapshot_confidence: state.state_confidence,
             snapshot_statement: statement,
@@ -981,6 +1052,7 @@ impl ContextSnapshot {
             workset_item_references: workset_refs,
             recent_activity_references: activity_refs,
             recent_task_references: task_refs,
+            important_memory_references: Vec::new(),
             last_meaningful_activity: meaningful_activity,
             snapshot_confidence: memory.current_context_confidence,
             snapshot_statement: statement,
@@ -1179,6 +1251,7 @@ pub struct ContextSnapshotBuilder {
     pub workset_item_references: Vec<SnapshotWorksetItemReference>,
     pub recent_activity_references: Vec<SnapshotActivityReference>,
     pub recent_task_references: Vec<SnapshotTaskReference>,
+    pub important_memory_references: Vec<SnapshotImportantMemoryReference>,
     pub last_meaningful_activity: Option<MeaningfulActivity>,
     pub snapshot_confidence: f64,
     pub quality: Option<ContextSnapshotQuality>,
@@ -1203,6 +1276,7 @@ impl ContextSnapshotBuilder {
             workset_item_references: Vec::new(),
             recent_activity_references: Vec::new(),
             recent_task_references: Vec::new(),
+            important_memory_references: Vec::new(),
             last_meaningful_activity: None,
             snapshot_confidence: 0.50,
             quality: None,
@@ -1266,10 +1340,29 @@ impl ContextSnapshotBuilder {
             })
             .unwrap_or_default();
 
-        // 7. Last meaningful activity
+        // 7. Important memories (references only - historical contextual anchors)
+        let important_memories: Vec<SnapshotImportantMemoryReference> =
+            crate::context_engine::important_memory::ContextImportantMemoryBuilder::build(
+                conn,
+                context_id,
+                None,
+            )
+            .map(|set| set.memories)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| {
+                m.memory_type
+                    != crate::context_engine::important_memory::ImportantMemoryType::ConfirmedContextFact
+                    || !m.title.starts_with("Workspace:")
+            })
+            .take(8)
+            .map(|m| SnapshotImportantMemoryReference::from(&m))
+            .collect();
+
+        // 8. Last meaningful activity
         let meaningful_activity = state.as_ref().and_then(|s| s.meaningful_activity.clone());
 
-        // 8. Determine active task
+        // 9. Determine active task
         let (task_id, task_title, task_conf, task_prov) = if let Some(ref st) = state {
             if let Some(ref title) = st.task_title {
                 let prov = if st.has_user_feedback {
@@ -1301,7 +1394,7 @@ impl ContextSnapshotBuilder {
             (None, None, None, None)
         };
 
-        // 9. State & Freshness
+        // 10. State & Freshness
         let state_val = state
             .as_ref()
             .map(|s| s.state)
@@ -1349,6 +1442,7 @@ impl ContextSnapshotBuilder {
             workset_item_references: workset_refs,
             recent_activity_references: activity_refs,
             recent_task_references: task_refs,
+            important_memory_references: important_memories,
             last_meaningful_activity: meaningful_activity,
             snapshot_confidence,
             quality: None,
@@ -1415,6 +1509,22 @@ impl ContextSnapshotBuilder {
         self
     }
 
+    pub fn with_important_memory_references(
+        mut self,
+        memories: Vec<SnapshotImportantMemoryReference>,
+    ) -> Self {
+        self.important_memory_references = memories;
+        self
+    }
+
+    pub fn add_important_memory_reference(
+        mut self,
+        memory: SnapshotImportantMemoryReference,
+    ) -> Self {
+        self.important_memory_references.push(memory);
+        self
+    }
+
     pub fn with_meaningful_activity(mut self, activity: MeaningfulActivity) -> Self {
         self.last_meaningful_activity = Some(activity);
         self
@@ -1473,6 +1583,7 @@ impl ContextSnapshotBuilder {
             self.workset_item_references,
             self.recent_activity_references,
             self.recent_task_references,
+            self.important_memory_references,
             self.last_meaningful_activity,
             self.snapshot_confidence,
             self.provenance,
@@ -4352,6 +4463,245 @@ mod tests {
             "Snapshot storage pipeline took too long: {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn test_snapshot_integrates_important_memory_references_lightweight() {
+        use crate::context_engine::important_memory::{
+            ImportantMemoryType, MemoryImportanceBand,
+        };
+
+        // 1. Construct lightweight important memory references (e.g., GitHub repo, Figma project, Hero design reference)
+        let repo_ref = SnapshotImportantMemoryReference {
+            id: "mem-repo-1".to_string(),
+            source_id: "item-github-123".to_string(),
+            memory_type: ImportantMemoryType::ImportantReference,
+            title: "Aurora GitHub repository".to_string(),
+            detail: Some("github.com/org/aurora-web".to_string()),
+            importance: 0.95,
+            importance_band: MemoryImportanceBand::Critical,
+            confidence: 0.92,
+            provenance: InformationProvenance::Confirmed,
+            first_seen_at: Some("2026-09-10T10:00:00Z".to_string()),
+            last_seen_at: Some("2026-09-17T18:00:00Z".to_string()),
+            app_name: Some("Google Chrome".to_string()),
+            domain: Some("github.com".to_string()),
+        };
+
+        let figma_ref = SnapshotImportantMemoryReference {
+            id: "mem-figma-2".to_string(),
+            source_id: "item-figma-456".to_string(),
+            memory_type: ImportantMemoryType::ImportantReference,
+            title: "Figma project".to_string(),
+            detail: Some("figma.com/file/aurora-hero".to_string()),
+            importance: 0.88,
+            importance_band: MemoryImportanceBand::High,
+            confidence: 0.89,
+            provenance: InformationProvenance::Observed,
+            first_seen_at: Some("2026-09-12T11:00:00Z".to_string()),
+            last_seen_at: Some("2026-09-17T18:30:00Z".to_string()),
+            app_name: Some("Figma".to_string()),
+            domain: Some("figma.com".to_string()),
+        };
+
+        let design_ref = SnapshotImportantMemoryReference {
+            id: "mem-design-3".to_string(),
+            source_id: "item-hero-spec-789".to_string(),
+            memory_type: ImportantMemoryType::ImportantItem,
+            title: "Hero design reference".to_string(),
+            detail: Some("CSS keyframes and timing curves".to_string()),
+            importance: 0.82,
+            importance_band: MemoryImportanceBand::High,
+            confidence: 0.85,
+            provenance: InformationProvenance::Observed,
+            first_seen_at: Some("2026-09-15T14:00:00Z".to_string()),
+            last_seen_at: Some("2026-09-17T19:00:00Z".to_string()),
+            app_name: Some("Cursor".to_string()),
+            domain: None,
+        };
+
+        // 2. Build snapshot with these important memories
+        let snapshot = ContextSnapshotBuilder::new("ws-aurora-1", "Aurora Website")
+            .with_task(
+                Some("task-hero-anim".to_string()),
+                "Hero animation",
+                0.90,
+                InformationProvenance::Inferred,
+            )
+            .with_important_memory_references(vec![
+                repo_ref.clone(),
+                figma_ref.clone(),
+                design_ref.clone(),
+            ])
+            .build();
+
+        // 3. Verify snapshot contains the references and not heavyweight duplicated payload objects
+        assert_eq!(snapshot.context_name, "Aurora Website");
+        assert_eq!(snapshot.task_title.as_deref(), Some("Hero animation"));
+        assert_eq!(snapshot.important_memory_references.len(), 3);
+
+        let titles: Vec<&str> = snapshot
+            .important_memory_references
+            .iter()
+            .map(|r| r.title.as_str())
+            .collect();
+        assert!(titles.contains(&"Aurora GitHub repository"));
+        assert!(titles.contains(&"Figma project"));
+        assert!(titles.contains(&"Hero design reference"));
+
+        // Verify JSON serialization includes lightweight references cleanly
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("Aurora GitHub repository"));
+        assert!(json.contains("important_memory_references"));
+        assert!(json.contains("important_reference"));
+    }
+
+    #[test]
+    fn test_snapshot_distinguishes_historical_memory_vs_current_state_on_sparse_return() {
+        use crate::context_engine::important_memory::{
+            ImportantMemoryType, MemoryImportanceBand,
+        };
+
+        // Scenario: User returns to "Aurora Website" after several days of inactivity.
+        // Recent activity is sparse/absent.
+        // Snapshot should still know:
+        // - Important project references (GitHub, Figma)
+        // - Previous task ("Hero animation")
+        // - Relevant workset items
+        // BUT should NOT pretend the user is still actively in-flight on the old task.
+
+        let repo_ref = SnapshotImportantMemoryReference {
+            id: "mem-repo".to_string(),
+            source_id: "item-gh".to_string(),
+            memory_type: ImportantMemoryType::ImportantReference,
+            title: "Aurora GitHub repository".to_string(),
+            detail: None,
+            importance: 0.92,
+            importance_band: MemoryImportanceBand::Critical,
+            confidence: 0.95,
+            provenance: InformationProvenance::Confirmed,
+            first_seen_at: Some("2026-09-01T00:00:00Z".to_string()),
+            last_seen_at: Some("2026-09-10T00:00:00Z".to_string()),
+            app_name: Some("Safari".to_string()),
+            domain: Some("github.com".to_string()),
+        };
+
+        let workset_item = create_dummy_workset_item(
+            "item-hero-code",
+            "Hero.tsx",
+            WorksetItemRelevance::Primary,
+            0.88,
+            Some("Cursor"),
+        );
+
+        let previous_task = SnapshotTaskReference {
+            id: Some("task-hero".to_string()),
+            title: "Hero animation".to_string(),
+            action_verb: Some("Animating".to_string()),
+            target_subject: Some("Hero".to_string()),
+            confidence: 0.85,
+            confidence_band: "High".to_string(),
+            provenance: InformationProvenance::Inferred,
+            first_seen_at: Some("2026-09-10T12:00:00Z".to_string()),
+            last_active_at: Some("2026-09-10T18:00:00Z".to_string()),
+            status: Some("paused".to_string()),
+        };
+
+        // Elapsed time is 3 days (259200 seconds)
+        let elapsed_seconds = 3 * 86400;
+        let freshness = StateFreshness::classify(elapsed_seconds);
+        assert_eq!(freshness, StateFreshness::Stale);
+
+        let snapshot = ContextSnapshotBuilder::new("ws-aurora-ret", "Aurora Website")
+            .with_task(
+                Some("task-hero".to_string()),
+                "Hero animation",
+                0.85,
+                InformationProvenance::Inferred,
+            )
+            .with_state(ContextStateValue::Dormant)
+            .with_freshness(freshness, elapsed_seconds)
+            .with_task_references(vec![previous_task])
+            .add_workset_item(workset_item)
+            .add_important_memory_reference(repo_ref)
+            .build();
+
+        // 1. Verify Historical Memory is preserved
+        assert_eq!(snapshot.important_memory_references.len(), 1);
+        assert_eq!(
+            snapshot.important_memory_references[0].title,
+            "Aurora GitHub repository"
+        );
+        assert_eq!(snapshot.recent_task_references.len(), 1);
+        assert_eq!(
+            snapshot.recent_task_references[0].title,
+            "Hero animation"
+        );
+        assert_eq!(snapshot.workset_item_references.len(), 1);
+
+        // 2. Verify Current State is explicitly distinguished as Dormant / Stale
+        assert_eq!(snapshot.state, ContextStateValue::Dormant);
+        assert_eq!(snapshot.state_freshness, StateFreshness::Stale);
+        assert!(snapshot.is_dormant());
+        assert!(!snapshot.is_working()); // NOT actively in flight
+
+        // 3. Statement reflects historical departure rather than active session
+        assert!(
+            snapshot.snapshot_statement.contains("Left off on task 'Hero animation'"),
+            "Statement was: {}",
+            snapshot.snapshot_statement
+        );
+        assert!(
+            snapshot.snapshot_statement.contains("several days ago")
+                || snapshot.snapshot_statement.contains("stale"),
+            "Statement was: {}",
+            snapshot.snapshot_statement
+        );
+    }
+
+    #[test]
+    fn test_snapshot_from_db_pulls_promoted_important_memories() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora App").unwrap();
+
+        // Create a confirmed/frequent item in DB
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://github.com/aurora/repo",
+            Some("Aurora GitHub repository"),
+            "{}",
+        )
+        .unwrap();
+
+        // Record user memory control action to keep it important
+        let _ = crate::context_engine::important_memory::record_context_memory_control(
+            &conn,
+            &ws.id,
+            &item.id,
+            crate::context_engine::important_memory::UserMemoryControlAction::KeepImportant,
+        );
+
+        // Build snapshot from DB
+        let builder = ContextSnapshotBuilder::from_db(&conn, &ws.id).unwrap();
+        let snapshot = builder.build();
+
+        assert_eq!(snapshot.context_name, "Aurora App");
+        // Verify important memory references contains the confirmed memory
+        assert!(
+            !snapshot.important_memory_references.is_empty(),
+            "Expected snapshot to contain important memory references from DB"
+        );
+        let mem = snapshot
+            .important_memory_references
+            .iter()
+            .find(|m| m.title == "Aurora GitHub repository")
+            .expect("Expected snapshot to contain 'Aurora GitHub repository'");
+        assert_eq!(mem.provenance, InformationProvenance::Confirmed);
     }
 }
 
