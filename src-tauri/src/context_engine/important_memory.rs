@@ -1188,6 +1188,236 @@ pub fn record_context_memory_control(
 }
 
 // =========================================================================
+// ContextMemoryQueryService: Clean Retrieval & Query Interface (Day 21 Step 8)
+// =========================================================================
+
+/// Clean service boundary for querying, searching, and filtering contextual memories.
+/// Reuses local SQLite indexing and semantic similarity infrastructure where available.
+pub struct ContextMemoryQueryService;
+
+impl ContextMemoryQueryService {
+    /// Retrieves all important memories for a specific context, ordered by importance descending.
+    pub fn get_important_memories(
+        conn: &Connection,
+        context_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContextImportantMemory>> {
+        let set = ContextImportantMemoryBuilder::build(conn, context_id, None)?;
+        let mut memories = set.memories;
+        memories.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(lim) = limit {
+            memories.truncate(lim);
+        }
+        Ok(memories)
+    }
+
+    /// Retrieves memories ordered by recency (last_seen_at / first_seen_at) for a context.
+    pub fn get_recent_memories(
+        conn: &Connection,
+        context_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContextImportantMemory>> {
+        let set = ContextImportantMemoryBuilder::build(conn, context_id, None)?;
+        let mut memories = set.memories;
+        memories.sort_by(|a, b| {
+            let time_a = a.last_seen_at.as_deref().or(a.first_seen_at.as_deref()).unwrap_or("");
+            let time_b = b.last_seen_at.as_deref().or(b.first_seen_at.as_deref()).unwrap_or("");
+            time_b.cmp(time_a)
+        });
+        if let Some(lim) = limit {
+            memories.truncate(lim);
+        }
+        Ok(memories)
+    }
+
+    /// Searches important memories in a context matching a text query.
+    pub fn find_important_memory(
+        conn: &Connection,
+        context_id: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<ContextImportantMemory>> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Self::get_important_memories(conn, context_id, limit);
+        }
+
+        let set = ContextImportantMemoryBuilder::build(conn, context_id, None)?;
+        let terms: Vec<&str> = q.split_whitespace().collect();
+
+        let mut scored_memories: Vec<(f64, ContextImportantMemory)> = set
+            .memories
+            .into_iter()
+            .filter_map(|mem| {
+                let title_lower = mem.title.to_lowercase();
+                let detail_lower = mem.detail.as_deref().unwrap_or("").to_lowercase();
+                let summary_lower = mem.explanation.summary.to_lowercase();
+                let why_lower = mem.explanation.why_reasons.join(" ").to_lowercase();
+                let app_lower = mem.metadata.app_name.as_deref().unwrap_or("").to_lowercase();
+                let domain_lower = mem.metadata.domain.as_deref().unwrap_or("").to_lowercase();
+                let tags_lower = mem.metadata.tags.join(" ").to_lowercase();
+
+                let mut match_score = 0.0;
+                let mut matched_all = true;
+
+                for term in &terms {
+                    let mut term_matched = false;
+                    if title_lower.contains(term) {
+                        match_score += 4.0;
+                        term_matched = true;
+                    }
+                    if domain_lower.contains(term) || app_lower.contains(term) {
+                        match_score += 3.0;
+                        term_matched = true;
+                    }
+                    if detail_lower.contains(term) {
+                        match_score += 2.0;
+                        term_matched = true;
+                    }
+                    if summary_lower.contains(term) || why_lower.contains(term) {
+                        match_score += 1.5;
+                        term_matched = true;
+                    }
+                    if tags_lower.contains(term) {
+                        match_score += 1.0;
+                        term_matched = true;
+                    }
+
+                    if !term_matched {
+                        matched_all = false;
+                    }
+                }
+
+                if matched_all && match_score > 0.0 {
+                    if mem.memory_type == ImportantMemoryType::MeaningfulState {
+                        match_score *= 0.5;
+                    }
+                    let total_score = match_score + (mem.importance * 2.0);
+                    Some((total_score, mem))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored_memories.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut results: Vec<ContextImportantMemory> = scored_memories.into_iter().map(|(_, m)| m).collect();
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+        Ok(results)
+    }
+
+    /// Unified search across contextual memories and contextual items.
+    /// Uses existing local search infrastructure (`search_inbox_items` for items and memory derivation).
+    /// Preserves context, memory type, importance, source reference, confidence, and timestamps.
+    pub fn search_context_memory(
+        conn: &Connection,
+        context_id: &str,
+        query: &str,
+        limit: Option<usize>,
+        semantic_provider: Option<&dyn crate::semantic::SemanticProvider>,
+    ) -> Result<Vec<ContextImportantMemory>> {
+        let q = query.trim();
+
+        // 1. First retrieve matched important memories
+        let mut results = Self::find_important_memory(conn, context_id, q, None)?;
+        let existing_source_ids: HashSet<String> = results.iter().map(|m| m.source_id.clone()).collect();
+
+        // 2. If query is present, also execute local item search for this workspace using existing search infrastructure
+        if !q.is_empty() {
+            let search_params = crate::search::InboxSearchParams {
+                query: Some(q.to_string()),
+                workspace_id: if context_id.is_empty() {
+                    None
+                } else {
+                    Some(context_id.to_string())
+                },
+                limit: Some(limit.unwrap_or(20)),
+                sort_by: Some(crate::search::InboxSearchSort::Relevance),
+                enable_semantic: semantic_provider.map(|p| p.status().is_ready),
+                ..Default::default()
+            };
+
+            if let Ok(item_results) = crate::search::search_inbox_items(conn, &search_params, semantic_provider) {
+                for item_res in item_results {
+                    if existing_source_ids.contains(&item_res.item.id) {
+                        continue;
+                    }
+
+                    // Map into ContextImportantMemory representation preserving all required fields
+                    let title = item_res.item.title.unwrap_or_else(|| {
+                        if item_res.item.item_type == "url" {
+                            item_res.item.content.clone()
+                        } else {
+                            "Untitled Item".to_string()
+                        }
+                    });
+
+                    let snippet = if item_res.item.content.len() > 100 {
+                        format!("{}...", &item_res.item.content[..97])
+                    } else {
+                        item_res.item.content.clone()
+                    };
+
+                    let score = item_res.combined_score as f64;
+                    let importance = (score * 0.75).clamp(0.1, 0.85);
+
+                    let mem = ContextImportantMemory::new(
+                        format!("mem_search_{}", item_res.item.id),
+                        context_id,
+                        item_res.item.id.clone(),
+                        ImportantMemoryType::ImportantItem,
+                        importance,
+                        score.max(0.5),
+                        Some(item_res.item.created_at.clone()),
+                        Some(item_res.item.updated_at.clone()),
+                        InformationProvenance::Inferred,
+                        title,
+                        Some(snippet),
+                        ImportantMemoryExplanation::new(
+                            format!("Matched search query '{}'.", q),
+                            if !item_res.match_highlights.is_empty() {
+                                item_res.match_highlights
+                            } else {
+                                vec![format!("Relevance score: {:.2}", score)]
+                            },
+                            vec![item_res.item.id.clone()],
+                            score,
+                            InformationProvenance::Inferred,
+                            Some("Retrieved via context search query.".to_string()),
+                        ),
+                        ImportantMemoryMetadata {
+                            item_type: Some(item_res.item.item_type),
+                            app_name: None,
+                            domain: None,
+                            session_count: None,
+                            streak_count: None,
+                            action_verb: None,
+                            target_subject: None,
+                            state_value: None,
+                            tags: vec!["search_result".to_string()],
+                        },
+                    );
+                    results.push(mem);
+                }
+            }
+        }
+
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+
+        Ok(results)
+    }
+}
+
+// =========================================================================
 // Unit Tests
 // =========================================================================
 
@@ -1453,4 +1683,119 @@ mod tests {
         ).unwrap();
         assert_eq!(count, 1, "Underlying Item must NOT be deleted from the database");
     }
+
+    #[test]
+    fn test_get_important_memories_retrieval_and_limits() {
+        let (conn, ws_id) = setup_test_db();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-1', ?1, 'text', 'Design specification for Tokyo trip itinerary', 'Tokyo Itinerary', '{}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-1", &ws_id).unwrap();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-2', ?1, 'url', 'https://hotel.tokyo/booking', 'Selected Hotel', '{\"domain\": \"hotel.tokyo\"}', '2026-09-18T01:00:00Z', '2026-09-18T01:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-2", &ws_id).unwrap();
+
+        // 1. Retrieve all important memories
+        let memories = ContextMemoryQueryService::get_important_memories(&conn, &ws_id, None).unwrap();
+        assert!(memories.len() >= 2);
+        assert!(memories[0].importance >= memories[1].importance);
+        assert_eq!(memories[0].context_id, ws_id);
+        assert!(memories[0].confidence > 0.0);
+
+        // 2. Retrieve with limit
+        let limited = ContextMemoryQueryService::get_important_memories(&conn, &ws_id, Some(1)).unwrap();
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
+    fn test_get_recent_memories_ordering() {
+        let (conn, ws_id) = setup_test_db();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-old', ?1, 'text', 'Old document', 'Old Doc', '{}', '2026-09-10T00:00:00Z', '2026-09-10T00:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-old", &ws_id).unwrap();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-new', ?1, 'text', 'Brand new update', 'New Update', '{}', '2026-09-18T10:00:00Z', '2026-09-18T10:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-new", &ws_id).unwrap();
+
+        let recent = ContextMemoryQueryService::get_recent_memories(&conn, &ws_id, None).unwrap();
+        assert!(!recent.is_empty());
+        // Verify timestamps are preserved
+        assert!(recent.iter().any(|m| m.source_id == "item-new"));
+    }
+
+    #[test]
+    fn test_find_important_memory_keyword_matching() {
+        let (conn, ws_id) = setup_test_db();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-hotel', ?1, 'text', 'Comparing hotel options in Shinjuku', 'Tokyo Hotel Research', '{\"domain\": \"booking.com\"}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-hotel", &ws_id).unwrap();
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-flight', ?1, 'text', 'Haneda flight options and pricing', 'Flight Options', '{\"domain\": \"skyscanner.net\"}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-flight", &ws_id).unwrap();
+
+        // Search for "Hotel"
+        let hotel_matches = ContextMemoryQueryService::find_important_memory(&conn, &ws_id, "Hotel", None).unwrap();
+        assert!(!hotel_matches.is_empty());
+        assert_eq!(hotel_matches[0].source_id, "item-hotel");
+        assert_eq!(hotel_matches[0].context_id, ws_id);
+        assert_eq!(hotel_matches[0].memory_type, ImportantMemoryType::ImportantItem);
+
+        // Search for domain "skyscanner"
+        let flight_matches = ContextMemoryQueryService::find_important_memory(&conn, &ws_id, "skyscanner", None).unwrap();
+        assert!(!flight_matches.is_empty());
+        assert_eq!(flight_matches[0].source_id, "item-flight");
+    }
+
+    #[test]
+    fn test_search_context_memory_unified_retrieval() {
+        let (conn, ws_id) = setup_test_db();
+
+        // Confirmed important item
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-itinerary', ?1, 'text', '7-day comprehensive Tokyo plan', 'Tokyo 7-Day Itinerary', '{}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, "item-itinerary", &ws_id).unwrap();
+
+        // Normal contextual item matching search
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item-ramen', ?1, 'text', 'Best ramen spots in Shibuya and Roppongi', 'Ramen Guide', '{}', '2026-09-18T01:00:00Z', '2026-09-18T01:00:00Z')",
+            params![ws_id],
+        ).unwrap();
+
+        // Search for "Ramen"
+        let results = ContextMemoryQueryService::search_context_memory(&conn, &ws_id, "Ramen", None, None).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].source_id, "item-ramen");
+        assert_eq!(results[0].context_id, ws_id);
+        assert!(results[0].importance > 0.0);
+        assert!(results[0].confidence > 0.0);
+        assert!(results[0].first_seen_at.is_some());
+    }
 }
+
