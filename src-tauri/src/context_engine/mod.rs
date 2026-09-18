@@ -191,6 +191,8 @@ pub mod context_state_e2e_tests;
 pub mod snapshot_e2e_tests;
 #[cfg(test)]
 pub mod memory_refinement_e2e_tests;
+#[cfg(test)]
+pub mod reconstruction_e2e_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
