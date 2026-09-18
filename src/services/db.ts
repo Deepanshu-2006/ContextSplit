@@ -1088,9 +1088,12 @@ export const db = {
       inactivityDaysThreshold: inactivityDaysThreshold ?? null,
     }),
 
-  // Context Overview
+  // Context Overview & Reconstruction
   getContextOverview: (workspaceId: string) =>
     invoke<ContextOverview>("get_context_overview", { workspaceId }),
+
+  getContextReconstruction: (workspaceId: string) =>
+    invoke<import("./contextReconstruction").ContextReconstruction>("get_context_reconstruction", { workspaceId }),
 
   // AI Context Reasoning
   analyzeItemContextAI: (itemId: string, isUserExplicit: boolean = false) =>

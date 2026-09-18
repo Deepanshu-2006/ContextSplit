@@ -647,6 +647,20 @@ fn get_context_overview(
 }
 
 // ---------------------------------------------------------------------------
+// Context Reconstruction command (Day 22)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_context_reconstruction(
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::context_engine::reconstruction::ContextReconstruction, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::reconstruction::ContextReconstructionService::new()
+        .reconstruct_context_cached(&conn, workspace_id)
+}
+
+// ---------------------------------------------------------------------------
 // Temporal Context Weighting commands
 // ---------------------------------------------------------------------------
 
@@ -1434,8 +1448,9 @@ pub fn run() {
             archive_workspace,
             unarchive_workspace,
             evaluate_workspace_lifecycle,
-            // Context Overview
+            // Context Overview & Reconstruction
             get_context_overview,
+            get_context_reconstruction,
             // AI Context Reasoning
             analyze_item_context_ai,
             analyze_candidate_context_ai,

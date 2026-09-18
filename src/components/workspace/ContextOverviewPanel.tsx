@@ -20,14 +20,12 @@ import {
   ChevronUp,
   Info,
 } from 'lucide-react';
-import { db, ContextOverview, TimelineEvent, Item } from '../../services/db';
+import { db, TimelineEvent, Item } from '../../services/db';
 import {
-  contextMemoryService,
-  ContextMemoryResponse,
-  ContextImportantMemorySet,
-} from '../../services/contextMemory';
-import { contextWorksetService, ContextWorkset } from '../../services/contextWorkset';
-import { contextStateService, ContextState, ContextStateValue } from '../../services/contextState';
+  contextReconstructionService,
+  ContextReconstruction,
+} from '../../services/contextReconstruction';
+import { ContextWorkset } from '../../services/contextWorkset';
 import { contextSnapshotService, ContextSnapshotDiff } from '../../services/contextSnapshot';
 import { ContextWorksetDetailView } from './ContextWorksetDetailView';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -43,11 +41,8 @@ export function ContextOverviewPanel() {
     openTimeline,
   } = useWorkspaceStore();
 
-  const [overview, setOverview] = useState<ContextOverview | null>(null);
-  const [memory, setMemory] = useState<ContextMemoryResponse | null>(null);
-  const [workset, setWorkset] = useState<ContextWorkset | null>(null);
-  const [contextState, setContextState] = useState<ContextState | null>(null);
-  const [importantMemories, setImportantMemories] = useState<ContextImportantMemorySet | null>(null);
+  const [reconstruction, setReconstruction] = useState<ContextReconstruction | null>(null);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isUpdatingLifecycle, setIsUpdatingLifecycle] = useState(false);
@@ -59,35 +54,28 @@ export function ContextOverviewPanel() {
 
   useEffect(() => {
     if (isOverviewOpen && overviewWorkspaceId) {
-      loadOverviewAndMemory(overviewWorkspaceId);
+      loadReconstruction(overviewWorkspaceId);
     } else {
-      setOverview(null);
-      setMemory(null);
-      setWorkset(null);
-      setContextState(null);
-      setImportantMemories(null);
+      setReconstruction(null);
+      setTimelineEvents([]);
       setSelectedItemId(null);
     }
   }, [isOverviewOpen, overviewWorkspaceId]);
 
-  const loadOverviewAndMemory = async (wsId: string) => {
+  const loadReconstruction = async (wsId: string) => {
     setIsLoading(true);
     setError(null);
     try {
-      const [overviewData, memoryData, worksetData, stateData, importantData] = await Promise.all([
-        db.getContextOverview(wsId).catch(() => null),
-        contextMemoryService.getContextMemory(wsId).catch(() => null),
-        contextWorksetService.getContextWorkset(wsId).catch(() => null),
-        contextStateService.getContextState(wsId).catch(() => null),
-        contextMemoryService.getContextImportantMemories(wsId).catch(() => null),
-      ]);
-      setOverview(overviewData);
-      setMemory(memoryData);
-      setWorkset(worksetData);
-      setContextState(stateData || overviewData?.context_state || null);
-      setImportantMemories(importantData);
+      // Primary unified data source: ContextReconstruction
+      const recData = await contextReconstructionService.getContextReconstruction(wsId);
+      setReconstruction(recData);
+
+      // Lazy load timeline events only for timeline tab support
+      db.getContextTimeline(wsId)
+        .then((tl) => setTimelineEvents(tl.chronological_activity || []))
+        .catch(() => {});
     } catch (err: any) {
-      setError(err?.toString() || 'Failed to load context overview');
+      setError(err?.toString() || 'Failed to load context reconstruction');
     } finally {
       setIsLoading(false);
     }
@@ -111,18 +99,22 @@ export function ContextOverviewPanel() {
   }, [isOverviewOpen, selectedItemId, activeTab, closeOverview]);
 
   const handleToggleArchive = async () => {
-    if (!overview) return;
+    if (!reconstruction) return;
+    const wsId = reconstruction.context.id || overviewWorkspaceId;
+    if (!wsId) return;
+
     setIsUpdatingLifecycle(true);
     try {
-      if (overview.lifecycle_state === 'archived') {
-        await db.unarchiveWorkspace(overview.workspace_id);
-        toast.success(`Reactivated context "${overview.name}"`);
+      const isArchived = reconstruction.context.lifecycle_state === 'archived';
+      if (isArchived) {
+        await db.unarchiveWorkspace(wsId);
+        toast.success(`Reactivated context "${reconstruction.context.name}"`);
       } else {
-        await db.archiveWorkspace(overview.workspace_id);
-        toast.success(`Archived context "${overview.name}"`);
+        await db.archiveWorkspace(wsId);
+        toast.success(`Archived context "${reconstruction.context.name}"`);
       }
       await loadWorkspaces();
-      await loadOverviewAndMemory(overview.workspace_id);
+      await loadReconstruction(wsId);
     } catch (err: any) {
       toast.error(`Failed to update lifecycle: ${err?.message || err}`);
     } finally {
@@ -131,16 +123,65 @@ export function ContextOverviewPanel() {
   };
 
   const filteredTimelineEvents = useMemo(() => {
-    if (!overview?.timeline?.chronological_activity) return [];
-    if (!timelineSearch.trim()) return overview.timeline.chronological_activity;
+    if (!timelineEvents || timelineEvents.length === 0) return [];
+    if (!timelineSearch.trim()) return timelineEvents;
 
     const q = timelineSearch.toLowerCase();
-    return overview.timeline.chronological_activity.filter((ev) =>
+    return timelineEvents.filter((ev) =>
       ev.title.toLowerCase().includes(q) || ev.description.toLowerCase().includes(q)
     );
-  }, [overview, timelineSearch]);
+  }, [timelineEvents, timelineSearch]);
+
+  // Derived Workset adapter for the detail view
+  const adaptedWorkset: ContextWorkset | null = useMemo(() => {
+    if (!reconstruction) return null;
+    const items = reconstruction.workset.items.map((item) => ({
+      id: item.id,
+      item_type: item.item_type,
+      title: item.title ?? null,
+      content_snippet: item.content_snippet ?? '',
+      app_name: item.app_name ?? null,
+      domain: item.domain ?? null,
+      relevance: (item.relevance as any) || 'primary',
+      relevance_score: item.relevance_score,
+      reasons: item.reasons || [],
+      provenance: (item.provenance as any) || 'inferred',
+      created_at: reconstruction.reconstructed_at,
+      last_active_at: item.last_active_at ?? null,
+      is_suggested_addition: false,
+    }));
+
+    return {
+      context_id: reconstruction.context.id || overviewWorkspaceId || '',
+      context_name: reconstruction.context.name,
+      task_id: reconstruction.current_task.task_ref?.id || null,
+      task_title: reconstruction.current_task.title || null,
+      generated_at: reconstruction.reconstructed_at,
+      last_active_at: reconstruction.current_state.last_active_at ?? null,
+      workset_state: (reconstruction.current_state.state_value as any) || 'active',
+      items,
+      recent_activity: reconstruction.last_meaningful_activity.description || 'Recent activity',
+      relevant_items: items.filter((i) => i.relevance === 'primary' || i.relevance === 'supporting'),
+      important_references: items.filter((i) => i.relevance === 'reference'),
+      related_tasks: [],
+      confidence: reconstruction.confidence.score,
+      confidence_band: reconstruction.confidence.band,
+      provenance: (reconstruction.context.provenance as any) || 'inferred',
+      explanation: {
+        summary: reconstruction.quality.explanation,
+        why_reasons: reconstruction.confidence.reasons || [],
+        supporting_evidence: [],
+        confidence_band: reconstruction.confidence.band,
+        provenance: (reconstruction.context.provenance as any) || 'inferred',
+        uncertainty_note: null,
+      },
+    };
+  }, [reconstruction, overviewWorkspaceId]);
 
   if (!isOverviewOpen || !overviewWorkspaceId) return null;
+
+  const contextName = reconstruction?.context.name || targetWorkspace?.name || 'Context Overview';
+  const lifecycleState = (reconstruction?.context.lifecycle_state || targetWorkspace?.lifecycle_state || 'active') as 'active' | 'dormant' | 'archived';
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-xs animate-in fade-in duration-200">
@@ -149,7 +190,7 @@ export function ContextOverviewPanel() {
 
       {/* Slide-over Drawer Panel */}
       <div className="w-full max-w-xl h-full bg-white shadow-xl flex flex-col border-l border-gray-200 animate-in slide-in-from-right duration-200">
-        {/* Header */}
+        {/* Header: CONTEXT NAME */}
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center text-gray-700 flex-shrink-0">
@@ -158,21 +199,19 @@ export function ContextOverviewPanel() {
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base font-semibold text-gray-900 truncate">
-                  {overview?.name || memory?.context || targetWorkspace?.name || 'Context Overview'}
+                  {contextName}
                 </h2>
-                {overview && (
-                  <LifecycleBadge state={overview.lifecycle_state} />
-                )}
+                <LifecycleBadge state={lifecycleState} />
               </div>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
             <button
-              onClick={() => overviewWorkspaceId && loadOverviewAndMemory(overviewWorkspaceId)}
+              onClick={() => overviewWorkspaceId && loadReconstruction(overviewWorkspaceId)}
               disabled={isLoading}
               className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors cursor-pointer"
-              title="Refresh Overview"
+              title="Refresh Reconstruction"
             >
               <RefreshCw size={14} className={isLoading ? 'animate-spin text-gray-700' : ''} />
             </button>
@@ -222,61 +261,46 @@ export function ContextOverviewPanel() {
 
         {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {isLoading && !overview && !memory && !contextState ? (
+          {isLoading && !reconstruction ? (
             <div className="h-64 flex flex-col items-center justify-center text-gray-400 gap-2">
               <RefreshCw size={18} className="animate-spin text-gray-400" />
-              <p className="text-xs">Loading context...</p>
+              <p className="text-xs">Reconstructing context...</p>
             </div>
           ) : error ? (
             <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200 text-sm flex items-start gap-3">
               <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold">Unable to load overview</div>
+                <div className="font-semibold">Unable to reconstruct context</div>
                 <div className="text-xs text-red-600 mt-1">{error}</div>
               </div>
             </div>
           ) : (
             activeTab === 'overview' ? (
-              <ResumeMemoryOverviewContent
-                overview={overview}
-                memory={memory}
-                workset={workset}
-                contextState={contextState}
-                importantMemories={importantMemories}
-                targetWorkspaceName={targetWorkspace?.name}
-                onToggleArchive={handleToggleArchive}
-                isUpdatingLifecycle={isUpdatingLifecycle}
-                onSelectItem={(itemId) => setSelectedItemId(itemId)}
-                onOpenWorksetDetail={() => setActiveTab('workset')}
-                onViewFullTimeline={() => {
-                  closeOverview();
-                  if (overview) {
-                    openTimeline(overview.workspace_id);
-                  }
-                }}
-                onMemoryFeedbackRecorded={() => {
-                  if (overviewWorkspaceId) {
-                    loadOverviewAndMemory(overviewWorkspaceId);
-                  }
-                }}
-              />
+              reconstruction && (
+                <ReconstructionOverviewContent
+                  reconstruction={reconstruction}
+                  onToggleArchive={handleToggleArchive}
+                  isUpdatingLifecycle={isUpdatingLifecycle}
+                  onSelectItem={(itemId) => setSelectedItemId(itemId)}
+                  onOpenWorksetDetail={() => setActiveTab('workset')}
+                  onViewFullTimeline={() => {
+                    closeOverview();
+                    if (overviewWorkspaceId) {
+                      openTimeline(overviewWorkspaceId);
+                    }
+                  }}
+                />
+              )
             ) : activeTab === 'workset' ? (
               <ContextWorksetDetailView
-                workset={workset}
-                contextName={overview?.name || memory?.context || targetWorkspace?.name || 'Workspace'}
-                currentTaskTitle={
-                  contextState?.task_title ||
-                  memory?.task ||
-                  workset?.task_title ||
-                  (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet'
-                    ? overview.current_task.title
-                    : null)
-                }
+                workset={adaptedWorkset}
+                contextName={contextName}
+                currentTaskTitle={reconstruction?.current_task.title || null}
                 onBack={() => setActiveTab('overview')}
                 onSelectItem={(itemId) => setSelectedItemId(itemId)}
                 onWorksetUpdated={() => {
                   if (overviewWorkspaceId) {
-                    loadOverviewAndMemory(overviewWorkspaceId);
+                    loadReconstruction(overviewWorkspaceId);
                   }
                 }}
               />
@@ -332,22 +356,7 @@ function LifecycleBadge({ state }: { state: 'active' | 'dormant' | 'archived' })
   );
 }
 
-interface ResumeMemoryOverviewContentProps {
-  overview: ContextOverview | null;
-  memory: ContextMemoryResponse | null;
-  workset: ContextWorkset | null;
-  contextState: ContextState | null;
-  importantMemories?: ContextImportantMemorySet | null;
-  targetWorkspaceName?: string;
-  onToggleArchive: () => void;
-  isUpdatingLifecycle: boolean;
-  onSelectItem: (itemId: string) => void;
-  onOpenWorksetDetail: () => void;
-  onViewFullTimeline: () => void;
-  onMemoryFeedbackRecorded?: () => void;
-}
-
-function formatStateLabel(state?: ContextStateValue | string | null): string {
+function formatStateLabel(state?: string | null): string {
   switch (state) {
     case 'active':
       return 'Active';
@@ -366,54 +375,42 @@ function formatStateLabel(state?: ContextStateValue | string | null): string {
   }
 }
 
-function ResumeMemoryOverviewContent({
-  overview,
-  memory,
-  workset,
-  contextState,
-  importantMemories,
-  targetWorkspaceName,
+interface ReconstructionOverviewContentProps {
+  reconstruction: ContextReconstruction;
+  onToggleArchive: () => void;
+  isUpdatingLifecycle: boolean;
+  onSelectItem: (itemId: string) => void;
+  onOpenWorksetDetail: () => void;
+  onViewFullTimeline: () => void;
+}
+
+function ReconstructionOverviewContent({
+  reconstruction,
   onToggleArchive,
   isUpdatingLifecycle,
   onSelectItem,
   onOpenWorksetDetail,
   onViewFullTimeline,
-}: ResumeMemoryOverviewContentProps) {
-  const contextName =
-    contextState?.context_name ||
-    overview?.name ||
-    memory?.context ||
-    workset?.context_name ||
-    targetWorkspaceName ||
-    'Workspace';
+}: ReconstructionOverviewContentProps) {
+  const contextName = reconstruction.context.name || 'Workspace';
+  const contextId = reconstruction.context.id;
 
-  // 1. Context Working State
-  const stateValue: ContextStateValue =
-    contextState?.state ||
-    (overview?.lifecycle_state === 'archived' ? 'dormant' : overview?.lifecycle_state === 'dormant' ? 'dormant' : 'active');
-  const stateLabel = formatStateLabel(stateValue);
+  // 1. Current State Label
+  const stateLabel = formatStateLabel(reconstruction.current_state.state_value);
 
-  // 2. YOU WERE WORKING ON
-  const rawTask =
-    contextState?.task_title ||
-    memory?.task ||
-    workset?.task_title ||
-    (overview?.current_task?.is_confident && overview.current_task.title !== 'Not clear yet'
-      ? overview.current_task.title
-      : null);
-  const isTaskAvailable = Boolean(rawTask && rawTask.trim() !== '' && rawTask.toLowerCase() !== 'not clear yet');
-  const taskTitle = isTaskAvailable && rawTask ? rawTask : `Recent work in ${contextName}`;
+  // 2. YOU WERE WORKING ON (Handle partial reconstruction gracefully: do not invent a task)
+  const isTaskAvailable =
+    reconstruction.current_task.status === 'available' ||
+    reconstruction.current_task.status === 'partial';
+  const taskTitle =
+    isTaskAvailable && reconstruction.current_task.title && reconstruction.current_task.title.trim().length > 0
+      ? reconstruction.current_task.title
+      : 'Recent project activity';
 
   // Last active timestamp
-  const lastActiveTimestamp =
-    contextState?.last_active_at ||
-    workset?.last_active_at ||
-    memory?.last_active_at ||
-    overview?.recent_activity;
+  const lastActiveTimestamp = reconstruction.current_state.last_active_at;
   const formattedLastActive =
-    (contextState?.freshness_display && contextState.freshness_display !== 'No prior activity'
-      ? contextState.freshness_display
-      : null) ||
+    reconstruction.current_state.freshness_display ||
     (lastActiveTimestamp ? formatSessionTime(lastActiveTimestamp) : 'Active recently');
 
   // Progressive Disclosure: "What changed?" and "Why?"
@@ -421,12 +418,6 @@ function ResumeMemoryOverviewContent({
   const [showWhatChanged, setShowWhatChanged] = useState(false);
   const [snapshotDiff, setSnapshotDiff] = useState<ContextSnapshotDiff | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
-
-  const contextId =
-    contextState?.context_id ||
-    overview?.workspace_id ||
-    memory?.context_id ||
-    workset?.context_id;
 
   const handleToggleWhatChanged = async () => {
     const nextState = !showWhatChanged;
@@ -445,100 +436,36 @@ function ResumeMemoryOverviewContent({
   };
 
   // 3. WHERE YOU LEFT OFF
-  const isStateUncertain = stateValue === 'uncertain' || stateValue === 'insufficient_evidence';
-  const primaryWorksetItem = workset?.items.find((i) => i.relevance === 'primary');
-  
+  const primaryItem = reconstruction.workset.items.find((i) => i.relevance === 'primary');
   let whereLeftOff: string;
-  if (isStateUncertain) {
-    whereLeftOff = `Recent activity in ${contextName}`;
-  } else if (primaryWorksetItem?.title || primaryWorksetItem?.content_snippet) {
-    whereLeftOff = primaryWorksetItem.title || primaryWorksetItem.content_snippet;
-  } else if (
-    contextState?.last_meaningful_activity &&
-    contextState.last_meaningful_activity.trim().length > 0 &&
-    !contextState.last_meaningful_activity.toLowerCase().includes('unknown') &&
-    contextState.last_meaningful_activity !== `Recent activity in ${contextName}`
+  if (
+    reconstruction.last_meaningful_activity.description &&
+    reconstruction.last_meaningful_activity.status !== 'unavailable'
   ) {
-    whereLeftOff = contextState.last_meaningful_activity;
-  } else if (contextState?.resume_state?.last_meaningful_activity) {
-    whereLeftOff = contextState.resume_state.last_meaningful_activity;
-  } else if (contextState?.resume_state?.left_off_on) {
-    whereLeftOff = contextState.resume_state.left_off_on;
+    whereLeftOff = reconstruction.last_meaningful_activity.description;
+  } else if (primaryItem?.title || primaryItem?.content_snippet) {
+    whereLeftOff = primaryItem.title || primaryItem.content_snippet || `Recent activity in ${contextName}`;
   } else {
     whereLeftOff = `Recent activity in ${contextName}`;
   }
 
-  // 4. CONTINUE WITH items
-  const continueWithItems: { id: string; title: string; app_name?: string | null; domain?: string | null }[] = useMemo(() => {
-    if (workset?.items && workset.items.length > 0) {
-      return workset.items.map((item) => ({
-        id: item.id,
-        title: item.title || item.content_snippet || 'Untitled item',
-        app_name: item.app_name,
-        domain: item.domain,
-      }));
-    }
-    if (contextState?.resume_state?.recent_work && contextState.resume_state.recent_work.length > 0) {
-      return contextState.resume_state.recent_work.map((title, idx) => ({
-        id: contextState.recent_item_ids[idx] || `recent-${idx}`,
-        title,
-      }));
-    }
-    if (overview?.recent_items && overview.recent_items.length > 0) {
-      return overview.recent_items.map((item) => ({
-        id: item.id,
-        title: item.title || item.content_snippet || 'Untitled item',
-        app_name: item.app_name,
-        domain: item.domain,
-      }));
-    }
-    return [];
-  }, [workset, contextState, overview]);
+  // 4. CONTINUE WITH items (Primary + Supporting items)
+  const continueWithItems = reconstruction.workset.items;
 
-  // 5. IMPORTANT contextual memories (quiet reference, 3-5 items max)
-  const displayedImportantMemories = useMemo(() => {
-    if (!importantMemories?.memories || importantMemories.memories.length === 0) return [];
-    const currentTaskLower = taskTitle?.toLowerCase().trim();
-    return importantMemories.memories
-      .filter((m) => {
-        // Exclude root workspace fact itself
-        if (m.source_id === contextId || m.id === `mem_fact_ws_${contextId}`) {
-          return false;
-        }
-        // Exclude internal meaningful state indicators
-        if (m.memory_type === 'meaningful_state') {
-          return false;
-        }
-        // Exclude active task if identical to the primary active task displayed above
-        if (m.memory_type === 'active_task' && m.title.toLowerCase().trim() === currentTaskLower) {
-          return false;
-        }
-        return true;
-      })
-      .slice(0, 4);
-  }, [importantMemories, contextId, taskTitle]);
+  // 5. IMPORTANT contextual memories (Optional: 3-4 items max)
+  const importantMemories = reconstruction.important_memories.memories.slice(0, 4);
 
-  // Clean explanation reasons without badge clutter
+  // Explanation reasons for "Why?"
   const explanationReasons = useMemo(() => {
-    if (contextState?.explanation?.reasons && contextState.explanation.reasons.length > 0) {
-      return contextState.explanation.reasons.map(r => r.text);
+    if (reconstruction.confidence.reasons && reconstruction.confidence.reasons.length > 0) {
+      return reconstruction.confidence.reasons;
     }
-    const list: string[] = [];
-    if (taskTitle && taskTitle !== `Recent work in ${contextName}`) {
-      list.push(`${taskTitle} was the most recent active task`);
-    }
-    if (continueWithItems.length > 0) {
-      list.push(`${continueWithItems.length} relevant item${continueWithItems.length === 1 ? ' was' : 's were'} recently active`);
-    }
-    list.push(`${contextName} remained the active context`);
-    return list;
-  }, [contextState, taskTitle, continueWithItems.length, contextName]);
+    return [`Reconstructed from verified contextual activity in ${contextName}`];
+  }, [reconstruction.confidence.reasons, contextName]);
 
-  const uncertaintyNote =
-    contextState?.explanation?.uncertainty_note ||
-    (isStateUncertain
-      ? 'Context signals are emerging or sparse. State will update as more activity occurs.'
-      : null);
+  const isStateUncertain =
+    reconstruction.current_state.state_value === 'uncertain' ||
+    reconstruction.current_state.state_value === 'insufficient_evidence';
 
   return (
     <div className="space-y-7 animate-in fade-in duration-150">
@@ -683,10 +610,10 @@ function ResumeMemoryOverviewContent({
               ))}
             </ul>
 
-            {uncertaintyNote && (
+            {isStateUncertain && (
               <div className="pt-2 border-t border-gray-100 text-[11px] text-gray-500 flex items-start gap-1.5">
                 <Info size={12} className="flex-shrink-0 mt-0.5 text-gray-400" />
-                <span>{uncertaintyNote}</span>
+                <span>Context signals are emerging or sparse. State will update as more activity occurs.</span>
               </div>
             )}
           </div>
@@ -717,7 +644,7 @@ function ResumeMemoryOverviewContent({
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="text-gray-300 text-xs select-none">•</span>
                   <span className="truncate group-hover:text-gray-900 font-normal">
-                    {item.title}
+                    {item.title || item.content_snippet || 'Untitled item'}
                   </span>
                 </div>
                 {(item.app_name || item.domain) && (
@@ -747,8 +674,8 @@ function ResumeMemoryOverviewContent({
         </div>
       </div>
 
-      {/* 5. IMPORTANT */}
-      {displayedImportantMemories.length > 0 && (
+      {/* 5. IMPORTANT (Optional) */}
+      {importantMemories.length > 0 && (
         <div className="space-y-2.5">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
@@ -764,7 +691,7 @@ function ResumeMemoryOverviewContent({
           </div>
 
           <div className="space-y-1">
-            {displayedImportantMemories.map((mem) => (
+            {importantMemories.map((mem) => (
               <div
                 key={mem.id}
                 onClick={() => onSelectItem(mem.source_id)}
@@ -776,9 +703,9 @@ function ResumeMemoryOverviewContent({
                     {mem.title}
                   </span>
                 </div>
-                {(mem.metadata?.app_name || mem.metadata?.domain) && (
+                {(mem.app_name || mem.domain) && (
                   <span className="text-[10px] text-gray-400 flex-shrink-0 ml-2 font-normal">
-                    {mem.metadata.app_name || mem.metadata.domain}
+                    {mem.app_name || mem.domain}
                   </span>
                 )}
               </div>
@@ -787,14 +714,14 @@ function ResumeMemoryOverviewContent({
         </div>
       )}
 
-      {/* Secondary Actions & View Timeline */}
+      {/* Secondary Actions: Lifecycle & View Timeline */}
       <div className="pt-4 border-t border-gray-100 flex items-center justify-between gap-3 text-xs text-gray-500">
         <button
           onClick={onToggleArchive}
-          disabled={isUpdatingLifecycle || !overview}
+          disabled={isUpdatingLifecycle || !reconstruction}
           className="flex items-center gap-1.5 px-2 py-1 text-xs font-normal text-gray-500 hover:text-gray-800 transition-colors cursor-pointer disabled:opacity-50"
         >
-          {overview?.lifecycle_state === 'archived' ? (
+          {reconstruction.context.lifecycle_state === 'archived' ? (
             <>
               <ArchiveRestore size={12} />
               <span>Restore context</span>
@@ -818,8 +745,6 @@ function ResumeMemoryOverviewContent({
     </div>
   );
 }
-
-
 
 function ContextItemDetailModal({
   itemId,
