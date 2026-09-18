@@ -1952,7 +1952,11 @@ impl ContextReconstructionService {
                     true,
                 )
             }
-            Err(_) => {
+            Err(err) => {
+                eprintln!(
+                    "[ContextReconstruction] Step 1 Diagnostic: Workspace '{}' not found in database ({:?}); checking fallback evidence",
+                    context_id, err
+                );
                 // Check if items exist for this context ID
                 let items_count = crate::db::operations::list_items(conn, Some(context_id))
                     .map(|it| it.len())
@@ -2074,9 +2078,16 @@ impl ContextReconstructionService {
         // -----------------------------------------------------------------
         // Step 4: Retrieve ContextMemory
         // -----------------------------------------------------------------
-        let memory_opt = ContextMemoryService::new()
-            .reconstruct_memory(conn, context_id)
-            .ok();
+        let memory_opt = match ContextMemoryService::new().reconstruct_memory(conn, context_id) {
+            Ok(mem) => Some(mem),
+            Err(err) => {
+                eprintln!(
+                    "[ContextReconstruction] Step 4 Diagnostic: ContextMemory unavailable for context '{}' ({}); falling back gracefully",
+                    context_id, err
+                );
+                None
+            }
+        };
 
         // If task is still unavailable but memory resolved an active task with high confidence, use it
         if current_task_section.status == ReconstructionSectionStatus::Unavailable {
@@ -2116,7 +2127,11 @@ impl ContextReconstructionService {
                     ReconstructionWorksetSection::partial(snapshot_items, quality_score)
                 }
             }
-            Err(_) => {
+            Err(err) => {
+                eprintln!(
+                    "[ContextReconstruction] Step 5 Diagnostic: Workset derivation unavailable for context '{}' ({}); falling back gracefully",
+                    context_id, err
+                );
                 if !active_items.is_empty() {
                     ReconstructionWorksetSection::partial(vec![], 0.30)
                 } else {
@@ -2173,7 +2188,11 @@ impl ContextReconstructionService {
 
                 (state_sec, readiness_sec, meaningful_sec)
             }
-            Err(_) => {
+            Err(err) => {
+                eprintln!(
+                    "[ContextReconstruction] Step 6 Diagnostic: ContextState derivation unavailable for context '{}' ({}); falling back gracefully",
+                    context_id, err
+                );
                 let state_sec = if is_workspace_found {
                     ReconstructionStateSection::partial(
                         ContextStateValue::RecentlyActive,
@@ -2211,7 +2230,13 @@ impl ContextReconstructionService {
                     ReconstructionImportantMemoriesSection::available(snapshot_mems)
                 }
             }
-            Err(_) => ReconstructionImportantMemoriesSection::unavailable(),
+            Err(err) => {
+                eprintln!(
+                    "[ContextReconstruction] Step 7 Diagnostic: Important memory extraction unavailable for context '{}' ({}); falling back gracefully",
+                    context_id, err
+                );
+                ReconstructionImportantMemoriesSection::unavailable()
+            }
         };
 
         // -----------------------------------------------------------------
@@ -2253,7 +2278,13 @@ impl ContextReconstructionService {
                         ReconstructionSnapshotSection::available(snap_ref)
                     }
                 }
-                Err(_) => ReconstructionSnapshotSection::unavailable(),
+                Err(err) => {
+                    eprintln!(
+                        "[ContextReconstruction] Step 8 Diagnostic: Departure snapshot unavailable for context '{}' ({}); falling back gracefully",
+                        context_id, err
+                    );
+                    ReconstructionSnapshotSection::unavailable()
+                }
             }
         } else {
             ReconstructionSnapshotSection::unavailable()
@@ -4019,6 +4050,236 @@ mod tests {
 
         // After TTL expired, get() returns None (stale cache results cannot override newer persisted state)
         assert!(short_cache.get(&ws.id).is_none());
+    }
+
+    #[test]
+    fn test_graceful_failure_missing_snapshot() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "No Snapshot Workspace").unwrap();
+
+        // Explicitly disable snapshots in settings to test missing/unavailable snapshot subsystem
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_context_snapshots = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        // Add confirmed items
+        for i in 1..=3 {
+            let meta = serde_json::json!({ "status": "confirmed" }).to_string();
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "file",
+                &format!("/path/file_{}.rs", i),
+                Some(&format!("Source File {}", i)),
+                &meta,
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        // Add active task
+        let tc = crate::db::models::TaskCandidate {
+            id: "tc_nosnap".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Build without snapshot".to_string(),
+            confidence: 0.85,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Missing / disabled snapshot must NEVER fail or crash reconstruction
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.workset.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.latest_snapshot.status, ReconstructionSectionStatus::Unavailable);
+        assert!(rec.quality.can_confidently_resume);
+    }
+
+    #[test]
+    fn test_graceful_failure_missing_task() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "No Task Workspace").unwrap();
+
+        // 1. Zero task candidates and zero items -> task is Unavailable
+        let service = ContextReconstructionService::new();
+        let rec_empty = service.reconstruct_context(&conn, &ws.id).unwrap();
+        assert_eq!(rec_empty.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_empty.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert!(rec_empty.current_task.title.is_none());
+
+        // 2. Add items without explicit task candidates -> memory provides conservative Partial task or remains unavailable without fabricating certainty
+        for i in 1..=2 {
+            let meta = serde_json::json!({ "status": "confirmed" }).to_string();
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                &format!("https://example.com/doc_{}", i),
+                Some(&format!("Doc {}", i)),
+                &meta,
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        let rec_items = service.reconstruct_context(&conn, &ws.id).unwrap();
+        assert_eq!(rec_items.context.status, ReconstructionSectionStatus::Available);
+        assert_ne!(rec_items.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_items.workset.status, ReconstructionSectionStatus::Available);
+        assert_ne!(rec_items.quality.rating, ReconstructionQualityRating::Insufficient);
+    }
+
+    #[test]
+    fn test_graceful_failure_missing_workset() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Empty Workset Workspace").unwrap();
+
+        // Add task candidate but zero items
+        let tc = crate::db::models::TaskCandidate {
+            id: "tc_noworkset".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Research Phase".to_string(),
+            confidence: 0.80,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Workset is unavailable, but Context + Task + State are still returned
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.current_task.title, Some("Research Phase".to_string()));
+        assert_eq!(rec.workset.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(rec.workset.total_count, 0);
+    }
+
+    #[test]
+    fn test_graceful_failure_corrupted_optional_record() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Corrupted Record Workspace").unwrap();
+
+        // Insert item with malformed / non-JSON metadata
+        let malformed_metadata = "{ this is invalid json !!! }";
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "note",
+            "scratchpad",
+            Some("Corrupted Note"),
+            malformed_metadata,
+        ).unwrap();
+        let _ = crate::db::operations::confirm_membership(&conn, &item.id, &ws.id);
+
+        let service = ContextReconstructionService::new();
+        // Reconstruction must NOT panic or crash on corrupted record strings
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+    }
+
+    #[test]
+    fn test_graceful_failure_deleted_referenced_item() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Deleted Item Workspace").unwrap();
+
+        // Create item and capture snapshot referencing it
+        let meta = serde_json::json!({ "status": "confirmed" }).to_string();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "file",
+            "/path/to/ephemeral.txt",
+            Some("Ephemeral Document"),
+            &meta,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let mut snap_builder = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ws.id, "Deleted Item Workspace");
+        snap_builder.workset_item_references = vec![SnapshotWorksetItemReference {
+            id: item.id.clone(),
+            title: Some("Ephemeral Document".to_string()),
+            item_type: "file".to_string(),
+            relevance: WorksetItemRelevance::Primary,
+            relevance_score: 0.9,
+            provenance: InformationProvenance::Confirmed,
+            app_name: Some("Finder".to_string()),
+            domain: None,
+            content_snippet: "/path/to/ephemeral.txt".to_string(),
+            reasons: vec!["Active reference".to_string()],
+            created_at: Utc::now().to_rfc3339(),
+            last_active_at: Some(Utc::now().to_rfc3339()),
+        }];
+        let snap = snap_builder.build();
+        let _ = crate::db::operations::save_context_snapshot(&conn, &snap, 10);
+
+        // Delete the referenced item physically from database
+        crate::db::operations::delete_item(&conn, &item.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Deleted referenced items do not cause query failure or panic
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+    }
+
+    #[test]
+    fn test_graceful_failure_stale_context() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Dormant Project").unwrap();
+
+        // Insert activity from 6 months ago
+        let old_time = (Utc::now() - chrono::Duration::days(180)).to_rfc3339();
+        let meta = serde_json::json!({ "status": "confirmed", "created_at": old_time }).to_string();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://archive.org/spec",
+            Some("Archived Spec"),
+            &meta,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Stale context correctly reflects state freshness and orientation readiness without crashing
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+        assert!(!rec.quality.can_confidently_resume || rec.resume_readiness.readiness != ResumeReadiness::Ready);
+    }
+
+    #[test]
+    fn test_graceful_failure_near_total_unavailability() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        // Reconstruct a non-existent workspace ID with zero database data
+        let rec = service.reconstruct_context(&conn, "ctx_completely_empty_000").unwrap();
+
+        // Invariant: Total unavailability returns graceful fallback models without crashing
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Uncertain);
+        assert_eq!(rec.context.name, "Unknown project");
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(rec.workset.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(rec.resume_readiness.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(rec.resume_readiness.readiness, ResumeReadiness::Insufficient);
+        assert_eq!(rec.quality.rating, ReconstructionQualityRating::Insufficient);
+        assert!(!rec.quality.can_confidently_resume);
     }
 }
 
