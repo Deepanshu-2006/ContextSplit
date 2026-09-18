@@ -439,22 +439,49 @@ impl ContextActivitySegmenter {
         workspace_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<ContextActivitySegment>, String> {
+        let ws_opt = crate::db::operations::get_workspace(conn, workspace_id).ok();
+        let ws_name = ws_opt.as_ref().map(|w| w.name.clone()).unwrap_or_else(|| workspace_id.to_string());
         let limit_val = limit.unwrap_or(50).clamp(1, 200) as i64;
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM items 
+                "SELECT id, session_id, created_at, item_type, title 
+                 FROM items 
                  WHERE workspace_id = ?1 
                  ORDER BY created_at DESC 
                  LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
-        let mut item_ids = stmt
-            .query_map(rusqlite::params![workspace_id, limit_val], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
-            .collect::<Vec<_>>();
-        item_ids.reverse();
-        self.build_segments_from_items(conn, &item_ids)
+        let rows = stmt
+            .query_map(rusqlite::params![workspace_id, limit_val], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut events = Vec::new();
+        for r in rows.flatten() {
+            let (id, session_id, created_at, item_type, title) = r;
+            events.push(SegmentStreamEvent {
+                item_id: id,
+                session_id,
+                timestamp: created_at,
+                target_context: Some(ContextReference::workspace(workspace_id, &ws_name)),
+                confidence: 1.0,
+                confidence_band: "Very High".to_string(),
+                is_ambiguous: false,
+                item_type,
+                item_title: title,
+                evidence: vec![format!("User confirmed in workspace '{}'", ws_name)],
+            });
+        }
+
+        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        Ok(self.segment_event_stream(&events))
     }
 
     /// Derives contextual activity segments within a specific date/time window.

@@ -1197,13 +1197,8 @@ impl ContextStateBuilder {
         let ws = crate::db::operations::get_workspace(conn, context_id).ok();
         let context_name = ws.map(|w| w.name);
 
-        let workset = ContextWorksetBuilder::from_db(conn, context_id)
-            .and_then(|b| b.build())
-            .ok();
-
-        let memory = ContextMemoryBuilder::from_db(conn, context_id)
-            .and_then(|b| b.build())
-            .ok();
+        let workset = ContextWorksetService::new().derive_for_workspace(conn, context_id).ok();
+        let memory = ContextMemory::derive_for_workspace(conn, context_id).ok();
 
         let activity_segments = Vec::new();
 
@@ -1271,20 +1266,39 @@ impl ContextStateBuilder {
             .filter_map(|r| r.ok())
             .collect();
 
-        let items = crate::db::operations::list_items(conn, Some(context_id))
-            .unwrap_or_default();
-
-        let mut has_user_feedback = false;
-        if let Ok(mut mem_stmt) = conn.prepare("SELECT source FROM context_memberships WHERE workspace_id = ?1") {
-            if let Ok(rows) = mem_stmt.query_map(rusqlite::params![context_id], |row| row.get::<_, String>(0)) {
-                for s in rows.flatten() {
-                    if s == "manual" || s == "user_confirmed" {
-                        has_user_feedback = true;
-                        break;
-                    }
+        let mut items = Vec::new();
+        if let Ok(mut item_stmt) = conn.prepare(
+            "SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at
+             FROM items
+             WHERE workspace_id = ?1
+             ORDER BY created_at DESC LIMIT 50",
+        ) {
+            if let Ok(rows) = item_stmt.query_map(rusqlite::params![context_id], |row| {
+                Ok(crate::db::models::Item {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    item_type: row.get(3)?,
+                    content: row.get(4)?,
+                    title: row.get(5)?,
+                    metadata: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            }) {
+                for r in rows.flatten() {
+                    items.push(r);
                 }
             }
         }
+
+        let has_user_feedback: bool = conn
+            .query_row(
+                "SELECT 1 FROM context_memberships WHERE workspace_id = ?1 AND source IN ('manual', 'user_confirmed') LIMIT 1",
+                rusqlite::params![context_id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
 
         Ok(Self {
             context_id: context_id.to_string(),

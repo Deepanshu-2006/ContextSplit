@@ -780,14 +780,18 @@ impl ContextWorksetBuilder {
         // 1. Derive ContextMemory (reusing Day 17 memory pipeline)
         let memory = ContextMemory::derive_for_workspace(conn, workspace_id)?;
 
-        // 2. Fetch all confirmed items for this workspace (direct or confirmed membership)
+        // 2. Fetch all confirmed items for this workspace (direct or confirmed membership, bounded to recent 50)
         let mut items = Vec::new();
         if let Ok(mut item_stmt) = conn.prepare(
-            "SELECT DISTINCT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+            "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
              FROM items i
-             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
-             WHERE i.workspace_id = ?1 OR (cm.workspace_id = ?1 AND cm.membership_type = 'confirmed')
-             ORDER BY i.created_at DESC LIMIT 50",
+             WHERE i.workspace_id = ?1
+             UNION
+             SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+             FROM items i
+             JOIN context_memberships cm ON i.id = cm.item_id
+             WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'
+             ORDER BY created_at DESC LIMIT 50",
         ) {
             if let Ok(rows) = item_stmt.query_map(params![workspace_id], |row| {
                 Ok(Item {

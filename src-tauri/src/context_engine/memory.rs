@@ -1057,13 +1057,17 @@ impl ContextMemoryBuilder {
         let ws = crate::db::operations::get_workspace(conn, workspace_id)
             .map_err(|e| format!("Workspace '{}' not found: {}", workspace_id, e))?;
 
-        // 1. Fetch Items
+        // 1. Fetch Items (bounded to recent 50 using indexed UNION)
         let mut item_stmt = conn.prepare(
-            "SELECT DISTINCT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+            "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
              FROM items i
-             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
-             WHERE i.workspace_id = ?1 OR cm.workspace_id = ?1
-             ORDER BY i.created_at DESC LIMIT 50",
+             WHERE i.workspace_id = ?1
+             UNION
+             SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+             FROM items i
+             JOIN context_memberships cm ON i.id = cm.item_id
+             WHERE cm.workspace_id = ?1
+             ORDER BY created_at DESC LIMIT 50",
         ).map_err(|e| e.to_string())?;
 
         let item_rows = item_stmt.query_map(params![workspace_id], |row| {
@@ -1087,11 +1091,12 @@ impl ContextMemoryBuilder {
             }
         }
 
-        // 2. Fetch Memberships
+        // 2. Fetch Memberships (bounded to recent 50)
         let mut mem_stmt = conn.prepare(
             "SELECT id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at
              FROM context_memberships
-             WHERE workspace_id = ?1",
+             WHERE workspace_id = ?1
+             ORDER BY created_at DESC LIMIT 50",
         ).map_err(|e| e.to_string())?;
 
         let mem_rows = mem_stmt.query_map(params![workspace_id], |row| {
@@ -2214,7 +2219,7 @@ impl ContextMemoryService {
     }
 
     pub fn reconstruct_memory(&self, conn: &Connection, workspace_id: &str) -> Result<ContextMemory, String> {
-        ContextMemoryBuilder::from_db(conn, workspace_id)?.build()
+        ContextMemory::derive_for_workspace(conn, workspace_id)
     }
 
     pub fn reconstruct_active_memory(&self, conn: &Connection) -> Result<Option<ContextMemory>, String> {

@@ -549,7 +549,8 @@ impl ContextImportantMemoryBuilder {
                  FROM context_memberships cm
                  JOIN items i ON i.id = cm.item_id
                  WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'
-                 ORDER BY cm.created_at DESC",
+                 ORDER BY cm.created_at DESC
+                 LIMIT 30",
             )?;
 
             let rows = stmt.query_map(params![workspace_id], |row| {
@@ -628,8 +629,7 @@ impl ContextImportantMemoryBuilder {
         }
 
         // 4. Derive Context Workset for High-Signal Inferred Items & References
-        if let Ok(workset_builder) = ContextWorksetBuilder::from_db(conn, workspace_id) {
-            if let Ok(workset) = workset_builder.build() {
+        if let Ok(workset) = crate::context_engine::workset::ContextWorksetService::new().derive_for_workspace(conn, workspace_id) {
                 for item_ref in &workset.items {
                     // Skip if user explicitly removed this item from context or from important memory
                     if forgotten_from_context_ids.contains(&item_ref.id) || unpinned_from_important_ids.contains(&item_ref.id) {
@@ -731,7 +731,6 @@ impl ContextImportantMemoryBuilder {
                     memories.push(mem);
                 }
             }
-        }
 
         // 5. Evaluate Multi-Session Item Recurrence (Recurring References)
         {
@@ -739,10 +738,11 @@ impl ContextImportantMemoryBuilder {
                 "SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT s.id) as session_count,
                         MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
                  FROM items i
-                 JOIN sessions s ON (i.session_id = s.id OR i.created_at BETWEEN s.started_at AND s.last_activity_at)
+                 JOIN sessions s ON i.session_id = s.id
                  WHERE (i.workspace_id = ?1 OR EXISTS(SELECT 1 FROM context_memberships cm WHERE cm.item_id = i.id AND cm.workspace_id = ?1))
                  GROUP BY i.id
-                 HAVING session_count >= ?2",
+                 HAVING session_count >= ?2
+                 LIMIT 20",
             );
 
             if let Ok(mut stmt) = stmt {
@@ -957,75 +957,73 @@ impl ContextImportantMemoryBuilder {
         }
 
         // 7. Evaluate Meaningful Context State
-        if let Ok(state_builder) = ContextStateBuilder::from_db(conn, workspace_id) {
-            if let Ok(state) = state_builder.build() {
-                if state.state.is_active() || state.state.is_recently_active() || state.state.is_paused() {
-                    let importance = if state.state.is_active() {
-                        0.85
-                    } else if state.state.is_recently_active() {
-                        0.75
-                    } else {
-                        0.65
-                    };
+        if let Ok(state) = crate::context_engine::context_state::ContextStateService::new().derive_for_context(conn, workspace_id) {
+            if state.state.is_active() || state.state.is_recently_active() || state.state.is_paused() {
+                let importance = if state.state.is_active() {
+                    0.85
+                } else if state.state.is_recently_active() {
+                    0.75
+                } else {
+                    0.65
+                };
 
-                    let explanation = ImportantMemoryExplanation::new(
-                        format!("Operational State: {}", state.state.display_name()),
-                        vec![
-                            format!("Context state: {}", state.state.display_name()),
-                            format!("Freshness: {}", state.freshness.as_str()),
-                            format!("Resume readiness: {}", state.readiness.readiness.display_name()),
-                        ],
-                        vec![],
-                        state.state_confidence,
-                        InformationProvenance::Inferred,
-                        Some("Derived from recent activity timestamps and transition boundaries.".to_string()),
-                    );
+                let explanation = ImportantMemoryExplanation::new(
+                    format!("Operational State: {}", state.state.display_name()),
+                    vec![
+                        format!("Context state: {}", state.state.display_name()),
+                        format!("Freshness: {}", state.freshness.as_str()),
+                        format!("Resume readiness: {}", state.readiness.readiness.display_name()),
+                    ],
+                    vec![],
+                    state.state_confidence,
+                    InformationProvenance::Inferred,
+                    Some("Derived from recent activity timestamps and transition boundaries.".to_string()),
+                );
 
-                    let timestamp = state
-                        .meaningful_activity
-                        .as_ref()
-                        .map(|a| a.timestamp.clone())
-                        .or_else(|| state.last_active_at.clone());
+                let timestamp = state
+                    .meaningful_activity
+                    .as_ref()
+                    .map(|a| a.timestamp.clone())
+                    .or_else(|| state.last_active_at.clone());
 
-                    let detail = state
-                        .meaningful_activity
-                        .as_ref()
-                        .map(|a| a.description.clone())
-                        .or_else(|| {
-                            if !state.last_meaningful_activity.is_empty() {
-                                Some(state.last_meaningful_activity.clone())
-                            } else {
-                                None
-                            }
-                        });
+                let detail = state
+                    .meaningful_activity
+                    .as_ref()
+                    .map(|a| a.description.clone())
+                    .or_else(|| {
+                        if !state.last_meaningful_activity.is_empty() {
+                            Some(state.last_meaningful_activity.clone())
+                        } else {
+                            None
+                        }
+                    });
 
-                    let mem = ContextImportantMemory::new(
-                        format!("mem_state_{}", workspace_id),
-                        workspace_id,
-                        workspace_id,
-                        ImportantMemoryType::MeaningfulState,
-                        importance,
-                        state.state_confidence,
-                        timestamp.clone(),
-                        timestamp,
-                        InformationProvenance::Inferred,
-                        format!("State: {}", state.state.display_name()),
-                        detail,
-                        explanation,
-                        ImportantMemoryMetadata {
-                            item_type: None,
-                            app_name: None,
-                            domain: None,
-                            session_count: None,
-                            streak_count: None,
-                            action_verb: None,
-                            target_subject: None,
-                            state_value: Some(state.state.as_str().to_string()),
-                            tags: vec![state.state.as_str().to_string(), state.freshness.as_str().to_string()],
-                        },
-                    );
-                    memories.push(mem);
-                }
+                let mem = ContextImportantMemory::new(
+                    format!("mem_state_{}", workspace_id),
+                    workspace_id,
+                    workspace_id,
+                    ImportantMemoryType::MeaningfulState,
+                    importance,
+                    state.state_confidence,
+                    timestamp.clone(),
+                    timestamp,
+                    InformationProvenance::Inferred,
+                    format!("State: {}", state.state.display_name()),
+                    detail,
+                    explanation,
+                    ImportantMemoryMetadata {
+                        item_type: None,
+                        app_name: None,
+                        domain: None,
+                        session_count: None,
+                        streak_count: None,
+                        action_verb: None,
+                        target_subject: None,
+                        state_value: Some(state.state.as_str().to_string()),
+                        tags: vec![state.state.as_str().to_string(), state.freshness.as_str().to_string()],
+                    },
+                );
+                memories.push(mem);
             }
         }
 

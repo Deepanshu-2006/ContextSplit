@@ -1932,9 +1932,11 @@ impl ContextReconstructionService {
     ) -> Result<ContextReconstruction, String> {
         let now_ts = Utc::now().to_rfc3339();
 
+        let t_total = Instant::now();
         // -----------------------------------------------------------------
-        // Step 1: Load Context
+        // Step 1: Load Context (O(1) indexed lookup)
         // -----------------------------------------------------------------
+        let t1 = Instant::now();
         let ws_res = crate::db::operations::get_workspace(conn, context_id);
         let (context_section, ws_name, is_workspace_found) = match ws_res {
             Ok(ws) => {
@@ -1957,11 +1959,15 @@ impl ContextReconstructionService {
                     "[ContextReconstruction] Step 1 Diagnostic: Workspace '{}' not found in database ({:?}); checking fallback evidence",
                     context_id, err
                 );
-                // Check if items exist for this context ID
-                let items_count = crate::db::operations::list_items(conn, Some(context_id))
-                    .map(|it| it.len())
-                    .unwrap_or(0);
-                if items_count > 0 {
+                // Bounded O(1) existence check instead of loading all items
+                let has_items: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM items WHERE workspace_id = ?1 LIMIT 1",
+                        rusqlite::params![context_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if has_items {
                     (
                         ReconstructionContextSection::partial(
                             format!("Context {}", context_id),
@@ -1979,23 +1985,12 @@ impl ContextReconstructionService {
                 }
             }
         };
+        let d1 = t1.elapsed();
 
         // -----------------------------------------------------------------
-        // Step 2: Retrieve Relevant Context Evidence & Veto Check
+        // Step 2 & 3: Determine Current / Recent Task & Resolve Task Contradictions
         // -----------------------------------------------------------------
-        let raw_items = crate::db::operations::list_items(conn, Some(context_id)).unwrap_or_default();
-        // Invariant: Hard veto on items marked 'dismissed' in context_memberships
-        let active_items: Vec<_> = raw_items
-            .into_iter()
-            .filter(|it| {
-                !it.metadata.contains("\"status\":\"dismissed\"")
-                    && !it.metadata.contains("\"membership_status\":\"dismissed\"")
-            })
-            .collect();
-
-        // -----------------------------------------------------------------
-        // Step 3: Determine Current / Recent Task & Resolve Task Contradictions
-        // -----------------------------------------------------------------
+        let t2 = Instant::now();
         let task_candidates = crate::db::operations::list_task_candidates_for_context(conn, context_id).unwrap_or_default();
         // Invariant: Dismissed tasks are strictly vetoed by user feedback
         let non_dismissed: Vec<_> = task_candidates
@@ -2074,10 +2069,12 @@ impl ContextReconstructionService {
         } else {
             ReconstructionTaskSection::unavailable()
         };
+        let d2 = t2.elapsed();
 
         // -----------------------------------------------------------------
-        // Step 4: Retrieve ContextMemory
+        // Step 4: Retrieve ContextMemory (Cached / bounded)
         // -----------------------------------------------------------------
+        let t4 = Instant::now();
         let memory_opt = match ContextMemoryService::new().reconstruct_memory(conn, context_id) {
             Ok(mem) => Some(mem),
             Err(err) => {
@@ -2102,10 +2099,12 @@ impl ContextReconstructionService {
                 }
             }
         }
+        let d4 = t4.elapsed();
 
         // -----------------------------------------------------------------
-        // Step 5: Retrieve ContextWorkset
+        // Step 5: Retrieve ContextWorkset (Cached / bounded)
         // -----------------------------------------------------------------
+        let t5 = Instant::now();
         let workset_res = ContextWorksetService::new().derive_for_workspace(conn, context_id);
         let workset_section = match workset_res {
             Ok(ws) => {
@@ -2132,17 +2131,26 @@ impl ContextReconstructionService {
                     "[ContextReconstruction] Step 5 Diagnostic: Workset derivation unavailable for context '{}' ({}); falling back gracefully",
                     context_id, err
                 );
-                if !active_items.is_empty() {
+                let has_active_items: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM items WHERE workspace_id = ?1 AND metadata NOT LIKE '%\"status\":\"dismissed\"%' LIMIT 1",
+                        rusqlite::params![context_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if has_active_items {
                     ReconstructionWorksetSection::partial(vec![], 0.30)
                 } else {
                     ReconstructionWorksetSection::unavailable()
                 }
             }
         };
+        let d5 = t5.elapsed();
 
         // -----------------------------------------------------------------
         // Step 6: Determine ContextState
         // -----------------------------------------------------------------
+        let t6 = Instant::now();
         let state_res = ContextStateService::new().derive_for_context(conn, context_id);
         let (current_state_section, resume_readiness_section, meaningful_act_section) = match state_res {
             Ok(state) => {
@@ -2212,10 +2220,12 @@ impl ContextReconstructionService {
                 (state_sec, readiness_sec, meaningful_sec)
             }
         };
+        let d6 = t6.elapsed();
 
         // -----------------------------------------------------------------
         // Step 7: Retrieve Important Contextual Memory
         // -----------------------------------------------------------------
+        let t7 = Instant::now();
         let important_memories_section = match ContextImportantMemoryBuilder::build(conn, context_id, None) {
             Ok(mem_set) => {
                 let snapshot_mems: Vec<SnapshotImportantMemoryReference> = mem_set
@@ -2238,57 +2248,73 @@ impl ContextReconstructionService {
                 ReconstructionImportantMemoriesSection::unavailable()
             }
         };
+        let d7 = t7.elapsed();
 
         // -----------------------------------------------------------------
-        // Step 8: Retrieve Latest ContextSnapshot & Detect Outdated Snapshot Conflicts
+        // Step 8: Retrieve Latest ContextSnapshot & Detect Outdated Snapshot Conflicts (Bounded query)
         // -----------------------------------------------------------------
+        let t8 = Instant::now();
         let latest_snapshot_section = if ContextSnapshotService::is_snapshots_enabled(conn) {
-            match ContextSnapshotService::new().derive_for_context_cached(conn, context_id) {
-                Ok(snap) => {
-                    let snap_created_at = snap.created_at.clone();
-                    let snap_ref = ReconstructionSnapshotRef {
-                        id: snap.id,
-                        context_id: snap.context_id,
-                        created_at: snap.created_at,
-                        quality_rating: snap.quality.rating,
-                        quality_score: snap.quality.score,
-                        task_title: snap.task_title,
-                        workset_count: snap.workset_item_references.len(),
-                        snapshot_statement: snap.snapshot_statement,
-                        can_confidently_resume: snap.quality.can_confidently_resume,
-                    };
+            let snap_opt = crate::db::operations::get_latest_context_snapshot(conn, context_id)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    let cache = crate::context_engine::snapshot::get_global_snapshot_cache();
+                    cache.get(context_id)
+                });
 
-                    // Check if live activity items are newer than the snapshot creation time
-                    let newer_items_count = active_items
-                        .iter()
-                        .filter(|it| it.created_at > snap_created_at || it.updated_at > snap_created_at)
-                        .count();
+            if let Some(snap) = snap_opt {
+                let snap_created_at = snap.created_at.clone();
+                let snap_ref = ReconstructionSnapshotRef {
+                    id: snap.id,
+                    context_id: snap.context_id,
+                    created_at: snap.created_at,
+                    quality_rating: snap.quality.rating,
+                    quality_score: snap.quality.score,
+                    task_title: snap.task_title,
+                    workset_count: snap.workset_item_references.len(),
+                    snapshot_statement: snap.snapshot_statement,
+                    can_confidently_resume: snap.quality.can_confidently_resume,
+                };
 
-                    if newer_items_count > 0 {
-                        // Conflict detected: Snapshot is superseded by live, newer workspace activity
-                        ReconstructionSnapshotSection::outdated(
-                            snap_ref,
-                            newer_items_count,
-                            format!(
-                                "Live activity has progressed with {} newer item(s) since snapshot",
-                                newer_items_count
-                            ),
-                        )
-                    } else {
-                        ReconstructionSnapshotSection::available(snap_ref)
-                    }
+                // Bounded indexed count query to check if newer items exist since snapshot
+                let newer_items_count: usize = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM items 
+                         WHERE workspace_id = ?1 
+                            AND (created_at > ?2 OR updated_at > ?2) 
+                            AND metadata NOT LIKE '%\"status\":\"dismissed\"%' 
+                            AND metadata NOT LIKE '%\"membership_status\":\"dismissed\"%'",
+                        rusqlite::params![context_id, snap_created_at],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+
+                if newer_items_count > 0 {
+                    // Conflict detected: Snapshot is superseded by live, newer workspace activity
+                    ReconstructionSnapshotSection::outdated(
+                        snap_ref,
+                        newer_items_count,
+                        format!(
+                            "Live activity has progressed with {} newer item(s) since snapshot",
+                            newer_items_count
+                        ),
+                    )
+                } else {
+                    ReconstructionSnapshotSection::available(snap_ref)
                 }
-                Err(err) => {
-                    eprintln!(
-                        "[ContextReconstruction] Step 8 Diagnostic: Departure snapshot unavailable for context '{}' ({}); falling back gracefully",
-                        context_id, err
-                    );
-                    ReconstructionSnapshotSection::unavailable()
-                }
+            } else {
+                ReconstructionSnapshotSection::unavailable()
             }
         } else {
             ReconstructionSnapshotSection::unavailable()
         };
+        let d8 = t8.elapsed();
+
+        println!(
+            "[Profiling: {}] Total: {:?} | S1(ws): {:?} | S2(tasks): {:?} | S4(mem): {:?} | S5(ws): {:?} | S6(state): {:?} | S7(impmem): {:?} | S8(snap): {:?}",
+            context_id, t_total.elapsed(), d1, d2, d4, d5, d6, d7, d8
+        );
 
         // -----------------------------------------------------------------
         // Step 9: Retrieve Recent Meaningful Activity Milestones
@@ -4281,6 +4307,193 @@ mod tests {
         assert_eq!(rec.quality.rating, ReconstructionQualityRating::Insufficient);
         assert!(!rec.quality.can_confidently_resume);
     }
+
+    /// Helper to seed N realistic items for a workspace inside a single fast batch transaction.
+    fn seed_workspace_items_batch(conn: &mut Connection, workspace_id: &str, count: usize) {
+        let now = Utc::now();
+        let tc = crate::db::models::TaskCandidate {
+            id: format!("tc_{}", workspace_id),
+            context_id: Some(workspace_id.to_string()),
+            title: "Performance Benchmark Active Task".to_string(),
+            confidence: 0.90,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: now.to_rfc3339(),
+            last_active_at: now.to_rfc3339(),
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(conn, &tc).unwrap();
+
+        let tx = conn.transaction().unwrap();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO items (id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at) 
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ).unwrap();
+
+            let mut mem_stmt = tx.prepare(
+                "INSERT INTO context_memberships (id, item_id, workspace_id, membership_type, confidence, source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'confirmed', 0.95, 'manual', ?4, ?5)"
+            ).unwrap();
+
+            for i in 1..=count {
+                let id = format!("item_{}_{}", workspace_id, i);
+                let item_type = if i % 3 == 0 { "file" } else if i % 3 == 1 { "url" } else { "text" };
+                let uri = format!("https://project-assets.internal/doc_{}.html", i);
+                let title = format!("Project Specification Document Part {}", i);
+                let meta = serde_json::json!({
+                    "status": "confirmed",
+                    "app_name": "Google Chrome",
+                    "domain": "project-assets.internal"
+                }).to_string();
+                let item_ts = (now - chrono::Duration::seconds(i as i64 * 10)).to_rfc3339();
+
+                stmt.execute(rusqlite::params![
+                    id,
+                    workspace_id,
+                    item_type,
+                    uri,
+                    title,
+                    meta,
+                    item_ts,
+                    item_ts
+                ]).unwrap();
+
+                let mem_id = format!("cm_{}_{}", workspace_id, i);
+                mem_stmt.execute(rusqlite::params![
+                    mem_id,
+                    id,
+                    workspace_id,
+                    item_ts,
+                    item_ts
+                ]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn test_performance_benchmark_small_10_items() {
+        let mut conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Small Project (10 items)").unwrap();
+        seed_workspace_items_batch(&mut conn, &ws.id, 10);
+
+        let service = ContextReconstructionService::new();
+
+        // 1. Cold / Uncached Reconstruction
+        let start_cold = Instant::now();
+        let rec_cold = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        let cold_duration = start_cold.elapsed();
+
+        println!("[Benchmark: Small 10 Items] Cold reconstruction: {:?}", cold_duration);
+        assert_eq!(rec_cold.context.status, ReconstructionSectionStatus::Available);
+        assert!(rec_cold.workset.status.is_present());
+        assert!(rec_cold.workset.total_count > 0);
+        assert!(cold_duration < Duration::from_secs(30), "Small cold reconstruction took {:?}", cold_duration);
+
+        // 2. Warm / Cached Reconstruction
+        let _ = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let start_warm = Instant::now();
+        let rec_warm = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let warm_duration = start_warm.elapsed();
+
+        println!("[Benchmark: Small 10 Items] Warm reconstruction: {:?}", warm_duration);
+        assert_eq!(rec_warm.context.id, rec_cold.context.id);
+        assert!(warm_duration < Duration::from_millis(500), "Small warm reconstruction took {:?}", warm_duration);
+    }
+
+    #[test]
+    fn test_performance_benchmark_medium_100_items() {
+        let mut conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Medium Project (100 items)").unwrap();
+        seed_workspace_items_batch(&mut conn, &ws.id, 100);
+
+        let service = ContextReconstructionService::new();
+
+        // 1. Cold / Uncached Reconstruction
+        let start_cold = Instant::now();
+        let rec_cold = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        let cold_duration = start_cold.elapsed();
+
+        println!("[Benchmark: Medium 100 Items] Cold reconstruction: {:?}", cold_duration);
+        assert_eq!(rec_cold.context.status, ReconstructionSectionStatus::Available);
+        assert!(rec_cold.workset.status.is_present());
+        assert!(rec_cold.workset.total_count > 0);
+        assert!(cold_duration < Duration::from_secs(30), "Medium cold reconstruction took {:?}", cold_duration);
+
+        // 2. Warm / Cached Reconstruction
+        let _ = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let start_warm = Instant::now();
+        let rec_warm = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let warm_duration = start_warm.elapsed();
+
+        println!("[Benchmark: Medium 100 Items] Warm reconstruction: {:?}", warm_duration);
+        assert_eq!(rec_warm.context.id, rec_cold.context.id);
+        assert!(warm_duration < Duration::from_millis(500), "Medium warm reconstruction took {:?}", warm_duration);
+    }
+
+    #[test]
+    fn test_performance_benchmark_large_1000_items() {
+        let mut conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Large Project (1,000 items)").unwrap();
+        seed_workspace_items_batch(&mut conn, &ws.id, 1000);
+
+        let service = ContextReconstructionService::new();
+
+        // 1. Cold / Uncached Reconstruction (Bounded query ensures execution remains fast regardless of scale)
+        let start_cold = Instant::now();
+        let rec_cold = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        let cold_duration = start_cold.elapsed();
+
+        println!("[Benchmark: Large 1000 Items] Cold reconstruction: {:?}", cold_duration);
+        assert_eq!(rec_cold.context.status, ReconstructionSectionStatus::Available);
+        assert!(rec_cold.workset.status.is_present());
+        assert!(rec_cold.workset.total_count > 0);
+        assert!(cold_duration < Duration::from_secs(30), "Large cold reconstruction took {:?}", cold_duration);
+
+        // 2. Warm / Cached Reconstruction
+        let _ = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let start_warm = Instant::now();
+        let rec_warm = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let warm_duration = start_warm.elapsed();
+
+        println!("[Benchmark: Large 1000 Items] Warm reconstruction: {:?}", warm_duration);
+        assert_eq!(rec_warm.context.id, rec_cold.context.id);
+        assert!(warm_duration < Duration::from_millis(500), "Large warm reconstruction took {:?}", warm_duration);
+    }
+
+    #[test]
+    fn test_performance_benchmark_very_large_10000_items() {
+        let mut conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Very Large Project (10,000 items)").unwrap();
+        seed_workspace_items_batch(&mut conn, &ws.id, 10000);
+
+        let service = ContextReconstructionService::new();
+
+        // 1. Cold / Uncached Reconstruction with 10,000 historical items
+        // Must NEVER do unbounded table scans; indexes + limits guarantee fast response.
+        let start_cold = Instant::now();
+        let rec_cold = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        let cold_duration = start_cold.elapsed();
+
+        println!("[Benchmark: Very Large 10,000 Items] Cold reconstruction: {:?}", cold_duration);
+        assert_eq!(rec_cold.context.status, ReconstructionSectionStatus::Available);
+        assert!(rec_cold.workset.status.is_present());
+        assert!(rec_cold.workset.total_count > 0);
+        assert!(
+            cold_duration < Duration::from_secs(30),
+            "10,000-item cold reconstruction took {:?}, must remain bounded",
+            cold_duration
+        );
+
+        // 2. Warm / Cached Reconstruction
+        let _ = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let start_warm = Instant::now();
+        let rec_warm = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        let warm_duration = start_warm.elapsed();
+
+        println!("[Benchmark: Very Large 10,000 Items] Warm reconstruction: {:?}", warm_duration);
+        assert_eq!(rec_warm.context.id, rec_cold.context.id);
+        assert!(warm_duration < Duration::from_millis(500), "10,000-item warm reconstruction took {:?}", warm_duration);
+    }
 }
-
-

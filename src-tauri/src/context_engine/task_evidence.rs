@@ -701,14 +701,17 @@ impl TaskEvidenceCollector {
 
         let window_start = (Utc::now() - chrono::Duration::seconds(self.options.time_window_seconds)).to_rfc3339();
 
-        // 1. Fetch recent Items associated with this context
+        // 1. Fetch recent Items associated with this context (bounded with indexed UNION)
         let mut item_stmt = conn.prepare(
-            "SELECT DISTINCT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
+            "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
              FROM items i
-             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
-             WHERE (i.workspace_id = ?1 OR cm.workspace_id = ?1)
-               AND i.created_at >= ?2
-             ORDER BY i.created_at DESC
+             WHERE i.workspace_id = ?1 AND i.created_at >= ?2
+             UNION
+             SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
+             FROM items i
+             JOIN context_memberships cm ON i.id = cm.item_id
+             WHERE cm.workspace_id = ?1 AND i.created_at >= ?2
+             ORDER BY created_at DESC
              LIMIT ?3",
         )?;
 
@@ -832,8 +835,7 @@ impl TaskEvidenceCollector {
         let mut sig_stmt = conn.prepare(
             "SELECT id, item_id, signal_type, session_id, payload, created_at
              FROM context_signals
-             WHERE (workspace_id = ?1 OR item_id IN (SELECT id FROM items WHERE workspace_id = ?1))
-               AND created_at >= ?2
+             WHERE workspace_id = ?1 AND created_at >= ?2
              ORDER BY created_at DESC
              LIMIT ?3",
         )?;
