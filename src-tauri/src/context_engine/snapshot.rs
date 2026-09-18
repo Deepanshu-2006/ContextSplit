@@ -2053,6 +2053,7 @@ pub fn get_global_snapshot_cache() -> &'static ContextSnapshotCache {
 
 pub fn invalidate_snapshot_cache(context_id: &str) {
     get_global_snapshot_cache().invalidate(context_id);
+    crate::context_engine::reconstruction::invalidate_reconstruction_cache(Some(context_id));
 }
 
 // =========================================================================

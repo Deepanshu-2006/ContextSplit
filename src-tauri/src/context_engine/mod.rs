@@ -39,14 +39,16 @@ pub mod snapshot;
 pub mod reconstruction;
 
 pub use reconstruction::{
-    ContextReconstruction, ContextReconstructionBuilder, ContextReconstructionQuality,
-    ContextReconstructionService, ReconstructionActivityRef, ReconstructionConfidence,
-    ReconstructionContextRef, ReconstructionContextSection, ReconstructionImportantMemoriesSection,
+    CachedReconstructionEntry, ContextReconstruction, ContextReconstructionBuilder,
+    ContextReconstructionCache, ContextReconstructionQuality, ContextReconstructionService,
+    ReconstructionActivityRef, ReconstructionConfidence, ReconstructionContextRef,
+    ReconstructionContextSection, ReconstructionImportantMemoriesSection,
     ReconstructionImportantMemoryRef, ReconstructionMeaningfulActivitySection,
     ReconstructionQualityFactors, ReconstructionQualityRating, ReconstructionRecentActivitySection,
     ReconstructionResumeReadinessSection, ReconstructionSectionStatus, ReconstructionSnapshotRef,
     ReconstructionSnapshotSection, ReconstructionStateSection, ReconstructionTaskRef,
     ReconstructionTaskSection, ReconstructionWorksetItemRef, ReconstructionWorksetSection,
+    get_global_reconstruction_cache, invalidate_reconstruction_cache,
     CONTEXT_RECONSTRUCTION_DISCLAIMER,
 };
 

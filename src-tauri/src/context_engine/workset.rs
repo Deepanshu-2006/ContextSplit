@@ -645,6 +645,7 @@ pub fn get_global_workset_cache() -> &'static ContextWorksetCache {
 
 pub fn invalidate_workset_cache(workspace_id: Option<&str>) {
     get_global_workset_cache().invalidate(workspace_id);
+    crate::context_engine::reconstruction::invalidate_reconstruction_cache(workspace_id);
 }
 
 // =========================================================================

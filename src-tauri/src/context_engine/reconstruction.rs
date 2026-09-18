@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
+
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -1769,6 +1773,129 @@ impl ContextReconstructionBuilder {
 }
 
 // =========================================================================
+// Context Reconstruction Cache
+// =========================================================================
+
+/// In-memory cache entry for reconstructed contexts.
+#[derive(Debug, Clone)]
+pub struct CachedReconstructionEntry {
+    pub reconstruction: ContextReconstruction,
+    pub cached_at: Instant,
+}
+
+/// Lightweight, thread-safe in-memory cache for recently reconstructed contexts.
+///
+/// Invariants:
+/// 1. OPTIMIZATION ONLY: Persisted SQLite storage is the authoritative source of truth.
+/// 2. Never cache indefinitely: Entries expire after a configurable TTL (default: 30 seconds).
+/// 3. Bounded capacity: Prevents unbounded memory growth.
+/// 4. Invalidation safety: Cache is purged when meaningful context, task, workset, memory,
+///    or state transitions happen, and on cold reconstructions.
+/// 5. Stale prevention: Stale cached results are never allowed to override newer persisted state.
+#[derive(Debug)]
+pub struct ContextReconstructionCache {
+    entries: RwLock<HashMap<String, CachedReconstructionEntry>>,
+    ttl: Duration,
+    max_entries: usize,
+}
+
+impl Default for ContextReconstructionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextReconstructionCache {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(30),
+            max_entries: 50,
+        }
+    }
+
+    pub fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
+    }
+
+    /// Retrieves a cached reconstruction if present and not expired.
+    pub fn get(&self, context_id: &str) -> Option<ContextReconstruction> {
+        if let Ok(guard) = self.entries.read() {
+            if let Some(entry) = guard.get(context_id) {
+                if entry.cached_at.elapsed() < self.ttl {
+                    return Some(entry.reconstruction.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Stores a reconstructed context in cache.
+    pub fn insert(&self, context_id: &str, reconstruction: ContextReconstruction) {
+        if let Ok(mut guard) = self.entries.write() {
+            if guard.len() >= self.max_entries {
+                guard.clear();
+            }
+            guard.insert(
+                context_id.to_string(),
+                CachedReconstructionEntry {
+                    reconstruction,
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// Invalidates cached reconstructions for a specific context or all contexts.
+    pub fn invalidate(&self, context_id: Option<&str>) {
+        if let Ok(mut guard) = self.entries.write() {
+            if let Some(id) = context_id {
+                guard.remove(id);
+            } else {
+                guard.clear();
+            }
+        }
+    }
+
+    /// Returns the number of currently cached items.
+    pub fn len(&self) -> usize {
+        if let Ok(guard) = self.entries.read() {
+            guard.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn contains(&self, context_id: &str) -> bool {
+        self.get(context_id).is_some()
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+}
+
+static GLOBAL_RECONSTRUCTION_CACHE: OnceLock<ContextReconstructionCache> = OnceLock::new();
+
+pub fn get_global_reconstruction_cache() -> &'static ContextReconstructionCache {
+    GLOBAL_RECONSTRUCTION_CACHE.get_or_init(ContextReconstructionCache::new)
+}
+
+pub fn invalidate_reconstruction_cache(context_id: Option<&str>) {
+    get_global_reconstruction_cache().invalidate(context_id);
+}
+
+// =========================================================================
 // ContextReconstructionService: Deterministic Orchestration Service
 // =========================================================================
 
@@ -2225,10 +2352,23 @@ impl ContextReconstructionService {
         ))
     }
 
+    /// Reconstructs a context using the lightweight cache when available and unexpired.
+    /// Falls back to deterministic SQLite storage on cache miss and populates cache.
+    pub fn reconstruct_context_cached(&self, conn: &Connection, context_id: &str) -> Result<ContextReconstruction, String> {
+        if let Some(cached) = get_global_reconstruction_cache().get(context_id) {
+            return Ok(cached);
+        }
+
+        let reconstruction = self.reconstruct_context(conn, context_id)?;
+        get_global_reconstruction_cache().insert(context_id, reconstruction.clone());
+        Ok(reconstruction)
+    }
+
     /// Performs a cold reconstruction guaranteed to bypass all in-memory caches,
     /// reconstructing exclusively from SQLite persisted storage.
     pub fn reconstruct_cold(&self, conn: &Connection, context_id: &str) -> Result<ContextReconstruction, String> {
         // Invalidate all in-memory caches for this context to simulate a fresh cold process restart
+        invalidate_reconstruction_cache(Some(context_id));
         crate::context_engine::workset::invalidate_workset_cache(Some(context_id));
         crate::context_engine::snapshot::invalidate_snapshot_cache(context_id);
         crate::context_engine::memory::invalidate_memory_cache(Some(context_id));
@@ -3771,6 +3911,114 @@ mod tests {
         assert!(!json_str.contains("\"score\":"));
         assert!(!json_str.contains("\"numerical_score\":"));
         assert!(!json_str.contains("\"quality_percentage\":"));
+    }
+
+    #[test]
+    fn test_reconstruction_cache_hit_and_miss() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Cache Test Project").unwrap();
+        let service = ContextReconstructionService::new();
+
+        // 1. Clear cache to guarantee miss
+        invalidate_reconstruction_cache(Some(&ws.id));
+        assert!(!get_global_reconstruction_cache().contains(&ws.id));
+
+        // 2. Cache miss: reconstructs from SQLite & stores in cache
+        let rec1 = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        assert_eq!(rec1.context.name, "Cache Test Project");
+        assert!(get_global_reconstruction_cache().contains(&ws.id));
+
+        // 3. Cache hit: returns immediately from cache
+        let rec2 = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        assert_eq!(rec1.context.id, rec2.context.id);
+        assert_eq!(rec1.reconstructed_at, rec2.reconstructed_at);
+    }
+
+    #[test]
+    fn test_reconstruction_cache_invalidation() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Original Name").unwrap();
+        let service = ContextReconstructionService::new();
+
+        // Populate cache
+        let rec1 = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        assert_eq!(rec1.context.name, "Original Name");
+        assert!(get_global_reconstruction_cache().contains(&ws.id));
+
+        // Invalidate specific context
+        invalidate_reconstruction_cache(Some(&ws.id));
+        assert!(!get_global_reconstruction_cache().contains(&ws.id));
+
+        // Invalidate all contexts
+        get_global_reconstruction_cache().insert(&ws.id, rec1);
+        assert!(get_global_reconstruction_cache().contains(&ws.id));
+        invalidate_reconstruction_cache(None);
+        assert_eq!(get_global_reconstruction_cache().len(), 0);
+    }
+
+    #[test]
+    fn test_reconstruction_cache_context_transition() {
+        let conn = setup_test_db();
+        let ws_a = crate::db::operations::create_workspace(&conn, "Context Alpha").unwrap();
+        let ws_b = crate::db::operations::create_workspace(&conn, "Context Beta").unwrap();
+        let service = ContextReconstructionService::new();
+
+        // Reconstruct both contexts
+        let rec_a = service.reconstruct_context_cached(&conn, &ws_a.id).unwrap();
+        let rec_b = service.reconstruct_context_cached(&conn, &ws_b.id).unwrap();
+
+        assert_eq!(rec_a.context.name, "Context Alpha");
+        assert_eq!(rec_b.context.name, "Context Beta");
+
+        // Transition: Context Alpha undergoes a state / task transition and invalidates Alpha
+        invalidate_reconstruction_cache(Some(&ws_a.id));
+
+        // Alpha is a cache miss and re-evaluated, Beta remains intact in cache
+        assert!(!get_global_reconstruction_cache().contains(&ws_a.id));
+        assert!(get_global_reconstruction_cache().contains(&ws_b.id));
+
+        let rec_b2 = service.reconstruct_context_cached(&conn, &ws_b.id).unwrap();
+        assert_eq!(rec_b.reconstructed_at, rec_b2.reconstructed_at);
+    }
+
+    #[test]
+    fn test_reconstruction_cache_application_restart() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Cold Restart Project").unwrap();
+        let service = ContextReconstructionService::new();
+
+        // Populate warm cache
+        let _ = service.reconstruct_context_cached(&conn, &ws.id).unwrap();
+        assert!(get_global_reconstruction_cache().contains(&ws.id));
+
+        // Simulate application restart via cold reconstruction
+        let cold_rec = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        assert_eq!(cold_rec.context.name, "Cold Restart Project");
+
+        // Cold reconstruction explicitly invalidated in-memory caches and loaded from DB
+        assert!(!get_global_reconstruction_cache().contains(&ws.id));
+    }
+
+    #[test]
+    fn test_reconstruction_cache_stale_expiration() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "TTL Expiry Project").unwrap();
+        let service = ContextReconstructionService::new();
+
+        // Create a custom cache with 10ms TTL to test expiration
+        let short_cache = ContextReconstructionCache::new().with_ttl(Duration::from_millis(10));
+
+        let rec1 = service.reconstruct_context(&conn, &ws.id).unwrap();
+        short_cache.insert(&ws.id, rec1.clone());
+
+        // Immediately available
+        assert!(short_cache.get(&ws.id).is_some());
+
+        // Wait for TTL expiration
+        std::thread::sleep(Duration::from_millis(25));
+
+        // After TTL expired, get() returns None (stale cache results cannot override newer persisted state)
+        assert!(short_cache.get(&ws.id).is_none());
     }
 }
 
