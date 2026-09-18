@@ -5,16 +5,15 @@ import {
   ExternalLink,
   Copy,
   Check,
-  Plus,
   Trash2,
-  Sparkles,
-  ArrowRight,
+  Folder,
+  ChevronDown,
+  Maximize2,
+  Globe,
   FileText,
   Image as ImageIcon,
-  Link2,
-  FileCode,
-  AppWindow,
-  ChevronDown,
+  ArrowRight,
+  Sparkles,
 } from 'lucide-react';
 import { Item, Workspace, ItemRelationship, UnifiedContextInterpretation, ContextReasoningResult, db } from '../../services/db';
 import { DerivedInboxItem, useInboxStore } from '../../store/inboxStore';
@@ -38,29 +37,28 @@ export function InboxDetailDrawer({
   onSelectItem,
   onMoveToWorkspace,
 }: InboxDetailDrawerProps) {
-  const { acceptItemSuggestion, dismissItemSuggestion, markItemUnderstood } = useInboxStore();
+  const { acceptItemSuggestion, dismissItemSuggestion } = useInboxStore();
   const { reviewCandidate } = useDiscoveryStore();
 
   const [copied, setCopied] = useState(false);
-  const [relationships, setRelationships] = useState<ItemRelationship[]>([]);
   const [relatedItems, setRelatedItems] = useState<Item[]>([]);
   const [interpretation, setInterpretation] = useState<UnifiedContextInterpretation | null>(null);
   const [aiResult, setAiResult] = useState<ContextReasoningResult | null>(null);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isAssignDropdownOpen, setIsAssignDropdownOpen] = useState(false);
   const [isActing, setIsActing] = useState(false);
+  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
 
   const item = derived?.item;
 
-  // Load contextual evidence and relationships whenever item changes
   useEffect(() => {
     if (!item) return;
 
     setCopied(false);
     setAiResult(null);
     setIsAssignDropdownOpen(false);
+    setIsLightboxOpen(false);
 
-    // Fetch relationships and context evaluation
     let isMounted = true;
 
     Promise.all([
@@ -68,10 +66,8 @@ export function InboxDetailDrawer({
       db.evaluateItemContext(item.id).catch(() => null),
     ]).then(async ([rels, interp]) => {
       if (!isMounted) return;
-      setRelationships(rels);
       setInterpretation(interp);
 
-      // Fetch the actual Item objects for related items
       if (rels.length > 0) {
         const otherIds = rels.map((r) => (r.item_a_id === item.id ? r.item_b_id : r.item_a_id));
         const itemPromises = otherIds.map((id) => db.getItem(id).catch(() => null));
@@ -89,20 +85,23 @@ export function InboxDetailDrawer({
     };
   }, [item?.id]);
 
-  // Handle Escape key to close drawer
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        if (isLightboxOpen) {
+          setIsLightboxOpen(false);
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, isLightboxOpen]);
 
   if (!derived || !item) return null;
 
-  const { attention, candidateInfo, inboxState } = derived;
+  const { attention, candidateInfo } = derived;
   const suggestedWsId = attention?.factors?.suggested_workspace_id;
   const suggestedWs = workspaces.find((w) => w.id === suggestedWsId);
   const currentWs = workspaces.find((w) => w.id === item.workspace_id);
@@ -110,27 +109,29 @@ export function InboxDetailDrawer({
   // Parse metadata
   let appName: string | null = null;
   let sourceUrl: string | null = null;
+  let domain: string | null = null;
   try {
     const meta = JSON.parse(item.metadata || '{}');
     appName = meta.app_name || meta.source_app || null;
     sourceUrl = meta.source_url || meta.url || null;
+    if (sourceUrl) {
+      try {
+        domain = new URL(sourceUrl).hostname.replace(/^www\./, '');
+      } catch {
+        domain = sourceUrl;
+      }
+    }
   } catch {}
 
-  // Format relative timestamp
-  const getFormattedTime = (dateStr: string) => {
+  const formatTimestamp = (dateStr: string) => {
     try {
       const date = new Date(dateStr);
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
-      const diffMins = Math.floor(diffMs / (1000 * 60));
-      const diffHours = Math.floor(diffMins / 60);
-      const diffDays = Math.floor(diffHours / 24);
-
-      if (diffMins < 1) return 'Captured just now';
-      if (diffMins < 60) return `Captured ${diffMins} min ago`;
-      if (diffHours < 24) return `Captured ${diffHours} hr ago`;
-      if (diffDays === 1) return 'Captured yesterday';
-      return `Captured on ${date.toLocaleDateString()}`;
+      return date.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
     } catch {
       return '';
     }
@@ -141,7 +142,7 @@ export function InboxDetailDrawer({
       await navigator.clipboard.writeText(item.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-      toast.success('Copied to clipboard');
+      toast.success('Copied');
     } catch (e) {
       console.warn('Failed to copy', e);
     }
@@ -151,11 +152,11 @@ export function InboxDetailDrawer({
     setIsActing(true);
     try {
       await acceptItemSuggestion(item.id, wsId);
-      toast.success(`Added to ${workspaces.find((w) => w.id === wsId)?.name || 'workspace'}`);
+      toast.success(`Moved to ${workspaces.find((w) => w.id === wsId)?.name || 'workspace'}`);
       onClose();
     } catch (e) {
       console.error(e);
-      toast.error('Failed to accept suggestion');
+      toast.error('Failed to move item');
     } finally {
       setIsActing(false);
     }
@@ -165,22 +166,10 @@ export function InboxDetailDrawer({
     setIsActing(true);
     try {
       await dismissItemSuggestion(item.id, suggestedWsId || undefined);
-      toast.success('Suggestion dismissed');
+      toast.success('Suggestion cleared');
     } catch (e) {
       console.error(e);
-      toast.error('Failed to dismiss suggestion');
-    } finally {
-      setIsActing(false);
-    }
-  };
-
-  const handleMarkReviewed = async () => {
-    setIsActing(true);
-    try {
-      await markItemUnderstood(item.id, 'User marked as reviewed');
-      toast.success('Marked as reviewed');
-    } catch (e) {
-      console.error(e);
+      toast.error('Failed to dismiss');
     } finally {
       setIsActing(false);
     }
@@ -213,7 +202,7 @@ export function InboxDetailDrawer({
             }));
             toast.success('Item restored');
           } catch {
-            toast.error('Failed to restore item');
+            toast.error('Failed to restore');
           }
         },
       });
@@ -230,423 +219,317 @@ export function InboxDetailDrawer({
       if (resp.ai_result) {
         setAiResult(resp.ai_result);
       } else {
-        toast.info(resp.unavailability_reason || 'AI Reasoning unavailable');
+        toast.info(resp.unavailability_reason || 'Context reasoning unavailable');
       }
     } catch (e) {
-      console.error('Failed to run AI reasoning', e);
-      toast.error('Could not run AI reasoning');
+      console.error('Failed to run reasoning', e);
+      toast.error('Could not analyze context');
     } finally {
       setIsAiLoading(false);
     }
   };
 
-  // Determine context presentation
-  const confidencePct = Math.round((attention?.factors?.contextual_confidence ?? 0) * 100);
-  const isSuggested = Boolean(suggestedWsId && confidencePct > 0);
-  const isCandidate = Boolean(candidateInfo);
-  const isNeedsReview = Boolean(
-    attention?.factors?.is_ambiguous || derived.section === 'needs_attention' || inboxState?.state === 'needs_review'
-  );
-  const isConfirmed = Boolean(currentWs);
-
-  // Extract explanation reasons
-  const explanationBullets: string[] = [];
-  if (appName) {
-    explanationBullets.push(`Captured while working in ${appName}`);
-  }
-  if (sourceUrl) {
-    try {
-      const urlObj = new URL(sourceUrl);
-      explanationBullets.push(`Associated with domain ${urlObj.hostname}`);
-    } catch {
-      explanationBullets.push(`Associated with URL ${sourceUrl}`);
-    }
-  }
-  if (attention?.reason) {
-    explanationBullets.push(attention.reason);
-  }
-  if (interpretation?.summary && !explanationBullets.includes(interpretation.summary)) {
-    explanationBullets.push(interpretation.summary);
-  }
-  if (relationships.length > 0) {
-    explanationBullets.push(`Connected to ${relationships.length} related recent items in this context session`);
-  }
-  if (explanationBullets.length === 0) {
-    explanationBullets.push('Content similarities and temporal co-occurrence with recent captures');
-  }
-
-  const getItemIcon = () => {
+  const getItemTypeLabel = () => {
     switch (item.item_type) {
       case 'image':
-        return <ImageIcon size={15} className="text-purple-600" />;
+        return 'Image';
       case 'url':
-        return <Link2 size={15} className="text-blue-600" />;
+        return 'Link';
       case 'file':
-        return <FileCode size={15} className="text-gray-600" />;
+        return 'File';
       default:
-        return <FileText size={15} className="text-gray-600" />;
+        return 'Text Note';
     }
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-40 flex justify-end pointer-events-auto">
-      {/* Semi-transparent backdrop */}
-      <div
-        className="fixed inset-0 bg-black/15 backdrop-blur-[1px] transition-opacity duration-200"
-        onClick={onClose}
-      />
-
-      {/* Slide-over Drawer Panel */}
-      <div
-        className="relative w-full max-w-md h-full bg-white border-l border-black/10 shadow-2xl flex flex-col z-50 overflow-hidden animate-in slide-in-from-right duration-200"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Drawer Header */}
-        <div className="px-6 py-4 border-b border-black/6 flex items-center justify-between shrink-0 bg-[#FAFAFA]">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-7 h-7 rounded-lg bg-black/5 flex items-center justify-center shrink-0">
-              {getItemIcon()}
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-[14px] font-semibold text-gray-900 truncate">
-                {item.title || 'Captured Item'}
-              </h2>
-              <p className="text-[11px] text-gray-400 font-normal">
-                {getFormattedTime(item.created_at)}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1">
+    <>
+      {/* Lightbox full-image preview */}
+      {isLightboxOpen && item.item_type === 'image' && (
+        <div
+          className="fixed inset-0 z-60 bg-black/90 flex items-center justify-center p-8 animate-in fade-in duration-150 cursor-zoom-out"
+          onClick={() => setIsLightboxOpen(false)}
+        >
+          <div className="relative max-w-5xl max-h-[92vh] flex items-center justify-center">
+            <img
+              src={item.content}
+              alt={item.title || 'Preview'}
+              className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            />
             <button
-              onClick={handleDeleteItem}
-              title="Delete item"
-              className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
-            >
-              <Trash2 size={15} />
-            </button>
-            <button
-              onClick={onClose}
-              title="Close panel (Esc)"
-              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-black/5 rounded-lg transition-colors cursor-pointer"
+              onClick={() => setIsLightboxOpen(false)}
+              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-800 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
             >
               <X size={16} />
             </button>
           </div>
         </div>
+      )}
 
-        {/* Drawer Scrollable Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 flex flex-col gap-6 text-[13px]">
-          {/* SECTION: CONTENT */}
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                Content
+      {/* Main Drawer Overlay */}
+      <div className="fixed inset-0 z-40 flex justify-end pointer-events-auto">
+        <div
+          className="fixed inset-0 bg-black/15 transition-opacity duration-150"
+          onClick={onClose}
+        />
+
+        {/* macOS Inspector Style Drawer */}
+        <div
+          className="relative w-full max-w-[420px] h-full bg-[#FAFAFA] border-l border-zinc-200/90 shadow-xl flex flex-col z-50 overflow-hidden text-zinc-900 select-text"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Top Bar */}
+          <div className="h-12 px-4 border-b border-zinc-200/80 bg-white flex items-center justify-between shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-[13px] font-medium text-zinc-900 truncate">
+                {item.title || getItemTypeLabel()}
               </span>
-              <button
-                onClick={handleCopy}
-                className="flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-gray-800 transition-colors cursor-pointer"
-              >
-                {copied ? (
-                  <>
-                    <Check size={12} className="text-emerald-600" />
-                    <span className="text-emerald-600">Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy size={12} />
-                    <span>Copy</span>
-                  </>
-                )}
-              </button>
             </div>
 
-            {/* Content Rendering */}
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={handleCopy}
+                title="Copy"
+                className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-md transition-colors cursor-pointer"
+              >
+                {copied ? <Check size={14} className="text-zinc-900" /> : <Copy size={14} />}
+              </button>
+              <button
+                onClick={handleDeleteItem}
+                title="Delete"
+                className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-red-600 hover:bg-zinc-100 rounded-md transition-colors cursor-pointer"
+              >
+                <Trash2 size={14} />
+              </button>
+              <div className="w-px h-3.5 bg-zinc-200 mx-1" />
+              <button
+                onClick={onClose}
+                title="Close"
+                className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 rounded-md transition-colors cursor-pointer"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          </div>
+
+          {/* Body Content */}
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+            {/* Visual Hero Preview */}
             {item.item_type === 'image' ? (
-              <div className="rounded-xl overflow-hidden border border-black/8 bg-gray-50 flex items-center justify-center p-1">
+              <div
+                onClick={() => setIsLightboxOpen(true)}
+                className="group relative rounded-lg border border-zinc-200 bg-white p-2 flex items-center justify-center cursor-zoom-in hover:border-zinc-300 transition-colors"
+              >
                 <img
                   src={item.content}
-                  alt={item.title || 'Captured image'}
-                  className="w-full h-auto max-h-72 object-contain rounded-lg"
+                  alt={item.title || 'Preview'}
+                  className="w-full h-auto max-h-64 object-contain rounded"
                 />
+                <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white p-1 rounded backdrop-blur-xs">
+                  <Maximize2 size={12} />
+                </div>
               </div>
             ) : item.item_type === 'url' ? (
-              <div className="p-3 bg-blue-50/40 rounded-xl border border-blue-100 flex flex-col gap-1.5">
+              <div className="rounded-lg border border-zinc-200 bg-white p-3 flex flex-col gap-1.5">
                 <a
                   href={item.content}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-sm font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1.5 break-all"
+                  className="text-[13px] font-medium text-zinc-900 hover:underline flex items-center gap-1.5 break-all"
                 >
-                  <span>{item.title || item.content}</span>
-                  <ExternalLink size={13} className="shrink-0 opacity-70" />
+                  <span>{item.title || domain || item.content}</span>
+                  <ExternalLink size={12} className="text-zinc-400 shrink-0" />
                 </a>
-                <span className="text-[11px] text-gray-400 font-mono break-all select-all">
+                <span className="text-[11px] text-zinc-400 font-mono break-all select-all">
                   {item.content}
                 </span>
               </div>
             ) : (
-              <div className="bg-[#FBFBFB] rounded-xl border border-black/6 p-3.5 select-text text-gray-800 leading-relaxed font-sans text-[13px] whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
+              <div className="rounded-lg border border-zinc-200 bg-white p-3.5 text-[13px] text-zinc-800 leading-relaxed font-sans whitespace-pre-wrap break-words max-h-56 overflow-y-auto">
                 {item.content}
               </div>
             )}
 
-            {/* Source Application / Origin */}
-            {appName && (
-              <div className="flex items-center gap-1.5 text-[11px] text-gray-400 pt-0.5">
-                <AppWindow size={12} />
-                <span>Captured from {appName}</span>
-              </div>
-            )}
-          </div>
-
-          <div className="h-px bg-black/5" />
-
-          {/* SECTION: CONTEXT */}
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                Context
-              </span>
-              {confidencePct > 0 && (
-                <span className="text-[11px] font-semibold text-gray-500 font-mono">
-                  {confidencePct}% confidence
-                </span>
-              )}
-            </div>
-
-            {/* Context Identification Card */}
-            <div className="p-3.5 bg-gray-50/80 rounded-xl border border-black/5 flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-indigo-500" />
-                  <span className="text-[13px] font-semibold text-gray-900">
-                    {isConfirmed
-                      ? currentWs?.name
-                      : isSuggested
-                      ? suggestedWs?.name || 'Suggested Context'
-                      : isCandidate
-                      ? candidateInfo?.candidateName
-                      : isNeedsReview
-                      ? 'Needs Review'
-                      : 'No context yet'}
-                  </span>
+            {/* Smart Suggestion Banner (if detected) */}
+            {suggestedWs && (
+              <div className="rounded-lg border border-zinc-200 bg-white p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="text-zinc-500">Suggested Workspace</span>
+                  <span className="font-medium text-zinc-900">{suggestedWs.name}</span>
                 </div>
-                <span
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-                    isConfirmed
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : isSuggested
-                      ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                      : isCandidate
-                      ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
-                      : isNeedsReview
-                      ? 'bg-amber-50 text-amber-700 border-amber-200'
-                      : 'bg-gray-100 text-gray-600 border-gray-200'
-                  }`}
-                >
-                  {isConfirmed
-                    ? 'Confirmed'
-                    : isSuggested
-                    ? 'Suggested'
-                    : isCandidate
-                    ? 'Candidate'
-                    : isNeedsReview
-                    ? 'Review'
-                    : 'Unassigned'}
-                </span>
-              </div>
-
-              {/* Why ContextSplit thinks this */}
-              <div className="pt-2 border-t border-black/4 flex flex-col gap-1.5">
-                <span className="text-[11px] font-semibold text-gray-500">
-                  Why ContextSplit thinks this:
-                </span>
-                <ul className="space-y-1 text-[12px] text-gray-600">
-                  {explanationBullets.map((bullet, idx) => (
-                    <li key={idx} className="flex items-start gap-1.5">
-                      <span className="text-gray-400 mt-0.5">•</span>
-                      <span>{bullet}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              {/* AI Context Reasoning if triggered */}
-              {aiResult ? (
-                <div className="mt-2 pt-2 border-t border-indigo-100 bg-indigo-50/50 p-2.5 rounded-lg text-[12px] text-indigo-900">
-                  <div className="flex items-center gap-1.5 font-semibold text-indigo-700 mb-1">
-                    <Sparkles size={12} className="text-amber-500" />
-                    <span>AI Reasoning Analysis</span>
-                  </div>
-                  <p className="italic text-gray-700 leading-relaxed">
-                    "{aiResult.explanation}"
-                  </p>
-                </div>
-              ) : (
-                <div className="pt-1">
+                <div className="flex items-center gap-2 pt-1">
                   <button
-                    onClick={handleRunAiReasoning}
-                    disabled={isAiLoading}
-                    className="inline-flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+                    onClick={() => handleAcceptSuggestion(suggestedWs.id)}
+                    disabled={isActing}
+                    className="flex-1 py-1 px-3 bg-zinc-900 hover:bg-black text-white text-[12px] font-medium rounded-md transition-colors cursor-pointer"
                   >
-                    <Sparkles size={12} className={isAiLoading ? 'animate-spin' : ''} />
-                    <span>{isAiLoading ? 'Analyzing Context...' : 'Run deep AI explanation'}</span>
+                    Move to {suggestedWs.name}
+                  </button>
+                  <button
+                    onClick={handleDismiss}
+                    disabled={isActing}
+                    className="py-1 px-2.5 text-zinc-500 hover:text-zinc-800 text-[12px] rounded-md transition-colors cursor-pointer"
+                  >
+                    Dismiss
                   </button>
                 </div>
-              )}
-            </div>
-          </div>
+              </div>
+            )}
 
-          <div className="h-px bg-black/5" />
-
-          {/* SECTION: ACTIONS */}
-          <div className="flex flex-col gap-2.5">
-            <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-              Actions
-            </span>
-
-            <div className="flex flex-col gap-2">
-              {/* Primary Action Button */}
-              {isSuggested && suggestedWsId && (
-                <button
-                  onClick={() => handleAcceptSuggestion(suggestedWsId)}
-                  disabled={isActing}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-gray-900 hover:bg-black text-white rounded-xl text-[12px] font-semibold shadow-xs transition-colors cursor-pointer"
-                >
-                  <Plus size={14} strokeWidth={2.5} />
-                  <span>Add to {suggestedWs?.name || 'Workspace'}</span>
-                </button>
-              )}
-
-              {isCandidate && candidateInfo && (
+            {/* Candidate Project Banner */}
+            {candidateInfo && (
+              <div className="rounded-lg border border-zinc-200 bg-white p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="text-zinc-500">New Cluster Detected</span>
+                  <span className="font-medium text-zinc-900">"{candidateInfo.candidateName}"</span>
+                </div>
                 <button
                   onClick={() => {
                     reviewCandidate(candidateInfo.candidateId);
                     onClose();
                   }}
-                  className="w-full flex items-center justify-center gap-2 py-2 px-3 bg-cyan-600 hover:bg-cyan-700 text-white rounded-xl text-[12px] font-semibold shadow-xs transition-colors cursor-pointer"
+                  className="w-full py-1.5 px-3 bg-zinc-900 hover:bg-black text-white text-[12px] font-medium rounded-md transition-colors cursor-pointer"
                 >
-                  <Sparkles size={14} />
-                  <span>Review Candidate "{candidateInfo.candidateName}"</span>
+                  Review Candidate
                 </button>
-              )}
+              </div>
+            )}
 
-              {/* Secondary Actions */}
-              <div className="flex items-center gap-2">
-                {isSuggested && (
-                  <button
-                    onClick={handleDismiss}
-                    disabled={isActing}
-                    className="flex-1 py-1.5 px-3 bg-white hover:bg-gray-50 text-gray-700 border border-black/10 rounded-xl text-[12px] font-medium transition-colors cursor-pointer text-center"
-                  >
-                    Dismiss
-                  </button>
-                )}
-
-                {isNeedsReview && (
-                  <button
-                    onClick={handleMarkReviewed}
-                    disabled={isActing}
-                    className="flex-1 py-1.5 px-3 bg-white hover:bg-gray-50 text-gray-700 border border-black/10 rounded-xl text-[12px] font-medium transition-colors cursor-pointer text-center"
-                  >
-                    Mark as reviewed
-                  </button>
-                )}
-
-                {/* Move to another workspace dropdown */}
-                <div className="relative flex-1">
+            {/* Inspector Properties Table */}
+            <div className="rounded-lg border border-zinc-200 bg-white overflow-hidden">
+              <div className="px-3 py-2 border-b border-zinc-100 flex items-center justify-between text-[12px]">
+                <span className="text-zinc-500">Workspace</span>
+                <div className="relative">
                   <button
                     onClick={() => setIsAssignDropdownOpen(!isAssignDropdownOpen)}
-                    className="w-full flex items-center justify-between py-1.5 px-3 bg-white hover:bg-gray-50 text-gray-700 border border-black/10 rounded-xl text-[12px] font-medium transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 text-zinc-800 hover:text-zinc-950 font-medium cursor-pointer"
                   >
-                    <span className="truncate">Move to...</span>
-                    <ChevronDown size={12} className="text-gray-400" />
+                    <Folder size={13} className="text-zinc-400" />
+                    <span>{currentWs ? currentWs.name : 'Inbox (Unassigned)'}</span>
+                    <ChevronDown size={12} className="text-zinc-400" />
                   </button>
 
                   {isAssignDropdownOpen && (
-                    <div className="absolute right-0 bottom-full mb-1 w-52 bg-white border border-black/10 rounded-xl shadow-xl py-1 z-30 max-h-48 overflow-y-auto">
-                      <div className="px-3 py-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
-                        Workspaces
-                      </div>
+                    <div className="absolute right-0 top-full mt-1 w-52 bg-white border border-zinc-200 rounded-lg shadow-lg py-1 z-30 max-h-48 overflow-y-auto">
                       {workspaces.map((ws) => (
                         <button
                           key={ws.id}
                           onClick={() => {
                             onMoveToWorkspace(item.id, ws.id);
                             setIsAssignDropdownOpen(false);
-                            onClose();
                           }}
-                          className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 hover:bg-black/5 flex items-center gap-2 transition-colors cursor-pointer"
+                          className={`w-full text-left px-3 py-1.5 text-[12px] flex items-center justify-between transition-colors cursor-pointer ${
+                            ws.id === item.workspace_id
+                              ? 'bg-zinc-100 font-medium text-zinc-900'
+                              : 'text-zinc-700 hover:bg-zinc-50'
+                          }`}
                         >
                           <span className="truncate">{ws.name}</span>
+                          {ws.id === item.workspace_id && (
+                            <Check size={12} className="text-zinc-600 shrink-0" />
+                          )}
                         </button>
                       ))}
                     </div>
                   )}
                 </div>
               </div>
-            </div>
-          </div>
 
-          {/* SECTION: RELATED ITEMS (Only shown here in detail view) */}
-          {relatedItems.length > 0 && (
-            <>
-              <div className="h-px bg-black/5" />
-              <div className="flex flex-col gap-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    Related Items ({relatedItems.length})
-                  </span>
-                  <span className="text-[10px] text-gray-400">From same session / context</span>
+              {appName && (
+                <div className="px-3 py-2 border-b border-zinc-100 flex items-center justify-between text-[12px]">
+                  <span className="text-zinc-500">Source</span>
+                  <span className="font-medium text-zinc-800 truncate max-w-[200px]">{appName}</span>
                 </div>
+              )}
 
-                <div className="flex flex-col gap-1.5">
-                  {relatedItems.map((relItem) => {
-                    const rel = relationships.find(
-                      (r) => r.item_a_id === relItem.id || r.item_b_id === relItem.id
-                    );
-                    const percent = rel ? Math.round(rel.strength * 100) : null;
+              {domain && (
+                <div className="px-3 py-2 border-b border-zinc-100 flex items-center justify-between text-[12px]">
+                  <span className="text-zinc-500">Domain</span>
+                  <span className="font-mono text-[11px] text-zinc-700 truncate max-w-[200px] flex items-center gap-1">
+                    <Globe size={11} className="text-zinc-400" />
+                    {domain}
+                  </span>
+                </div>
+              )}
 
-                    return (
-                      <div
-                        key={relItem.id}
-                        onClick={() => onSelectItem(relItem.id)}
-                        className="group flex items-center justify-between p-2.5 bg-gray-50/70 hover:bg-gray-100/80 rounded-xl border border-black/5 transition-colors cursor-pointer"
-                      >
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          <span className="text-gray-400 group-hover:text-gray-600">
-                            {relItem.item_type === 'image' ? (
-                              <ImageIcon size={13} />
-                            ) : relItem.item_type === 'url' ? (
-                              <Link2 size={13} />
-                            ) : (
-                              <FileText size={13} />
-                            )}
-                          </span>
-                          <span className="text-[12px] font-medium text-gray-800 truncate">
-                            {relItem.title || relItem.content.slice(0, 40)}
-                          </span>
-                        </div>
+              <div className="px-3 py-2 border-b border-zinc-100 flex items-center justify-between text-[12px]">
+                <span className="text-zinc-500">Type</span>
+                <span className="font-medium text-zinc-800">{getItemTypeLabel()}</span>
+              </div>
 
-                        {percent !== null && (
-                          <div className="flex items-center gap-1.5 shrink-0 ml-2">
-                            <span className="text-[10px] font-semibold text-gray-400 font-mono">
-                              {percent}%
-                            </span>
-                            <ArrowRight size={11} className="text-gray-300 group-hover:text-gray-600" />
-                          </div>
-                        )}
+              <div className="px-3 py-2 flex items-center justify-between text-[12px]">
+                <span className="text-zinc-500">Captured</span>
+                <span className="text-zinc-700">{formatTimestamp(item.created_at)}</span>
+              </div>
+            </div>
+
+            {/* Context Insights (Clean Native Disclosure) */}
+            <div className="rounded-lg border border-zinc-200 bg-white p-3 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] font-medium text-zinc-800">Context Analysis</span>
+                {!aiResult && (
+                  <button
+                    onClick={handleRunAiReasoning}
+                    disabled={isAiLoading}
+                    className="text-[11px] text-zinc-500 hover:text-zinc-900 transition-colors flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sparkles size={11} className={isAiLoading ? 'animate-spin' : ''} />
+                    <span>{isAiLoading ? 'Analyzing...' : 'Deep inspect'}</span>
+                  </button>
+                )}
+              </div>
+
+              {interpretation?.summary && (
+                <p className="text-[12px] text-zinc-600 leading-normal">
+                  {interpretation.summary}
+                </p>
+              )}
+
+              {aiResult && (
+                <div className="mt-1 pt-2 border-t border-zinc-100 text-[12px] text-zinc-700 leading-relaxed bg-zinc-50 p-2.5 rounded">
+                  {aiResult.explanation}
+                </div>
+              )}
+            </div>
+
+            {/* Connected / Related Items */}
+            {relatedItems.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-medium text-zinc-400 px-1">
+                  Related Captures ({relatedItems.length})
+                </span>
+                <div className="rounded-lg border border-zinc-200 bg-white divide-y divide-zinc-100">
+                  {relatedItems.map((relItem) => (
+                    <div
+                      key={relItem.id}
+                      onClick={() => onSelectItem(relItem.id)}
+                      className="p-2.5 flex items-center justify-between hover:bg-zinc-50 transition-colors cursor-pointer text-[12px]"
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="text-zinc-400">
+                          {relItem.item_type === 'image' ? (
+                            <ImageIcon size={12} />
+                          ) : relItem.item_type === 'url' ? (
+                            <Globe size={12} />
+                          ) : (
+                            <FileText size={12} />
+                          )}
+                        </span>
+                        <span className="text-zinc-800 truncate font-normal">
+                          {relItem.title || relItem.content.slice(0, 35)}
+                        </span>
                       </div>
-                    );
-                  })}
+                      <ArrowRight size={11} className="text-zinc-300 ml-2 shrink-0" />
+                    </div>
+                  ))}
                 </div>
               </div>
-            </>
-          )}
+            )}
+          </div>
         </div>
       </div>
-    </div>,
+    </>,
     document.body
   );
 }
