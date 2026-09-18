@@ -446,10 +446,10 @@ export function InboxView({
           {/* Subtle Sort Control */}
           <button
             onClick={() => setSortOrder(sortOrder === 'newest' ? 'oldest' : 'newest')}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-gray-50 text-gray-600 hover:text-gray-900 border border-black/8 rounded-lg text-[12px] font-medium transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-zinc-50 text-zinc-700 hover:text-zinc-900 border border-zinc-200/90 rounded-lg text-[12px] font-medium transition-colors cursor-pointer shadow-2xs"
             title={`Sort by capture date: currently ${sortOrder === 'newest' ? 'Newest' : 'Oldest'}`}
           >
-            <ArrowDownUp size={13} className="text-gray-400" />
+            <ArrowDownUp size={13} className="text-zinc-400" />
             <span>{sortOrder === 'newest' ? 'Newest ↓' : 'Oldest ↑'}</span>
           </button>
 
@@ -458,7 +458,7 @@ export function InboxView({
             onClick={runDiscoveryScan}
             disabled={isDiscoverLoading}
             title="Scan for context patterns"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-gray-50 text-gray-600 hover:text-gray-900 border border-black/8 rounded-lg text-[12px] font-medium transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-zinc-50 text-zinc-700 hover:text-zinc-900 border border-zinc-200/90 rounded-lg text-[12px] font-medium transition-colors cursor-pointer shadow-2xs"
           >
             <Sparkles size={13} className={`text-amber-500 ${isDiscoverLoading ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline">Discover</span>
@@ -470,7 +470,7 @@ export function InboxView({
           {/* Primary + Capture Button */}
           <button
             onClick={() => setIsCaptureModalOpen(true)}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gray-900 hover:bg-black text-white rounded-lg text-[12px] font-semibold transition-colors cursor-pointer shadow-xs ml-1"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-zinc-900 hover:bg-black text-white rounded-lg text-[12px] font-semibold transition-colors cursor-pointer shadow-2xs ml-0.5"
           >
             <Plus size={14} strokeWidth={2.5} />
             <span>Capture</span>
