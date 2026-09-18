@@ -1001,6 +1001,403 @@ impl ReconstructionConfidence {
 }
 
 // =========================================================================
+// ContextReconstructionQuality: Epistemic Quality Evaluation Model
+// =========================================================================
+
+/// Overall qualitative classification of context reconstruction quality.
+///
+/// Strictly qualitative — does NOT expose a numerical score to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconstructionQualityRating {
+    /// Strong, corroborated evidence across all dimensions (context, task, state, workset, memory).
+    Coherent,
+    /// Solid context and workset with minor gaps (e.g. inferred task or slightly older snapshot).
+    MostlyCoherent,
+    /// Partial evidence available (e.g. known workspace and some items, but task/state partial).
+    Partial,
+    /// Competing signals or significant ambiguities (e.g. competing tasks, conflicting evidence).
+    Uncertain,
+    /// Minimal or no reliable evidence found; cannot safely resume work.
+    Insufficient,
+}
+
+impl ReconstructionQualityRating {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Coherent => "coherent",
+            Self::MostlyCoherent => "mostly_coherent",
+            Self::Partial => "partial",
+            Self::Uncertain => "uncertain",
+            Self::Insufficient => "insufficient",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Coherent => "Coherent",
+            Self::MostlyCoherent => "Mostly Coherent",
+            Self::Partial => "Partial",
+            Self::Uncertain => "Uncertain",
+            Self::Insufficient => "Insufficient",
+        }
+    }
+
+    pub fn is_coherent(&self) -> bool {
+        matches!(self, Self::Coherent | Self::MostlyCoherent)
+    }
+
+    pub fn can_confidently_resume(&self) -> bool {
+        matches!(self, Self::Coherent | Self::MostlyCoherent)
+    }
+}
+
+/// Qualitative evaluation factors across individual reconstruction dimensions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReconstructionQualityFactors {
+    /// Qualitative evaluation of context dimension ("strong", "moderate", "weak", "uncertain", "missing")
+    pub context_confidence: String,
+    /// Qualitative evaluation of task dimension ("strong", "moderate", "weak", "uncertain", "missing")
+    pub task_confidence: String,
+    /// Qualitative evaluation of operational state ("strong", "moderate", "stale", "uncertain", "missing")
+    pub state_confidence: String,
+    /// Qualitative evaluation of working asset set ("strong", "moderate", "weak", "uncertain", "empty")
+    pub workset_quality: String,
+    /// Qualitative evaluation of contextual memory ("strong", "moderate", "sparse", "absent")
+    pub memory_quality: String,
+    /// Qualitative evaluation of snapshot freshness ("fresh", "outdated", "stale", "absent")
+    pub snapshot_freshness: String,
+    /// Qualitative assessment of evidence consistency ("consistent", "partial_conflicts", "competing_signals", "contradictory")
+    pub evidence_consistency: String,
+    /// Total count of detected contradictions or conflicts
+    pub contradiction_count: usize,
+    /// Freshness of recent activity data ("fresh", "recent", "stale", "unknown")
+    pub data_freshness: String,
+    /// List of key evidentiary strengths
+    #[serde(default)]
+    pub strengths: Vec<String>,
+    /// List of missing or weak areas
+    #[serde(default)]
+    pub gaps: Vec<String>,
+    /// Specific contradiction details if detected
+    #[serde(default)]
+    pub contradictions: Vec<String>,
+}
+
+/// Comprehensive qualitative evaluation of a reconstructed context.
+///
+/// Evaluates multi-dimensional evidence consistency and provides an actionable,
+/// epistemic rating without exposing a deceptive pseudo-precise percentage to the user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextReconstructionQuality {
+    /// Qualitative rating classification
+    pub rating: ReconstructionQualityRating,
+    /// Human-friendly display label (e.g. "Coherent Reconstruction")
+    pub display_label: String,
+    /// Natural language explanation summarizing why this rating was assigned
+    pub explanation: String,
+    /// Multi-dimensional qualitative factors
+    pub factors: ReconstructionQualityFactors,
+    /// Whether user can confidently resume without friction
+    pub can_confidently_resume: bool,
+}
+
+impl ContextReconstructionQuality {
+    /// Creates an explicit `ContextReconstructionQuality`.
+    pub fn new(
+        rating: ReconstructionQualityRating,
+        explanation: impl Into<String>,
+        factors: ReconstructionQualityFactors,
+        can_confidently_resume: bool,
+    ) -> Self {
+        let label = match rating {
+            ReconstructionQualityRating::Coherent => "Coherent Reconstruction",
+            ReconstructionQualityRating::MostlyCoherent => "Mostly Coherent Reconstruction",
+            ReconstructionQualityRating::Partial => "Partial Reconstruction",
+            ReconstructionQualityRating::Uncertain => "Uncertain Reconstruction",
+            ReconstructionQualityRating::Insufficient => "Insufficient Reconstruction",
+        };
+
+        Self {
+            rating,
+            display_label: label.to_string(),
+            explanation: explanation.into(),
+            factors,
+            can_confidently_resume,
+        }
+    }
+
+    /// Evaluates the reconstruction quality across all 9 contextual dimensions
+    /// from the individual reconstruction sections.
+    pub fn evaluate_sections(
+        context: &ReconstructionContextSection,
+        current_task: &ReconstructionTaskSection,
+        current_state: &ReconstructionStateSection,
+        workset: &ReconstructionWorksetSection,
+        important_memories: &ReconstructionImportantMemoriesSection,
+        latest_snapshot: &ReconstructionSnapshotSection,
+        resume_readiness: &ReconstructionResumeReadinessSection,
+    ) -> Self {
+        // 1. Context Confidence
+        let context_confidence = if context.status == ReconstructionSectionStatus::Available && context.confidence >= 0.70 {
+            "strong".to_string()
+        } else if context.status == ReconstructionSectionStatus::Available || context.status == ReconstructionSectionStatus::Partial {
+            "moderate".to_string()
+        } else if context.status == ReconstructionSectionStatus::Uncertain {
+            "uncertain".to_string()
+        } else {
+            "missing".to_string()
+        };
+
+        // 2. Task Confidence
+        let task_confidence = if current_task.status == ReconstructionSectionStatus::Available && current_task.confidence.unwrap_or(0.0) >= 0.70 {
+            "strong".to_string()
+        } else if current_task.status == ReconstructionSectionStatus::Partial {
+            "moderate".to_string()
+        } else if current_task.status == ReconstructionSectionStatus::Uncertain {
+            "uncertain".to_string()
+        } else if current_task.status == ReconstructionSectionStatus::Unavailable {
+            "missing".to_string()
+        } else {
+            "weak".to_string()
+        };
+
+        // 3. State Confidence
+        let state_confidence = if current_state.status == ReconstructionSectionStatus::Available {
+            match current_state.freshness {
+                Some(StateFreshness::Fresh) => "strong".to_string(),
+                Some(StateFreshness::Recent) => "moderate".to_string(),
+                Some(StateFreshness::Stale) | Some(StateFreshness::VeryStale) => "stale".to_string(),
+                None => "moderate".to_string(),
+            }
+        } else if current_state.status == ReconstructionSectionStatus::Partial {
+            "moderate".to_string()
+        } else if current_state.status == ReconstructionSectionStatus::Uncertain {
+            "uncertain".to_string()
+        } else {
+            "missing".to_string()
+        };
+
+        // 4. Workset Quality
+        let workset_quality = if workset.status == ReconstructionSectionStatus::Available && workset.total_count >= 2 && workset.quality_score >= 0.60 {
+            "strong".to_string()
+        } else if workset.status == ReconstructionSectionStatus::Available || workset.status == ReconstructionSectionStatus::Partial {
+            "moderate".to_string()
+        } else if workset.status == ReconstructionSectionStatus::Uncertain {
+            "uncertain".to_string()
+        } else if workset.total_count == 0 || workset.status == ReconstructionSectionStatus::Unavailable {
+            "empty".to_string()
+        } else {
+            "weak".to_string()
+        };
+
+        // 5. Memory Quality
+        let memory_quality = if important_memories.status == ReconstructionSectionStatus::Available && important_memories.total_count >= 2 {
+            "strong".to_string()
+        } else if important_memories.status == ReconstructionSectionStatus::Available || important_memories.status == ReconstructionSectionStatus::Partial {
+            "moderate".to_string()
+        } else if important_memories.total_count > 0 {
+            "sparse".to_string()
+        } else {
+            "absent".to_string()
+        };
+
+        // 6. Snapshot Freshness
+        let snapshot_freshness = if latest_snapshot.status == ReconstructionSectionStatus::Available && !latest_snapshot.is_outdated {
+            "fresh".to_string()
+        } else if latest_snapshot.is_outdated {
+            "outdated".to_string()
+        } else if latest_snapshot.status == ReconstructionSectionStatus::Partial {
+            "stale".to_string()
+        } else {
+            "absent".to_string()
+        };
+
+        // 7. Contradictions & Evidence Consistency
+        let mut contradictions = Vec::new();
+        if let Some(ref reason) = current_task.conflict_reason {
+            contradictions.push(format!("Task conflict: {}", reason));
+        } else if current_task.status == ReconstructionSectionStatus::Uncertain && current_task.competing_candidates.len() >= 2 {
+            contradictions.push("Two or more active task candidates have competing evidence".to_string());
+        }
+
+        if latest_snapshot.is_outdated {
+            contradictions.push(format!(
+                "Snapshot superseded by {} newer live activity item(s)",
+                latest_snapshot.newer_items_count
+            ));
+        }
+
+        if context.status == ReconstructionSectionStatus::Uncertain {
+            contradictions.push("Context / workspace identity is uncertain".to_string());
+        }
+
+        let contradiction_count = contradictions.len();
+        let evidence_consistency = if contradiction_count == 0 {
+            "consistent".to_string()
+        } else if current_task.competing_candidates.len() >= 2 {
+            "competing_signals".to_string()
+        } else if contradiction_count == 1 {
+            "partial_conflicts".to_string()
+        } else {
+            "contradictory".to_string()
+        };
+
+        // 8. Data Freshness
+        let data_freshness = match current_state.freshness {
+            Some(StateFreshness::Fresh) => "fresh".to_string(),
+            Some(StateFreshness::Recent) => "recent".to_string(),
+            Some(StateFreshness::Stale) | Some(StateFreshness::VeryStale) => "stale".to_string(),
+            None => "unknown".to_string(),
+        };
+
+        // 9. Strengths & Gaps
+        let mut strengths = Vec::new();
+        if context_confidence == "strong" {
+            strengths.push("Confirmed workspace identity".to_string());
+        }
+        if task_confidence == "strong" {
+            strengths.push("High-confidence active task identified".to_string());
+        }
+        if workset_quality == "strong" {
+            strengths.push(format!("Rich working asset set ({} items)", workset.total_count));
+        }
+        if state_confidence == "strong" || state_confidence == "moderate" {
+            strengths.push("Recent operational activity corroborated".to_string());
+        }
+        if memory_quality == "strong" {
+            strengths.push("Corroborated long-term contextual memories".to_string());
+        }
+        if snapshot_freshness == "fresh" {
+            strengths.push("Recent departure snapshot available".to_string());
+        }
+
+        let mut gaps = Vec::new();
+        if context_confidence == "uncertain" || context_confidence == "missing" {
+            gaps.push("Workspace identity unknown or unconfirmed".to_string());
+        }
+        if task_confidence == "uncertain" {
+            gaps.push("Active task focus is ambiguous between competing candidates".to_string());
+        } else if task_confidence == "missing" {
+            gaps.push("No active task candidate detected".to_string());
+        }
+        if workset_quality == "empty" || workset_quality == "weak" {
+            gaps.push("Working set contains minimal or no open references".to_string());
+        }
+        if snapshot_freshness == "outdated" {
+            gaps.push("Departure snapshot is superseded by newer activity".to_string());
+        }
+
+        // 10. Classification of Overall Quality Rating
+        let (rating, explanation) = if context_confidence == "missing"
+            || (workset_quality == "empty" && task_confidence == "missing" && context_confidence != "strong")
+        {
+            (
+                ReconstructionQualityRating::Insufficient,
+                "Insufficient contextual evidence to reconstruct a coherent workspace state.".to_string(),
+            )
+        } else if context_confidence == "uncertain"
+            || (contradiction_count >= 1 && evidence_consistency == "competing_signals" && context_confidence != "strong")
+        {
+            (
+                ReconstructionQualityRating::Uncertain,
+                "Reconstruction is uncertain due to conflicting or ambiguous context evidence.".to_string(),
+            )
+        } else if context_confidence == "strong" {
+            if task_confidence == "uncertain" {
+                if workset_quality == "strong" {
+                    (
+                        ReconstructionQualityRating::MostlyCoherent,
+                        "Context and working assets are strong, though active task focus is uncertain between competing candidates.".to_string(),
+                    )
+                } else if workset_quality == "moderate" {
+                    (
+                        ReconstructionQualityRating::Partial,
+                        "Context confirmed with moderate working assets, but active task focus is uncertain.".to_string(),
+                    )
+                } else {
+                    (
+                        ReconstructionQualityRating::Uncertain,
+                        "Context is known but task and working assets are uncertain.".to_string(),
+                    )
+                }
+            } else if task_confidence == "strong"
+                && workset_quality == "strong"
+                && contradiction_count == 0
+                && snapshot_freshness != "outdated"
+            {
+                (
+                    ReconstructionQualityRating::Coherent,
+                    "Strong multi-source corroboration across context, active task, working set, and operational state.".to_string(),
+                )
+            } else if (task_confidence == "strong" || task_confidence == "moderate")
+                && (workset_quality == "strong" || workset_quality == "moderate")
+            {
+                if contradiction_count == 0 {
+                    (
+                        ReconstructionQualityRating::MostlyCoherent,
+                        "Reconstruction is mostly coherent with solid context, task, and working assets.".to_string(),
+                    )
+                } else {
+                    (
+                        ReconstructionQualityRating::Partial,
+                        "Reconstruction is partial due to detected evidence conflicts or outdated snapshot.".to_string(),
+                    )
+                }
+            } else if workset_quality == "strong" || task_confidence == "strong" {
+                (
+                    ReconstructionQualityRating::Partial,
+                    "Partial context reconstruction available with some corroborated dimensions.".to_string(),
+                )
+            } else {
+                (
+                    ReconstructionQualityRating::Partial,
+                    "Partial context reconstruction with limited activity history.".to_string(),
+                )
+            }
+        } else if context_confidence == "moderate" {
+            if task_confidence == "uncertain" || contradiction_count >= 1 {
+                (
+                    ReconstructionQualityRating::Uncertain,
+                    "Contextual evidence is moderate but contains conflicting signals.".to_string(),
+                )
+            } else {
+                (
+                    ReconstructionQualityRating::Partial,
+                    "Partial context reconstruction with moderate signals.".to_string(),
+                )
+            }
+        } else {
+            (
+                ReconstructionQualityRating::Insufficient,
+                "Insufficient evidence to safely resume work.".to_string(),
+            )
+        };
+
+        let can_confidently_resume = (rating == ReconstructionQualityRating::Coherent
+            || rating == ReconstructionQualityRating::MostlyCoherent)
+            && resume_readiness.can_resume;
+
+        let factors = ReconstructionQualityFactors {
+            context_confidence,
+            task_confidence,
+            state_confidence,
+            workset_quality,
+            memory_quality,
+            snapshot_freshness,
+            evidence_consistency,
+            contradiction_count,
+            data_freshness,
+            strengths,
+            gaps,
+            contradictions,
+        };
+
+        Self::new(rating, explanation, factors, can_confidently_resume)
+    }
+}
+
+// =========================================================================
 // ContextReconstruction: Unified Canonical Reconstruction Model
 // =========================================================================
 
@@ -1036,6 +1433,8 @@ pub struct ContextReconstruction {
     pub resume_readiness: ReconstructionResumeReadinessSection,
     /// Overall composite confidence evaluation
     pub confidence: ReconstructionConfidence,
+    /// Qualitative reconstruction quality classification
+    pub quality: ContextReconstructionQuality,
     /// ISO-8601 timestamp when this reconstruction was derived
     pub reconstructed_at: String,
     /// Concise, natural executive summary statement
@@ -1058,6 +1457,7 @@ impl ContextReconstruction {
         recent_activity: ReconstructionRecentActivitySection,
         resume_readiness: ReconstructionResumeReadinessSection,
         confidence: ReconstructionConfidence,
+        quality: Option<ContextReconstructionQuality>,
         reconstructed_at: Option<String>,
     ) -> Self {
         let ts = reconstructed_at.unwrap_or_else(|| Utc::now().to_rfc3339());
@@ -1068,6 +1468,18 @@ impl ContextReconstruction {
             &workset,
             &resume_readiness,
         );
+
+        let eval_quality = quality.unwrap_or_else(|| {
+            ContextReconstructionQuality::evaluate_sections(
+                &context,
+                &current_task,
+                &current_state,
+                &workset,
+                &important_memories,
+                &latest_snapshot,
+                &resume_readiness,
+            )
+        });
 
         Self {
             context,
@@ -1080,11 +1492,13 @@ impl ContextReconstruction {
             recent_activity,
             resume_readiness,
             confidence,
+            quality: eval_quality,
             reconstructed_at: ts,
             summary_statement: summary,
             epistemic_disclaimer: CONTEXT_RECONSTRUCTION_DISCLAIMER.to_string(),
         }
     }
+
 
     /// Generates a natural, factual summary statement reflecting the exact state without robotic strings.
     pub fn generate_summary_statement(
@@ -1235,6 +1649,7 @@ pub struct ContextReconstructionBuilder {
     recent_activity: Option<ReconstructionRecentActivitySection>,
     resume_readiness: Option<ReconstructionResumeReadinessSection>,
     confidence: Option<ReconstructionConfidence>,
+    quality: Option<ContextReconstructionQuality>,
     reconstructed_at: Option<String>,
 }
 
@@ -1257,6 +1672,7 @@ impl ContextReconstructionBuilder {
             recent_activity: None,
             resume_readiness: None,
             confidence: None,
+            quality: None,
             reconstructed_at: None,
         }
     }
@@ -1311,6 +1727,11 @@ impl ContextReconstructionBuilder {
         self
     }
 
+    pub fn quality(mut self, quality: ContextReconstructionQuality) -> Self {
+        self.quality = Some(quality);
+        self
+    }
+
     pub fn reconstructed_at(mut self, ts: impl Into<String>) -> Self {
         self.reconstructed_at = Some(ts.into());
         self
@@ -1341,6 +1762,7 @@ impl ContextReconstructionBuilder {
             recent_activity,
             resume_readiness,
             confidence,
+            self.quality,
             self.reconstructed_at,
         )
     }
@@ -1798,6 +2220,7 @@ impl ContextReconstructionService {
             recent_activity_section,
             resume_readiness_section,
             confidence,
+            None,
             Some(now_ts),
         ))
     }
@@ -3159,5 +3582,196 @@ mod tests {
         assert!(items_rec2.contains(&item2.id.as_str()));
         assert!(!items_rec2.contains(&item1.id.as_str()));
     }
+
+    // =========================================================================
+    // DAY 22 STEP 7: RECONSTRUCTION QUALITY EVALUATION TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_quality_coherent_aurora_example() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // 3 high-relevance items
+        for i in 1..=3 {
+            let meta = serde_json::json!({
+                "app_name": "Figma",
+                "domain": "figma.com",
+                "window_title": format!("Hero Animation Part {}", i),
+            }).to_string();
+
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                &format!("https://figma.com/file/hero_{}", i),
+                Some(&format!("Hero Animation Part {}", i)),
+                &meta,
+            ).unwrap();
+
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        // Active task candidate
+        let tc = crate::db::models::TaskCandidate {
+            id: "tc_hero_quality".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.92,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Verification of Quality Classification
+        assert_eq!(reconstruction.quality.rating, ReconstructionQualityRating::Coherent);
+        assert_eq!(reconstruction.quality.display_label, "Coherent Reconstruction");
+        assert!(reconstruction.quality.can_confidently_resume);
+        assert_eq!(reconstruction.quality.factors.context_confidence, "strong");
+        assert_eq!(reconstruction.quality.factors.task_confidence, "strong");
+        assert_eq!(reconstruction.quality.factors.workset_quality, "strong");
+        assert_eq!(reconstruction.quality.factors.evidence_consistency, "consistent");
+        assert_eq!(reconstruction.quality.factors.contradiction_count, 0);
+        assert!(!reconstruction.quality.factors.strengths.is_empty());
+        assert!(reconstruction.quality.factors.contradictions.is_empty());
+    }
+
+    #[test]
+    fn test_quality_uncertain_task_with_strong_context() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // 3 items to provide strong workset
+        for i in 1..=3 {
+            let meta = serde_json::json!({
+                "app_name": "Figma",
+                "domain": "figma.com",
+                "window_title": format!("Hero Animation Part {}", i),
+            }).to_string();
+
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                &format!("https://figma.com/file/hero_{}", i),
+                Some(&format!("Hero Animation Part {}", i)),
+                &meta,
+            ).unwrap();
+
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        // Two competing tasks with comparable evidence
+        let now = Utc::now().to_rfc3339();
+        let tc1 = crate::db::models::TaskCandidate {
+            id: "tc_hero_1".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.85,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: now.clone(),
+            last_active_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let tc2 = crate::db::models::TaskCandidate {
+            id: "tc_nav_2".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Navigation menu redesign".to_string(),
+            confidence: 0.82,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: now.clone(),
+            last_active_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc1).unwrap();
+        crate::db::operations::create_task_candidate(&conn, &tc2).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: If task is uncertain but context is strong -> mostly_coherent / partial (NOT coherent)
+        assert_ne!(reconstruction.quality.rating, ReconstructionQualityRating::Coherent);
+        assert!(
+            reconstruction.quality.rating == ReconstructionQualityRating::MostlyCoherent
+                || reconstruction.quality.rating == ReconstructionQualityRating::Partial
+        );
+        assert_eq!(reconstruction.quality.factors.context_confidence, "strong");
+        assert_eq!(reconstruction.quality.factors.task_confidence, "uncertain");
+        assert_eq!(reconstruction.quality.factors.evidence_consistency, "competing_signals");
+        assert!(reconstruction.quality.factors.contradiction_count >= 1);
+        assert!(reconstruction.quality.factors.gaps.iter().any(|g| g.contains("ambiguous")));
+    }
+
+    #[test]
+    fn test_quality_uncertain_context_and_insufficient() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        // Reconstruct unknown context
+        let rec = service.reconstruct_context(&conn, "ctx_nonexistent_999").unwrap();
+
+        assert_eq!(rec.quality.rating, ReconstructionQualityRating::Insufficient);
+        assert_eq!(rec.quality.display_label, "Insufficient Reconstruction");
+        assert!(!rec.quality.can_confidently_resume);
+        assert_eq!(rec.quality.factors.context_confidence, "uncertain");
+        assert!(!rec.quality.factors.gaps.is_empty());
+    }
+
+    #[test]
+    fn test_quality_outdated_snapshot_conflict() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "E-Commerce App").unwrap();
+
+        let old_time = Utc::now() - chrono::Duration::hours(4);
+        let mut snap_builder = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ws.id, "E-Commerce App");
+        snap_builder.reference_time = Some(old_time);
+        snap_builder.task_title = Some("Old Checkout Flow".to_string());
+        let snap = snap_builder.build();
+        let _ = crate::db::operations::save_context_snapshot(&conn, &snap, 10);
+        crate::context_engine::snapshot::get_global_snapshot_cache().insert(&ws.id, snap.clone());
+
+        // Add newer live item
+        let fresh_meta = serde_json::json!({ "status": "confirmed", "created_at": Utc::now().to_rfc3339() }).to_string();
+        let item = crate::db::operations::create_item(&conn, Some(&ws.id), None, "url", "https://checkout.stripe.com", Some("Stripe Checkout"), &fresh_meta).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(rec.quality.factors.snapshot_freshness, "outdated");
+        assert!(rec.quality.factors.contradictions.iter().any(|c| c.contains("superseded")));
+    }
+
+    #[test]
+    fn test_quality_no_numerical_score_exposed() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Privacy Safe Project").unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        let json_str = serde_json::to_string(&rec.quality).expect("Must serialize quality to JSON");
+
+        // Invariant: Do NOT expose a numerical score to the user in ContextReconstructionQuality
+        assert!(json_str.contains("\"rating\":"));
+        assert!(json_str.contains("\"display_label\":"));
+        assert!(json_str.contains("\"explanation\":"));
+        assert!(json_str.contains("\"factors\":"));
+        assert!(json_str.contains("\"can_confidently_resume\":"));
+        assert!(!json_str.contains("\"score\":"));
+        assert!(!json_str.contains("\"numerical_score\":"));
+        assert!(!json_str.contains("\"quality_percentage\":"));
+    }
 }
+
 
