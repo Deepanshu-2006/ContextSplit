@@ -250,6 +250,12 @@ pub struct ReconstructionTaskSection {
     /// Rationale or explanatory reasons
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// Competing task references when multiple tasks have comparable evidence
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub competing_candidates: Vec<ReconstructionTaskRef>,
+    /// Specific contradiction reason if conflict detected
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_reason: Option<String>,
 }
 
 impl ReconstructionTaskSection {
@@ -269,6 +275,8 @@ impl ReconstructionTaskSection {
             provenance: Some(prov),
             task_ref: Some(task_ref),
             reasons: vec!["Grounded active task identified from focused activity".to_string()],
+            competing_candidates: Vec::new(),
+            conflict_reason: None,
         }
     }
 
@@ -283,6 +291,8 @@ impl ReconstructionTaskSection {
             provenance: Some(InformationProvenance::Inferred),
             task_ref: None,
             reasons: vec!["Task candidate inferred with partial evidence".to_string()],
+            competing_candidates: Vec::new(),
+            conflict_reason: None,
         }
     }
 
@@ -302,6 +312,27 @@ impl ReconstructionTaskSection {
             provenance: Some(InformationProvenance::Inferred),
             task_ref: None,
             reasons,
+            competing_candidates: Vec::new(),
+            conflict_reason: None,
+        }
+    }
+
+    pub fn uncertain_with_competing(
+        competing: Vec<ReconstructionTaskRef>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let reason_str = reason.into();
+        Self {
+            status: ReconstructionSectionStatus::Uncertain,
+            title: None,
+            action_verb: None,
+            target_subject: None,
+            confidence: Some(0.35),
+            provenance: Some(InformationProvenance::Inferred),
+            task_ref: None,
+            reasons: vec![reason_str.clone()],
+            competing_candidates: competing,
+            conflict_reason: Some(reason_str),
         }
     }
 
@@ -315,6 +346,8 @@ impl ReconstructionTaskSection {
             provenance: None,
             task_ref: None,
             reasons: vec!["No active or recent task detected".to_string()],
+            competing_candidates: Vec::new(),
+            conflict_reason: None,
         }
     }
 }
@@ -659,6 +692,15 @@ pub struct ReconstructionSnapshotSection {
     /// Human-readable snapshot summary statement
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+    /// Whether this snapshot is outdated relative to newer observed workspace activity
+    #[serde(default)]
+    pub is_outdated: bool,
+    /// Count of newer activity items observed since the snapshot was captured
+    #[serde(default)]
+    pub newer_items_count: usize,
+    /// Optional conflict note explaining why snapshot is outdated/partial
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_note: Option<String>,
 }
 
 impl ReconstructionSnapshotSection {
@@ -670,6 +712,28 @@ impl ReconstructionSnapshotSection {
             quality_rating: Some(snapshot.quality_rating),
             statement: Some(snapshot.snapshot_statement.clone()),
             snapshot: Some(snapshot),
+            is_outdated: false,
+            newer_items_count: 0,
+            conflict_note: None,
+        }
+    }
+
+    pub fn outdated(
+        snapshot: ReconstructionSnapshotRef,
+        newer_count: usize,
+        conflict_note: impl Into<String>,
+    ) -> Self {
+        let note = conflict_note.into();
+        Self {
+            status: ReconstructionSectionStatus::Partial,
+            snapshot_id: Some(snapshot.id.clone()),
+            captured_at: Some(snapshot.created_at.clone()),
+            quality_rating: Some(SnapshotQualityRating::Partial),
+            statement: Some(format!("Outdated departure snapshot: {}", note)),
+            snapshot: Some(snapshot),
+            is_outdated: true,
+            newer_items_count: newer_count,
+            conflict_note: Some(note),
         }
     }
 
@@ -681,6 +745,9 @@ impl ReconstructionSnapshotSection {
             captured_at: Some(captured_at.into()),
             quality_rating: Some(SnapshotQualityRating::Partial),
             statement,
+            is_outdated: false,
+            newer_items_count: 0,
+            conflict_note: None,
         }
     }
 
@@ -692,6 +759,9 @@ impl ReconstructionSnapshotSection {
             captured_at: None,
             quality_rating: Some(SnapshotQualityRating::Insufficient),
             statement: Some("Uncertain departure snapshot".to_string()),
+            is_outdated: false,
+            newer_items_count: 0,
+            conflict_note: None,
         }
     }
 
@@ -703,6 +773,9 @@ impl ReconstructionSnapshotSection {
             captured_at: None,
             quality_rating: None,
             statement: None,
+            is_outdated: false,
+            newer_items_count: 0,
+            conflict_note: None,
         }
     }
 }
@@ -1368,17 +1441,75 @@ impl ContextReconstructionService {
             .collect();
 
         // -----------------------------------------------------------------
-        // Step 3: Determine Current / Recent Task
+        // Step 3: Determine Current / Recent Task & Resolve Task Contradictions
         // -----------------------------------------------------------------
         let task_candidates = crate::db::operations::list_task_candidates_for_context(conn, context_id).unwrap_or_default();
-        // Filter out inactive and dismissed tasks (Status Override Invariant)
-        let mut active_task_candidates: Vec<_> = task_candidates
+        // Invariant: Dismissed tasks are strictly vetoed by user feedback
+        let non_dismissed: Vec<_> = task_candidates
             .into_iter()
-            .filter(|tc| tc.status != TaskCandidateStatus::Inactive && tc.status != TaskCandidateStatus::Dismissed)
+            .filter(|tc| tc.status != TaskCandidateStatus::Dismissed)
             .collect();
-        active_task_candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
 
-        let mut current_task_section = if let Some(best_task) = active_task_candidates.first() {
+        // Separate active candidates from inactive
+        let mut active_task_candidates: Vec<_> = non_dismissed
+            .into_iter()
+            .filter(|tc| tc.status == TaskCandidateStatus::Active)
+            .collect();
+
+        // Sort candidates primarily by recency (last_active_at descending) then by confidence descending
+        active_task_candidates.sort_by(|a, b| {
+            b.last_active_at.cmp(&a.last_active_at)
+                .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        let mut current_task_section = if active_task_candidates.len() >= 2 {
+            let top1 = &active_task_candidates[0];
+            let top2 = &active_task_candidates[1];
+
+            // Check if top2 is a competing task:
+            // Condition: confidences are close (|top1.confidence - top2.confidence| <= 0.15)
+            // AND timestamps are close (e.g. within 3600 seconds or comparable recency).
+            let conf_diff = (top1.confidence - top2.confidence).abs();
+            let is_competing = conf_diff <= 0.15 && {
+                let t1_res = chrono::DateTime::parse_from_rfc3339(&top1.last_active_at);
+                let t2_res = chrono::DateTime::parse_from_rfc3339(&top2.last_active_at);
+                match (t1_res, t2_res) {
+                    (Ok(dt1), Ok(dt2)) => (dt1.timestamp() - dt2.timestamp()).abs() <= 3600,
+                    _ => true,
+                }
+            };
+
+            if is_competing {
+                // Contradiction: Multiple active tasks with comparable evidence -> mark Uncertain and preserve references
+                let competing_refs: Vec<SnapshotTaskReference> = active_task_candidates
+                    .iter()
+                    .take(3)
+                    .map(SnapshotTaskReference::from)
+                    .collect();
+                ReconstructionTaskSection::uncertain_with_competing(
+                    competing_refs,
+                    "Two recently active tasks have comparable evidence",
+                )
+            } else {
+                // Resolved contradiction: Top1 is clearly newer or significantly higher confidence.
+                // Older candidate is superseded.
+                if top1.confidence >= 0.65 {
+                    let mut sec = ReconstructionTaskSection::available(SnapshotTaskReference::from(top1));
+                    sec.reasons.push(format!(
+                        "Current active task selected; candidate '{}' superseded or has lower confidence",
+                        top2.title
+                    ));
+                    sec
+                } else {
+                    let mut sec = ReconstructionTaskSection::partial(&top1.title, top1.confidence);
+                    sec.reasons.push(format!(
+                        "Inferred task candidate; candidate '{}' has lower recency/evidence",
+                        top2.title
+                    ));
+                    sec
+                }
+            }
+        } else if let Some(best_task) = active_task_candidates.first() {
             if best_task.confidence >= 0.65 {
                 let task_ref = SnapshotTaskReference::from(best_task);
                 ReconstructionTaskSection::available(task_ref)
@@ -1535,11 +1666,12 @@ impl ContextReconstructionService {
         };
 
         // -----------------------------------------------------------------
-        // Step 8: Retrieve Latest ContextSnapshot
+        // Step 8: Retrieve Latest ContextSnapshot & Detect Outdated Snapshot Conflicts
         // -----------------------------------------------------------------
         let latest_snapshot_section = if ContextSnapshotService::is_snapshots_enabled(conn) {
             match ContextSnapshotService::new().derive_for_context_cached(conn, context_id) {
                 Ok(snap) => {
+                    let snap_created_at = snap.created_at.clone();
                     let snap_ref = ReconstructionSnapshotRef {
                         id: snap.id,
                         context_id: snap.context_id,
@@ -1551,7 +1683,26 @@ impl ContextReconstructionService {
                         snapshot_statement: snap.snapshot_statement,
                         can_confidently_resume: snap.quality.can_confidently_resume,
                     };
-                    ReconstructionSnapshotSection::available(snap_ref)
+
+                    // Check if live activity items are newer than the snapshot creation time
+                    let newer_items_count = active_items
+                        .iter()
+                        .filter(|it| it.created_at > snap_created_at || it.updated_at > snap_created_at)
+                        .count();
+
+                    if newer_items_count > 0 {
+                        // Conflict detected: Snapshot is superseded by live, newer workspace activity
+                        ReconstructionSnapshotSection::outdated(
+                            snap_ref,
+                            newer_items_count,
+                            format!(
+                                "Live activity has progressed with {} newer item(s) since snapshot",
+                                newer_items_count
+                            ),
+                        )
+                    } else {
+                        ReconstructionSnapshotSection::available(snap_ref)
+                    }
                 }
                 Err(_) => ReconstructionSnapshotSection::unavailable(),
             }
@@ -2231,5 +2382,216 @@ mod tests {
         let names: Vec<_> = all.iter().map(|r| r.context.name.as_str()).collect();
         assert!(names.contains(&"Workspace A"));
         assert!(names.contains(&"Workspace B"));
+    }
+
+    #[test]
+    fn test_conflict_competing_tasks() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "E-Commerce App").unwrap();
+
+        let now = Utc::now().to_rfc3339();
+        let tc1 = crate::db::models::TaskCandidate {
+            id: "tc_cart".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Optimize checkout cart flow".to_string(),
+            confidence: 0.85,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: now.clone(),
+            last_active_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        let tc2 = crate::db::models::TaskCandidate {
+            id: "tc_payment".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Stripe payment webhook integration".to_string(),
+            confidence: 0.82,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: now.clone(),
+            last_active_at: now.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc1).unwrap();
+        crate::db::operations::create_task_candidate(&conn, &tc2).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Competing tasks with comparable evidence must mark task section as Uncertain
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Uncertain);
+        assert_eq!(rec.current_task.competing_candidates.len(), 2);
+        assert!(rec.current_task.conflict_reason.is_some());
+        assert_eq!(
+            rec.current_task.conflict_reason.as_deref(),
+            Some("Two recently active tasks have comparable evidence")
+        );
+    }
+
+    #[test]
+    fn test_conflict_stale_task_vs_current_task() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Data Pipeline").unwrap();
+
+        let old_time = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        let fresh_time = Utc::now().to_rfc3339();
+
+        let stale_tc = crate::db::models::TaskCandidate {
+            id: "tc_old".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Old Kafka cluster upgrade".to_string(),
+            confidence: 0.70,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: old_time.clone(),
+            last_active_at: old_time.clone(),
+            created_at: old_time.clone(),
+            updated_at: old_time.clone(),
+        };
+        let fresh_tc = crate::db::models::TaskCandidate {
+            id: "tc_fresh".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Fix parquet serialization bug".to_string(),
+            confidence: 0.90,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: fresh_time.clone(),
+            last_active_at: fresh_time.clone(),
+            created_at: fresh_time.clone(),
+            updated_at: fresh_time.clone(),
+        };
+
+        crate::db::operations::create_task_candidate(&conn, &stale_tc).unwrap();
+        crate::db::operations::create_task_candidate(&conn, &fresh_tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Fresh task deterministically supersedes stale task
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.current_task.title.as_deref(), Some("Fix parquet serialization bug"));
+        assert!(rec.current_task.reasons.iter().any(|r| r.contains("superseded") || r.contains("lower confidence")));
+    }
+
+    #[test]
+    fn test_conflict_conflicting_context_evidence() {
+        let conn = setup_test_db();
+        // Unknown workspace ID with 0 evidence
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, "ambiguous_ctx_999").unwrap();
+
+        // Invariant: Do not fabricate certainty on conflicting / unknown context
+        assert_eq!(rec.context.status, ReconstructionSectionStatus::Uncertain);
+        assert_eq!(rec.context.name, "Unknown project");
+        assert_eq!(rec.resume_readiness.readiness, ResumeReadiness::Insufficient);
+    }
+
+    #[test]
+    fn test_conflict_user_rejection() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Security Module").unwrap();
+
+        // User dismissed task candidate
+        let dismissed_tc = crate::db::models::TaskCandidate {
+            id: "tc_dismissed".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Auditing SSH Keys".to_string(),
+            confidence: 0.99, // High algorithm score
+            status: TaskCandidateStatus::Dismissed, // BUT user dismissed it!
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &dismissed_tc).unwrap();
+
+        // User dismissed item
+        let dismissed_item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://internal-wiki/rejected",
+            Some("Rejected Guide"),
+            "{}",
+        ).unwrap();
+        crate::db::operations::dismiss_membership(&conn, &dismissed_item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: User rejections must unconditionally veto candidate & item
+        assert_eq!(rec.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(rec.current_task.title, None);
+        assert_eq!(rec.workset.total_count, 0);
+    }
+
+    #[test]
+    fn test_conflict_newer_vs_older_evidence() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Search Indexer").unwrap();
+
+        // Add 2 items created just now
+        for i in 1..=2 {
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "file",
+                &format!("/path/to/indexer_{}.rs", i),
+                Some(&format!("Indexer {}", i)),
+                "{}",
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(rec.workset.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec.workset.total_count, 2);
+        assert!(rec.confidence.score >= 0.40);
+    }
+
+    #[test]
+    fn test_conflict_contradictory_snapshots() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Mobile Client").unwrap();
+
+        let old_time = Utc::now() - chrono::Duration::hours(3);
+
+        // Build and cache an older snapshot from 3 hours ago
+        let mut builder = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ws.id, "Mobile Client");
+        builder.reference_time = Some(old_time);
+        builder.task_title = Some("Old layout design".to_string());
+        let snap = builder.build();
+
+        crate::context_engine::snapshot::get_global_snapshot_cache().insert(&ws.id, snap.clone());
+        let _ = crate::db::operations::save_context_snapshot(&conn, &snap, 10);
+
+        // Now add newer activity items created after the snapshot
+        let fresh_time = Utc::now().to_rfc3339();
+        let meta = serde_json::json!({
+            "status": "confirmed",
+            "created_at": fresh_time,
+        }).to_string();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://figma.com/mobile_v2",
+            Some("Mobile V2 Design"),
+            &meta,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Snapshot captured prior to newer live items is detected as outdated
+        assert!(rec.latest_snapshot.is_outdated);
+        assert_eq!(rec.latest_snapshot.status, ReconstructionSectionStatus::Partial);
+        assert!(rec.latest_snapshot.newer_items_count >= 1);
+        assert!(rec.latest_snapshot.conflict_note.is_some());
     }
 }
