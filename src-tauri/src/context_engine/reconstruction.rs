@@ -1802,6 +1802,17 @@ impl ContextReconstructionService {
         ))
     }
 
+    /// Performs a cold reconstruction guaranteed to bypass all in-memory caches,
+    /// reconstructing exclusively from SQLite persisted storage.
+    pub fn reconstruct_cold(&self, conn: &Connection, context_id: &str) -> Result<ContextReconstruction, String> {
+        // Invalidate all in-memory caches for this context to simulate a fresh cold process restart
+        crate::context_engine::workset::invalidate_workset_cache(Some(context_id));
+        crate::context_engine::snapshot::invalidate_snapshot_cache(context_id);
+        crate::context_engine::memory::invalidate_memory_cache(Some(context_id));
+
+        self.reconstruct_context(conn, context_id)
+    }
+
     /// Reconstructs the currently active workspace/context if one is active.
     pub fn reconstruct_active(&self, conn: &Connection) -> Result<Option<ContextReconstruction>, String> {
         let active_memory = ContextMemoryService::new().reconstruct_active_memory(conn).ok().flatten();
@@ -2593,5 +2604,217 @@ mod tests {
         assert_eq!(rec.latest_snapshot.status, ReconstructionSectionStatus::Partial);
         assert!(rec.latest_snapshot.newer_items_count >= 1);
         assert!(rec.latest_snapshot.conflict_note.is_some());
+    }
+
+    fn setup_file_db(path: &std::path::Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let settings = crate::db::settings::PrivacySettings {
+            enable_active_app: true,
+            enable_window_title: true,
+            enable_browser_domain: true,
+            enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
+            enable_ai_reasoning: false,
+            ai_gating_enabled: false,
+            ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
+            enable_context_snapshots: true,
+        };
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_cold_reconstruction_lifecycle_10_steps() {
+        // Step 1: Create context in persistent SQLite DB file
+        let db_path = std::env::temp_dir().join(format!("contextsplit_cold_test_{}.db", uuid::Uuid::new_v4()));
+
+        let (context_id, pre_shutdown_task_title) = {
+            let conn = setup_file_db(&db_path);
+
+            // 1. Create context
+            let ws = crate::db::operations::create_workspace(&conn, "Nebula Analytics").unwrap();
+
+            // 2. Capture activity (items)
+            let meta1 = serde_json::json!({
+                "window_title": "Nebula Dashboard Component",
+                "app_name": "VS Code",
+                "status": "confirmed"
+            }).to_string();
+            let item1 = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "file",
+                "/src/components/Dashboard.tsx",
+                Some("Dashboard.tsx"),
+                &meta1,
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item1.id, &ws.id).unwrap();
+
+            let meta2 = serde_json::json!({
+                "window_title": "Nebula Chart Metrics",
+                "app_name": "Chrome",
+                "status": "confirmed"
+            }).to_string();
+            let item2 = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                "https://analytics.nebula.io/metrics",
+                Some("Nebula Metrics Chart"),
+                &meta2,
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item2.id, &ws.id).unwrap();
+
+            // 3. Generate task
+            let tc = crate::db::models::TaskCandidate {
+                id: "tc_nebula".to_string(),
+                context_id: Some(ws.id.clone()),
+                title: "Build realtime metrics dashboard".to_string(),
+                confidence: 0.92,
+                status: TaskCandidateStatus::Active,
+                first_detected_at: Utc::now().to_rfc3339(),
+                last_active_at: Utc::now().to_rfc3339(),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            };
+            crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+            // 4. Generate workset & 5. Generate state
+            let _ = crate::context_engine::workset::ContextWorksetService::new().derive_for_workspace(&conn, &ws.id).unwrap();
+            let _ = crate::context_engine::context_state::ContextStateService::new().derive_for_context(&conn, &ws.id).unwrap();
+
+            // 6. Generate snapshot
+            let mut snap_builder = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ws.id, "Nebula Analytics");
+            snap_builder.task_title = Some("Build realtime metrics dashboard".to_string());
+            snap_builder.task_confidence = Some(0.92);
+            let snap = snap_builder.build();
+            crate::db::operations::save_context_snapshot(&conn, &snap, 10).unwrap();
+
+            // 7. Generate important memory
+            let item_pin = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                "https://github.com/org/nebula-analytics",
+                Some("Nebula Core Repo"),
+                "{}",
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item_pin.id, &ws.id).unwrap();
+
+            // Warm up cache
+            crate::context_engine::snapshot::get_global_snapshot_cache().insert(&ws.id, snap.clone());
+
+            (ws.id, "Build realtime metrics dashboard".to_string())
+        };
+
+        // 8. Shut down application / process:
+        // Clear ALL global in-memory caches to simulate total process termination
+        crate::context_engine::workset::invalidate_workset_cache(Some(&context_id));
+        crate::context_engine::snapshot::invalidate_snapshot_cache(&context_id);
+        crate::context_engine::memory::invalidate_memory_cache(Some(&context_id));
+
+        // 9. Restart: Open a brand-new connection from the SQLite file
+        let new_conn = Connection::open(&db_path).unwrap();
+
+        // 10. Call reconstructContext (cold reconstruction)
+        let service = ContextReconstructionService::new();
+        let cold_rec = service.reconstruct_cold(&new_conn, &context_id).unwrap();
+
+        // Verification of Semantic Consistency from pure persisted SQLite data
+        assert_eq!(cold_rec.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(cold_rec.context.name, "Nebula Analytics");
+
+        assert_eq!(cold_rec.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(cold_rec.current_task.title.as_deref(), Some(pre_shutdown_task_title.as_str()));
+        assert!(cold_rec.current_task.confidence.unwrap() >= 0.85);
+
+        assert_eq!(cold_rec.workset.status, ReconstructionSectionStatus::Available);
+        assert!(cold_rec.workset.total_count >= 2);
+
+        assert_eq!(cold_rec.resume_readiness.readiness, ResumeReadiness::Ready);
+        assert!(cold_rec.resume_readiness.can_resume);
+        assert!(cold_rec.is_resumable());
+        assert!(cold_rec.confidence.score >= 0.65);
+
+        // Cleanup test db
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_cold_reconstruction_with_partial_persistence() {
+        let db_path = std::env::temp_dir().join(format!("contextsplit_partial_cold_{}.db", uuid::Uuid::new_v4()));
+
+        let context_id = {
+            let conn = setup_file_db(&db_path);
+
+            let ws = crate::db::operations::create_workspace(&conn, "Abruptly Exited Project").unwrap();
+
+            // Only 1 item persisted before sudden shutdown (no task, no snapshot)
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "text",
+                "README notes",
+                Some("README"),
+                "{}",
+            ).unwrap();
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+            ws.id
+        };
+
+        // Purge any caches
+        crate::context_engine::workset::invalidate_workset_cache(Some(&context_id));
+        crate::context_engine::snapshot::invalidate_snapshot_cache(&context_id);
+        crate::context_engine::memory::invalidate_memory_cache(Some(&context_id));
+
+        // Reopen cold connection
+        let new_conn = Connection::open(&db_path).unwrap();
+        let service = ContextReconstructionService::new();
+        let cold_rec = service.reconstruct_cold(&new_conn, &context_id).unwrap();
+
+        // Invariant: Missing entities are marked unavailable/partial without crashing or hallucinating
+        assert_eq!(cold_rec.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(cold_rec.context.name, "Abruptly Exited Project");
+        assert_eq!(cold_rec.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(cold_rec.workset.total_count, 1);
+        assert!(!cold_rec.resume_readiness.can_resume);
+        assert!(!cold_rec.is_resumable());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_cold_reconstruction_multi_workspace() {
+        let db_path = std::env::temp_dir().join(format!("contextsplit_multi_cold_{}.db", uuid::Uuid::new_v4()));
+
+        {
+            let conn = setup_file_db(&db_path);
+
+            let _ws1 = crate::db::operations::create_workspace(&conn, "Frontend App").unwrap();
+            let _ws2 = crate::db::operations::create_workspace(&conn, "Backend Microservice").unwrap();
+            let _ws3 = crate::db::operations::create_workspace(&conn, "Infrastructure").unwrap();
+        }
+
+        let new_conn = Connection::open(&db_path).unwrap();
+        let service = ContextReconstructionService::new();
+        let all_cold = service.reconstruct_all(&new_conn).unwrap();
+
+        assert_eq!(all_cold.len(), 3);
+        let names: Vec<_> = all_cold.iter().map(|r| r.context.name.as_str()).collect();
+        assert!(names.contains(&"Frontend App"));
+        assert!(names.contains(&"Backend Microservice"));
+        assert!(names.contains(&"Infrastructure"));
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
