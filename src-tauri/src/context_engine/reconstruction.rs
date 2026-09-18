@@ -2817,4 +2817,347 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
+
+    // =========================================================================
+    // DAY 22 STEP 6: CONTEXT SWITCHING & CROSS-CONTEXT ISOLATION TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_context_switching_isolation_a_b_c_a() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        // ---------------------------------------------------------------------
+        // 1. Setup Context A: "Aurora Website"
+        // ---------------------------------------------------------------------
+        let ctx_a = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        let meta_a1 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "figma.com",
+            "window_title": "Aurora Hero Animation - Figma",
+            "status": "confirmed"
+        }).to_string();
+        let item_a1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_a.id),
+            None,
+            "url",
+            "https://figma.com/file/aurora_hero_spec",
+            Some("Aurora Hero Animation Figma"),
+            &meta_a1,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_a1.id, &ctx_a.id).unwrap();
+
+        let meta_a2 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "google.com",
+            "window_title": "css spring animation keyframes - Google Search",
+            "status": "confirmed"
+        }).to_string();
+        let item_a2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_a.id),
+            None,
+            "url",
+            "https://google.com/search?q=css+spring+animation+keyframes",
+            Some("Google Search: CSS Spring Animation"),
+            &meta_a2,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_a2.id, &ctx_a.id).unwrap();
+
+        let tc_a = crate::db::models::TaskCandidate {
+            id: "tc_aurora_hero".to_string(),
+            context_id: Some(ctx_a.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.93,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc_a).unwrap();
+
+        let mut snap_builder_a = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ctx_a.id, "Aurora Website");
+        snap_builder_a.task_title = Some("Hero animation".to_string());
+        snap_builder_a.task_confidence = Some(0.93);
+        let snap_a = snap_builder_a.build();
+        crate::db::operations::save_context_snapshot(&conn, &snap_a, 10).unwrap();
+
+        // ---------------------------------------------------------------------
+        // 2. Setup Context B: "University OS"
+        // ---------------------------------------------------------------------
+        let ctx_b = crate::db::operations::create_workspace(&conn, "University OS").unwrap();
+
+        let meta_b1 = serde_json::json!({
+            "app_name": "VS Code",
+            "window_title": "sched_rr.c - University OS Kernel",
+            "status": "confirmed"
+        }).to_string();
+        let item_b1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_b.id),
+            None,
+            "file",
+            "/courses/cs450/kernel/sched_rr.c",
+            Some("sched_rr.c"),
+            &meta_b1,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_b1.id, &ctx_b.id).unwrap();
+
+        let meta_b2 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "google.com",
+            "window_title": "round robin priority scheduling c implementation - Google Search",
+            "status": "confirmed"
+        }).to_string();
+        let item_b2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_b.id),
+            None,
+            "url",
+            "https://google.com/search?q=round+robin+priority+scheduling+c+implementation",
+            Some("Google Search: Round Robin Priority Scheduling"),
+            &meta_b2,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_b2.id, &ctx_b.id).unwrap();
+
+        let tc_b = crate::db::models::TaskCandidate {
+            id: "tc_uni_kernel".to_string(),
+            context_id: Some(ctx_b.id.clone()),
+            title: "Kernel scheduling assignment".to_string(),
+            confidence: 0.89,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc_b).unwrap();
+
+        let mut snap_builder_b = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ctx_b.id, "University OS");
+        snap_builder_b.task_title = Some("Kernel scheduling assignment".to_string());
+        snap_builder_b.task_confidence = Some(0.89);
+        let snap_b = snap_builder_b.build();
+        crate::db::operations::save_context_snapshot(&conn, &snap_b, 10).unwrap();
+
+        // ---------------------------------------------------------------------
+        // 3. Setup Context C: "Tokyo Trip"
+        // ---------------------------------------------------------------------
+        let ctx_c = crate::db::operations::create_workspace(&conn, "Tokyo Trip").unwrap();
+
+        let meta_c1 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "booking.com",
+            "window_title": "Shinjuku Granbell Hotel - Booking.com",
+            "status": "confirmed"
+        }).to_string();
+        let item_c1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_c.id),
+            None,
+            "url",
+            "https://booking.com/hotel/jp/shinjuku-granbell.html",
+            Some("Shinjuku Granbell Hotel"),
+            &meta_c1,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_c1.id, &ctx_c.id).unwrap();
+
+        let meta_c2 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "google.com",
+            "window_title": "best time to visit tokyo fall foliage - Google Search",
+            "status": "confirmed"
+        }).to_string();
+        let item_c2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ctx_c.id),
+            None,
+            "url",
+            "https://google.com/search?q=best+time+to+visit+tokyo+fall+foliage",
+            Some("Google Search: Tokyo Fall Foliage"),
+            &meta_c2,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item_c2.id, &ctx_c.id).unwrap();
+
+        let tc_c = crate::db::models::TaskCandidate {
+            id: "tc_tokyo_book".to_string(),
+            context_id: Some(ctx_c.id.clone()),
+            title: "Book flight and hotel".to_string(),
+            confidence: 0.91,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc_c).unwrap();
+
+        let mut snap_builder_c = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ctx_c.id, "Tokyo Trip");
+        snap_builder_c.task_title = Some("Book flight and hotel".to_string());
+        snap_builder_c.task_confidence = Some(0.91);
+        let snap_c = snap_builder_c.build();
+        crate::db::operations::save_context_snapshot(&conn, &snap_c, 10).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Switch Sequence: A → B → C → A
+        // ---------------------------------------------------------------------
+
+        // === Switch 1: Reconstruct Context A ("Aurora Website") ===
+        let rec_a1 = service.reconstruct_context(&conn, &ctx_a.id).unwrap();
+        assert_eq!(rec_a1.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_a1.context.id.as_deref(), Some(ctx_a.id.as_str()));
+        assert_eq!(rec_a1.context.name, "Aurora Website");
+
+        // Verify Task isolation (no leaks from B or C)
+        assert_eq!(rec_a1.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_a1.current_task.title.as_deref(), Some("Hero animation"));
+        assert_ne!(rec_a1.current_task.title.as_deref(), Some("Kernel scheduling assignment"));
+        assert_ne!(rec_a1.current_task.title.as_deref(), Some("Book flight and hotel"));
+
+        // Verify Workset isolation (no items from B or C)
+        let a_item_ids: Vec<_> = rec_a1.workset.items.iter().map(|i| i.id.as_str()).collect();
+        assert!(a_item_ids.contains(&item_a1.id.as_str()));
+        assert!(a_item_ids.contains(&item_a2.id.as_str()));
+        assert!(!a_item_ids.contains(&item_b1.id.as_str()), "Context B item leaked into Context A!");
+        assert!(!a_item_ids.contains(&item_b2.id.as_str()), "Context B item leaked into Context A!");
+        assert!(!a_item_ids.contains(&item_c1.id.as_str()), "Context C item leaked into Context A!");
+        assert!(!a_item_ids.contains(&item_c2.id.as_str()), "Context C item leaked into Context A!");
+
+        // Verify Snapshot isolation
+        if let Some(ref s) = rec_a1.latest_snapshot.snapshot {
+            assert_eq!(s.context_id, ctx_a.id);
+            assert_eq!(s.task_title.as_deref(), Some("Hero animation"));
+        }
+
+        // === Switch 2: Reconstruct Context B ("University OS") ===
+        let rec_b = service.reconstruct_context(&conn, &ctx_b.id).unwrap();
+        assert_eq!(rec_b.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_b.context.id.as_deref(), Some(ctx_b.id.as_str()));
+        assert_eq!(rec_b.context.name, "University OS");
+
+        // Verify Task isolation
+        assert_eq!(rec_b.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_b.current_task.title.as_deref(), Some("Kernel scheduling assignment"));
+        assert_ne!(rec_b.current_task.title.as_deref(), Some("Hero animation"));
+        assert_ne!(rec_b.current_task.title.as_deref(), Some("Book flight and hotel"));
+
+        // Verify Workset isolation
+        let b_item_ids: Vec<_> = rec_b.workset.items.iter().map(|i| i.id.as_str()).collect();
+        assert!(b_item_ids.contains(&item_b1.id.as_str()));
+        assert!(b_item_ids.contains(&item_b2.id.as_str()));
+        assert!(!b_item_ids.contains(&item_a1.id.as_str()), "Context A item leaked into Context B!");
+        assert!(!b_item_ids.contains(&item_a2.id.as_str()), "Context A item leaked into Context B!");
+        assert!(!b_item_ids.contains(&item_c1.id.as_str()), "Context C item leaked into Context B!");
+        assert!(!b_item_ids.contains(&item_c2.id.as_str()), "Context C item leaked into Context B!");
+
+        // Verify Snapshot isolation
+        if let Some(ref s) = rec_b.latest_snapshot.snapshot {
+            assert_eq!(s.context_id, ctx_b.id);
+            assert_eq!(s.task_title.as_deref(), Some("Kernel scheduling assignment"));
+        }
+
+        // === Switch 3: Reconstruct Context C ("Tokyo Trip") ===
+        let rec_c = service.reconstruct_context(&conn, &ctx_c.id).unwrap();
+        assert_eq!(rec_c.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_c.context.id.as_deref(), Some(ctx_c.id.as_str()));
+        assert_eq!(rec_c.context.name, "Tokyo Trip");
+
+        // Verify Task isolation
+        assert_eq!(rec_c.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_c.current_task.title.as_deref(), Some("Book flight and hotel"));
+        assert_ne!(rec_c.current_task.title.as_deref(), Some("Hero animation"));
+        assert_ne!(rec_c.current_task.title.as_deref(), Some("Kernel scheduling assignment"));
+
+        // Verify Workset isolation
+        let c_item_ids: Vec<_> = rec_c.workset.items.iter().map(|i| i.id.as_str()).collect();
+        assert!(c_item_ids.contains(&item_c1.id.as_str()));
+        assert!(c_item_ids.contains(&item_c2.id.as_str()));
+        assert!(!c_item_ids.contains(&item_a1.id.as_str()), "Context A item leaked into Context C!");
+        assert!(!c_item_ids.contains(&item_a2.id.as_str()), "Context A item leaked into Context C!");
+        assert!(!c_item_ids.contains(&item_b1.id.as_str()), "Context B item leaked into Context C!");
+        assert!(!c_item_ids.contains(&item_b2.id.as_str()), "Context B item leaked into Context C!");
+
+        // Verify Snapshot isolation
+        if let Some(ref s) = rec_c.latest_snapshot.snapshot {
+            assert_eq!(s.context_id, ctx_c.id);
+            assert_eq!(s.task_title.as_deref(), Some("Book flight and hotel"));
+        }
+
+        // === Switch 4: Reconstruct Context A ("Aurora Website") again ===
+        let rec_a2 = service.reconstruct_context(&conn, &ctx_a.id).unwrap();
+        assert_eq!(rec_a2.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_a2.context.id.as_deref(), Some(ctx_a.id.as_str()));
+        assert_eq!(rec_a2.context.name, "Aurora Website");
+
+        // State and content must remain strictly invariant and unpolluted
+        assert_eq!(rec_a2.current_task.title.as_deref(), Some("Hero animation"));
+        let a2_item_ids: Vec<_> = rec_a2.workset.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(a_item_ids, a2_item_ids);
+        assert!(!a2_item_ids.contains(&item_b1.id.as_str()));
+        assert!(!a2_item_ids.contains(&item_c1.id.as_str()));
+    }
+
+    #[test]
+    fn test_identical_application_and_domain_isolation_no_merge() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        // Create two separate workspaces
+        let ws1 = crate::db::operations::create_workspace(&conn, "Repo Alpha").unwrap();
+        let ws2 = crate::db::operations::create_workspace(&conn, "Repo Beta").unwrap();
+
+        // Both use the EXACT same application ("Google Chrome") and EXACT same domain ("github.com")
+        let meta_shared1 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "github.com",
+            "window_title": "company/repo-alpha: Alpha service",
+            "status": "confirmed"
+        }).to_string();
+        let item1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws1.id),
+            None,
+            "url",
+            "https://github.com/company/repo-alpha",
+            Some("Repo Alpha on GitHub"),
+            &meta_shared1,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item1.id, &ws1.id).unwrap();
+
+        let meta_shared2 = serde_json::json!({
+            "app_name": "Google Chrome",
+            "domain": "github.com",
+            "window_title": "company/repo-beta: Beta service",
+            "status": "confirmed"
+        }).to_string();
+        let item2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws2.id),
+            None,
+            "url",
+            "https://github.com/company/repo-beta",
+            Some("Repo Beta on GitHub"),
+            &meta_shared2,
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item2.id, &ws2.id).unwrap();
+
+        let rec1 = service.reconstruct_context(&conn, &ws1.id).unwrap();
+        let rec2 = service.reconstruct_context(&conn, &ws2.id).unwrap();
+
+        // Invariant: Shared app/domain does NOT cause contexts to merge
+        assert_eq!(rec1.context.name, "Repo Alpha");
+        assert_eq!(rec2.context.name, "Repo Beta");
+
+        let items_rec1: Vec<_> = rec1.workset.items.iter().map(|i| i.id.as_str()).collect();
+        let items_rec2: Vec<_> = rec2.workset.items.iter().map(|i| i.id.as_str()).collect();
+
+        assert!(items_rec1.contains(&item1.id.as_str()));
+        assert!(!items_rec1.contains(&item2.id.as_str()));
+
+        assert!(items_rec2.contains(&item2.id.as_str()));
+        assert!(!items_rec2.contains(&item1.id.as_str()));
+    }
 }
+
