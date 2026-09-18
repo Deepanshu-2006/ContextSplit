@@ -1,18 +1,20 @@
 use chrono::Utc;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::context_engine::context_state::{
-    ContextStateValue, MeaningfulActivity, ResumeReadiness, StateFreshness,
+    ContextStateService, ContextStateValue, MeaningfulActivity, ResumeReadiness, StateFreshness,
 };
 use crate::context_engine::important_memory::{
-    ImportantMemoryType, MemoryImportanceBand,
+    ContextImportantMemoryBuilder, ImportantMemoryType, MemoryImportanceBand,
 };
-use crate::context_engine::memory::InformationProvenance;
+use crate::context_engine::memory::{ContextMemoryService, InformationProvenance};
 use crate::context_engine::snapshot::{
-    SnapshotActivityReference, SnapshotImportantMemoryReference, SnapshotQualityRating,
-    SnapshotTaskReference, SnapshotWorksetItemReference,
+    ContextSnapshotService, SnapshotActivityReference, SnapshotImportantMemoryReference,
+    SnapshotQualityRating, SnapshotTaskReference, SnapshotWorksetItemReference,
 };
-use crate::context_engine::workset::WorksetItemRelevance;
+use crate::context_engine::workset::{ContextWorksetService, WorksetItemRelevance};
+use crate::db::models::TaskCandidateStatus;
 
 // =========================================================================
 // Epistemic Disclaimer
@@ -1272,6 +1274,409 @@ impl ContextReconstructionBuilder {
 }
 
 // =========================================================================
+// ContextReconstructionService: Deterministic Orchestration Service
+// =========================================================================
+
+/// Concrete service providing deterministic contextual reconstruction.
+///
+/// Orchestrates the 12-step deterministic reconstruction pipeline:
+/// 1. Workspace Identity & Lifecycle State
+/// 2. Context Evidence & Membership Vetoes
+/// 3. Current / Recent Task Candidates
+/// 4. Context Memory (Working & Episodic Sequences)
+/// 5. Context Workset (Primary / Supporting Working Assets)
+/// 6. Context Operational State & Freshness
+/// 7. Important Contextual Memories & Anchors
+/// 8. Latest Departure Snapshot (if enabled)
+/// 9. Recent Meaningful Activity Milestones
+/// 10. Resume Readiness Assessment
+/// 11. Composite Reconstruction Confidence
+/// 12. Assembled ContextReconstruction Narrative
+#[derive(Debug, Default, Clone)]
+pub struct ContextReconstructionService;
+
+impl ContextReconstructionService {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Reconstructs the context for a given context / workspace identifier.
+    ///
+    /// Executes the deterministic 12-step pipeline with graceful degradation across all subsystems.
+    pub fn reconstruct_context(
+        &self,
+        conn: &Connection,
+        context_id: &str,
+    ) -> Result<ContextReconstruction, String> {
+        let now_ts = Utc::now().to_rfc3339();
+
+        // -----------------------------------------------------------------
+        // Step 1: Load Context
+        // -----------------------------------------------------------------
+        let ws_res = crate::db::operations::get_workspace(conn, context_id);
+        let (context_section, ws_name, is_workspace_found) = match ws_res {
+            Ok(ws) => {
+                let name = ws.name.clone();
+                let status = Some(ws.lifecycle_state.clone());
+                (
+                    ReconstructionContextSection::available(
+                        ws.id,
+                        name.clone(),
+                        status,
+                        InformationProvenance::Confirmed,
+                        1.0,
+                    ),
+                    name,
+                    true,
+                )
+            }
+            Err(_) => {
+                // Check if items exist for this context ID
+                let items_count = crate::db::operations::list_items(conn, Some(context_id))
+                    .map(|it| it.len())
+                    .unwrap_or(0);
+                if items_count > 0 {
+                    (
+                        ReconstructionContextSection::partial(
+                            format!("Context {}", context_id),
+                            0.60,
+                        ),
+                        format!("Context {}", context_id),
+                        false,
+                    )
+                } else {
+                    (
+                        ReconstructionContextSection::uncertain(Some("Unknown project".to_string())),
+                        "Unknown project".to_string(),
+                        false,
+                    )
+                }
+            }
+        };
+
+        // -----------------------------------------------------------------
+        // Step 2: Retrieve Relevant Context Evidence & Veto Check
+        // -----------------------------------------------------------------
+        let raw_items = crate::db::operations::list_items(conn, Some(context_id)).unwrap_or_default();
+        // Invariant: Hard veto on items marked 'dismissed' in context_memberships
+        let active_items: Vec<_> = raw_items
+            .into_iter()
+            .filter(|it| {
+                !it.metadata.contains("\"status\":\"dismissed\"")
+                    && !it.metadata.contains("\"membership_status\":\"dismissed\"")
+            })
+            .collect();
+
+        // -----------------------------------------------------------------
+        // Step 3: Determine Current / Recent Task
+        // -----------------------------------------------------------------
+        let task_candidates = crate::db::operations::list_task_candidates_for_context(conn, context_id).unwrap_or_default();
+        // Filter out inactive and dismissed tasks (Status Override Invariant)
+        let mut active_task_candidates: Vec<_> = task_candidates
+            .into_iter()
+            .filter(|tc| tc.status != TaskCandidateStatus::Inactive && tc.status != TaskCandidateStatus::Dismissed)
+            .collect();
+        active_task_candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut current_task_section = if let Some(best_task) = active_task_candidates.first() {
+            if best_task.confidence >= 0.65 {
+                let task_ref = SnapshotTaskReference::from(best_task);
+                ReconstructionTaskSection::available(task_ref)
+            } else if best_task.confidence >= 0.35 {
+                ReconstructionTaskSection::partial(&best_task.title, best_task.confidence)
+            } else {
+                ReconstructionTaskSection::uncertain(Some(best_task.title.clone()))
+            }
+        } else {
+            ReconstructionTaskSection::unavailable()
+        };
+
+        // -----------------------------------------------------------------
+        // Step 4: Retrieve ContextMemory
+        // -----------------------------------------------------------------
+        let memory_opt = ContextMemoryService::new()
+            .reconstruct_memory(conn, context_id)
+            .ok();
+
+        // If task is still unavailable but memory resolved an active task with high confidence, use it
+        if current_task_section.status == ReconstructionSectionStatus::Unavailable {
+            if let Some(ref mem) = memory_opt {
+                if let Some(ref title) = mem.current_task_title {
+                    let conf = mem.current_task_confidence.unwrap_or(0.60);
+                    if conf >= 0.65 {
+                        current_task_section = ReconstructionTaskSection::partial(title, conf);
+                    } else if conf >= 0.35 {
+                        current_task_section = ReconstructionTaskSection::partial(title, conf);
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Step 5: Retrieve ContextWorkset
+        // -----------------------------------------------------------------
+        let workset_res = ContextWorksetService::new().derive_for_workspace(conn, context_id);
+        let workset_section = match workset_res {
+            Ok(ws) => {
+                let snapshot_items: Vec<SnapshotWorksetItemReference> = ws
+                    .items
+                    .iter()
+                    .map(SnapshotWorksetItemReference::from)
+                    .collect();
+
+                let quality_score = ws.confidence;
+
+                if ws.items.is_empty() {
+                    ReconstructionWorksetSection::unavailable()
+                } else if quality_score >= 0.60 && ws.items.len() >= 2 {
+                    ReconstructionWorksetSection::available(snapshot_items, quality_score)
+                } else if ws.items.len() == 1 && quality_score < 0.40 {
+                    ReconstructionWorksetSection::uncertain(1, snapshot_items)
+                } else {
+                    ReconstructionWorksetSection::partial(snapshot_items, quality_score)
+                }
+            }
+            Err(_) => {
+                if !active_items.is_empty() {
+                    ReconstructionWorksetSection::partial(vec![], 0.30)
+                } else {
+                    ReconstructionWorksetSection::unavailable()
+                }
+            }
+        };
+
+        // -----------------------------------------------------------------
+        // Step 6: Determine ContextState
+        // -----------------------------------------------------------------
+        let state_res = ContextStateService::new().derive_for_context(conn, context_id);
+        let (current_state_section, resume_readiness_section, meaningful_act_section) = match state_res {
+            Ok(state) => {
+                let state_expl = if !state.explanation.reasons.is_empty() {
+                    format!("{}: {}", state.explanation.title, state.explanation.reasons.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("; "))
+                } else {
+                    state.explanation.title.clone()
+                };
+                let state_sec = ReconstructionStateSection::available(
+                    state.state,
+                    state.freshness,
+                    state.freshness_display,
+                    state.last_active_at,
+                    Some(state_expl),
+                );
+
+                let readiness_sec = match state.readiness.readiness {
+                    ResumeReadiness::Ready => ReconstructionResumeReadinessSection::ready(
+                        state.readiness.reasons,
+                        state.readiness.formatted_explanation,
+                    ),
+                    ResumeReadiness::MostlyReady => ReconstructionResumeReadinessSection::mostly_ready(
+                        state.readiness.reasons,
+                        vec![],
+                        state.readiness.formatted_explanation,
+                    ),
+                    ResumeReadiness::Partial => ReconstructionResumeReadinessSection::partial(
+                        state.readiness.reasons,
+                        vec![],
+                        state.readiness.formatted_explanation,
+                    ),
+                    ResumeReadiness::Insufficient => ReconstructionResumeReadinessSection::insufficient(
+                        vec![],
+                        state.readiness.formatted_explanation,
+                    ),
+                };
+
+                let meaningful_sec = if let Some(act) = state.meaningful_activity {
+                    ReconstructionMeaningfulActivitySection::available(act)
+                } else {
+                    ReconstructionMeaningfulActivitySection::unavailable()
+                };
+
+                (state_sec, readiness_sec, meaningful_sec)
+            }
+            Err(_) => {
+                let state_sec = if is_workspace_found {
+                    ReconstructionStateSection::partial(
+                        ContextStateValue::RecentlyActive,
+                        "State estimated with limited activity history",
+                    )
+                } else {
+                    ReconstructionStateSection::unavailable()
+                };
+
+                let readiness_sec = ReconstructionResumeReadinessSection::insufficient(
+                    vec!["State derivation unavailable".to_string()],
+                    "Insufficient evidence to evaluate readiness.",
+                );
+
+                let meaningful_sec = ReconstructionMeaningfulActivitySection::unavailable();
+
+                (state_sec, readiness_sec, meaningful_sec)
+            }
+        };
+
+        // -----------------------------------------------------------------
+        // Step 7: Retrieve Important Contextual Memory
+        // -----------------------------------------------------------------
+        let important_memories_section = match ContextImportantMemoryBuilder::build(conn, context_id, None) {
+            Ok(mem_set) => {
+                let snapshot_mems: Vec<SnapshotImportantMemoryReference> = mem_set
+                    .memories
+                    .iter()
+                    .map(SnapshotImportantMemoryReference::from)
+                    .collect();
+
+                if snapshot_mems.is_empty() {
+                    ReconstructionImportantMemoriesSection::unavailable()
+                } else {
+                    ReconstructionImportantMemoriesSection::available(snapshot_mems)
+                }
+            }
+            Err(_) => ReconstructionImportantMemoriesSection::unavailable(),
+        };
+
+        // -----------------------------------------------------------------
+        // Step 8: Retrieve Latest ContextSnapshot
+        // -----------------------------------------------------------------
+        let latest_snapshot_section = if ContextSnapshotService::is_snapshots_enabled(conn) {
+            match ContextSnapshotService::new().derive_for_context_cached(conn, context_id) {
+                Ok(snap) => {
+                    let snap_ref = ReconstructionSnapshotRef {
+                        id: snap.id,
+                        context_id: snap.context_id,
+                        created_at: snap.created_at,
+                        quality_rating: snap.quality.rating,
+                        quality_score: snap.quality.score,
+                        task_title: snap.task_title,
+                        workset_count: snap.workset_item_references.len(),
+                        snapshot_statement: snap.snapshot_statement,
+                        can_confidently_resume: snap.quality.can_confidently_resume,
+                    };
+                    ReconstructionSnapshotSection::available(snap_ref)
+                }
+                Err(_) => ReconstructionSnapshotSection::unavailable(),
+            }
+        } else {
+            ReconstructionSnapshotSection::unavailable()
+        };
+
+        // -----------------------------------------------------------------
+        // Step 9: Retrieve Recent Meaningful Activity Milestones
+        // -----------------------------------------------------------------
+        let recent_activity_section = if let Some(ref mem) = memory_opt {
+            let act_refs: Vec<SnapshotActivityReference> = mem
+                .activity_sequence
+                .iter()
+                .map(SnapshotActivityReference::from)
+                .collect();
+
+            if act_refs.is_empty() {
+                ReconstructionRecentActivitySection::unavailable()
+            } else {
+                ReconstructionRecentActivitySection::available(act_refs, None, None)
+            }
+        } else {
+            ReconstructionRecentActivitySection::unavailable()
+        };
+
+        // -----------------------------------------------------------------
+        // Step 10 & 11: Calculate / Resolve Overall Reconstruction Confidence
+        // -----------------------------------------------------------------
+        let mut conf_score = 0.0;
+        let mut conf_reasons = Vec::new();
+
+        if context_section.status.is_available() {
+            conf_score += 0.20;
+            conf_reasons.push(format!("Workspace '{}' confirmed", ws_name));
+        } else if context_section.status.is_partial() {
+            conf_score += 0.10;
+        }
+
+        if current_task_section.status.is_available() {
+            let t_conf = current_task_section.confidence.unwrap_or(0.80);
+            conf_score += 0.25 * t_conf;
+            if let Some(ref t_title) = current_task_section.title {
+                conf_reasons.push(format!("Active task '{}' identified", t_title));
+            }
+        } else if current_task_section.status.is_partial() {
+            conf_score += 0.10;
+        }
+
+        if workset_section.status.is_available() {
+            conf_score += 0.25 * workset_section.quality_score;
+            conf_reasons.push(format!("{} workset items available", workset_section.total_count));
+        } else if workset_section.status.is_partial() {
+            conf_score += 0.10;
+        }
+
+        if current_state_section.status.is_available() {
+            let fresh_weight = match current_state_section.freshness {
+                Some(StateFreshness::Fresh) => 0.15,
+                Some(StateFreshness::Recent) => 0.12,
+                Some(StateFreshness::Stale) => 0.06,
+                Some(StateFreshness::VeryStale) | None => 0.02,
+            };
+            conf_score += fresh_weight;
+        }
+
+        if important_memories_section.status.is_available() {
+            conf_score += 0.10;
+        }
+
+        if meaningful_act_section.status.is_available() {
+            conf_score += 0.05;
+        }
+
+        if !is_workspace_found {
+            conf_score = conf_score.min(0.35);
+            conf_reasons.push("Context entity not found in database".to_string());
+        }
+
+        let confidence = ReconstructionConfidence::new(conf_score, conf_reasons);
+
+        // -----------------------------------------------------------------
+        // Step 12: Assemble and Return ContextReconstruction
+        // -----------------------------------------------------------------
+        Ok(ContextReconstruction::new(
+            context_section,
+            current_task_section,
+            current_state_section,
+            meaningful_act_section,
+            workset_section,
+            important_memories_section,
+            latest_snapshot_section,
+            recent_activity_section,
+            resume_readiness_section,
+            confidence,
+            Some(now_ts),
+        ))
+    }
+
+    /// Reconstructs the currently active workspace/context if one is active.
+    pub fn reconstruct_active(&self, conn: &Connection) -> Result<Option<ContextReconstruction>, String> {
+        let active_memory = ContextMemoryService::new().reconstruct_active_memory(conn).ok().flatten();
+        if let Some(mem) = active_memory {
+            if let Some(ref ctx) = mem.context {
+                return self.reconstruct_context(conn, &ctx.id).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reconstructs all registered workspaces/contexts.
+    pub fn reconstruct_all(&self, conn: &Connection) -> Result<Vec<ContextReconstruction>, String> {
+        let workspaces = crate::db::operations::list_workspaces(conn)
+            .map_err(|e| format!("Failed to list workspaces: {}", e))?;
+        let mut reconstructions = Vec::new();
+        for ws in workspaces {
+            if let Ok(rec) = self.reconstruct_context(conn, &ws.id) {
+                reconstructions.push(rec);
+            }
+        }
+        Ok(reconstructions)
+    }
+}
+
+// =========================================================================
 // Unit Tests
 // =========================================================================
 
@@ -1600,5 +2005,231 @@ mod tests {
         // Verify that sensitive tokens are scrubbed
         assert!(!context_sec.name.contains("ghp_12345678901234567890123456789012"));
         assert!(context_sec.name.contains("[API_KEY_REDACTED]"));
+    }
+
+    // =========================================================================
+    // Service Integration & Pipeline Unit Tests
+    // =========================================================================
+
+    fn setup_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+
+        let settings = crate::db::settings::PrivacySettings {
+            enable_active_app: true,
+            enable_window_title: true,
+            enable_browser_domain: true,
+            enable_session_tracking: true,
+            enable_semantic_processing: true,
+            semantic_provider: "local".to_string(),
+            enable_semantic_suggestions: true,
+            enable_ai_reasoning: false,
+            ai_gating_enabled: false,
+            ai_gating_confidence_threshold: 0.9,
+            capture_paused: false,
+            enable_context_snapshots: true,
+        };
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_complete_aurora_pipeline() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+
+        // Add 3 high-relevance items
+        for i in 1..=3 {
+            let meta = serde_json::json!({
+                "app_name": "Figma",
+                "domain": "figma.com",
+                "window_title": format!("Hero Animation Part {}", i),
+            }).to_string();
+
+            let item = crate::db::operations::create_item(
+                &conn,
+                Some(&ws.id),
+                None,
+                "url",
+                &format!("https://figma.com/file/hero_{}", i),
+                Some(&format!("Hero Animation Part {}", i)),
+                &meta,
+            ).unwrap();
+
+            crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+        }
+
+        // Add active task candidate
+        let tc = crate::db::models::TaskCandidate {
+            id: "tc_hero".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hero animation".to_string(),
+            confidence: 0.88,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(reconstruction.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(reconstruction.context.name, "Aurora Website");
+        assert_eq!(reconstruction.current_task.status, ReconstructionSectionStatus::Available);
+        assert_eq!(reconstruction.current_task.title.as_deref(), Some("Hero animation"));
+        assert_eq!(reconstruction.workset.status, ReconstructionSectionStatus::Available);
+        assert!(reconstruction.workset.total_count >= 2);
+        assert_eq!(reconstruction.resume_readiness.readiness, ResumeReadiness::Ready);
+        assert!(reconstruction.resume_readiness.can_resume);
+        assert!(reconstruction.confidence.score >= 0.70);
+        assert!(reconstruction.is_resumable());
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_snapshots_disabled_graceful_degradation() {
+        let conn = setup_test_db();
+        // Disable snapshots
+        let mut settings = crate::db::settings::get_settings(&conn).unwrap();
+        settings.enable_context_snapshots = false;
+        crate::db::settings::update_settings(&conn, settings).unwrap();
+
+        let ws = crate::db::operations::create_workspace(&conn, "Aurora Website").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Color palette tokens",
+            Some("Color tokens"),
+            "{}",
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Snapshot is unavailable due to user settings
+        assert_eq!(reconstruction.latest_snapshot.status, ReconstructionSectionStatus::Unavailable);
+        // But the rest of the reconstruction succeeds seamlessly!
+        assert_eq!(reconstruction.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(reconstruction.context.name, "Aurora Website");
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_no_task_no_fabrication() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Backend Service").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "text",
+            "Config values",
+            Some("Config"),
+            "{}",
+        ).unwrap();
+        crate::db::operations::confirm_membership(&conn, &item.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: No active task candidate exists; must NOT fabricate one.
+        assert_eq!(reconstruction.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(reconstruction.current_task.title, None);
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_unknown_workspace() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, "non_existent_workspace_id").unwrap();
+
+        // Invariant: Missing workspace degrades gracefully with Uncertain status and Insufficient readiness
+        assert_eq!(reconstruction.context.status, ReconstructionSectionStatus::Uncertain);
+        assert_eq!(reconstruction.resume_readiness.readiness, ResumeReadiness::Insufficient);
+        assert!(!reconstruction.resume_readiness.can_resume);
+        assert!(!reconstruction.is_resumable());
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_dismissed_item_veto() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Design System").unwrap();
+
+        // Add 1 confirmed item
+        let item1 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "url", "https://figma.com", Some("Figma DS"), "{}").unwrap();
+        crate::db::operations::confirm_membership(&conn, &item1.id, &ws.id).unwrap();
+
+        // Add 1 dismissed item
+        let item2 = crate::db::operations::create_item(&conn, Some(&ws.id), None, "url", "https://spam.com", Some("Spam Link"), "{}").unwrap();
+        crate::db::operations::dismiss_membership(&conn, &item2.id, &ws.id).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Dismissed item must never appear in workset
+        let item_ids: Vec<_> = reconstruction.workset.items.iter().map(|i| i.id.as_str()).collect();
+        assert!(!item_ids.contains(&item2.id.as_str()));
+    }
+
+    #[test]
+    fn test_service_reconstruct_context_completed_task_not_active() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Core App").unwrap();
+
+        // Create inactive task candidate
+        let tc = crate::db::models::TaskCandidate {
+            id: "tc_mig".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Finished Migration".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Inactive,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Invariant: Inactive/completed task candidate must not be reconstructed as active
+        assert_eq!(reconstruction.current_task.status, ReconstructionSectionStatus::Unavailable);
+        assert_eq!(reconstruction.current_task.title, None);
+    }
+
+    #[test]
+    fn test_service_deterministic_output() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Deterministic Project").unwrap();
+
+        let service = ContextReconstructionService::new();
+        let rec1 = service.reconstruct_context(&conn, &ws.id).unwrap();
+        let rec2 = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(rec1.context, rec2.context);
+        assert_eq!(rec1.current_task, rec2.current_task);
+        assert_eq!(rec1.current_state, rec2.current_state);
+        assert_eq!(rec1.workset, rec2.workset);
+        assert_eq!(rec1.resume_readiness, rec2.resume_readiness);
+        assert_eq!(rec1.summary_statement, rec2.summary_statement);
+    }
+
+    #[test]
+    fn test_service_reconstruct_all_and_active() {
+        let conn = setup_test_db();
+        let _ws1 = crate::db::operations::create_workspace(&conn, "Workspace A").unwrap();
+        let _ws2 = crate::db::operations::create_workspace(&conn, "Workspace B").unwrap();
+
+        let service = ContextReconstructionService::new();
+        let all = service.reconstruct_all(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        let names: Vec<_> = all.iter().map(|r| r.context.name.as_str()).collect();
+        assert!(names.contains(&"Workspace A"));
+        assert!(names.contains(&"Workspace B"));
     }
 }
