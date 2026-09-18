@@ -8,6 +8,7 @@ import { DiscoveryNotificationCard } from "./components/discovery/DiscoveryNotif
 import { CandidateReviewModal } from "./components/discovery/CandidateReviewModal";
 import { ContextTimelineDrawer } from "./components/timeline/ContextTimelineDrawer";
 import { ContextOverviewPanel } from "./components/workspace/ContextOverviewPanel";
+import { ContextReconstructionInspector } from "./components/workspace/ContextReconstructionInspector";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
@@ -17,7 +18,15 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 import "./App.css";
 
 function App() {
-  const { isLoading, loadWorkspaces, listenForClipboard, activeWorkspaceId } = useWorkspaceStore();
+  const {
+    isLoading,
+    loadWorkspaces,
+    listenForClipboard,
+    activeWorkspaceId,
+    isReconstructionInspectorOpen,
+    reconstructionInspectorWorkspaceId,
+    closeReconstructionInspector,
+  } = useWorkspaceStore();
   const { checkForCandidates } = useDiscoveryStore();
   
   const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
@@ -100,6 +109,12 @@ function App() {
       <CandidateReviewModal />
       <ContextTimelineDrawer />
       <ContextOverviewPanel />
+      {import.meta.env.DEV && isReconstructionInspectorOpen && reconstructionInspectorWorkspaceId && (
+        <ContextReconstructionInspector
+          workspaceId={reconstructionInspectorWorkspaceId}
+          onClose={closeReconstructionInspector}
+        />
+      )}
       <Toaster
         position="bottom-right"
         toastOptions={{

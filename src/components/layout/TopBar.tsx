@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Sparkles, Settings, Clock, Layers } from "lucide-react";
+import { Search, Sparkles, Settings, Clock, Layers, Cpu } from "lucide-react";
 import { SettingsModal } from "../settings/SettingsModal";
 import { useDiscoveryStore } from "../../store/discoveryStore";
 import { useWorkspaceStore } from "../../store/workspaceStore";
@@ -7,7 +7,13 @@ import { useWorkspaceStore } from "../../store/workspaceStore";
 export function TopBar() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const { candidates, runDiscoveryScan, isLoading } = useDiscoveryStore();
-  const { activeWorkspaceId, workspaces, openTimeline, openOverview } = useWorkspaceStore();
+  const {
+    activeWorkspaceId,
+    workspaces,
+    openTimeline,
+    openOverview,
+    openReconstructionInspector,
+  } = useWorkspaceStore();
 
   const currentWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
   const detectedCount = candidates.filter((c) => c.status === "detected").length;
@@ -51,6 +57,18 @@ export function TopBar() {
               <Clock size={13} className="text-indigo-600" />
               <span>Timeline</span>
             </button>
+
+            {/* DEV-only Context Reconstruction Inspector */}
+            {import.meta.env.DEV && (
+              <button
+                onClick={() => openReconstructionInspector(currentWorkspace.id)}
+                title="[DEV ONLY] Open Context Reconstruction Inspector"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-bold text-emerald-300 bg-slate-950 hover:bg-slate-900 rounded-lg border border-emerald-800/80 shadow-xs transition-colors cursor-pointer"
+              >
+                <Cpu size={13} className="text-emerald-400" />
+                <span>REC DEV</span>
+              </button>
+            )}
           </>
         )}
 

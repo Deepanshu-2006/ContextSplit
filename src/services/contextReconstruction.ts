@@ -198,9 +198,16 @@ export interface ContextReconstruction {
 
 export const contextReconstructionService = {
   /**
-   * Fetches the unified contextual reconstruction for a workspace/context.
+   * Fetches the unified contextual reconstruction for a workspace/context (cached).
    */
   getContextReconstruction: async (workspaceId: string): Promise<ContextReconstruction> => {
     return invoke<ContextReconstruction>('get_context_reconstruction', { workspaceId });
+  },
+
+  /**
+   * Performs a cold contextual reconstruction bypassing all in-memory caches.
+   */
+  reconstructCold: async (workspaceId: string): Promise<ContextReconstruction> => {
+    return invoke<ContextReconstruction>('reconstruct_context_cold', { workspaceId });
   },
 };

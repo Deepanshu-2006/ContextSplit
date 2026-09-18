@@ -660,6 +660,16 @@ fn get_context_reconstruction(
         .reconstruct_context_cached(&conn, workspace_id)
 }
 
+#[tauri::command]
+fn reconstruct_context_cold(
+    workspace_id: &str,
+    state: State<'_, AppState>,
+) -> Result<crate::context_engine::reconstruction::ContextReconstruction, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    crate::context_engine::reconstruction::ContextReconstructionService::new()
+        .reconstruct_cold(&conn, workspace_id)
+}
+
 // ---------------------------------------------------------------------------
 // Temporal Context Weighting commands
 // ---------------------------------------------------------------------------
@@ -1451,6 +1461,7 @@ pub fn run() {
             // Context Overview & Reconstruction
             get_context_overview,
             get_context_reconstruction,
+            reconstruct_context_cold,
             // AI Context Reasoning
             analyze_item_context_ai,
             analyze_candidate_context_ai,

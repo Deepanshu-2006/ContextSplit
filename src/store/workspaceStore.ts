@@ -37,6 +37,10 @@ interface WorkspaceState {
   overviewWorkspaceId: string | null;
   openOverview: (workspaceId?: string) => void;
   closeOverview: () => void;
+  isReconstructionInspectorOpen: boolean;
+  reconstructionInspectorWorkspaceId: string | null;
+  openReconstructionInspector: (workspaceId?: string) => void;
+  closeReconstructionInspector: () => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -52,6 +56,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   timelineWorkspaceId: null,
   isOverviewOpen: false,
   overviewWorkspaceId: null,
+  isReconstructionInspectorOpen: false,
+  reconstructionInspectorWorkspaceId: null,
 
   openTimeline: (workspaceId?: string) => {
     const targetId = workspaceId || (get().activeWorkspaceId !== 'inbox' ? (get().activeWorkspaceId as string) : null);
@@ -68,6 +74,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
   closeOverview: () => set({ isOverviewOpen: false, overviewWorkspaceId: null }),
+
+  openReconstructionInspector: (workspaceId?: string) => {
+    const targetId = workspaceId || (get().activeWorkspaceId !== 'inbox' ? (get().activeWorkspaceId as string) : null);
+    if (targetId) {
+      set({ isReconstructionInspectorOpen: true, reconstructionInspectorWorkspaceId: targetId });
+    }
+  },
+  closeReconstructionInspector: () => set({ isReconstructionInspectorOpen: false, reconstructionInspectorWorkspaceId: null }),
 
   setCaptureState: (state) => set({ captureState: state }),
   setIsDraggingCard: (isDragging) => set({ isDraggingCard: isDragging }),
