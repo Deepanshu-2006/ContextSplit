@@ -36,6 +36,18 @@ pub mod work_sequence;
 pub mod workset;
 pub mod context_state;
 pub mod snapshot;
+pub mod reconstruction;
+
+pub use reconstruction::{
+    ContextReconstruction, ContextReconstructionBuilder, ReconstructionActivityRef,
+    ReconstructionConfidence, ReconstructionContextRef, ReconstructionContextSection,
+    ReconstructionImportantMemoriesSection, ReconstructionImportantMemoryRef,
+    ReconstructionMeaningfulActivitySection, ReconstructionRecentActivitySection,
+    ReconstructionResumeReadinessSection, ReconstructionSectionStatus,
+    ReconstructionSnapshotRef, ReconstructionSnapshotSection, ReconstructionStateSection,
+    ReconstructionTaskRef, ReconstructionTaskSection, ReconstructionWorksetItemRef,
+    ReconstructionWorksetSection, CONTEXT_RECONSTRUCTION_DISCLAIMER,
+};
 
 pub use memory_decay::{
     ContextMemoryDecayEvaluator, MemoryDecayInput, MemoryDecayPolicy, MemoryDecayResult,
