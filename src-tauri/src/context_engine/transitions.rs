@@ -58,6 +58,10 @@ pub struct TransitionStabilityConfig {
     pub max_return_gap_seconds: i64,
     /// Minimum confidence required to confirm a return transition (default: 0.50)
     pub min_return_confidence: f64,
+    /// Whether to filter out isolated weak/entertainment events from triggering false context switches (default: true)
+    pub filter_isolated_weak_events: bool,
+    /// Whether fast-track requires corroborated structural signals (project/repo, file path, task, or user confirmation) (default: true)
+    pub require_corroborated_signals_for_fast_track: bool,
 }
 
 impl Default for TransitionStabilityConfig {
@@ -73,7 +77,284 @@ impl Default for TransitionStabilityConfig {
             fast_track_score: 0.80,
             max_return_gap_seconds: 86400, // 24 hours
             min_return_confidence: 0.50,
+            filter_isolated_weak_events: true,
+            require_corroborated_signals_for_fast_track: true,
         }
+    }
+}
+
+/// Explicit classification of contextual evidence types supporting or contesting a state transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionEvidenceType {
+    /// Explicit user interaction (manual move, user confirmation, active workspace switch)
+    ExplicitUserInteraction,
+    /// Confirmed project or git repository path transition
+    ProjectOrRepoChange,
+    /// Concrete source file or document path within target workspace structure
+    FilePathChange,
+    /// URL domain switch coupled with topical / semantic alignment
+    UrlDomainAndSemanticChange,
+    /// Task candidate or active task transition
+    TaskTransition,
+    /// Sustained consecutive observations in another context over time
+    SustainedActivity,
+    /// Multi-signal strong contextual corroboration (high agreement count, significant margin)
+    StrongContextualEvidence,
+    /// Isolated, weak, or uncorroborated event (entertainment, social media, generic search, single ambient ping)
+    WeakEvent,
+}
+
+impl TransitionEvidenceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExplicitUserInteraction => "explicit_user_interaction",
+            Self::ProjectOrRepoChange => "project_or_repo_change",
+            Self::FilePathChange => "file_path_change",
+            Self::UrlDomainAndSemanticChange => "url_domain_and_semantic_change",
+            Self::TaskTransition => "task_transition",
+            Self::SustainedActivity => "sustained_activity",
+            Self::StrongContextualEvidence => "strong_contextual_evidence",
+            Self::WeakEvent => "weak_event",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::ExplicitUserInteraction => "Explicit User Interaction",
+            Self::ProjectOrRepoChange => "Project / Repository Change",
+            Self::FilePathChange => "File Path Change",
+            Self::UrlDomainAndSemanticChange => "URL / Domain + Semantic Change",
+            Self::TaskTransition => "Task Transition",
+            Self::SustainedActivity => "Sustained Activity in Another Context",
+            Self::StrongContextualEvidence => "Strong Contextual Evidence",
+            Self::WeakEvent => "Weak / Uncorroborated Event",
+        }
+    }
+
+    pub fn is_strong_support(&self) -> bool {
+        matches!(
+            self,
+            Self::ExplicitUserInteraction
+                | Self::ProjectOrRepoChange
+                | Self::FilePathChange
+                | Self::UrlDomainAndSemanticChange
+                | Self::TaskTransition
+                | Self::SustainedActivity
+                | Self::StrongContextualEvidence
+        )
+    }
+}
+
+/// Structured diagnosis of the evidence supporting or contesting a contextual transition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransitionEvidenceAnalysis {
+    pub evidence_types: Vec<TransitionEvidenceType>,
+    pub has_explicit_user_action: bool,
+    pub has_project_or_repo_change: bool,
+    pub has_file_path_change: bool,
+    pub has_url_domain_semantic_change: bool,
+    pub has_task_transition: bool,
+    pub has_sustained_activity: bool,
+    pub has_strong_contextual_evidence: bool,
+    pub is_weak_isolated_event: bool,
+    pub primary_signal_summary: String,
+}
+
+/// Classifies contextual transition evidence into structured signal categories.
+pub fn classify_transition_evidence(
+    is_user_confirmed: bool,
+    confidence: f64,
+    _score: f64,
+    score_margin: f64,
+    evidence_agreement_count: usize,
+    observation_count: usize,
+    evidence: &[String],
+) -> TransitionEvidenceAnalysis {
+    let mut types = Vec::new();
+
+    let mut has_explicit_user = is_user_confirmed;
+    let mut has_project_repo = false;
+    let mut has_file_path = false;
+    let mut has_url_domain = false;
+    let mut has_task = false;
+    let mut has_sustained = observation_count >= 2;
+    let mut has_weak_indicator = false;
+
+    // Check textual evidence items
+    for ev in evidence {
+        let ev_lower = ev.to_lowercase();
+
+        if ev_lower.contains("user-confirmed")
+            || ev_lower.contains("explicit user")
+            || ev_lower.contains("manual selection")
+            || ev_lower.contains("user move")
+            || ev_lower.contains("user switched")
+        {
+            has_explicit_user = true;
+        }
+
+        if ev_lower.contains("repository")
+            || ev_lower.contains("git repo")
+            || ev_lower.contains("project root")
+            || ev_lower.contains("project path")
+            || ev_lower.contains("repo:")
+            || ev_lower.contains("project:")
+            || ev_lower.contains("/projects/")
+            || ev_lower.contains("github.com/")
+            || ev_lower.contains("workspace repo")
+        {
+            has_project_repo = true;
+        }
+
+        if ev_lower.contains("file path")
+            || ev_lower.contains("file:")
+            || ev_lower.contains("path:")
+            || ev_lower.contains("document path")
+            || ev_lower.contains("source code")
+            || ev_lower.contains(".rs")
+            || ev_lower.contains(".tsx")
+            || ev_lower.contains(".ts")
+            || ev_lower.contains(".py")
+            || ev_lower.contains(".go")
+            || ev_lower.contains(".md")
+            || ev_lower.contains("file in workspace")
+            || ev_lower.contains("local file")
+        {
+            has_file_path = true;
+        }
+
+        if ev_lower.contains("domain")
+            || ev_lower.contains("url")
+            || ev_lower.contains("semantic")
+            || ev_lower.contains("web page")
+            || ev_lower.contains("browser opened")
+            || ev_lower.contains("domain match")
+            || ev_lower.contains("topic overlap")
+        {
+            has_url_domain = true;
+        }
+
+        if ev_lower.contains("task")
+            || ev_lower.contains("task transition")
+            || ev_lower.contains("task candidate")
+            || ev_lower.contains("task evidence")
+            || ev_lower.contains("subtask")
+            || ev_lower.contains("assignment")
+            || ev_lower.contains("lecture")
+            || ev_lower.contains("syllabus")
+            || ev_lower.contains("sprint")
+        {
+            has_task = true;
+        }
+
+        if ev_lower.contains("sustained") || ev_lower.contains("consecutive") {
+            has_sustained = true;
+        }
+
+        if ev_lower.contains("youtube")
+            || ev_lower.contains("netflix")
+            || ev_lower.contains("spotify")
+            || ev_lower.contains("twitch")
+            || ev_lower.contains("tiktok")
+            || ev_lower.contains("twitter")
+            || ev_lower.contains("instagram")
+            || ev_lower.contains("reddit")
+            || ev_lower.contains("facebook")
+            || ev_lower.contains("gaming")
+            || ev_lower.contains("entertainment")
+            || ev_lower.contains("social media")
+            || ev_lower.contains("random video")
+            || ev_lower.contains("casual search")
+            || ev_lower.contains("unrelated search")
+            || ev_lower.contains("peripheral match")
+            || ev_lower.contains("weak single domain")
+        {
+            has_weak_indicator = true;
+        }
+    }
+
+    let structural_signal_count = (has_project_repo as usize)
+        + (has_file_path as usize)
+        + (has_url_domain as usize)
+        + (has_task as usize);
+
+    let has_strong_contextual = (evidence_agreement_count >= 2 || structural_signal_count >= 2)
+        && confidence >= 0.70
+        && score_margin >= 0.15;
+
+    // Check if it's a weak isolated event:
+    // 1) Explicit weak indicator (entertainment/social/unrelated search), OR
+    // 2) Low confidence (<0.65) + low agreement (<=1) + single observation + no strong structural signals
+    let is_weak_isolated = has_weak_indicator
+        || (!has_explicit_user
+            && !has_project_repo
+            && !has_file_path
+            && !has_url_domain
+            && !has_task
+            && !has_sustained
+            && !has_strong_contextual
+            && confidence < 0.65
+            && observation_count <= 1);
+
+    if has_explicit_user {
+        types.push(TransitionEvidenceType::ExplicitUserInteraction);
+    }
+    if has_project_repo {
+        types.push(TransitionEvidenceType::ProjectOrRepoChange);
+    }
+    if has_file_path {
+        types.push(TransitionEvidenceType::FilePathChange);
+    }
+    if has_url_domain {
+        types.push(TransitionEvidenceType::UrlDomainAndSemanticChange);
+    }
+    if has_task {
+        types.push(TransitionEvidenceType::TaskTransition);
+    }
+    if has_sustained {
+        types.push(TransitionEvidenceType::SustainedActivity);
+    }
+    if has_strong_contextual {
+        types.push(TransitionEvidenceType::StrongContextualEvidence);
+    }
+    if is_weak_isolated {
+        types.push(TransitionEvidenceType::WeakEvent);
+    }
+
+    let primary_summary = if has_explicit_user {
+        "Explicit user interaction".to_string()
+    } else if has_project_repo && has_file_path {
+        "Corroborated project repository and file path transition".to_string()
+    } else if has_project_repo {
+        "Project repository transition".to_string()
+    } else if has_file_path {
+        "File path transition".to_string()
+    } else if has_task {
+        "Task transition".to_string()
+    } else if has_url_domain {
+        "URL domain and semantic change".to_string()
+    } else if has_sustained {
+        format!("Sustained activity ({} observations)", observation_count)
+    } else if has_strong_contextual {
+        "Multi-signal strong contextual evidence".to_string()
+    } else if is_weak_isolated {
+        "Weak isolated / peripheral event".to_string()
+    } else {
+        "Standard candidate transition evidence".to_string()
+    };
+
+    TransitionEvidenceAnalysis {
+        evidence_types: types,
+        has_explicit_user_action: has_explicit_user,
+        has_project_or_repo_change: has_project_repo,
+        has_file_path_change: has_file_path,
+        has_url_domain_semantic_change: has_url_domain,
+        has_task_transition: has_task,
+        has_sustained_activity: has_sustained,
+        has_strong_contextual_evidence: has_strong_contextual,
+        is_weak_isolated_event: is_weak_isolated,
+        primary_signal_summary: primary_summary,
     }
 }
 
@@ -397,6 +678,16 @@ impl ContextTransitionDetector {
         self
     }
 
+    pub fn with_filter_isolated_weak_events(mut self, filter: bool) -> Self {
+        self.stability_config.filter_isolated_weak_events = filter;
+        self
+    }
+
+    pub fn with_require_corroborated_signals(mut self, req: bool) -> Self {
+        self.stability_config.require_corroborated_signals_for_fast_track = req;
+        self
+    }
+
     pub fn current_context(&self) -> Option<&ContextSnapshot> {
         self.current_context.as_ref()
     }
@@ -468,10 +759,55 @@ impl ContextTransitionDetector {
         score_margin: f64,
         evidence_agreement_count: usize,
     ) -> bool {
-        if is_user_confirmed {
+        let analysis = classify_transition_evidence(
+            is_user_confirmed,
+            confidence,
+            score,
+            score_margin,
+            evidence_agreement_count,
+            1,
+            &[],
+        );
+        self.is_fast_track_with_analysis(
+            is_user_confirmed,
+            confidence,
+            score,
+            score_margin,
+            evidence_agreement_count,
+            &analysis,
+        )
+    }
+
+    /// Determines whether a context candidate qualifies for immediate fast-tracking with structured evidence analysis.
+    pub fn is_fast_track_with_analysis(
+        &self,
+        is_user_confirmed: bool,
+        confidence: f64,
+        score: f64,
+        score_margin: f64,
+        evidence_agreement_count: usize,
+        analysis: &TransitionEvidenceAnalysis,
+    ) -> bool {
+        if is_user_confirmed || analysis.has_explicit_user_action {
             return true;
         }
+        if analysis.is_weak_isolated_event && self.stability_config.filter_isolated_weak_events {
+            return false;
+        }
         if confidence >= self.stability_config.fast_track_confidence {
+            return true;
+        }
+        // Strong structural signals (Project/Repo change, File path change, or Task transition with solid confidence)
+        if (analysis.has_project_or_repo_change || analysis.has_file_path_change || analysis.has_task_transition)
+            && confidence >= 0.75
+            && score_margin >= self.stability_config.meaningful_score_difference
+        {
+            return true;
+        }
+        if analysis.has_url_domain_semantic_change
+            && confidence >= 0.75
+            && score_margin >= self.stability_config.meaningful_score_difference
+        {
             return true;
         }
         if score >= self.stability_config.fast_track_score
@@ -532,6 +868,7 @@ impl ContextTransitionDetector {
                 metadata: serde_json::json!({
                     "elapsed_seconds": elapsed,
                     "inactivity_threshold_secs": self.inactivity_threshold_secs,
+                    "primary_signal_summary": "Inactivity expiration",
                 }),
             };
 
@@ -649,6 +986,7 @@ impl ContextTransitionDetector {
                     duration_since_previous_activity_seconds: None,
                     metadata: serde_json::json!({
                         "ambiguity_reason": "Competing affinities across multiple contexts",
+                        "primary_signal_summary": "Ambiguous multi-candidate shift",
                     }),
                 };
 
@@ -675,6 +1013,17 @@ impl ContextTransitionDetector {
                 };
             }
         };
+
+        // Classify the incoming transition evidence
+        let analysis = classify_transition_evidence(
+            is_user_confirmed,
+            confidence,
+            score,
+            score_margin,
+            evidence_agreement_count,
+            1,
+            &evidence,
+        );
 
         // Anti-jitter: Check minimum confidence threshold
         if confidence < self.stability_config.confidence_threshold && !is_user_confirmed {
@@ -717,17 +1066,52 @@ impl ContextTransitionDetector {
             }
         }
 
+        // Anti-Contamination / False-Context Defense:
+        // Do NOT trigger a context switch from one weak event!
+        // When an active context exists, an isolated weak event (e.g. random YouTube video, social media detour,
+        // generic search query, or uncorroborated single host app) must NOT trigger a context switch.
+        if let Some(curr) = &self.current_context {
+            if curr.reference.id != target.id
+                && analysis.is_weak_isolated_event
+                && self.stability_config.filter_isolated_weak_events
+                && !is_user_confirmed
+            {
+                // Discard any pending detour state if it was weak noise
+                if let Some(pending) = &self.pending_transition {
+                    if pending.target_context.id == target.id {
+                        self.pending_transition = None;
+                    }
+                }
+                return TransitionEvaluationResult::NoTransition {
+                    reason: format!(
+                        "Isolated weak event ('{}' - {}) suppressed to protect active context '{}'",
+                        target.name,
+                        analysis.primary_signal_summary,
+                        curr.reference.name
+                    ),
+                    timestamp: item_timestamp.to_string(),
+                };
+            }
+        }
+
         // Fast-Track Evaluation: does this candidate qualify for immediate transition?
-        let fast_track = self.is_fast_track(
+        let fast_track = self.is_fast_track_with_analysis(
             is_user_confirmed,
             confidence,
             score,
             score_margin,
             evidence_agreement_count,
+            &analysis,
         );
 
-        // Case A: Fast-tracked context change
-        if fast_track || self.stability_config.min_consecutive_evidence <= 1 {
+        let is_existing_pending_target = if let Some(ref p) = self.pending_transition {
+            p.target_context.id == target.id
+        } else {
+            false
+        };
+
+        // Case A: Fast-tracked context change (immediate item 1 switch, or user confirmed, or disabled hysteresis)
+        if (fast_track && !is_existing_pending_target) || is_user_confirmed || self.stability_config.min_consecutive_evidence <= 1 {
             self.pending_transition = None;
             return self.confirm_transition(
                 item_id,
@@ -858,6 +1242,21 @@ impl ContextTransitionDetector {
             .parse::<DateTime<Utc>>()
             .unwrap_or_else(|_| Utc::now());
 
+        let analysis = classify_transition_evidence(
+            confidence >= 0.99,
+            confidence,
+            confidence,
+            0.20,
+            evidence.len(),
+            1,
+            &evidence,
+        );
+        let evidence_type_strs: Vec<&str> = analysis
+            .evidence_types
+            .iter()
+            .map(|t| t.as_str())
+            .collect();
+
         match &mut self.current_context {
             Some(curr) => {
                 let from_ref = curr.reference.clone();
@@ -960,6 +1359,8 @@ impl ContextTransitionDetector {
                     metadata: serde_json::json!({
                         "confirmation_type": confirmation_note,
                         "duration_since_previous_activity_seconds": duration_opt,
+                        "evidence_types": evidence_type_strs,
+                        "primary_signal_summary": analysis.primary_signal_summary,
                     }),
                 };
 
@@ -1009,6 +1410,8 @@ impl ContextTransitionDetector {
                     metadata: serde_json::json!({
                         "resumed_after_inactivity": is_resumed_after_inactivity,
                         "confirmation_type": confirmation_note,
+                        "evidence_types": evidence_type_strs,
+                        "primary_signal_summary": analysis.primary_signal_summary,
                     }),
                 };
 
@@ -1132,6 +1535,19 @@ impl ContextTransitionDetector {
                 (None, 0.0, "Very Low", 0.0, 0.0, 0, vec![interp.summary.clone()])
             };
 
+        // Enrich evidence with item-level hints (title, file path, URL) if present
+        let mut full_evidence = evidence;
+        if let Some(t) = &item.title {
+            if !t.is_empty() {
+                full_evidence.push(format!("title: {}", t));
+            }
+        }
+        if item.item_type == "file" || item.content.starts_with('/') {
+            full_evidence.push(format!("file path: {}", item.content));
+        } else if item.item_type == "url" {
+            full_evidence.push(format!("url: {}", item.content));
+        }
+
         Ok(self.evaluate_interpretation_detailed(
             Some(&item.id),
             item.session_id.as_deref(),
@@ -1144,7 +1560,7 @@ impl ContextTransitionDetector {
             agreement,
             false,
             is_ambiguous,
-            evidence,
+            full_evidence,
         ))
     }
 
@@ -2027,4 +2443,332 @@ mod tests {
         assert_eq!(transitions[0].transition_type, ContextTransitionType::ContextStart);
         assert_eq!(transitions[1].transition_type, ContextTransitionType::ContextSwitch);
     }
+
+    #[test]
+    fn test_single_weak_event_random_youtube_does_not_trigger_switch() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_payx = ContextReference::workspace("ws_payx", "PayX");
+        let ctx_youtube = ContextReference::candidate("cand_youtube", "YouTube");
+
+        // 1. Establish active context in PayX
+        let res_payx = detector.evaluate_interpretation(
+            Some("item_payx_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_payx.clone()),
+            0.92,
+            "Very High",
+            false,
+            vec![
+                "Repository: github.com/company/PayX".to_string(),
+                "file path: /Projects/PayX/src/payment_gateway.rs".to_string(),
+            ],
+        );
+        assert!(res_payx.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_payx");
+
+        // 2. User opens a random YouTube video
+        // Must NOT trigger a context switch from PayX to YouTube!
+        let res_yt = detector.evaluate_interpretation(
+            Some("item_yt_1"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_youtube.clone()),
+            0.60,
+            "Medium",
+            false,
+            vec![
+                "YouTube random video: Top 10 funniest cat moments".to_string(),
+                "domain: youtube.com".to_string(),
+            ],
+        );
+
+        assert!(!res_yt.is_transition(), "Random YouTube video must not trigger context switch");
+        assert!(!res_yt.is_pending(), "Isolated weak event must not even create pending transition");
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_payx", "PayX must remain active");
+
+        // 3. User returns to PayX code -> Continuation in PayX
+        let res_payx_resume = detector.evaluate_interpretation(
+            Some("item_payx_2"),
+            Some("sess_1"),
+            "2026-09-10T10:08:00Z",
+            Some(ctx_payx.clone()),
+            0.90,
+            "High",
+            false,
+            vec![
+                "file path: /Projects/PayX/src/settlement.rs".to_string(),
+                "PayX repository edit".to_string(),
+            ],
+        );
+
+        assert!(res_payx_resume.is_continuation());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_payx");
+        assert_eq!(detector.current_context().unwrap().streak_count, 2);
+    }
+
+    #[test]
+    fn test_corroborated_context_switch_sequence() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_payx = ContextReference::workspace("ws_payx", "PayX");
+        let ctx_contextsplit = ContextReference::workspace("ws_contextsplit", "ContextSplit");
+
+        // 1. Establish in PayX
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_payx.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["PayX repository /Projects/PayX".to_string()],
+        );
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_payx");
+
+        // 2. User switches to ContextSplit repository
+        let res_repo = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:10:00Z",
+            Some(ctx_contextsplit.clone()),
+            0.88,
+            "High",
+            false,
+            vec![
+                "git repo changed to ContextSplit".to_string(),
+                "project root: /Projects/ContextSplit".to_string(),
+            ],
+        );
+
+        assert!(res_repo.is_transition());
+        let t = res_repo.transition().unwrap();
+        assert_eq!(t.transition_type, ContextTransitionType::ContextSwitch);
+        assert_eq!(t.from_context.as_ref().unwrap().id, "ws_payx");
+        assert_eq!(t.to_context.as_ref().unwrap().id, "ws_contextsplit");
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_contextsplit");
+
+        // 3. User opens ContextSplit-related files
+        let res_files = detector.evaluate_interpretation(
+            Some("item_3"),
+            Some("sess_1"),
+            "2026-09-10T10:12:00Z",
+            Some(ctx_contextsplit.clone()),
+            0.92,
+            "Very High",
+            false,
+            vec![
+                "file path: /Projects/ContextSplit/src-tauri/src/transitions.rs".to_string(),
+                "source code editing in ContextSplit".to_string(),
+            ],
+        );
+
+        assert!(res_files.is_continuation());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_contextsplit");
+
+        // 4. User performs ContextSplit task
+        let res_task = detector.evaluate_interpretation(
+            Some("item_4"),
+            Some("sess_1"),
+            "2026-09-10T10:15:00Z",
+            Some(ctx_contextsplit.clone()),
+            0.95,
+            "Very High",
+            false,
+            vec![
+                "task transition: DAY 23 Improve context switch detection".to_string(),
+                "ContextSplit task evidence".to_string(),
+            ],
+        );
+
+        assert!(res_task.is_continuation());
+        assert_eq!(detector.current_context().unwrap().streak_count, 3);
+    }
+
+    #[test]
+    fn test_project_or_repo_change_fast_track() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "PayX");
+        let ctx_b = ContextReference::workspace("ws_b", "ContextSplit");
+
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["PayX".to_string()],
+        );
+
+        let res_switch = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.85,
+            "High",
+            false,
+            vec!["repository: https://github.com/org/ContextSplit".to_string()],
+        );
+
+        assert!(res_switch.is_transition());
+        assert_eq!(res_switch.transition().unwrap().transition_type, ContextTransitionType::ContextSwitch);
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
+    }
+
+    #[test]
+    fn test_file_path_change_transition() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "PayX");
+        let ctx_b = ContextReference::workspace("ws_b", "ContextSplit");
+
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["PayX work".to_string()],
+        );
+
+        let res_file = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.86,
+            "High",
+            false,
+            vec!["file path: /Users/dev/Projects/ContextSplit/src/App.tsx".to_string()],
+        );
+
+        assert!(res_file.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
+    }
+
+    #[test]
+    fn test_task_transition_signal() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_a = ContextReference::workspace("ws_a", "PayX");
+        let ctx_b = ContextReference::workspace("ws_b", "ContextSplit");
+
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_a.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["PayX".to_string()],
+        );
+
+        let res_task = detector.evaluate_interpretation(
+            Some("item_2"),
+            Some("sess_1"),
+            "2026-09-10T10:05:00Z",
+            Some(ctx_b.clone()),
+            0.88,
+            "High",
+            false,
+            vec!["task transition: Refactor context switch detection".to_string()],
+        );
+
+        assert!(res_task.is_transition());
+        assert_eq!(detector.current_context().unwrap().reference.id, "ws_b");
+    }
+
+    #[test]
+    fn test_social_media_and_entertainment_detours_defended() {
+        let mut detector = ContextTransitionDetector::new();
+
+        let ctx_payx = ContextReference::workspace("ws_payx", "PayX");
+        let ctx_detour = ContextReference::candidate("cand_noise", "Casual Browsing");
+
+        detector.evaluate_interpretation(
+            Some("item_1"),
+            Some("sess_1"),
+            "2026-09-10T10:00:00Z",
+            Some(ctx_payx.clone()),
+            0.90,
+            "High",
+            false,
+            vec!["PayX repo".to_string()],
+        );
+
+        let detours = [
+            vec!["YouTube video stream".to_string()],
+            vec!["Twitter / X feed browsing".to_string()],
+            vec!["Spotify music playback".to_string()],
+            vec!["Reddit gaming thread".to_string()],
+            vec!["Netflix movie watch".to_string()],
+        ];
+
+        for (idx, detour_evidence) in detours.iter().enumerate() {
+            let res = detector.evaluate_interpretation(
+                Some(&format!("detour_{}", idx)),
+                Some("sess_1"),
+                &format!("2026-09-10T10:0{}:00Z", idx + 1),
+                Some(ctx_detour.clone()),
+                0.55,
+                "Medium",
+                false,
+                detour_evidence.clone(),
+            );
+
+            assert!(!res.is_transition(), "Detour {:?} must not trigger transition", detour_evidence);
+            assert_eq!(detector.current_context().unwrap().reference.id, "ws_payx");
+        }
+    }
+
+    #[test]
+    fn test_transition_evidence_classification() {
+        let analysis_repo = classify_transition_evidence(
+            false,
+            0.85,
+            0.85,
+            0.20,
+            2,
+            1,
+            &["git repo: ContextSplit".to_string(), "project root: /Projects/ContextSplit".to_string()],
+        );
+        assert!(analysis_repo.has_project_or_repo_change);
+        assert!(analysis_repo.has_strong_contextual_evidence);
+        assert!(!analysis_repo.is_weak_isolated_event);
+        assert!(analysis_repo.evidence_types.contains(&TransitionEvidenceType::ProjectOrRepoChange));
+
+        let analysis_yt = classify_transition_evidence(
+            false,
+            0.60,
+            0.60,
+            0.05,
+            1,
+            1,
+            &["YouTube random video: funny clips".to_string()],
+        );
+        assert!(analysis_yt.is_weak_isolated_event);
+        assert!(analysis_yt.evidence_types.contains(&TransitionEvidenceType::WeakEvent));
+
+        let analysis_user = classify_transition_evidence(
+            true,
+            1.0,
+            1.0,
+            1.0,
+            3,
+            1,
+            &["User-confirmed item assignment to workspace 'PayX'".to_string()],
+        );
+        assert!(analysis_user.has_explicit_user_action);
+        assert!(analysis_user.evidence_types.contains(&TransitionEvidenceType::ExplicitUserInteraction));
+    }
 }
+
