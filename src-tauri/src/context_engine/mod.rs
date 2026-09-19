@@ -39,6 +39,13 @@ pub mod snapshot;
 pub mod reconstruction;
 pub mod quality_guard;
 pub mod contamination;
+pub mod ambiguity;
+
+pub use ambiguity::{
+    AmbiguityConfig, AmbiguityDecision, AmbiguityEvaluationInput, AmbiguityManager,
+    AmbiguityResolutionResult, AmbiguityStatus, AmbiguousActivityRecord,
+    CandidateContextAffinity, NewEvidenceInput,
+};
 
 pub use contamination::{
     extract_repo_slug, extract_search_query_terms, extract_topic_tokens, ContaminationCategory,
