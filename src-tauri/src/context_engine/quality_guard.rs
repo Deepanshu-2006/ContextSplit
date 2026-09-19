@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use crate::context_engine::competition::{AmbiguityState, ContextCompetitionAnalyzer};
+use crate::context_engine::contamination::{ContaminationCategory, ContaminationCheckInput, ContaminationGuard};
 use crate::context_engine::contradiction::ContradictionAnalyzer;
 use crate::context_engine::evidence::ContextEvidenceCollector;
 use crate::context_engine::scoring::{
@@ -166,6 +167,14 @@ pub struct QualityGuardInput {
     pub is_explicit_user_action: bool,
     pub score_margin_over_runner_up: Option<f64>,
     pub candidate_cluster_cohesion: Option<f64>,
+    /// Anti-contamination penalty score [0.0, 1.0]
+    pub contamination_risk_penalty: f64,
+    /// Whether this candidate relies only on common application identity without content corroboration
+    pub is_uncorroborated_app_only: bool,
+    /// Identified contamination category
+    pub contamination_category: Option<String>,
+    /// Anti-contamination explanation
+    pub contamination_explanation: Option<String>,
 }
 
 impl QualityGuardInput {
@@ -192,12 +201,26 @@ impl QualityGuardInput {
             is_explicit_user_action: false,
             score_margin_over_runner_up: None,
             candidate_cluster_cohesion: None,
+            contamination_risk_penalty: 0.0,
+            is_uncorroborated_app_only: false,
+            contamination_category: None,
+            contamination_explanation: None,
         }
     }
 
     pub fn with_target(mut self, ws_id: impl Into<String>, ws_name: impl Into<String>) -> Self {
         self.target_workspace_id = Some(ws_id.into());
         self.target_workspace_name = Some(ws_name.into());
+        self
+    }
+
+    pub fn with_app_name(mut self, app: impl Into<String>) -> Self {
+        self.app_name = Some(app.into());
+        self
+    }
+
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
         self
     }
 
@@ -260,6 +283,20 @@ impl QualityGuardInput {
     ) -> Self {
         self.score_margin_over_runner_up = margin;
         self.candidate_cluster_cohesion = cluster_cohesion;
+        self
+    }
+
+    pub fn with_contamination(
+        mut self,
+        penalty: f64,
+        category: Option<impl Into<String>>,
+        explanation: Option<impl Into<String>>,
+        is_app_only: bool,
+    ) -> Self {
+        self.contamination_risk_penalty = penalty.clamp(0.0, 1.0);
+        self.contamination_category = category.map(|c| c.into());
+        self.contamination_explanation = explanation.map(|e| e.into());
+        self.is_uncorroborated_app_only = is_app_only;
         self
     }
 }
@@ -424,6 +461,76 @@ impl ContextQualityGuard {
                     "Suppressed from {} to prevent context contamination.",
                     target_name
                 ),
+                target_workspace_id: input.target_workspace_id.clone(),
+                target_workspace_name: input.target_workspace_name.clone(),
+            };
+        }
+
+        // Anti-contamination defense: Reject entertainment, social, unrelated search, unrelated repo/file
+        if input.contamination_risk_penalty >= 0.50 {
+            let cat_str = input
+                .contamination_category
+                .as_deref()
+                .unwrap_or("unrelated activity");
+            let expl = input
+                .contamination_explanation
+                .as_deref()
+                .unwrap_or("Context assignment requires contextual evidence, not application identity alone.");
+
+            warnings.push(format!(
+                "Anti-contamination defense: {} prevented from modifying {}.",
+                cat_str, target_name
+            ));
+            warnings.push("Context assignment requires contextual evidence, not application identity alone.".to_string());
+
+            let dim = QualityGuardDimensionScores {
+                conflicting_context_evidence: input.contamination_risk_penalty.max(input.conflicting_context_evidence),
+                composite_quality_score: 0.0,
+                ..Default::default()
+            };
+
+            return QualityGuardResult {
+                decision: QualityGuardDecision::Reject,
+                decision_name: QualityGuardDecision::Reject.as_str().to_string(),
+                composite_quality_score: 0.0,
+                confidence: 0.0,
+                dimension_scores: dim,
+                reasons: vec![format!(
+                    "Contamination safeguard: '{}' ({}) rejected from {}.",
+                    input.title, cat_str, target_name
+                )],
+                warnings,
+                suggested_action: format!(
+                    "Rejected from {} to protect context boundary integrity. {}",
+                    target_name, expl
+                ),
+                target_workspace_id: input.target_workspace_id.clone(),
+                target_workspace_name: input.target_workspace_name.clone(),
+            };
+        }
+
+        // Application identity alone without contextual corroboration must be held in Inbox, not accepted
+        if input.is_uncorroborated_app_only {
+            warnings.push(
+                "Application identity alone without corroborating contextual evidence; context modification blocked."
+                    .to_string(),
+            );
+            return QualityGuardResult {
+                decision: QualityGuardDecision::HoldForMoreEvidence,
+                decision_name: QualityGuardDecision::HoldForMoreEvidence.as_str().to_string(),
+                composite_quality_score: 0.15,
+                confidence: 0.15,
+                dimension_scores: QualityGuardDimensionScores {
+                    composite_quality_score: 0.15,
+                    ..Default::default()
+                },
+                reasons: vec![format!(
+                    "Common application used without domain, file path, or task overlap with {}.",
+                    target_name
+                )],
+                warnings,
+                suggested_action: "Held safely in Inbox awaiting contextual evidence or user review."
+                    .to_string(),
                 target_workspace_id: input.target_workspace_id.clone(),
                 target_workspace_name: input.target_workspace_name.clone(),
             };
@@ -833,6 +940,11 @@ impl ContextQualityGuard {
             + (if same_session { 0.30 } else { 0.0 })
             + (item_relationships * 0.20);
 
+        // 10. Anti-contamination defense check
+        let contamination_eval = ContaminationGuard::new()
+            .assess_from_db(conn, item_id, target_workspace_id)
+            .unwrap_or_default();
+
         let input = QualityGuardInput::new(item.title.unwrap_or_default())
             .with_target(target_workspace_id, workspace.name)
             .with_semantic_relevance(semantic_relevance)
@@ -843,7 +955,13 @@ impl ContextQualityGuard {
             .with_context_confidence(existing_context_confidence)
             .with_user_feedback(user_feedback)
             .with_explicit_user_action(is_confirmed)
-            .with_noise_flags(is_noise, is_glance);
+            .with_noise_flags(is_noise, is_glance)
+            .with_contamination(
+                contamination_eval.contamination_penalty,
+                contamination_eval.category.map(|c| c.as_str()),
+                Some(contamination_eval.explanation),
+                contamination_eval.is_uncorroborated_app_only,
+            );
 
         Ok(self.evaluate(&input))
     }
@@ -1164,5 +1282,221 @@ mod tests {
         assert!(res.decision.is_accepted());
         assert!(res.dimension_scores.composite_quality_score > 0.50);
         assert_eq!(res.dimension_scores.diversity_multiplier, 1.0);
+    }
+
+    // =========================================================================
+    // Day 23 Step 3: Anti-Contamination Safeguard Tests
+    // =========================================================================
+
+    #[test]
+    fn test_guard_contamination_youtube_video_rejected_from_payx() {
+        let guard = ContextQualityGuard::new();
+        // User is working on PayX, opens YouTube video
+        let input = QualityGuardInput::new("Funny Cats Compilation 2026 - YouTube")
+            .with_target("ws_payx", "PayX")
+            .with_app_name("Google Chrome")
+            .with_domain("youtube.com")
+            .with_continuity(0.80, 0.80) // Temporal session continuity is high!
+            .with_contamination(
+                0.75,
+                Some("entertainment_media"),
+                Some("Unrelated entertainment media ('Funny Cats Compilation 2026 - YouTube') prevented from contaminating context 'PayX'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert_eq!(res.composite_quality_score, 0.0);
+        assert!(res.warnings.iter().any(|w| w.contains("Anti-contamination defense")));
+        assert!(res.warnings.iter().any(|w| w.contains("Context assignment requires contextual evidence, not application identity alone")));
+    }
+
+    #[test]
+    fn test_guard_contamination_social_media_rejected_from_deep_work() {
+        let guard = ContextQualityGuard::new();
+        // User opens Instagram during deep work session
+        let input = QualityGuardInput::new("Instagram Feed — Photos and Videos")
+            .with_target("ws_arch", "System Architecture")
+            .with_app_name("Safari")
+            .with_domain("instagram.com")
+            .with_continuity(0.70, 0.70)
+            .with_contamination(
+                0.70,
+                Some("social_media"),
+                Some("Social media activity prevented from contaminating context 'System Architecture'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.reasons.iter().any(|r| r.contains("Contamination safeguard")));
+    }
+
+    #[test]
+    fn test_guard_contamination_unrelated_search_rejected_from_university_os() {
+        let guard = ContextQualityGuard::new();
+        // User is working on University OS assignment, searches "Best gaming laptop"
+        let input = QualityGuardInput::new("Best gaming laptop - Google Search")
+            .with_target("ws_os", "University OS assignment")
+            .with_app_name("Google Chrome")
+            .with_domain("google.com")
+            .with_continuity(0.85, 0.85) // Open in the same browser window
+            .with_contamination(
+                0.65,
+                Some("unrelated_search_query"),
+                Some("Unrelated search query ('Best gaming laptop') prevented from contaminating context 'University OS assignment'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.suggested_action.contains("Best gaming laptop"));
+    }
+
+    #[test]
+    fn test_guard_contamination_unrelated_website_rejected() {
+        let guard = ContextQualityGuard::new();
+        // User browses news / shopping site during focus
+        let input = QualityGuardInput::new("Amazon.com: Deals of the Day")
+            .with_target("ws_code", "ContextSplit Core")
+            .with_app_name("Arc")
+            .with_domain("amazon.com")
+            .with_continuity(0.75, 0.75)
+            .with_contamination(
+                0.55,
+                Some("generic_domain_or_shopping"),
+                Some("Casual web browsing ('Amazon.com: Deals of the Day') prevented from contaminating context 'ContextSplit Core'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+    }
+
+    #[test]
+    fn test_guard_contamination_unrelated_github_repo_rejected_from_tokyo_trip() {
+        let guard = ContextQualityGuard::new();
+        // User opens torvalds/linux while in Tokyo Trip context
+        let input = QualityGuardInput::new("torvalds/linux: Linux kernel source tree")
+            .with_target("ws_tokyo", "Tokyo Trip")
+            .with_app_name("Google Chrome")
+            .with_domain("github.com")
+            .with_continuity(0.80, 0.80)
+            .with_contamination(
+                0.70,
+                Some("unrelated_repository"),
+                Some("Unrelated repository ('torvalds/linux') not attached to non-software context 'Tokyo Trip'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.reasons.iter().any(|r| r.contains("unrelated_repository")));
+    }
+
+    #[test]
+    fn test_guard_contamination_unrelated_file_rejected() {
+        let guard = ContextQualityGuard::new();
+        // User opens Tax return PDF while in OS homework context
+        let input = QualityGuardInput::new("Tax_Return_2025.pdf")
+            .with_target("ws_os", "University OS assignment")
+            .with_app_name("Preview")
+            .with_continuity(0.60, 0.60)
+            .with_contamination(
+                0.65,
+                Some("unrelated_file"),
+                Some("Unrelated document ('Tax_Return_2025.pdf') prevented from contaminating context 'University OS assignment'."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+    }
+
+    #[test]
+    fn test_guard_contamination_generic_domain_rejected() {
+        let guard = ContextQualityGuard::new();
+        // User opens Wikipedia article on ancient history during Coding context
+        let input = QualityGuardInput::new("Roman Empire - Wikipedia")
+            .with_target("ws_payx", "PayX")
+            .with_app_name("Safari")
+            .with_domain("wikipedia.org")
+            .with_continuity(0.70, 0.70)
+            .with_contamination(
+                0.55,
+                Some("generic_domain_or_shopping"),
+                Some("Casual web browsing prevented from contaminating context."),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+    }
+
+    #[test]
+    fn test_guard_contamination_common_app_overreliance_held_in_inbox() {
+        let guard = ContextQualityGuard::new();
+        // User opens VS Code on blank window without semantic or domain match
+        let input = QualityGuardInput::new("Untitled-1 — Visual Studio Code")
+            .with_target("ws_payx", "PayX")
+            .with_app_name("Visual Studio Code")
+            .with_continuity(0.50, 0.50)
+            .with_contamination(
+                0.45,
+                Some("uncorroborated_common_application"),
+                Some("Context assignment requires contextual evidence, not application identity alone ('Visual Studio Code')."),
+                true, // is_uncorroborated_app_only = true
+            );
+
+        let res = guard.evaluate(&input);
+        assert_eq!(res.decision, QualityGuardDecision::HoldForMoreEvidence);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.warnings.iter().any(|w| w.contains("Application identity alone without corroborating contextual evidence")));
+        assert!(res.suggested_action.contains("Held safely in Inbox"));
+    }
+
+    #[test]
+    fn test_guard_database_e2e_youtube_prevented_from_contaminating_payx() {
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "PayX").unwrap();
+        let session = create_session(&conn).unwrap();
+
+        // Confirmed item in PayX
+        let confirmed_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "link",
+            "https://stripe.com/docs/webhooks",
+            Some("Stripe Webhook API Docs"),
+            "{\"domain\": \"stripe.com\", \"app_name\": \"Google Chrome\"}",
+        ).unwrap();
+        crate::db::operations::create_or_update_membership(&conn, &confirmed_item.id, &ws.id, "confirmed", 1.0, "user").unwrap();
+
+        // New item: YouTube video captured in the same session
+        let yt_item = create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "link",
+            "https://www.youtube.com/watch?v=abcxyz",
+            Some("Top 10 Video Game Fails - YouTube"),
+            "{\"domain\": \"youtube.com\", \"app_name\": \"Google Chrome\"}",
+        ).unwrap();
+
+        let guard = ContextQualityGuard::new();
+        let res = guard.evaluate_from_db(&conn, &yt_item.id, &ws.id).unwrap();
+
+        // Must NOT accept into PayX
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.warnings.iter().any(|w| w.contains("Anti-contamination defense")));
     }
 }
