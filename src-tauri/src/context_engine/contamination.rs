@@ -341,20 +341,64 @@ const COMMON_HOST_APPS: &[&str] = &[
     "Microsoft Edge",
     "Edge",
     "Firefox",
+    "Opera",
+    "Vivaldi",
+    "Chromium",
     "Visual Studio Code",
     "Code",
+    "VS Code",
+    "VSCode",
     "Cursor",
+    "Windsurf",
+    "Zed",
+    "Sublime Text",
+    "TextEdit",
+    "Atom",
+    "Xcode",
+    "Android Studio",
+    "IntelliJ IDEA",
+    "IntelliJ",
+    "PyCharm",
+    "WebStorm",
+    "CLion",
+    "GoLand",
+    "RustRover",
+    "Rider",
+    "DataGrip",
+    "Figma",
+    "Canva",
+    "Sketch",
+    "Adobe XD",
+    "Photoshop",
+    "Illustrator",
+    "InDesign",
     "Terminal",
     "iTerm2",
     "iTerm",
     "Alacritty",
     "Kitty",
+    "Warp",
+    "Hyper",
     "Finder",
     "Explorer",
-    "TextEdit",
     "Notes",
     "Preview",
-    "Sublime Text",
+    "GitHub Desktop",
+    "GitKraken",
+    "SourceTree",
+    "Tower",
+    "Postman",
+    "Insomnia",
+    "TablePlus",
+    "DBeaver",
+    "Slack",
+    "Discord",
+    "Notion",
+    "Obsidian",
+    "Linear",
+    "Jira",
+    "Trello",
+    "Asana",
 ];
 
 // =========================================================================
@@ -547,13 +591,70 @@ impl ContaminationGuard {
         }
 
         // ---------------------------------------------------------------------
-        // 4. Check Unrelated Code Repositories (e.g. GitHub repo during Tokyo Trip)
+        // 4. Project Path & Repository Disambiguation
+        // ---------------------------------------------------------------------
+        let (extracted_proj_path, extracted_repo, extracted_doc) = extract_project_path_and_document(
+            &input.title,
+            input.url.as_deref(),
+            input.file_path.as_deref(),
+        );
+
+        let ws_name_lower = input.target_workspace_name.to_lowercase();
+        let ws_tokens = &input.target_workspace_keywords;
+
+        // Check project path match or conflict
+        if let Some(ref proj) = extracted_proj_path {
+            let proj_lower = proj.to_lowercase();
+            let matches_target_ws = ws_name_lower.contains(&proj_lower)
+                || proj_lower.contains(&ws_name_lower)
+                || ws_tokens.iter().any(|k| proj_lower.contains(k) || k.contains(&proj_lower));
+
+            if matches_target_ws {
+                // Strong positive match for project path!
+                return ContaminationDefenseResult {
+                    is_contamination_risk: false,
+                    category: None,
+                    contamination_penalty: 0.0,
+                    is_uncorroborated_app_only: false,
+                    should_reject_from_context: false,
+                    should_hold_in_inbox: false,
+                    explanation: format!(
+                        "Project path '{}' directly corroborates workspace '{}'.",
+                        proj, input.target_workspace_name
+                    ),
+                    reasons: vec![format!("Project directory '{}' matches active workspace.", proj)],
+                };
+            } else {
+                // Conflicting project path! e.g. /Projects/ContextSplit while evaluating PayX
+                reasons.push(format!(
+                    "Project path '{}' belongs to a different project than '{}'.",
+                    proj, input.target_workspace_name
+                ));
+                return ContaminationDefenseResult {
+                    is_contamination_risk: true,
+                    category: Some(ContaminationCategory::UnrelatedFile),
+                    contamination_penalty: 0.75,
+                    is_uncorroborated_app_only: false,
+                    should_reject_from_context: true,
+                    should_hold_in_inbox: true,
+                    explanation: format!(
+                        "Activity from project path '{}' rejected from unrelated context '{}'.",
+                        proj, input.target_workspace_name
+                    ),
+                    reasons,
+                };
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 5. Check Code Repositories (e.g. GitHub repo during Tokyo Trip or PayX)
         // ---------------------------------------------------------------------
         let is_code_repo = domain_norm
             .as_deref()
             .map(|d| d == "github.com" || d == "gitlab.com" || d == "bitbucket.org")
             .unwrap_or(false)
-            || input.url.as_deref().map(|u| u.contains("github.com/") || u.contains("gitlab.com/")).unwrap_or(false);
+            || input.url.as_deref().map(|u| u.contains("github.com/") || u.contains("gitlab.com/")).unwrap_or(false)
+            || extracted_repo.is_some();
 
         if is_code_repo {
             let ws_is_software_or_code = workspace_is_dedicated_to_topic(
@@ -562,10 +663,9 @@ impl ContaminationGuard {
                 &["code", "dev", "engineering", "backend", "frontend", "api", "repo", "os", "kernel", "software", "system", "app"],
             );
 
-            let repo_identifier = extract_repo_slug(
-                input.url.as_deref(),
-                &input.title,
-            );
+            let repo_identifier = extracted_repo.or_else(|| {
+                extract_repo_slug(input.url.as_deref(), &input.title)
+            });
 
             let repo_matches_known = input.target_workspace_repos.iter().any(|r| {
                 if let Some(ref slug) = repo_identifier {
@@ -574,7 +674,12 @@ impl ContaminationGuard {
                 } else {
                     false
                 }
-            });
+            }) || repo_identifier.as_ref().map(|slug| {
+                let slug_lower = slug.to_lowercase();
+                ws_name_lower.contains(&slug_lower)
+                    || slug_lower.contains(&ws_name_lower)
+                    || ws_tokens.iter().any(|k| slug_lower.contains(k))
+            }).unwrap_or(false);
 
             let topic_overlap = compute_topic_overlap(
                 &title_lower,
@@ -582,6 +687,24 @@ impl ContaminationGuard {
                 &input.target_workspace_keywords,
                 &input.target_workspace_active_tasks,
             );
+
+            if repo_matches_known {
+                // Repository matches workspace
+                return ContaminationDefenseResult {
+                    is_contamination_risk: false,
+                    category: None,
+                    contamination_penalty: 0.0,
+                    is_uncorroborated_app_only: false,
+                    should_reject_from_context: false,
+                    should_hold_in_inbox: false,
+                    explanation: format!(
+                        "Repository '{}' corroborates workspace '{}'.",
+                        repo_identifier.as_deref().unwrap_or(""),
+                        input.target_workspace_name
+                    ),
+                    reasons: vec!["Repository matches workspace configuration.".to_string()],
+                };
+            }
 
             if !ws_is_software_or_code && !repo_matches_known && topic_overlap < 0.20 {
                 reasons.push(format!(
@@ -603,8 +726,8 @@ impl ContaminationGuard {
                     ),
                     reasons,
                 };
-            } else if ws_is_software_or_code && !repo_matches_known && !input.target_workspace_repos.is_empty() && topic_overlap < 0.15 && input.semantic_similarity_score < 0.25 {
-                // Workspace has known repos (e.g. PayX) and user opened a completely different repo (e.g. random-repo)
+            } else if !repo_matches_known && topic_overlap < 0.15 && input.semantic_similarity_score < 0.25 {
+                // Workspace has known repos or is software-focused and user opened an unconfirmed/mismatched repo
                 reasons.push(format!(
                     "Repository '{}' does not match confirmed repositories for '{}'.",
                     repo_identifier.as_deref().unwrap_or(&input.title),
@@ -613,9 +736,9 @@ impl ContaminationGuard {
                 return ContaminationDefenseResult {
                     is_contamination_risk: true,
                     category: Some(ContaminationCategory::UnrelatedRepository),
-                    contamination_penalty: 0.60,
+                    contamination_penalty: 0.65,
                     is_uncorroborated_app_only: false,
-                    should_reject_from_context: false,
+                    should_reject_from_context: true,
                     should_hold_in_inbox: true,
                     explanation: format!(
                         "Unconfirmed repository ('{}') held in Inbox awaiting corroboration for '{}'.",
@@ -628,7 +751,7 @@ impl ContaminationGuard {
         }
 
         // ---------------------------------------------------------------------
-        // 5. Check Unrelated Local Files & Documents
+        // 6. Check Unrelated Local Files & Documents
         // ---------------------------------------------------------------------
         if let Some(ref path) = input.file_path {
             let file_name = std::path::Path::new(path)
@@ -676,8 +799,31 @@ impl ContaminationGuard {
             }
         }
 
+        // Check document name matching (e.g. Figma or Word document)
+        if let Some(ref doc) = extracted_doc {
+            let doc_lower = doc.to_lowercase();
+            let matches_doc = ws_name_lower.contains(&doc_lower)
+                || doc_lower.contains(&ws_name_lower)
+                || ws_tokens.iter().any(|k| doc_lower.contains(k));
+            if matches_doc {
+                return ContaminationDefenseResult {
+                    is_contamination_risk: false,
+                    category: None,
+                    contamination_penalty: 0.0,
+                    is_uncorroborated_app_only: false,
+                    should_reject_from_context: false,
+                    should_hold_in_inbox: false,
+                    explanation: format!(
+                        "Document '{}' corroborates workspace '{}'.",
+                        doc, input.target_workspace_name
+                    ),
+                    reasons: vec![format!("Document name '{}' matches workspace topic.", doc)],
+                };
+            }
+        }
+
         // ---------------------------------------------------------------------
-        // 6. Check Generic Domains & Casual Shopping/News Web Browsing
+        // 7. Check Generic Domains & Casual Shopping/News Web Browsing
         // ---------------------------------------------------------------------
         let is_generic_domain = domain_norm
             .as_deref()
@@ -719,7 +865,7 @@ impl ContaminationGuard {
         }
 
         // ---------------------------------------------------------------------
-        // 7. Check Common Application Overreliance (Application Identity Alone)
+        // 8. Check Common Application Overreliance (Application Identity Alone)
         // ---------------------------------------------------------------------
         let is_common_host = is_app_in_list(app_norm, COMMON_HOST_APPS);
         if is_common_host {
@@ -739,7 +885,7 @@ impl ContaminationGuard {
 
             if !has_content_corroboration {
                 reasons.push(format!(
-                    "Activity uses host app '{}' without content, domain, or task corroboration for '{}'.",
+                    "Activity uses host app '{}' without content, domain, project path, or task corroboration for '{}'.",
                     app_norm, input.target_workspace_name
                 ));
                 return ContaminationDefenseResult {
@@ -1076,6 +1222,119 @@ fn is_personal_or_financial_file(file_name: &str, file_ext: &str) -> bool {
     matches!(file_ext, "tax" | "qfx" | "ofx")
 }
 
+pub fn extract_project_path_and_document(
+    title: &str,
+    url: Option<&str>,
+    file_path: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut project_path = None;
+    let mut repo_slug = None;
+    let mut document_name = None;
+
+    const GENERIC_BUFFER_NAMES: &[&str] = &[
+        "untitled",
+        "untitled-1",
+        "untitled-2",
+        "untitled-3",
+        "new tab",
+        "new document",
+        "document1",
+        "start",
+        "welcome",
+        "home",
+        "empty",
+    ];
+
+    // 1. Extract from file_path
+    if let Some(fp) = file_path {
+        let clean = fp.replace('\\', "/");
+        for marker in &["/projects/", "/workspace/", "/repos/", "/code/", "/dev/", "/work/", "/src/"] {
+            if let Some(pos) = clean.to_lowercase().find(marker) {
+                let after = &clean[pos + marker.len()..];
+                let proj = after.split('/').next().unwrap_or("").trim();
+                if !proj.is_empty() {
+                    project_path = Some(proj.to_string());
+                    break;
+                }
+            }
+        }
+        if project_path.is_none() {
+            let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
+            if parts.len() >= 2 {
+                project_path = Some(parts[parts.len() - 2].to_string());
+            }
+        }
+    }
+
+    // 2. Extract from URL (e.g. GitHub repo, Figma file, Google Docs)
+    if let Some(u) = url {
+        if let Some(slug) = extract_repo_slug(Some(u), title) {
+            repo_slug = Some(slug);
+        }
+        if u.contains("figma.com/file/") || u.contains("figma.com/design/") {
+            let parts: Vec<&str> = u.split('/').filter(|s| !s.is_empty()).collect();
+            if parts.len() >= 4 {
+                let doc = parts[parts.len() - 1].replace('-', " ");
+                if !doc.is_empty() && !GENERIC_BUFFER_NAMES.iter().any(|g| doc.to_lowercase().contains(g)) {
+                    document_name = Some(doc);
+                }
+            }
+        }
+    }
+
+    // 3. Extract from Window Title
+    if project_path.is_none() {
+        // e.g. "billing.rs — PayX — Visual Studio Code"
+        if title.contains(" — ") {
+            let parts: Vec<&str> = title.split(" — ").collect();
+            if parts.len() >= 2 {
+                let candidate = parts[parts.len() - 2].trim();
+                let cand_lower = candidate.to_lowercase();
+                if !candidate.is_empty()
+                    && !candidate.contains('.')
+                    && candidate.len() < 40
+                    && !GENERIC_BUFFER_NAMES.iter().any(|g| cand_lower == *g || cand_lower.starts_with(g))
+                {
+                    project_path = Some(candidate.to_string());
+                }
+            }
+        } else if title.contains(" - ") {
+            // e.g. "PayX Mobile UI - Figma"
+            let parts: Vec<&str> = title.split(" - ").collect();
+            if parts.len() >= 2 {
+                let candidate = parts[0].trim();
+                let cand_lower = candidate.to_lowercase();
+                if !candidate.is_empty() && !GENERIC_BUFFER_NAMES.iter().any(|g| cand_lower == *g) {
+                    document_name = Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    // Check Terminal titles like "user@MacBook PayX %" or "user@MacBook:~/Projects/PayX$"
+    if project_path.is_none() && (title.contains('%') || title.contains('$')) {
+        let clean_title = title.split(['%', '$']).next().unwrap_or(title).trim();
+        // Check part after @ if present, e.g. "MacBook PayX" or "MacBook:~/Projects/PayX"
+        let host_and_dir = if let Some(pos) = clean_title.find('@') {
+            &clean_title[pos + 1..]
+        } else {
+            clean_title
+        };
+        let last_word = host_and_dir
+            .split([' ', ':', '/'])
+            .filter(|s| !s.is_empty())
+            .last()
+            .unwrap_or("")
+            .trim();
+
+        if !last_word.is_empty() && last_word != "~" && last_word != "zsh" && last_word != "bash" && last_word != "MacBook" {
+            project_path = Some(last_word.to_string());
+        }
+    }
+
+    (project_path, repo_slug, document_name)
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -1273,5 +1532,186 @@ mod tests {
         assert_eq!(res.contamination_penalty, 0.0);
         assert!(!res.should_reject_from_context);
         assert!(!res.should_hold_in_inbox);
+    }
+
+    #[test]
+    fn test_vscode_open_on_payx_strongly_supports_payx() {
+        let guard = ContaminationGuard::new();
+        let input = ContaminationCheckInput::new("billing.rs — PayX — Visual Studio Code", "ws_payx", "PayX")
+            .with_app("Visual Studio Code")
+            .with_file_path("/Users/user/Projects/PayX/src/billing.rs")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["payx".to_string()],
+                vec!["Fix invoice rounding".to_string()],
+            );
+
+        let res = guard.assess(&input);
+        assert!(!res.is_contamination_risk);
+        assert_eq!(res.contamination_penalty, 0.0);
+        assert!(!res.is_uncorroborated_app_only);
+        assert!(!res.should_reject_from_context);
+        assert!(res.explanation.contains("directly corroborates"));
+    }
+
+    #[test]
+    fn test_vscode_open_on_contextsplit_supports_contextsplit_and_rejects_payx() {
+        let guard = ContaminationGuard::new();
+        let input = ContaminationCheckInput::new(
+            "main.rs — ContextSplit — Visual Studio Code",
+            "ws_payx",
+            "PayX",
+        )
+        .with_app("Visual Studio Code")
+        .with_file_path("/Users/user/Projects/ContextSplit/src/main.rs")
+        .with_workspace_details(
+            vec!["payx".to_string(), "billing".to_string()],
+            vec![],
+            vec!["payx".to_string()],
+            vec!["Fix invoice rounding".to_string()],
+        );
+
+        let res = guard.assess(&input);
+        assert!(res.is_contamination_risk);
+        assert_eq!(res.category, Some(ContaminationCategory::UnrelatedFile));
+        assert!(res.should_reject_from_context);
+        assert!(res.explanation.contains("ContextSplit"));
+    }
+
+    #[test]
+    fn test_vscode_alone_without_path_is_held_in_inbox() {
+        let guard = ContaminationGuard::new();
+        let input = ContaminationCheckInput::new("Visual Studio Code", "ws_payx", "PayX")
+            .with_app("Visual Studio Code")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["payx".to_string()],
+                vec!["Fix invoice rounding".to_string()],
+            );
+
+        let res = guard.assess(&input);
+        assert!(res.is_contamination_risk);
+        assert_eq!(res.category, Some(ContaminationCategory::UncorroboratedCommonApplication));
+        assert!(res.is_uncorroborated_app_only);
+        assert!(res.should_hold_in_inbox);
+        assert!(!res.should_reject_from_context);
+    }
+
+    #[test]
+    fn test_figma_with_payx_design_vs_figma_alone() {
+        let guard = ContaminationGuard::new();
+        // 1. Figma on PayX design
+        let input_payx = ContaminationCheckInput::new("PayX Mobile App UI - Figma", "ws_payx", "PayX")
+            .with_app("Figma")
+            .with_url("https://www.figma.com/file/12345/PayX-Mobile-App-UI")
+            .with_workspace_details(
+                vec!["payx".to_string(), "payments".to_string()],
+                vec![],
+                vec![],
+                vec!["Design mobile onboarding".to_string()],
+            );
+
+        let res1 = guard.assess(&input_payx);
+        assert!(!res1.is_contamination_risk);
+        assert!(!res1.should_reject_from_context);
+
+        // 2. Figma alone (Untitled)
+        let input_alone = ContaminationCheckInput::new("Untitled - Figma", "ws_payx", "PayX")
+            .with_app("Figma")
+            .with_workspace_details(
+                vec!["payx".to_string(), "payments".to_string()],
+                vec![],
+                vec![],
+                vec!["Design mobile onboarding".to_string()],
+            );
+
+        let res2 = guard.assess(&input_alone);
+        assert!(res2.is_contamination_risk);
+        assert_eq!(res2.category, Some(ContaminationCategory::UncorroboratedCommonApplication));
+        assert!(res2.should_hold_in_inbox);
+    }
+
+    #[test]
+    fn test_terminal_with_payx_cwd_vs_terminal_alone() {
+        let guard = ContaminationGuard::new();
+        // 1. Terminal in ~/Projects/PayX
+        let input_payx = ContaminationCheckInput::new("user@MacBook PayX %", "ws_payx", "PayX")
+            .with_app("Terminal")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["payx".to_string()],
+                vec!["Build backend".to_string()],
+            );
+
+        let res1 = guard.assess(&input_payx);
+        assert!(!res1.is_contamination_risk);
+        assert!(!res1.should_reject_from_context);
+
+        // 2. Terminal in ~/Projects/ContextSplit while checking PayX
+        let input_cs = ContaminationCheckInput::new("user@MacBook ContextSplit %", "ws_payx", "PayX")
+            .with_app("Terminal")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["payx".to_string()],
+                vec!["Build backend".to_string()],
+            );
+
+        let res2 = guard.assess(&input_cs);
+        assert!(res2.is_contamination_risk);
+        assert!(res2.should_reject_from_context);
+
+        // 3. Terminal alone (zsh on ~)
+        let input_alone = ContaminationCheckInput::new("user@MacBook ~ %", "ws_payx", "PayX")
+            .with_app("Terminal")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["payx".to_string()],
+                vec!["Build backend".to_string()],
+            );
+
+        let res3 = guard.assess(&input_alone);
+        assert!(res3.is_contamination_risk);
+        assert_eq!(res3.category, Some(ContaminationCategory::UncorroboratedCommonApplication));
+        assert!(res3.should_hold_in_inbox);
+    }
+
+    #[test]
+    fn test_chrome_with_url_vs_chrome_alone() {
+        let guard = ContaminationGuard::new();
+        // 1. Chrome on GitHub PayX repository
+        let input_repo = ContaminationCheckInput::new("myorg/PayX: Payment Engine", "ws_payx", "PayX")
+            .with_app("Google Chrome")
+            .with_domain("github.com")
+            .with_url("https://github.com/myorg/PayX")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec!["github.com".to_string()],
+                vec!["myorg/payx".to_string()],
+                vec!["Implement stripe webhook".to_string()],
+            );
+
+        let res1 = guard.assess(&input_repo);
+        assert!(!res1.is_contamination_risk);
+        assert!(!res1.should_reject_from_context);
+
+        // 2. Chrome alone (New Tab)
+        let input_alone = ContaminationCheckInput::new("New Tab", "ws_payx", "PayX")
+            .with_app("Google Chrome")
+            .with_workspace_details(
+                vec!["payx".to_string(), "billing".to_string()],
+                vec![],
+                vec!["myorg/payx".to_string()],
+                vec![],
+            );
+
+        let res2 = guard.assess(&input_alone);
+        assert!(res2.is_contamination_risk);
+        assert_eq!(res2.category, Some(ContaminationCategory::UncorroboratedCommonApplication));
+        assert!(res2.should_hold_in_inbox);
     }
 }
