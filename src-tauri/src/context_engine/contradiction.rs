@@ -18,6 +18,14 @@ pub enum ContradictionKind {
     CompetingContexts,
     /// Fresh recent activity contradicts older/decayed historical context associations
     TemporalConflict,
+    /// Unrelated streaming media or entertainment (YouTube, Spotify, Netflix) opened during active context
+    UnrelatedMediaOrEntertainment,
+    /// Unrelated generic web search query lacking semantic or task connection to context
+    UnrelatedSearchQuery,
+    /// Unrelated code repository or mismatched file opened during context
+    UnrelatedRepositoryOrFile,
+    /// Multi-purpose host application (Chrome, VS Code, Safari) with no corroborating contextual evidence
+    UncorroboratedApplication,
     /// Minor peripheral discrepancy (e.g. application or content type overlap with another workspace)
     PeripheralDiscrepancy,
 }
@@ -30,6 +38,10 @@ impl ContradictionKind {
             ContradictionKind::SemanticHistoryConflict => "semantic_history_conflict",
             ContradictionKind::CompetingContexts => "competing_contexts",
             ContradictionKind::TemporalConflict => "temporal_conflict",
+            ContradictionKind::UnrelatedMediaOrEntertainment => "unrelated_media_or_entertainment",
+            ContradictionKind::UnrelatedSearchQuery => "unrelated_search_query",
+            ContradictionKind::UnrelatedRepositoryOrFile => "unrelated_repository_or_file",
+            ContradictionKind::UncorroboratedApplication => "uncorroborated_application",
             ContradictionKind::PeripheralDiscrepancy => "peripheral_discrepancy",
         }
     }
@@ -42,6 +54,10 @@ impl ContradictionKind {
             ContradictionKind::SemanticHistoryConflict => 0.30,
             ContradictionKind::CompetingContexts => 0.30,
             ContradictionKind::TemporalConflict => 0.20,
+            ContradictionKind::UnrelatedMediaOrEntertainment => 0.50,
+            ContradictionKind::UnrelatedSearchQuery => 0.45,
+            ContradictionKind::UnrelatedRepositoryOrFile => 0.45,
+            ContradictionKind::UncorroboratedApplication => 0.30,
             ContradictionKind::PeripheralDiscrepancy => 0.05,
         }
     }
@@ -292,7 +308,124 @@ impl ContradictionAnalyzer {
         }
 
         // ---------------------------------------------------------------------
-        // 6. Weak Contradiction: Peripheral Discrepancy
+        // 6. Anti-Contamination: Entertainment, Unrelated Searches, Repos & Uncorroborated Apps
+        // ---------------------------------------------------------------------
+        for ev in evidence_set.by_category(EvidenceCategory::BrowserDomain) {
+            if let Some(domain) = ev.attributes.get("domain").and_then(|v| v.as_str()) {
+                let d_lower = domain.to_lowercase();
+                let is_media = d_lower.contains("youtube.com")
+                    || d_lower.contains("youtu.be")
+                    || d_lower.contains("netflix.com")
+                    || d_lower.contains("spotify.com")
+                    || d_lower.contains("twitch.tv")
+                    || d_lower.contains("tiktok.com");
+
+                let ws_name_lower = ws.name.to_lowercase();
+                let ws_has_media = ws_name_lower.contains("youtube")
+                    || ws_name_lower.contains("video")
+                    || ws_name_lower.contains("media")
+                    || ws_name_lower.contains("music")
+                    || ws_name_lower.contains("audio");
+
+                if is_media && !ws_has_media && !has_semantic_for_this {
+                    let desc = format!(
+                        "Entertainment activity on '{}' contradicts focus of '{}'",
+                        domain, ws.name
+                    );
+                    let strength = 0.85_f32;
+                    contradictions.push(ContradictoryEvidence {
+                        category: "unrelated_media_or_entertainment".to_string(),
+                        description: desc.clone(),
+                        penalty: ContradictionKind::UnrelatedMediaOrEntertainment.baseline_penalty(),
+                    });
+
+                    if strength > max_strength {
+                        max_strength = strength;
+                        primary_kind = Some(ContradictionKind::UnrelatedMediaOrEntertainment);
+                        primary_explanation = Some(desc);
+                    }
+                }
+
+                // Check generic search engine without topic overlap
+                let is_search = d_lower.contains("google.com")
+                    || d_lower.contains("bing.com")
+                    || d_lower.contains("duckduckgo.com");
+
+                if is_search && !has_semantic_for_this && !has_history_for_this {
+                    let desc = format!(
+                        "Generic search on '{}' lacks contextual connection to '{}'",
+                        domain, ws.name
+                    );
+                    let strength = 0.65_f32;
+                    contradictions.push(ContradictoryEvidence {
+                        category: "unrelated_search_query".to_string(),
+                        description: desc.clone(),
+                        penalty: ContradictionKind::UnrelatedSearchQuery.baseline_penalty(),
+                    });
+
+                    if strength > max_strength {
+                        max_strength = strength;
+                        primary_kind = Some(ContradictionKind::UnrelatedSearchQuery);
+                        primary_explanation = Some(desc);
+                    }
+                }
+
+                // Check code repository in non-coding workspace
+                let is_repo = d_lower.contains("github.com") || d_lower.contains("gitlab.com");
+                let ws_is_code = ws_name_lower.contains("code")
+                    || ws_name_lower.contains("dev")
+                    || ws_name_lower.contains("api")
+                    || ws_name_lower.contains("system")
+                    || ws_name_lower.contains("os")
+                    || ws_name_lower.contains("engine")
+                    || ws_name_lower.contains("app");
+
+                if is_repo && !ws_is_code && !has_semantic_for_this {
+                    let desc = format!(
+                        "Code repository on '{}' is unrelated to non-software context '{}'",
+                        domain, ws.name
+                    );
+                    let strength = 0.75_f32;
+                    contradictions.push(ContradictoryEvidence {
+                        category: "unrelated_repository_or_file".to_string(),
+                        description: desc.clone(),
+                        penalty: ContradictionKind::UnrelatedRepositoryOrFile.baseline_penalty(),
+                    });
+
+                    if strength > max_strength {
+                        max_strength = strength;
+                        primary_kind = Some(ContradictionKind::UnrelatedRepositoryOrFile);
+                        primary_explanation = Some(desc);
+                    }
+                }
+            }
+        }
+
+        // Check common application alone without corroboration
+        let only_app_contribution = contributions.len() == 1
+            && contributions.iter().any(|c| c.category == "source_app" && c.is_positive);
+
+        if only_app_contribution && !has_semantic_for_this && !has_history_for_this {
+            let desc = format!(
+                "Application identity alone without contextual corroboration for '{}'",
+                ws.name
+            );
+            let strength = 0.50_f32;
+            contradictions.push(ContradictoryEvidence {
+                category: "uncorroborated_application".to_string(),
+                description: desc.clone(),
+                penalty: ContradictionKind::UncorroboratedApplication.baseline_penalty(),
+            });
+
+            if strength > max_strength {
+                max_strength = strength;
+                primary_kind = Some(ContradictionKind::UncorroboratedApplication);
+                primary_explanation = Some(desc);
+            }
+        }
+
+        // ---------------------------------------------------------------------
+        // 7. Weak Contradiction: Peripheral Discrepancy
         // ---------------------------------------------------------------------
         if max_strength == 0.0 && raw_score >= 0.40 {
             // Check if source app or content type matches another workspace with items
@@ -615,5 +748,94 @@ mod tests {
         assert_eq!(report_a.contradiction_kind, Some(ContradictionKind::PeripheralDiscrepancy));
         assert_eq!(report_a.contradiction_strength, 0.20);
         assert!(report_a.confidence_penalty <= 0.10);
+    }
+
+    #[test]
+    fn test_unrelated_media_entertainment_contradiction() {
+        let mut evidence_set = ContextEvidenceSet::new("target_yt");
+        evidence_set.add(ContextEvidence::observed_domain("target_yt", "youtube.com", None, None));
+
+        let ws_payx = WorkspaceScoringContext::new("ws_payx", "PayX Billing Engine");
+        let analyzer = ContradictionAnalyzer::new();
+        let report = analyzer.analyze_candidate(
+            &evidence_set,
+            &ws_payx,
+            &[ws_payx.clone()],
+            0.20,
+            &[],
+            None,
+        );
+
+        assert_eq!(report.contradiction_kind, Some(ContradictionKind::UnrelatedMediaOrEntertainment));
+        assert_eq!(report.contradiction_strength, 0.85);
+        assert!(report.confidence_penalty >= 0.50);
+        assert!(report.contradiction_explanation.unwrap().contains("Entertainment activity"));
+    }
+
+    #[test]
+    fn test_unrelated_search_contradiction() {
+        let mut evidence_set = ContextEvidenceSet::new("target_search");
+        evidence_set.add(ContextEvidence::observed_domain("target_search", "google.com", None, None));
+
+        let ws_os = WorkspaceScoringContext::new("ws_os", "University OS assignment");
+        let analyzer = ContradictionAnalyzer::new();
+        let report = analyzer.analyze_candidate(
+            &evidence_set,
+            &ws_os,
+            &[ws_os.clone()],
+            0.15,
+            &[],
+            None,
+        );
+
+        assert_eq!(report.contradiction_kind, Some(ContradictionKind::UnrelatedSearchQuery));
+        assert_eq!(report.contradiction_strength, 0.65);
+        assert!(report.confidence_penalty >= 0.45);
+    }
+
+    #[test]
+    fn test_unrelated_repo_in_non_coding_workspace_contradiction() {
+        let mut evidence_set = ContextEvidenceSet::new("target_repo");
+        evidence_set.add(ContextEvidence::observed_domain("target_repo", "github.com", None, None));
+
+        let ws_tokyo = WorkspaceScoringContext::new("ws_tokyo", "Tokyo Trip");
+        let analyzer = ContradictionAnalyzer::new();
+        let report = analyzer.analyze_candidate(
+            &evidence_set,
+            &ws_tokyo,
+            &[ws_tokyo.clone()],
+            0.20,
+            &[],
+            None,
+        );
+
+        assert_eq!(report.contradiction_kind, Some(ContradictionKind::UnrelatedRepositoryOrFile));
+        assert_eq!(report.contradiction_strength, 0.75);
+        assert!(report.confidence_penalty >= 0.45);
+    }
+
+    #[test]
+    fn test_uncorroborated_app_contradiction() {
+        let evidence_set = ContextEvidenceSet::new("target_app");
+        let ws_payx = WorkspaceScoringContext::new("ws_payx", "PayX");
+        let analyzer = ContradictionAnalyzer::new();
+        let report = analyzer.analyze_candidate(
+            &evidence_set,
+            &ws_payx,
+            &[ws_payx.clone()],
+            0.20,
+            &[EvidenceContribution {
+                category: "source_app".to_string(),
+                raw_strength: 0.50,
+                weighted_score: 0.20,
+                description: "Same Chrome source app".to_string(),
+                is_positive: true,
+            }],
+            None,
+        );
+
+        assert_eq!(report.contradiction_kind, Some(ContradictionKind::UncorroboratedApplication));
+        assert_eq!(report.contradiction_strength, 0.50);
+        assert!(report.confidence_penalty >= 0.30);
     }
 }
