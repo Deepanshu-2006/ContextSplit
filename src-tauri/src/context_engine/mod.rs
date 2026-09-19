@@ -228,6 +228,8 @@ pub mod reconstruction_e2e_tests;
 #[cfg(test)]
 pub mod accuracy_dataset_tests;
 pub mod evaluator;
+#[cfg(test)]
+pub mod workday_simulation_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
