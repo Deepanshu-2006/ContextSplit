@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "contextsplit-context-accuracy-dataset",
+  "version": "1.0.0",
+  "description": "Deterministic synthetic evaluation dataset for ContextSplit context accuracy and false-context defense. DO NOT USE FOR TRAINING.",
+  "contexts": [
+    {
+      "id": "ws_payx",
+      "name": "PayX",
+      "category": "work_software",
+      "domains": ["payx.internal", "github.com/PayX", "stripe.com/docs"],
+      "repositories": ["PayX/payment-gateway", "PayX/payx-web"],
+      "root_paths": ["/Projects/PayX"],
+      "active_tasks": [
+        "Implement Stripe webhook retry logic",
+        "Fix checkout modal currency rendering"
+      ]
+    },
+    {
+      "id": "ws_contextsplit",
+      "name": "ContextSplit",
+      "category": "work_software",
+      "domains": ["contextsplit.app", "github.com/ContextSplit", "tauri.app"],
+      "repositories": ["ContextSplit/contextsplit-desktop"],
+      "root_paths": ["/Projects/ContextSplit"],
+      "active_tasks": [
+        "Enhance contextual transition detection",
+        "Add pending activity state machine"
+      ]
+    },
+    {
+      "id": "ws_swiftsend",
+      "name": "SwiftSend",
+      "category": "work_software",
+      "domains": ["swiftsend.io", "github.com/SwiftSend", "cloudinary.com", "firebase.google.com"],
+      "repositories": ["SwiftSend/swiftsend-core"],
+      "root_paths": ["/Projects/SwiftSend"],
+      "active_tasks": [
+        "Integrate Cloudinary chunked upload",
+        "Configure Firebase auth rules"
+      ]
+    },
+    {
+      "id": "ws_university_os",
+      "name": "University OS",
+      "category": "academic",
+      "domains": ["canvas.university.edu", "cs.university.edu"],
+      "repositories": ["University/cs342-os-scheduling"],
+      "root_paths": ["/Academic/CS342"],
+      "active_tasks": [
+        "Complete OS scheduling assignment 3",
+        "Review page replacement algorithms"
+      ]
+    },
+    {
+      "id": "ws_tokyo_trip",
+      "name": "Tokyo Trip",
+      "category": "personal_travel",
+      "domains": ["booking.com", "ana.co.jp", "google.com/maps", "japan-guide.com"],
+      "repositories": [],
+      "root_paths": ["/Personal/Travel/Tokyo"],
+      "active_tasks": [
+        "Book roundtrip flights to Haneda",
+        "Plan 5-day Tokyo sightseeing itinerary"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "case_clean_01_payx_arch",
+      "category": "clean",
+      "description": "PayX payment gateway architecture document in VS Code",
+      "activity": {
+        "title": "payment_architecture.ts — PayX — Visual Studio Code",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/PayX/src/payment_architecture.ts",
+        "content": "export class PaymentGatewayArchitecture {\n  async processTransaction(req: PaymentRequest) {}\n}",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_payx",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Direct workspace file path and project title keywords match PayX decisively."
+      }
+    },
+    {
+      "id": "case_clean_02_payx_frontend",
+      "category": "clean",
+      "description": "PayX React frontend checkout modal component",
+      "activity": {
+        "title": "CheckoutModal.tsx — PayX frontend",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/PayX/frontend/CheckoutModal.tsx",
+        "content": "export const CheckoutModal = ({ currency, amount }) => { return <div>PayX Secure Checkout</div>; };",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_payx",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Clear repository file path and component content matching PayX frontend task."
+      }
+    },
+    {
+      "id": "case_clean_03_contextsplit_engine",
+      "category": "clean",
+      "description": "ContextSplit context engine core logic",
+      "activity": {
+        "title": "mod.rs — context_engine — ContextSplit — VS Code",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/ContextSplit/src-tauri/src/context_engine/mod.rs",
+        "content": "pub mod transitions;\npub mod quality_guard;\npub mod pending_activity;",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_contextsplit",
+        "min_confidence": 0.90,
+        "can_alter_context_memory": true,
+        "explanation": "Exact repository root path and module hierarchy matching ContextSplit."
+      }
+    },
+    {
+      "id": "case_clean_04_contextsplit_launcher",
+      "category": "clean",
+      "description": "ContextSplit UI launcher component in TypeScript",
+      "activity": {
+        "title": "Launcher.tsx — ContextSplit Desktop UI",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/ContextSplit/src/components/Launcher.tsx",
+        "content": "export function Launcher() { return <div className='contextsplit-launcher'>Search Contexts</div>; }",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_contextsplit",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Direct source path and distinct component name belonging to ContextSplit."
+      }
+    },
+    {
+      "id": "case_clean_05_swiftsend_cloudinary",
+      "category": "clean",
+      "description": "SwiftSend Cloudinary upload integration component",
+      "activity": {
+        "title": "UploadComponent.tsx — SwiftSend Core",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/SwiftSend/src/components/UploadComponent.tsx",
+        "content": "import { uploadToCloudinary } from '../services/cloudinary';\nexport function UploadDropzone() {}",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_swiftsend",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "File path, Cloudinary import, and SwiftSend repository directory match decisively."
+      }
+    },
+    {
+      "id": "case_clean_06_university_os_scheduling",
+      "category": "clean",
+      "description": "University OS C++ round robin scheduling assignment",
+      "activity": {
+        "title": "scheduling_assignment.cpp — CS342 Operating Systems",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Academic/CS342/scheduling_assignment.cpp",
+        "content": "#include <iostream>\n#include <vector>\n// CS342 OS Assignment 3: Preemptive Round Robin Scheduler",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_university_os",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Academic path, course code CS342, and assignment title align with University OS context."
+      }
+    },
+    {
+      "id": "case_clean_07_tokyo_trip_flights",
+      "category": "clean",
+      "description": "Tokyo flight reservation on ANA Airlines",
+      "activity": {
+        "title": "ANA Sky Web — Haneda Flight Booking Confirmation #ANA892",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Roundtrip Flight: SFO -> HND (Tokyo Haneda International). Passenger Confirmation.",
+        "url": "https://www.ana.co.jp/en/us/booking/confirmation/ANA892",
+        "domain": "ana.co.jp"
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_tokyo_trip",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Direct flight confirmation domain and Tokyo destination keywords match Tokyo Trip."
+      }
+    },
+    {
+      "id": "case_clean_08_tokyo_trip_hotel",
+      "category": "clean",
+      "description": "Tokyo Shinjuku hotel reservation on Booking.com",
+      "activity": {
+        "title": "Booking.com: Hotel Gracery Shinjuku, Tokyo — Confirmed Reservation",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Hotel Gracery Shinjuku, Tokyo 160-0021. Check-in Oct 12, Check-out Oct 18.",
+        "url": "https://www.booking.com/hotel/jp/gracery-shinjuku.html",
+        "domain": "booking.com"
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_tokyo_trip",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Hotel reservation in Tokyo matching active itinerary task."
+      }
+    },
+    {
+      "id": "case_noisy_01_youtube_cat_video",
+      "category": "noisy",
+      "description": "Random entertainment YouTube video watched during work",
+      "activity": {
+        "title": "Funny Cat Videos Compilation 2026 — YouTube",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Watch hilarious cat moments and fails in full 4K.",
+        "url": "https://www.youtube.com/watch?v=cat_12345",
+        "domain": "youtube.com"
+      },
+      "expected": {
+        "status": "rejected",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Entertainment domain detour; must not contaminate any active context."
+      }
+    },
+    {
+      "id": "case_noisy_02_instagram_feed",
+      "category": "noisy",
+      "description": "Instagram social media scrolling",
+      "activity": {
+        "title": "Instagram",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Browse photos and reels from friends and trending creators.",
+        "url": "https://www.instagram.com/feed",
+        "domain": "instagram.com"
+      },
+      "expected": {
+        "status": "rejected",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Social media domain; contamination guard strictly suppresses."
+      }
+    },
+    {
+      "id": "case_noisy_03_shopping_mechanical_keyboard",
+      "category": "noisy",
+      "description": "Amazon shopping search for mechanical keyboard",
+      "activity": {
+        "title": "Amazon.com: Ergonomic Split Mechanical Keyboard RGB",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Hot-swappable tactile switches, USB-C split layout.",
+        "url": "https://www.amazon.com/dp/B08XYZ1234",
+        "domain": "amazon.com"
+      },
+      "expected": {
+        "status": "rejected",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Shopping website with zero topical relevance to active project tasks."
+      }
+    },
+    {
+      "id": "case_noisy_04_music_spotify",
+      "category": "noisy",
+      "description": "Background music listening on Spotify",
+      "activity": {
+        "title": "Spotify — Deep Focus Lo-Fi Coding Beats",
+        "app_name": "Spotify",
+        "file_path": null,
+        "content": "Ambient instrumental music playlist.",
+        "url": "https://open.spotify.com/playlist/lofi_focus",
+        "domain": "spotify.com"
+      },
+      "expected": {
+        "status": "rejected",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Background audio player; ephemeral entertainment excluded from context memory."
+      }
+    },
+    {
+      "id": "case_noisy_05_unrelated_linux_repo",
+      "category": "noisy",
+      "description": "Browsing Linux kernel repo out of curiosity while in PayX session",
+      "activity": {
+        "title": "torvalds/linux: Linux kernel source tree — GitHub",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "The Linux kernel source code repository.",
+        "url": "https://github.com/torvalds/linux",
+        "domain": "github.com"
+      },
+      "expected": {
+        "status": "rejected",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Unrelated GitHub repository not belonging to PayX or ContextSplit."
+      }
+    },
+    {
+      "id": "case_ambiguous_01_github_root",
+      "category": "ambiguous",
+      "description": "User opens GitHub homepage without repository details",
+      "activity": {
+        "title": "GitHub: Let's build from here",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Dashboard feed of followed organizations and trending repositories.",
+        "url": "https://github.com/",
+        "domain": "github.com"
+      },
+      "expected": {
+        "status": "ambiguous",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Both PayX, ContextSplit, and SwiftSend use GitHub; must hold pending without arbitrary assignment."
+      }
+    },
+    {
+      "id": "case_ambiguous_02_vscode_empty",
+      "category": "ambiguous",
+      "description": "VS Code launched on blank untitled document",
+      "activity": {
+        "title": "Untitled-1 — Visual Studio Code",
+        "app_name": "Visual Studio Code",
+        "file_path": null,
+        "content": "",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "pending",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Application identity only; insufficient evidence to attribute to any specific project."
+      }
+    },
+    {
+      "id": "case_ambiguous_03_terminal_prompt",
+      "category": "ambiguous",
+      "description": "Terminal in home directory without contextual commands",
+      "activity": {
+        "title": "zsh — ~ — 80x24",
+        "app_name": "Terminal",
+        "file_path": "/Users/user",
+        "content": "Last login: Sat Sep 20 01:25:00 on ttys001\nuser@MacBook-Pro ~ %",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "pending",
+        "workspace_id": null,
+        "min_confidence": 0.0,
+        "can_alter_context_memory": false,
+        "explanation": "Generic terminal root shell; unassigned until project directory or task command is executed."
+      }
+    },
+    {
+      "id": "case_misleading_01_vscode_for_university",
+      "category": "misleading_application",
+      "description": "VS Code used for University OS assignment instead of commercial coding projects",
+      "activity": {
+        "title": "page_replacement.cpp — CS342 Operating Systems — VS Code",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Academic/CS342/src/page_replacement.cpp",
+        "content": "#include <iostream>\n// FIFO and LRU page replacement simulation for CS342",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_university_os",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Must NOT falsely assign to PayX or ContextSplit just because VS Code is open; file path proves University OS."
+      }
+    },
+    {
+      "id": "case_misleading_02_chrome_for_tokyo",
+      "category": "misleading_application",
+      "description": "Chrome used for personal travel planning during day hours",
+      "activity": {
+        "title": "Tokyo 5-Day Sightseeing Itinerary: Shibuya, Asakusa, Akihabara — Japan Guide",
+        "app_name": "Google Chrome",
+        "file_path": null,
+        "content": "Complete guide to exploring Tokyo highlights in 5 days.",
+        "url": "https://www.japan-guide.com/e/e2164_itinerary_5d.html",
+        "domain": "japan-guide.com"
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_tokyo_trip",
+        "min_confidence": 0.80,
+        "can_alter_context_memory": true,
+        "explanation": "Must NOT attach to active work project just because Chrome is currently active; content dictates Tokyo Trip."
+      }
+    },
+    {
+      "id": "case_duplicate_01_repeated_event",
+      "category": "duplicate",
+      "description": "Rapid focus bounce generating identical window events",
+      "activity": {
+        "title": "payment_architecture.ts — PayX — Visual Studio Code",
+        "app_name": "Visual Studio Code",
+        "file_path": "/Projects/PayX/src/payment_architecture.ts",
+        "content": "export class PaymentGatewayArchitecture {}",
+        "url": null,
+        "domain": null
+      },
+      "expected": {
+        "status": "assigned",
+        "workspace_id": "ws_payx",
+        "min_confidence": 0.85,
+        "can_alter_context_memory": true,
+        "explanation": "Duplicate event should seamlessly deduplicate without state jitter."
+      }
+    },
+    {
+      "id": "case_switch_01_payx_to_contextsplit_sequence",
+      "category": "context_switch",
+      "description": "Corroborated sequence transitioning focus from PayX to ContextSplit",
+      "sequence": [
+        {
+          "step": 1,
+          "title": "PayX Checkout API — PayX",
+          "file_path": "/Projects/PayX/src/payment_architecture.ts",
+          "expected_context": "ws_payx"
+        },
+        {
+          "step": 2,
+          "title": "ContextSplit Repository — contextsplit-desktop — GitHub",
+          "url": "https://github.com/ContextSplit/contextsplit-desktop",
+          "expected_context": "ws_contextsplit"
+        },
+        {
+          "step": 3,
+          "title": "transitions.rs — ContextSplit — VS Code",
+          "file_path": "/Projects/ContextSplit/src-tauri/src/context_engine/transitions.rs",
+          "expected_context": "ws_contextsplit"
+        }
+      ],
+      "expected": {
+        "final_context": "ws_contextsplit",
+        "transition_type": "ContextSwitch",
+        "explanation": "Corroborated sequence of repo switch + file change confirms legitimate context transition."
+      }
+    },
+    {
+      "id": "case_delayed_01_github_resolved_to_swiftsend",
+      "category": "delayed_evidence",
+      "description": "Generic GitHub tab followed 30s later by SwiftSend repo commit view",
+      "event_initial": {
+        "id": "delayed_evt_1",
+        "title": "GitHub: Dashboard",
+        "app_name": "Google Chrome",
+        "domain": "github.com",
+        "initial_status": "ambiguous"
+      },
+      "event_decisive": {
+        "id": "delayed_evt_2",
+        "title": "SwiftSend/swiftsend-core: UploadComponent commit #7f8a1 — GitHub",
+        "app_name": "Google Chrome",
+        "domain": "github.com",
+        "url": "https://github.com/SwiftSend/swiftsend-core/commit/7f8a1",
+        "workspace_id": "ws_swiftsend"
+      },
+      "expected": {
+        "initial_event_resolved_workspace_id": "ws_swiftsend",
+        "initial_event_final_status": "assigned",
+        "explanation": "Subsequent SwiftSend repository navigation provides delayed backward corroboration."
+      }
+    }
+  ]
+}
