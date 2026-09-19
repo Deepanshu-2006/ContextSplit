@@ -40,6 +40,12 @@ pub mod reconstruction;
 pub mod quality_guard;
 pub mod contamination;
 pub mod ambiguity;
+pub mod pending_activity;
+
+pub use pending_activity::{
+    ActivityEvidenceSignal, ContextualActivityStatus, PendingActivityConfig,
+    PendingActivityManager, PendingContextualActivity,
+};
 
 pub use ambiguity::{
     AmbiguityConfig, AmbiguityDecision, AmbiguityEvaluationInput, AmbiguityManager,
