@@ -1172,6 +1172,12 @@ pub fn dismiss_membership(
 ) -> Result<super::models::ContextMembership> {
     let mem = create_or_update_membership(conn, item_id, workspace_id, "dismissed", 0.0, "user")?;
     
+    // Clear physical workspace assignment if filed to this workspace
+    let _ = conn.execute(
+        "UPDATE items SET workspace_id = NULL, updated_at = ?1 WHERE id = ?2 AND workspace_id = ?3",
+        params![Utc::now().to_rfc3339(), item_id, workspace_id],
+    );
+
     // Also record user feedback signal
     let now = Utc::now().to_rfc3339();
     let signal_id = Uuid::new_v4().to_string();
@@ -1188,8 +1194,9 @@ pub fn dismiss_membership(
         params![signal_id, workspace_id, item_id, payload, now],
     );
 
-    // Invalidate memory cache for this workspace
+    // Invalidate caches for this workspace
     crate::context_engine::memory::invalidate_memory_cache(Some(workspace_id));
+    crate::context_engine::workset::invalidate_workset_cache(Some(workspace_id));
 
     Ok(mem)
 }

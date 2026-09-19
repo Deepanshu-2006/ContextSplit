@@ -41,6 +41,12 @@ pub mod quality_guard;
 pub mod contamination;
 pub mod ambiguity;
 pub mod pending_activity;
+pub mod correction;
+
+pub use correction::{
+    ContextCorrectionService, CorrectionDefenseVerdict, CorrectionEvidenceSignature,
+    CorrectionFeedbackRecord,
+};
 
 pub use pending_activity::{
     ActivityEvidenceSignal, ContextualActivityStatus, DelayedResolutionConfig,
