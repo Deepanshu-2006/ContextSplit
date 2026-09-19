@@ -927,6 +927,27 @@ impl ContaminationGuard {
         item_id: &str,
         target_workspace_id: &str,
     ) -> Result<ContaminationDefenseResult, String> {
+        let semantic_score = crate::context_engine::scoring::evaluate_item_context(conn, item_id)
+            .ok()
+            .and_then(|interp| {
+                interp
+                    .existing_workspaces
+                    .iter()
+                    .find(|w| w.workspace_id == target_workspace_id)
+                    .map(|w| w.score)
+            })
+            .unwrap_or(0.0);
+        self.assess_from_db_with_semantic_score(conn, item_id, target_workspace_id, semantic_score)
+    }
+
+    /// Optimized version that reuses an already-computed semantic relevance score.
+    pub fn assess_from_db_with_semantic_score(
+        &self,
+        conn: &Connection,
+        item_id: &str,
+        target_workspace_id: &str,
+        semantic_score: f64,
+    ) -> Result<ContaminationDefenseResult, String> {
         let item = crate::db::operations::get_item(conn, item_id).map_err(|e| e.to_string())?;
         let workspace =
             crate::db::operations::get_workspace(conn, target_workspace_id).map_err(|e| e.to_string())?;
@@ -960,25 +981,13 @@ impl ContaminationGuard {
 
         // Active task candidates
         let mut active_tasks = Vec::new();
-        if let Ok(mut stmt) = conn.prepare("SELECT name FROM task_candidates WHERE workspace_id = ?1 AND status = 'active'") {
+        if let Ok(mut stmt) = conn.prepare("SELECT title FROM task_candidates WHERE context_id = ?1 AND status = 'active'") {
             if let Ok(rows) = stmt.query_map(params![target_workspace_id], |r| r.get::<_, String>(0)) {
                 for task_name in rows.flatten() {
                     active_tasks.push(task_name);
                 }
             }
         }
-
-        // Semantic similarity
-        let semantic_score = crate::context_engine::scoring::evaluate_item_context(conn, item_id)
-            .ok()
-            .and_then(|interp| {
-                interp
-                    .existing_workspaces
-                    .iter()
-                    .find(|w| w.workspace_id == target_workspace_id)
-                    .map(|w| w.score)
-            })
-            .unwrap_or(0.0);
 
         // Metadata extraction
         let meta: Value = serde_json::from_str(&item.metadata).unwrap_or(Value::Null);

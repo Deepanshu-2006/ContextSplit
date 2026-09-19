@@ -230,6 +230,8 @@ pub mod accuracy_dataset_tests;
 pub mod evaluator;
 #[cfg(test)]
 pub mod workday_simulation_tests;
+#[cfg(test)]
+pub mod quality_guard_performance_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

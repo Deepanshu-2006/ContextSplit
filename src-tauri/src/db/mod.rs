@@ -527,6 +527,31 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 24;
     }
 
+    if user_version < 25 {
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_session_id ON items(session_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_signals_workspace_created ON context_signals(workspace_id, created_at DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_candidates_context_status ON task_candidates(context_id, status)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_context_memberships_item_ws_type ON context_memberships(item_id, workspace_id, membership_type)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC)",
+            [],
+        )?;
+
+        user_version = 25;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

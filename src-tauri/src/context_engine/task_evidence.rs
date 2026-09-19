@@ -701,17 +701,13 @@ impl TaskEvidenceCollector {
 
         let window_start = (Utc::now() - chrono::Duration::seconds(self.options.time_window_seconds)).to_rfc3339();
 
-        // 1. Fetch recent Items associated with this context (bounded with indexed UNION)
+        // 1. Fetch recent Items associated with this context (bounded with indexed query)
         let mut item_stmt = conn.prepare(
             "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
              FROM items i
-             WHERE i.workspace_id = ?1 AND i.created_at >= ?2
-             UNION
-             SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
-             FROM items i
-             JOIN context_memberships cm ON i.id = cm.item_id
-             WHERE cm.workspace_id = ?1 AND i.created_at >= ?2
-             ORDER BY created_at DESC
+             WHERE (i.workspace_id = ?1 OR i.id IN (SELECT item_id FROM context_memberships WHERE workspace_id = ?1))
+               AND i.created_at >= ?2
+             ORDER BY i.created_at DESC
              LIMIT ?3",
         )?;
 

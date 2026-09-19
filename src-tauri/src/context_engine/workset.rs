@@ -786,12 +786,8 @@ impl ContextWorksetBuilder {
             "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
              FROM items i
              WHERE i.workspace_id = ?1
-             UNION
-             SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
-             FROM items i
-             JOIN context_memberships cm ON i.id = cm.item_id
-             WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'
-             ORDER BY created_at DESC LIMIT 50",
+                OR i.id IN (SELECT item_id FROM context_memberships WHERE workspace_id = ?1 AND membership_type = 'confirmed')
+             ORDER BY i.created_at DESC LIMIT 50",
         ) {
             if let Ok(rows) = item_stmt.query_map(params![workspace_id], |row| {
                 Ok(Item {

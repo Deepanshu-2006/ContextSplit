@@ -893,7 +893,7 @@ impl ContextQualityGuard {
         let task_relevance: f64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_candidates
-                 WHERE workspace_id = ?1 AND status = 'active'",
+                 WHERE context_id = ?1 AND status = 'active'",
                 params![target_workspace_id],
                 |r| r.get::<_, i64>(0),
             )
@@ -940,9 +940,9 @@ impl ContextQualityGuard {
             + (if same_session { 0.30 } else { 0.0 })
             + (item_relationships * 0.20);
 
-        // 10. Anti-contamination defense check
+        // 10. Anti-contamination defense check (reuse pre-computed semantic relevance to avoid redundant scoring)
         let contamination_eval = ContaminationGuard::new()
-            .assess_from_db(conn, item_id, target_workspace_id)
+            .assess_from_db_with_semantic_score(conn, item_id, target_workspace_id, semantic_relevance)
             .unwrap_or_default();
 
         let input = QualityGuardInput::new(item.title.unwrap_or_default())

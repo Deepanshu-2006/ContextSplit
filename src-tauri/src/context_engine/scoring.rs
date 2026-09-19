@@ -1034,11 +1034,14 @@ pub fn evaluate_item_context(
         let clamped_score = (res.total_score as f64).clamp(0.0, 1.0);
         let clamped_confidence = (res.confidence as f64).clamp(0.0, 1.0);
 
-        let contextual_reasons = crate::context_engine::explanation::get_concise_explanations(conn, item_id, &res.context_id);
-        let final_reasons = if !contextual_reasons.is_empty() && clamped_score >= 0.20 {
-            contextual_reasons
-        } else if !res.strongest_reasons.is_empty() {
-            res.strongest_reasons.clone()
+        let explanation = crate::context_engine::explanation::explain_from_score_result(
+            &evidence_set,
+            res,
+            "suggested",
+            item_id,
+        );
+        let final_reasons = if !explanation.why_reasons.is_empty() {
+            explanation.why_reasons
         } else {
             vec![format!("Baseline comparison with minimal contextual overlap with {}.", res.context_name)]
         };
