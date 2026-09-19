@@ -43,8 +43,9 @@ pub mod ambiguity;
 pub mod pending_activity;
 
 pub use pending_activity::{
-    ActivityEvidenceSignal, ContextualActivityStatus, PendingActivityConfig,
-    PendingActivityManager, PendingContextualActivity,
+    ActivityEvidenceSignal, ContextualActivityStatus, DelayedResolutionConfig,
+    DelayedResolutionResult, PendingActivityConfig, PendingActivityManager,
+    PendingContextualActivity,
 };
 
 pub use ambiguity::{
