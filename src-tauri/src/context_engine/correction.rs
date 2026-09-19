@@ -390,6 +390,7 @@ impl ContextCorrectionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::ContextMembership;
     use crate::db::operations::{create_item, create_or_update_membership, create_workspace};
 
     fn setup_test_db() -> Connection {
