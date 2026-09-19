@@ -37,6 +37,12 @@ pub mod workset;
 pub mod context_state;
 pub mod snapshot;
 pub mod reconstruction;
+pub mod quality_guard;
+
+pub use quality_guard::{
+    ContextQualityGuard, QualityGuardConfig, QualityGuardDecision, QualityGuardDimensionScores,
+    QualityGuardInput, QualityGuardResult,
+};
 
 pub use reconstruction::{
     CachedReconstructionEntry, ContextReconstruction, ContextReconstructionBuilder,
