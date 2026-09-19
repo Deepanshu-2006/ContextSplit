@@ -232,6 +232,8 @@ pub mod evaluator;
 pub mod workday_simulation_tests;
 #[cfg(test)]
 pub mod quality_guard_performance_tests;
+#[cfg(test)]
+pub mod phase1_e2e_validation_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

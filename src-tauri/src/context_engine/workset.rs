@@ -178,6 +178,22 @@ pub fn is_accidental_capture(
         return true;
     }
 
+    if item_type == "clipboard" {
+        // Ephemeral numeric OTP / verification code / 2FA / tokens
+        if trimmed.chars().all(|c| c.is_ascii_digit()) && trimmed.len() >= 4 && trimmed.len() <= 8 {
+            return true;
+        }
+        let t_lower = t.to_lowercase();
+        if t_lower.contains("one-time password")
+            || t_lower.contains("verification code")
+            || t_lower.contains("otp")
+            || t_lower.contains("2fa")
+            || t_lower.contains("password")
+        {
+            return true;
+        }
+    }
+
     false
 }
 

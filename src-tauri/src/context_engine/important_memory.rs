@@ -572,6 +572,11 @@ impl ContextImportantMemoryBuilder {
                     continue;
                 }
 
+                // Filter out accidental captures/ephemeral tokens even if confirmed
+                if is_accidental_capture(&item_type, title_opt.as_deref(), &content, false) {
+                    continue;
+                }
+
                 confirmed_item_ids.insert(item_id.clone());
 
                 let raw_title = title_opt.unwrap_or_else(|| {
