@@ -227,6 +227,7 @@ pub mod memory_refinement_e2e_tests;
 pub mod reconstruction_e2e_tests;
 #[cfg(test)]
 pub mod accuracy_dataset_tests;
+pub mod evaluator;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
