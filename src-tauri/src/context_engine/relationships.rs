@@ -46,6 +46,56 @@ pub fn generate_semantic_relationships(ce: &crate::context_engine::engine::Conte
 }
 
 
+pub fn is_common_host_app(app: &str) -> bool {
+    let lower = app.to_lowercase();
+    const HOST_APPS: &[&str] = &[
+        "code", "visual studio code", "vscode", "cursor", "windsurf", "zed", "sublime text", "textedit", "atom",
+        "google chrome", "chrome", "safari", "arc", "brave", "brave browser", "edge", "microsoft edge", "firefox", "opera", "vivaldi",
+        "figma", "canva", "sketch", "adobe xd", "photoshop", "illustrator",
+        "terminal", "iterm2", "iterm", "alacritty", "kitty", "warp", "hyper",
+        "github desktop", "gitkraken", "sourcetree", "xcode", "android studio", "intellij", "pycharm", "webstorm", "clion", "goland", "rustrover",
+        "postman", "insomnia", "tableplus", "dbeaver",
+        "slack", "discord", "notion", "obsidian", "teams",
+    ];
+    HOST_APPS.iter().any(|h| lower.contains(h) || h.contains(&lower.as_str()))
+}
+
+pub fn extract_project_root(path: Option<&str>, title: Option<&str>) -> Option<String> {
+    if let Some(p) = path {
+        let clean = p.replace('\\', "/");
+        // Look for common project folder patterns like /Projects/Name, /workspace/Name, /repos/Name
+        for marker in &["/projects/", "/workspace/", "/repos/", "/code/", "/dev/", "/work/", "/src/"] {
+            if let Some(pos) = clean.to_lowercase().find(marker) {
+                let after = &clean[pos + marker.len()..];
+                let proj = after.split('/').next().unwrap_or("").trim();
+                if !proj.is_empty() {
+                    return Some(proj.to_string());
+                }
+            }
+        }
+        // Fallback: parent folder of file
+        let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.len() >= 2 {
+            return Some(parts[parts.len() - 2].to_string());
+        }
+    }
+
+    if let Some(t) = title {
+        // Look for "main.rs — PayX — Visual Studio Code" or "PayX - index.ts"
+        if t.contains(" — ") {
+            let parts: Vec<&str> = t.split(" — ").collect();
+            if parts.len() >= 2 {
+                let candidate = parts[parts.len() - 2].trim();
+                if !candidate.is_empty() && !candidate.contains('.') && candidate.len() < 40 {
+                    return Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<(), String> {
     let min_threshold = 0.3;
     let time_window_secs = 86400; // 24 hours
@@ -82,10 +132,14 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
             }
         }
     }
+
+    let new_meta: Value = serde_json::from_str(&new_item.metadata).unwrap_or(Value::Null);
+    let new_file_path = new_meta.get("file_path").or_else(|| new_meta.get("path")).and_then(|p| p.as_str());
+    let new_proj = extract_project_root(new_file_path, new_item.title.as_deref());
     
     // Fetch recent items
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, session_id, created_at FROM items 
+        "SELECT id, workspace_id, session_id, created_at, title, metadata FROM items 
          WHERE created_at >= ?1 AND id != ?2"
     ).map_err(|e| e.to_string())?;
     
@@ -95,11 +149,13 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
         ))
     }).map_err(|e| e.to_string())?;
     
     for row in iter {
-        if let Ok((recent_id, recent_ws_id, recent_session_id, recent_created_at)) = row {
+        if let Ok((recent_id, recent_ws_id, recent_session_id, recent_created_at, recent_title, recent_meta_str)) = row {
             let mut score: f64 = 0.0;
             let mut reasons = Vec::new();
             
@@ -120,7 +176,6 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
             }
             
             // 3. Time Proximity (+0.2)
-            // Parse created_at
             if let (Ok(n_time), Ok(r_time)) = (
                 new_item.created_at.parse::<DateTime<Utc>>(),
                 recent_created_at.parse::<DateTime<Utc>>()
@@ -129,6 +184,22 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
                 if diff <= 300 { // 5 minutes
                     score += 0.2;
                     reasons.push("temporal_proximity");
+                }
+            }
+
+            // 4. Project Path & Repository Disambiguation
+            let r_meta: Value = serde_json::from_str(&recent_meta_str).unwrap_or(Value::Null);
+            let r_file_path = r_meta.get("file_path").or_else(|| r_meta.get("path")).and_then(|p| p.as_str());
+            let recent_proj = extract_project_root(r_file_path, recent_title.as_deref());
+
+            if let (Some(ref n_p), Some(ref r_p)) = (&new_proj, &recent_proj) {
+                if n_p.eq_ignore_ascii_case(r_p) {
+                    score += 0.40;
+                    reasons.push("same_project_path");
+                } else {
+                    // Explicit conflicting project paths in same host app
+                    score -= 0.50;
+                    reasons.push("conflicting_project_path");
                 }
             }
             
@@ -143,7 +214,9 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
                             if let Ok(payload) = serde_json::from_str::<Value>(&sig.payload) {
                                 if let Some(r_app) = payload.get("app_name").and_then(|v| v.as_str()) {
                                     if n_app == r_app {
-                                        score += 0.3;
+                                        // Common host apps are supporting evidence only (+0.05), specialized apps get (+0.15)
+                                        let app_weight = if is_common_host_app(n_app) { 0.05 } else { 0.15 };
+                                        score += app_weight;
                                         reasons.push("same_source_app");
                                     }
                                 }
@@ -164,7 +237,7 @@ pub fn generate_relationships(conn: &Connection, new_item_id: &str) -> Result<()
                 }
             }
             
-            score = score.min(1.0);
+            score = score.clamp(0.0, 1.0);
             
             if score >= min_threshold {
                 let primary_reason = if reasons.is_empty() { "related".to_string() } else { reasons[0].to_string() };
@@ -246,9 +319,10 @@ mod tests {
     }
     
     #[test]
-    fn test_relationships_same_app() {
+    fn test_relationships_same_app_alone_insufficient_for_common_host_app() {
         let conn = setup_in_memory_db();
         
+        // Two items in Google Chrome without shared domain, project, or session
         let i1 = create_item(&conn, None, None, "text", "test", None, "{}").unwrap();
         let p1 = serde_json::json!({"app_name": "Google Chrome"}).to_string();
         create_context_signal(&conn, None, Some(&i1.id), "active_app", None, &p1).unwrap();
@@ -260,11 +334,53 @@ mod tests {
         generate_relationships(&conn, &i2.id).unwrap();
         
         let rels = get_item_relationships(&conn, &i2.id).unwrap();
-        assert_eq!(rels.len(), 1);
+        // Common host app (+0.05) + temporal proximity (+0.20) = 0.25 < min_threshold (0.30)
+        assert_eq!(rels.len(), 0);
+    }
+
+    #[test]
+    fn test_relationships_same_project_path_in_vscode_connects_strongly() {
+        let conn = setup_in_memory_db();
         
-        let score = rels[0].strength;
-        // Same App (0.3) + Time Proximity (0.2) = 0.5
-        assert!((score - 0.5).abs() < f64::EPSILON);
+        let meta1 = serde_json::json!({"file_path": "/Users/user/Projects/PayX/src/billing.rs"}).to_string();
+        let i1 = create_item(&conn, None, None, "code", "fn bill() {}", Some("billing.rs — PayX"), &meta1).unwrap();
+        let p1 = serde_json::json!({"app_name": "Visual Studio Code"}).to_string();
+        create_context_signal(&conn, None, Some(&i1.id), "active_app", None, &p1).unwrap();
+        
+        let meta2 = serde_json::json!({"file_path": "/Users/user/Projects/PayX/src/webhook.rs"}).to_string();
+        let i2 = create_item(&conn, None, None, "code", "fn hook() {}", Some("webhook.rs — PayX"), &meta2).unwrap();
+        let p2 = serde_json::json!({"app_name": "Visual Studio Code"}).to_string();
+        create_context_signal(&conn, None, Some(&i2.id), "active_app", None, &p2).unwrap();
+        
+        generate_relationships(&conn, &i2.id).unwrap();
+        
+        let rels = get_item_relationships(&conn, &i2.id).unwrap();
+        assert_eq!(rels.len(), 1);
+        // Same project path (0.40) + Time Proximity (0.20) + supporting app (0.05) = 0.65
+        assert!(rels[0].strength >= 0.60);
+    }
+
+    #[test]
+    fn test_relationships_differing_project_paths_in_vscode_prevented_from_connecting() {
+        let conn = setup_in_memory_db();
+        
+        // i1 in PayX
+        let meta1 = serde_json::json!({"file_path": "/Users/user/Projects/PayX/src/billing.rs"}).to_string();
+        let i1 = create_item(&conn, None, None, "code", "fn bill() {}", Some("billing.rs — PayX"), &meta1).unwrap();
+        let p1 = serde_json::json!({"app_name": "Visual Studio Code"}).to_string();
+        create_context_signal(&conn, None, Some(&i1.id), "active_app", None, &p1).unwrap();
+        
+        // i2 in ContextSplit
+        let meta2 = serde_json::json!({"file_path": "/Users/user/Projects/ContextSplit/src/main.rs"}).to_string();
+        let i2 = create_item(&conn, None, None, "code", "fn main() {}", Some("main.rs — ContextSplit"), &meta2).unwrap();
+        let p2 = serde_json::json!({"app_name": "Visual Studio Code"}).to_string();
+        create_context_signal(&conn, None, Some(&i2.id), "active_app", None, &p2).unwrap();
+        
+        generate_relationships(&conn, &i2.id).unwrap();
+        
+        let rels = get_item_relationships(&conn, &i2.id).unwrap();
+        // Conflict penalty prevents false relationship
+        assert_eq!(rels.len(), 0);
     }
     
     #[test]
