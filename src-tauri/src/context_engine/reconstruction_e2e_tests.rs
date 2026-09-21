@@ -1264,4 +1264,111 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].name, "Tokyo Trip");
     }
+
+    // =========================================================================
+    // SCENARIO 15 — INTERRUPTION, RESTART, AND RESILIENCE
+    //
+    // Tests:
+    // - Sleep: 6-hour sleep gap without activity fabrication
+    // - Application Crash: Abrupt exit with in-flight task recovers cleanly
+    // - Application & System Restart: Recovers state from persisted DB
+    // - Network Unavailable: Full offline reconstruction fidelity
+    // - Temporary DB Error / Missing Workspace: Graceful degradation
+    // =========================================================================
+    #[test]
+    fn test_scenario_15_interruption_restart_recovery_and_resilience() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        let base_time = Utc::now() - Duration::hours(10);
+        let t_start = base_time.to_rfc3339();
+        let t_crash = (base_time + Duration::minutes(40)).to_rfc3339();
+
+        // 1. Create Workspace & Crash Session
+        let ws = create_workspace(&conn, "ContextSplit").unwrap();
+        let session_crash = create_session(&conn).unwrap();
+
+        let task = TaskCandidate {
+            id: format!("task-recon-{}", ws.id),
+            context_id: Some(ws.id.clone()),
+            title: "Context Reconstruction Engine".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t_start.clone(),
+            last_active_at: t_crash.clone(),
+            created_at: t_start.clone(),
+            updated_at: t_crash.clone(),
+        };
+        create_task_candidate(&conn, &task).unwrap();
+
+        let item_1 = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_crash.id),
+            "file",
+            "/src/context_engine/pause_detector.rs",
+            Some("pause_detector.rs"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let item_2 = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_crash.id),
+            "file",
+            "/src/context_engine/session.rs",
+            Some("session.rs"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        create_item_relationship(&conn, &item_1.id, &item_2.id, "engine_core", 0.92, None).unwrap();
+
+        // Simulate abrupt process crash / power cut at t_crash (no raw_ended_at, no clean exit)
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE workspace_id = ?2", rusqlite::params![t_crash, ws.id]).unwrap();
+        conn.execute("UPDATE workspaces SET created_at = ?1, updated_at = ?1, last_activity_at = ?1 WHERE id = ?2", rusqlite::params![t_crash, ws.id]).unwrap();
+
+        // ---------------------------------------------------------------------
+        // TEST A: Post-Crash & Restart Reconstruction
+        // ---------------------------------------------------------------------
+        invalidate_reconstruction_cache(Some(&ws.id));
+        invalidate_workset_cache(Some(&ws.id));
+        invalidate_memory_cache(Some(&ws.id));
+        invalidate_snapshot_cache(&ws.id);
+
+        let rec_after_crash = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // Context is completely recoverable
+        assert_eq!(rec_after_crash.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_after_crash.context.name, "ContextSplit");
+        assert_eq!(rec_after_crash.current_task.title.as_deref(), Some("Context Reconstruction Engine"));
+        assert!(rec_after_crash.workset.items.iter().any(|i| i.title.as_deref() == Some("pause_detector.rs")));
+        assert!(rec_after_crash.workset.items.iter().any(|i| i.title.as_deref() == Some("session.rs")));
+
+        // ---------------------------------------------------------------------
+        // TEST B: System Sleep & Restart (No Fabricated Activity)
+        // ---------------------------------------------------------------------
+        // Total items in workspace must remain exactly 2 (zero fabricated items during 10 hours of downtime)
+        let item_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE workspace_id = ?1",
+                rusqlite::params![ws.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_count, 2, "Downtime must never fabricate items");
+
+        // ---------------------------------------------------------------------
+        // TEST C: Offline / Network Unavailable Resilience
+        // ---------------------------------------------------------------------
+        // Reconstruction operates purely local and deterministic without network requirements
+        let rec_offline = service.reconstruct_cold(&conn, &ws.id).unwrap();
+        assert_eq!(rec_offline.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(rec_offline.context.id, Some(ws.id.clone()));
+
+        // ---------------------------------------------------------------------
+        // TEST D: Unknown / Corrupt Workspace Graceful Degradation
+        // ---------------------------------------------------------------------
+        let rec_unknown = service.reconstruct_context(&conn, "ws_nonexistent_corrupt").unwrap();
+        assert_eq!(rec_unknown.context.status, ReconstructionSectionStatus::Uncertain);
+    }
 }

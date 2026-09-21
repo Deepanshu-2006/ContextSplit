@@ -332,8 +332,8 @@ impl ContextSessionEvaluator {
         // ---------------------------------------------------------------------
         // Semantic State Determination
         // ---------------------------------------------------------------------
-        let (state, effective_ended_at) = if is_micro && input.raw_ended_at.is_none() && seconds_since_last_act > cfg.active_recency_threshold_secs {
-            // Scant activity and long silence -> Partial session
+        let (state, effective_ended_at) = if meaningful_count == 0 && input.raw_ended_at.is_none() {
+            // Zero meaningful activity -> Partial micro-noise session
             (ContextSessionState::Partial, None)
         } else if input.is_resumed_context {
             // Resumed working session segment
@@ -760,5 +760,126 @@ mod tests {
         assert_eq!(session, deserialized);
         assert_eq!(deserialized.session_id, "sess_json");
         assert_eq!(deserialized.session_state, ContextSessionState::Completed);
+    }
+
+    #[test]
+    fn test_system_sleep_interruption_does_not_inflate_duration_or_fabricate_activity() {
+        // Active work for 30 minutes, then machine went to sleep for 8 hours
+        let items = vec![
+            make_test_item("1", "pause_detector.rs", "fn detect_pause()", "document_edit", Some("/src/pause_detector.rs")),
+            make_test_item("2", "lifecycle.rs", "pub enum ContextLifecycleState", "document_edit", Some("/src/lifecycle.rs")),
+        ];
+
+        let ref_now = DateTime::parse_from_rfc3339("2026-09-22T08:30:00Z").unwrap().with_timezone(&Utc);
+
+        let input = SessionEvaluationInput {
+            session_id: "sess_sleep",
+            context_id: "ws_contextsplit",
+            context_name: Some("ContextSplit"),
+            raw_started_at: "2026-09-22T00:00:00Z",
+            raw_last_activity_at: "2026-09-22T00:30:00Z", // Sleep occurred at 00:30
+            raw_ended_at: None, // No clean exit occurred
+            items: &items,
+            task_candidate: None,
+            is_task_completed: false,
+            has_pause_checkpoint: false,
+            is_resumed_context: false,
+            latest_snapshot: None,
+            reference_time: Some(ref_now),
+        };
+
+        let session = ContextSessionEvaluator::evaluate_session(input, None);
+
+        // 1. Session is Interrupted, not Completed
+        assert_eq!(session.session_state, ContextSessionState::Interrupted);
+        assert_eq!(session.ended_at, None, "Downtime must not fabricate ended_at");
+
+        // 2. Duration is based strictly on actual active work (30 min), NOT inflated by 8 hours of sleep
+        assert_eq!(session.duration_seconds, 1800);
+        assert_eq!(session.duration_formatted, "30m 0s");
+        assert_eq!(session.meaningful_activity_count, 2);
+    }
+
+    #[test]
+    fn test_application_crash_distinguished_from_normal_completion() {
+        let items = vec![
+            make_test_item("1", "engine.rs", "pub fn start_engine()", "document_edit", Some("/src/engine.rs")),
+            make_test_item("2", "engine.rs", "engine.poll()", "document_edit", Some("/src/engine.rs")),
+        ];
+
+        let ref_now = DateTime::parse_from_rfc3339("2026-09-22T03:00:00Z").unwrap().with_timezone(&Utc);
+
+        // Scenario A: Unexpected crash (no raw_ended_at, no task completion, long silence)
+        let input_crash = SessionEvaluationInput {
+            session_id: "sess_crash",
+            context_id: "ws_contextsplit",
+            context_name: Some("ContextSplit"),
+            raw_started_at: "2026-09-22T01:00:00Z",
+            raw_last_activity_at: "2026-09-22T01:25:00Z",
+            raw_ended_at: None,
+            items: &items,
+            task_candidate: None,
+            is_task_completed: false,
+            has_pause_checkpoint: false,
+            is_resumed_context: false,
+            latest_snapshot: None,
+            reference_time: Some(ref_now),
+        };
+        let session_crash = ContextSessionEvaluator::evaluate_session(input_crash, None);
+        assert_eq!(session_crash.session_state, ContextSessionState::Interrupted);
+        assert_eq!(session_crash.ended_at, None);
+
+        // Scenario B: Normal clean completion
+        let input_normal = SessionEvaluationInput {
+            session_id: "sess_clean",
+            context_id: "ws_contextsplit",
+            context_name: Some("ContextSplit"),
+            raw_started_at: "2026-09-22T01:00:00Z",
+            raw_last_activity_at: "2026-09-22T01:25:00Z",
+            raw_ended_at: Some("2026-09-22T01:25:00Z"),
+            items: &items,
+            task_candidate: None,
+            is_task_completed: true,
+            has_pause_checkpoint: false,
+            is_resumed_context: false,
+            latest_snapshot: None,
+            reference_time: Some(ref_now),
+        };
+        let session_normal = ContextSessionEvaluator::evaluate_session(input_normal, None);
+        assert_eq!(session_normal.session_state, ContextSessionState::Completed);
+        assert_eq!(session_normal.ended_at.as_deref(), Some("2026-09-22T01:25:00Z"));
+    }
+
+    #[test]
+    fn test_application_and_system_restart_reconstructs_context_without_filler() {
+        let items = vec![
+            make_test_item("1", "reconstruction.rs", "fn reconstruct()", "document_edit", Some("/src/reconstruction.rs")),
+        ];
+
+        let ref_now = DateTime::parse_from_rfc3339("2026-09-22T12:00:00Z").unwrap().with_timezone(&Utc);
+
+        let input = SessionEvaluationInput {
+            session_id: "sess_reboot",
+            context_id: "ws_contextsplit",
+            context_name: Some("ContextSplit"),
+            raw_started_at: "2026-09-22T02:00:00Z",
+            raw_last_activity_at: "2026-09-22T02:15:00Z", // System restarted shortly after 02:15
+            raw_ended_at: None,
+            items: &items,
+            task_candidate: None,
+            is_task_completed: false,
+            has_pause_checkpoint: false,
+            is_resumed_context: false,
+            latest_snapshot: None,
+            reference_time: Some(ref_now),
+        };
+
+        let session = ContextSessionEvaluator::evaluate_session(input, None);
+
+        // System downtime of 9+ hours must NOT be included as work
+        assert_eq!(session.session_state, ContextSessionState::Interrupted);
+        assert_eq!(session.duration_seconds, 900);
+        assert_eq!(session.duration_formatted, "15m 0s");
+        assert_eq!(session.meaningful_activity_count, 1);
     }
 }
