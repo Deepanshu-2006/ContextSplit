@@ -12,6 +12,9 @@ use crate::context_engine::context_state::{
 use crate::context_engine::important_memory::{
     ContextImportantMemoryBuilder, ImportantMemoryType, MemoryImportanceBand,
 };
+use crate::context_engine::lifecycle::{
+    ContextLifecycle, ContextLifecycleService, ContextLifecycleState,
+};
 use crate::context_engine::memory::{ContextMemoryService, InformationProvenance};
 use crate::context_engine::snapshot::{
     ContextSnapshotService, SnapshotActivityReference, SnapshotImportantMemoryReference,
@@ -1419,6 +1422,9 @@ impl ContextReconstructionQuality {
 pub struct ContextReconstruction {
     /// Context / workspace identification section
     pub context: ReconstructionContextSection,
+    /// Detailed lifecycle model and state
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<ContextLifecycle>,
     /// Active or inferred task section
     pub current_task: ReconstructionTaskSection,
     /// Conservative operational state & freshness section
@@ -1464,6 +1470,40 @@ impl ContextReconstruction {
         quality: Option<ContextReconstructionQuality>,
         reconstructed_at: Option<String>,
     ) -> Self {
+        Self::new_with_lifecycle(
+            context,
+            None,
+            current_task,
+            current_state,
+            last_meaningful_activity,
+            workset,
+            important_memories,
+            latest_snapshot,
+            recent_activity,
+            resume_readiness,
+            confidence,
+            quality,
+            reconstructed_at,
+        )
+    }
+
+    /// Creates a new `ContextReconstruction` with explicit lifecycle integration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_lifecycle(
+        context: ReconstructionContextSection,
+        lifecycle: Option<ContextLifecycle>,
+        current_task: ReconstructionTaskSection,
+        current_state: ReconstructionStateSection,
+        last_meaningful_activity: ReconstructionMeaningfulActivitySection,
+        workset: ReconstructionWorksetSection,
+        important_memories: ReconstructionImportantMemoriesSection,
+        latest_snapshot: ReconstructionSnapshotSection,
+        recent_activity: ReconstructionRecentActivitySection,
+        resume_readiness: ReconstructionResumeReadinessSection,
+        confidence: ReconstructionConfidence,
+        quality: Option<ContextReconstructionQuality>,
+        reconstructed_at: Option<String>,
+    ) -> Self {
         let ts = reconstructed_at.unwrap_or_else(|| Utc::now().to_rfc3339());
         let summary = Self::generate_summary_statement(
             &context,
@@ -1487,6 +1527,7 @@ impl ContextReconstruction {
 
         Self {
             context,
+            lifecycle,
             current_task,
             current_state,
             last_meaningful_activity,
@@ -1520,40 +1561,6 @@ impl ContextReconstruction {
             "Unassigned workspace"
         };
 
-        let task_part = match current_task.status {
-            ReconstructionSectionStatus::Available => {
-                if let Some(ref title) = current_task.title {
-                    format!("on '{}'", title)
-                } else {
-                    "on active work".to_string()
-                }
-            }
-            ReconstructionSectionStatus::Partial => {
-                if let Some(ref title) = current_task.title {
-                    format!("likely on '{}'", title)
-                } else {
-                    "on ongoing work".to_string()
-                }
-            }
-            ReconstructionSectionStatus::Uncertain => "with uncertain task focus".to_string(),
-            ReconstructionSectionStatus::Unavailable => "with no active task".to_string(),
-        };
-
-        let state_part = match current_state.status {
-            ReconstructionSectionStatus::Available => {
-                if let Some(ref disp) = current_state.freshness_display {
-                    disp.to_lowercase()
-                } else if let Some(ref val) = current_state.state_value {
-                    val.as_str().replace('_', " ")
-                } else {
-                    "recently active".to_string()
-                }
-            }
-            ReconstructionSectionStatus::Partial => "state partially known".to_string(),
-            ReconstructionSectionStatus::Uncertain => "state uncertain".to_string(),
-            ReconstructionSectionStatus::Unavailable => "no recent activity recorded".to_string(),
-        };
-
         let workset_part = match workset.status {
             ReconstructionSectionStatus::Available | ReconstructionSectionStatus::Partial => {
                 if workset.total_count == 1 {
@@ -1574,12 +1581,123 @@ impl ContextReconstruction {
             ReconstructionSectionStatus::Unavailable => "no workset items".to_string(),
         };
 
-        let readiness_part = resume_readiness.readiness.display_name();
+        let lifecycle_str = context.lifecycle_state.as_deref().unwrap_or("active");
+        match lifecycle_str.to_lowercase().as_str() {
+            "dormant" => {
+                let task_part = match current_task.status {
+                    ReconstructionSectionStatus::Available | ReconstructionSectionStatus::Partial => {
+                        if let Some(ref title) = current_task.title {
+                            format!("Last task '{}'", title)
+                        } else {
+                            "Historical work".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Uncertain => "With uncertain historical task".to_string(),
+                    ReconstructionSectionStatus::Unavailable => "With no recorded tasks".to_string(),
+                };
+                let readiness_part = if resume_readiness.can_resume || resume_readiness.status.is_present() {
+                    "historical / available".to_string()
+                } else {
+                    format!("historical / {}", resume_readiness.readiness.display_name().to_lowercase())
+                };
+                format!(
+                    "Context: {} (dormant). {} (dormant). Workset: {}. Resume readiness: {}.",
+                    ctx_name, task_part, workset_part, readiness_part
+                )
+            }
+            "paused" => {
+                let task_part = match current_task.status {
+                    ReconstructionSectionStatus::Available => {
+                        if let Some(ref title) = current_task.title {
+                            format!("on '{}'", title)
+                        } else {
+                            "on active work".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Partial => {
+                        if let Some(ref title) = current_task.title {
+                            format!("likely on '{}'", title)
+                        } else {
+                            "on ongoing work".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Uncertain => "with uncertain task focus".to_string(),
+                    ReconstructionSectionStatus::Unavailable => "with no active task".to_string(),
+                };
+                let state_part = match current_state.status {
+                    ReconstructionSectionStatus::Available => {
+                        if let Some(ref disp) = current_state.freshness_display {
+                            disp.to_lowercase()
+                        } else if let Some(ref val) = current_state.state_value {
+                            val.as_str().replace('_', " ")
+                        } else {
+                            "paused".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Partial => "state partially known".to_string(),
+                    ReconstructionSectionStatus::Uncertain => "state uncertain".to_string(),
+                    ReconstructionSectionStatus::Unavailable => "paused".to_string(),
+                };
+                let readiness_part = resume_readiness.readiness.display_name();
+                format!(
+                    "Context: {} (paused). Working {} ({}). Workset: {}. Resume readiness: {}.",
+                    ctx_name, task_part, state_part, workset_part, readiness_part
+                )
+            }
+            "archived" => {
+                let readiness_part = if resume_readiness.can_resume {
+                    "available (requires unarchive)"
+                } else {
+                    "insufficient (archived)"
+                };
+                format!(
+                    "Context: {} (archived). Archived context. Workset: {}. Resume readiness: {}.",
+                    ctx_name, workset_part, readiness_part
+                )
+            }
+            _ => {
+                let task_part = match current_task.status {
+                    ReconstructionSectionStatus::Available => {
+                        if let Some(ref title) = current_task.title {
+                            format!("on '{}'", title)
+                        } else {
+                            "on active work".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Partial => {
+                        if let Some(ref title) = current_task.title {
+                            format!("likely on '{}'", title)
+                        } else {
+                            "on ongoing work".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Uncertain => "with uncertain task focus".to_string(),
+                    ReconstructionSectionStatus::Unavailable => "with no active task".to_string(),
+                };
 
-        format!(
-            "Context: {}. Working {} ({}). Workset: {}. Resume readiness: {}.",
-            ctx_name, task_part, state_part, workset_part, readiness_part
-        )
+                let state_part = match current_state.status {
+                    ReconstructionSectionStatus::Available => {
+                        if let Some(ref disp) = current_state.freshness_display {
+                            disp.to_lowercase()
+                        } else if let Some(ref val) = current_state.state_value {
+                            val.as_str().replace('_', " ")
+                        } else {
+                            "recently active".to_string()
+                        }
+                    }
+                    ReconstructionSectionStatus::Partial => "state partially known".to_string(),
+                    ReconstructionSectionStatus::Uncertain => "state uncertain".to_string(),
+                    ReconstructionSectionStatus::Unavailable => "no recent activity recorded".to_string(),
+                };
+
+                let readiness_part = resume_readiness.readiness.display_name();
+
+                format!(
+                    "Context: {}. Working {} ({}). Workset: {}. Resume readiness: {}.",
+                    ctx_name, task_part, state_part, workset_part, readiness_part
+                )
+            }
+        }
     }
 
     /// Convenience predicate: Whether the reconstruction is rich and complete across all major sections.
@@ -1644,6 +1762,7 @@ impl ContextReconstruction {
 #[derive(Debug, Clone)]
 pub struct ContextReconstructionBuilder {
     context: Option<ReconstructionContextSection>,
+    lifecycle: Option<ContextLifecycle>,
     current_task: Option<ReconstructionTaskSection>,
     current_state: Option<ReconstructionStateSection>,
     last_meaningful_activity: Option<ReconstructionMeaningfulActivitySection>,
@@ -1667,6 +1786,7 @@ impl ContextReconstructionBuilder {
     pub fn new() -> Self {
         Self {
             context: None,
+            lifecycle: None,
             current_task: None,
             current_state: None,
             last_meaningful_activity: None,
@@ -1683,6 +1803,11 @@ impl ContextReconstructionBuilder {
 
     pub fn context(mut self, section: ReconstructionContextSection) -> Self {
         self.context = Some(section);
+        self
+    }
+
+    pub fn lifecycle(mut self, lifecycle: ContextLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 
@@ -1755,8 +1880,9 @@ impl ContextReconstructionBuilder {
         let resume_readiness = self.resume_readiness.unwrap_or_else(ReconstructionResumeReadinessSection::unavailable);
         let confidence = self.confidence.unwrap_or_else(ReconstructionConfidence::insufficient);
 
-        ContextReconstruction::new(
+        ContextReconstruction::new_with_lifecycle(
             context,
+            self.lifecycle,
             current_task,
             current_state,
             last_meaningful_activity,
@@ -1934,14 +2060,22 @@ impl ContextReconstructionService {
 
         let t_total = Instant::now();
         // -----------------------------------------------------------------
-        // Step 1: Load Context (O(1) indexed lookup)
+        // Step 1: Load Context & Dynamic Lifecycle (O(1) indexed lookup)
         // -----------------------------------------------------------------
         let t1 = Instant::now();
         let ws_res = crate::db::operations::get_workspace(conn, context_id);
+        let lifecycle_opt = if ws_res.is_ok() {
+            ContextLifecycleService::get_context_lifecycle(conn, context_id).ok()
+        } else {
+            None
+        };
         let (context_section, ws_name, is_workspace_found) = match ws_res {
             Ok(ws) => {
                 let name = ws.name.clone();
-                let status = Some(ws.lifecycle_state.clone());
+                let status = lifecycle_opt
+                    .as_ref()
+                    .map(|l| l.lifecycle_state.as_str().to_string())
+                    .or_else(|| Some(ws.lifecycle_state.clone()));
                 (
                     ReconstructionContextSection::available(
                         ws.id,
@@ -2393,8 +2527,9 @@ impl ContextReconstructionService {
         // -----------------------------------------------------------------
         // Step 12: Assemble and Return ContextReconstruction
         // -----------------------------------------------------------------
-        Ok(ContextReconstruction::new(
+        Ok(ContextReconstruction::new_with_lifecycle(
             context_section,
+            lifecycle_opt,
             current_task_section,
             current_state_section,
             meaningful_act_section,
@@ -4495,5 +4630,150 @@ mod tests {
         println!("[Benchmark: Very Large 10,000 Items] Warm reconstruction: {:?}", warm_duration);
         assert_eq!(rec_warm.context.id, rec_cold.context.id);
         assert!(warm_duration < Duration::from_millis(500), "10,000-item warm reconstruction took {:?}", warm_duration);
+    }
+
+    // =========================================================================
+    // Day 24 Step 10: Lifecycle Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_reconstruction_with_active_lifecycle() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "ContextSplit Active").unwrap();
+
+        // Seed recent item (within 5 minutes)
+        crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "code",
+            "src/main.rs",
+            Some("Active Rust main file"),
+            "{\"status\":\"active\"}",
+        ).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_cold(&conn, &ws.id).unwrap();
+
+        assert_eq!(reconstruction.context.id, Some(ws.id.clone()));
+        assert_eq!(reconstruction.context.lifecycle_state, Some("active".to_string()));
+        assert!(reconstruction.lifecycle.is_some());
+        let lc = reconstruction.lifecycle.unwrap();
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Active);
+        assert!(!reconstruction.summary_statement.contains("(dormant)"));
+        assert!(!reconstruction.summary_statement.contains("(archived)"));
+    }
+
+    #[test]
+    fn test_reconstruction_with_paused_lifecycle() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "ContextSplit").unwrap();
+        // Paused context: 2 hours inactive (within 24h warm window)
+        let item_time = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        
+        // Add task candidate
+        let tc = crate::db::models::TaskCandidate {
+            id: "task_reconstruction".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Context Reconstruction".to_string(),
+            confidence: 0.92,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (Utc::now() - chrono::Duration::hours(4)).to_rfc3339(),
+            last_active_at: item_time.clone(),
+            created_at: (Utc::now() - chrono::Duration::hours(4)).to_rfc3339(),
+            updated_at: item_time.clone(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+
+        conn.execute(
+            "UPDATE workspaces SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![ws.id, item_time],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item_paused_1', ?1, 'code', 'src/reconstruction.rs', 'Reconstruction Engine', '{}', ?2, ?2)",
+            rusqlite::params![ws.id, item_time],
+        ).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_cold(&conn, &ws.id).unwrap();
+
+        assert_eq!(reconstruction.context.lifecycle_state, Some("paused".to_string()));
+        assert!(reconstruction.lifecycle.is_some());
+        let lc = reconstruction.lifecycle.unwrap();
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Paused);
+        assert_eq!(reconstruction.current_task.title.as_deref(), Some("Context Reconstruction"));
+        assert!(reconstruction.resume_readiness.can_resume);
+        assert!(reconstruction.summary_statement.contains("ContextSplit (paused)"));
+        assert!(reconstruction.summary_statement.contains("Context Reconstruction"));
+    }
+
+    #[test]
+    fn test_reconstruction_with_dormant_lifecycle_preserves_history_and_does_not_claim_active() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Tokyo Trip").unwrap();
+
+        // 30 days inactive (dormant)
+        let old_time = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+
+        // Add task candidate
+        let tc = crate::db::models::TaskCandidate {
+            id: "task_hotel".to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Hotel research".to_string(),
+            confidence: 0.88,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: (Utc::now() - chrono::Duration::days(35)).to_rfc3339(),
+            last_active_at: old_time.clone(),
+            created_at: (Utc::now() - chrono::Duration::days(35)).to_rfc3339(),
+            updated_at: old_time.clone(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &tc).unwrap();
+        conn.execute(
+            "UPDATE workspaces SET last_activity_at = ?2, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![ws.id, old_time],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES ('item_tokyo_1', ?1, 'url', 'https://booking.com/tokyo', 'Tokyo Hotels', '{}', ?2, ?2)",
+            rusqlite::params![ws.id, old_time],
+        ).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_cold(&conn, &ws.id).unwrap();
+
+        assert_eq!(reconstruction.context.lifecycle_state, Some("dormant".to_string()));
+        assert!(reconstruction.lifecycle.is_some());
+        let lc = reconstruction.lifecycle.unwrap();
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Dormant);
+        assert_eq!(reconstruction.current_task.title.as_deref(), Some("Hotel research"));
+
+        // Must NOT claim the dormant context is currently active
+        assert!(!reconstruction.summary_statement.contains("Working on"));
+        assert!(reconstruction.summary_statement.contains("Tokyo Trip (dormant)"));
+        assert!(reconstruction.summary_statement.contains("Last task 'Hotel research'"));
+        assert!(reconstruction.summary_statement.contains("historical / available"));
+    }
+
+    #[test]
+    fn test_reconstruction_with_archived_lifecycle() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Old Deprecated Project").unwrap();
+        
+        // Mark explicitly archived in database
+        conn.execute(
+            "UPDATE workspaces SET lifecycle_state = 'archived', archived_at = ?2 WHERE id = ?1",
+            rusqlite::params![ws.id, Utc::now().to_rfc3339()],
+        ).unwrap();
+
+        let service = ContextReconstructionService::new();
+        let reconstruction = service.reconstruct_cold(&conn, &ws.id).unwrap();
+
+        assert_eq!(reconstruction.context.lifecycle_state, Some("archived".to_string()));
+        assert!(reconstruction.lifecycle.is_some());
+        let lc = reconstruction.lifecycle.unwrap();
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Archived);
+        assert!(reconstruction.summary_statement.contains("Old Deprecated Project (archived)"));
+        assert!(reconstruction.summary_statement.contains("Archived context"));
     }
 }
