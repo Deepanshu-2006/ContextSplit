@@ -48,6 +48,13 @@ pub mod dormancy;
 pub mod resume_detector;
 pub mod preservation;
 pub mod session;
+pub mod session_summary;
+
+pub use session_summary::{
+    ContextSessionSummaryGenerator, LastMeaningfulActivitySummary, PreservedItemHint,
+    SessionArtifactChange, SessionTaskSummary, StructuredSessionSummary,
+    STRUCTURED_SESSION_SUMMARY_DISCLAIMER,
+};
 
 pub use session::{
     ContextSession, ContextSessionEvaluator, ContextSessionState, SessionEvaluationInput,
