@@ -42,6 +42,12 @@ pub mod contamination;
 pub mod ambiguity;
 pub mod pending_activity;
 pub mod correction;
+pub mod lifecycle;
+
+pub use lifecycle::{
+    ContextLifecycle, ContextLifecycleEvaluator, ContextLifecycleService, ContextLifecycleState,
+    LifecycleEvaluationInput, LifecycleSourceEvidence,
+};
 
 pub use correction::{
     ContextCorrectionService, CorrectionDefenseVerdict, CorrectionEvidenceSignature,
