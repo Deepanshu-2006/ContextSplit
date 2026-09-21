@@ -47,6 +47,13 @@ pub mod pause_detector;
 pub mod dormancy;
 pub mod resume_detector;
 pub mod preservation;
+pub mod session;
+
+pub use session::{
+    ContextSession, ContextSessionEvaluator, ContextSessionState, SessionEvaluationInput,
+    SessionIntelligenceConfig, SessionSnapshotReference, SessionTaskReference,
+    CONTEXT_SESSION_DISCLAIMER,
+};
 
 pub use preservation::{
     ContextPreservationService, PreservedContextHierarchy, PreservedSessionSegment,
