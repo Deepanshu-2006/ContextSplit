@@ -44,6 +44,12 @@ pub mod pending_activity;
 pub mod correction;
 pub mod lifecycle;
 pub mod pause_detector;
+pub mod dormancy;
+
+pub use dormancy::{
+    DormancyDimensionScores, DormancyDistinctionAssessment, DormancyDistinctionEvaluator,
+    DormancyEvaluationConfig, DormancyEvaluationInput, WorkCycleIndicators,
+};
 
 pub use pause_detector::{
     ContextPauseDetector, PauseAssessment, PauseCause, PauseDetectionConfig, PauseEvaluationInput,

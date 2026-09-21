@@ -205,6 +205,14 @@ fn parse_ts(ts: &str) -> Option<DateTime<Utc>> {
 // ContextLifecycleEvaluator: Core Evaluation Engine
 // =========================================================================
 
+use crate::context_engine::dormancy::{
+    DormancyDistinctionAssessment, DormancyDistinctionEvaluator, DormancyEvaluationInput,
+};
+use crate::context_engine::important_memory::ContextImportantMemory;
+use crate::context_engine::task_extractor::ExtractedTaskCandidate;
+use crate::context_engine::transitions::ContextSnapshot;
+use crate::context_engine::workset::ContextWorkset;
+
 /// Input parameters for evaluating a context's lifecycle model.
 #[derive(Debug, Clone, Default)]
 pub struct LifecycleEvaluationInput<'a> {
@@ -215,6 +223,10 @@ pub struct LifecycleEvaluationInput<'a> {
     pub activity_segments: &'a [ContextActivitySegment],
     pub context_transitions: &'a [ContextTransition],
     pub task_transitions: &'a [DetectedTaskTransition],
+    pub active_task_candidate: Option<&'a ExtractedTaskCandidate>,
+    pub workset: Option<&'a ContextWorkset>,
+    pub important_memories: &'a [ContextImportantMemory],
+    pub latest_snapshot: Option<&'a ContextSnapshot>,
     pub items: &'a [Item],
     pub has_explicit_user_archive: bool,
     pub reference_time: Option<DateTime<Utc>>,
@@ -396,36 +408,7 @@ impl ContextLifecycleEvaluator {
                 .map(|cs| cs.state == ContextStateValue::Active)
                 .unwrap_or(false);
 
-            // Check if DB workspace indicates dormant state
-            let ws_is_dormant = input
-                .workspace
-                .map(|w| w.lifecycle_state.eq_ignore_ascii_case("dormant"))
-                .unwrap_or(false);
-
-            if elapsed > 7 * 86400 || ws_is_dormant {
-                // Dormant State: Extended inactivity (> 7 days)
-                let entered = if let Some(ref dt) = latest_active_dt {
-                    (*dt + chrono::Duration::days(7)).to_rfc3339()
-                } else {
-                    now.to_rfc3339()
-                };
-
-                let days = elapsed / 86400;
-                evidence.push(LifecycleSourceEvidence {
-                    evidence_type: "dormancy_threshold".to_string(),
-                    description: format!("No contextual activity observed for {} days (> 7 day threshold).", days),
-                    timestamp: entered.clone(),
-                    confidence: 0.85,
-                    reference_id: None,
-                });
-
-                (
-                    ContextLifecycleState::Dormant,
-                    0.85,
-                    entered,
-                    format!("Dormant context. Last active {} days ago; preserved for historical resumption.", days),
-                )
-            } else if !explicitly_switched_away && (state_is_active || (elapsed <= 900 && !input.items.is_empty())) {
+            if !explicitly_switched_away && (state_is_active || (elapsed <= 900 && !input.items.is_empty())) {
                 // Active State: Currently working within context (<= 15 minutes)
                 let entered = if let Some(ref r_str) = last_resumed_str {
                     r_str.clone()
@@ -460,38 +443,49 @@ impl ContextLifecycleEvaluator {
                     format!("User is currently working in '{}'.", ws_name),
                 )
             } else {
-                // Paused State: Temporarily stopped working, but resumable
-                let entered = if let Some(ref p_str) = last_paused_str {
-                    p_str.clone()
-                } else if let Some(ref dt) = latest_active_dt {
-                    (*dt + chrono::Duration::minutes(15)).to_rfc3339()
-                } else {
-                    now.to_rfc3339()
+                // Inactive context: Evaluate multidimensional distinction between PAUSED and DORMANT
+                let dormancy_input = DormancyEvaluationInput {
+                    context_id: input.context_id,
+                    context_name: input.context_name,
+                    workspace: input.workspace,
+                    items: input.items,
+                    activity_segments: input.activity_segments,
+                    context_transitions: input.context_transitions,
+                    task_transitions: input.task_transitions,
+                    active_task_candidate: input.active_task_candidate,
+                    workset: input.workset,
+                    important_memories: input.important_memories,
+                    latest_snapshot: input.latest_snapshot,
+                    reference_time: Some(now),
                 };
 
-                if explicitly_switched_away {
-                    evidence.push(LifecycleSourceEvidence {
-                        evidence_type: "context_transition".to_string(),
-                        description: format!("Focus switched away from '{}' to another workspace.", ws_name),
-                        timestamp: entered.clone(),
-                        confidence: 0.85,
-                        reference_id: None,
-                    });
+                let distinction = DormancyDistinctionEvaluator::evaluate(dormancy_input, None);
+
+                let entered = if distinction.is_dormant {
+                    if let Some(ref dt) = latest_active_dt {
+                        (*dt + chrono::Duration::days(7)).to_rfc3339()
+                    } else {
+                        now.to_rfc3339()
+                    }
                 } else {
-                    evidence.push(LifecycleSourceEvidence {
-                        evidence_type: "inactivity_timeout".to_string(),
-                        description: format!("Working session paused after inactivity (elapsed {} minutes).", elapsed / 60),
-                        timestamp: entered.clone(),
-                        confidence: 0.75,
-                        reference_id: None,
-                    });
+                    if let Some(ref p_str) = last_paused_str {
+                        p_str.clone()
+                    } else if let Some(ref dt) = latest_active_dt {
+                        (*dt + chrono::Duration::minutes(15)).to_rfc3339()
+                    } else {
+                        now.to_rfc3339()
+                    }
+                };
+
+                for ev in distinction.source_evidence {
+                    evidence.push(ev);
                 }
 
                 (
-                    ContextLifecycleState::Paused,
-                    0.80,
+                    distinction.lifecycle_state,
+                    distinction.confidence,
                     entered,
-                    format!("Work on '{}' is temporarily paused and ready to resume.", ws_name),
+                    distinction.reason,
                 )
             }
         };
@@ -569,6 +563,10 @@ impl ContextLifecycleService {
             activity_segments: &[],
             context_transitions: &[],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &items,
             has_explicit_user_archive: ws.lifecycle_state.eq_ignore_ascii_case("archived"),
             reference_time: None,
@@ -691,6 +689,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
             reference_time: Some(now),
@@ -727,6 +729,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[switch_transition],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
             reference_time: Some(now),
@@ -734,7 +740,7 @@ mod tests {
 
         let lifecycle = ContextLifecycleEvaluator::evaluate(input);
         assert_eq!(lifecycle.lifecycle_state, ContextLifecycleState::Paused);
-        assert!(lifecycle.reason.contains("temporarily paused and ready to resume"));
+        assert!(lifecycle.reason.contains("temporarily paused and ready to resume") || lifecycle.reason.contains("Paused context"));
         assert_eq!(lifecycle.last_paused_at, Some(switched_time));
     }
 
@@ -754,6 +760,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
             reference_time: Some(now),
@@ -761,8 +771,8 @@ mod tests {
 
         let lifecycle = ContextLifecycleEvaluator::evaluate(input);
         assert_eq!(lifecycle.lifecycle_state, ContextLifecycleState::Dormant);
-        assert!(lifecycle.reason.contains("Dormant context. Last active 14 days ago"));
-        assert!(lifecycle.source_evidence.iter().any(|e| e.evidence_type == "dormancy_threshold"));
+        assert!(lifecycle.reason.contains("Dormant context"));
+        assert!(lifecycle.source_evidence.iter().any(|e| e.evidence_type == "dormancy_assessment"));
     }
 
     #[test]
@@ -782,6 +792,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
             reference_time: Some(now),
@@ -810,6 +824,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: true,
             reference_time: Some(now),
@@ -845,6 +863,10 @@ mod tests {
             activity_segments: &[],
             context_transitions: &[return_transition],
             task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
             reference_time: Some(now),
