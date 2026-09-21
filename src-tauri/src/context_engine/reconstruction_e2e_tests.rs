@@ -1066,4 +1066,202 @@ mod tests {
             assert_ne!(item.title.as_deref(), Some("Stripe API Keys"));
         }
     }
+
+    // =========================================================================
+    // SCENARIO 14 — LONG-DORMANT CONTEXT RESUMPTION
+    //
+    // Context: Tokyo Trip
+    // Historical items:
+    // - Flights: ANA Flights to Haneda
+    // - Hotels: Shinjuku Prince Hotel
+    // - Itinerary: Tokyo 7-day Trip Itinerary
+    // - Maps: Tokyo Metro & Train Map
+    //
+    // 1. Historical active state with task "Tokyo Hotel & Flight Booking"
+    // 2. Extended inactivity (21 days gap) -> Lifecycle becomes DORMANT
+    //    Verify:
+    //    - Context remains intact in DB
+    //    - Important memories remain
+    //    - Historical sessions remain
+    //    - Snapshots remain
+    //    - Workset remains available
+    //    - Reconstruction remains possible
+    // 3. Strong new Tokyo Trip activity arrives:
+    //    - New items: Ghibli Museum Reservation, Tokyo Ramen & Sushi Guide
+    //    - ContextReturn transition recorded
+    // 4. Expected:
+    //    - DORMANT -> ACTIVE
+    //    - Context resumes with historical continuity
+    //    - Does not create a new unrelated context
+    //    - Historical items remain connected
+    // =========================================================================
+    #[test]
+    fn test_scenario_14_long_dormant_context_resumption() {
+        let conn = setup_test_db();
+        let service = ContextReconstructionService::new();
+
+        let historical_base = Utc::now() - Duration::days(21);
+        let t_hist_start = (historical_base).to_rfc3339();
+        let t_hist_end = (historical_base + Duration::hours(3)).to_rfc3339();
+
+        // 1. Create Workspace
+        let ws = create_workspace(&conn, "Tokyo Trip").unwrap();
+        let session_hist = create_session(&conn).unwrap();
+
+        // Historical Task
+        let task_hist = TaskCandidate {
+            id: format!("task-tokyo-{}", ws.id),
+            context_id: Some(ws.id.clone()),
+            title: "Tokyo Hotel & Flight Booking".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t_hist_start.clone(),
+            last_active_at: t_hist_end.clone(),
+            created_at: t_hist_start.clone(),
+            updated_at: t_hist_end.clone(),
+        };
+        create_task_candidate(&conn, &task_hist).unwrap();
+
+        // 4 Historical Items
+        let flight_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_hist.id),
+            "url",
+            "https://www.ana.co.jp/en/us/book-flights/tokyo-hnd",
+            Some("ANA Flights to Haneda"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Google Chrome\"}",
+        ).unwrap();
+
+        let hotel_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_hist.id),
+            "url",
+            "https://www.princehotels.com/shinjuku/",
+            Some("Shinjuku Prince Hotel"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Google Chrome\"}",
+        ).unwrap();
+
+        let itinerary_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_hist.id),
+            "file",
+            "/documents/trips/tokyo_7day_itinerary.md",
+            Some("Tokyo 7-day Trip Itinerary"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Obsidian\"}",
+        ).unwrap();
+
+        let map_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_hist.id),
+            "url",
+            "https://www.tokyometro.jp/en/subwaymap/",
+            Some("Tokyo Metro & Train Map"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Google Chrome\"}",
+        ).unwrap();
+
+        create_item_relationship(&conn, &flight_item.id, &hotel_item.id, "booking_reference", 0.9, None).unwrap();
+        create_item_relationship(&conn, &itinerary_item.id, &map_item.id, "location_guide", 0.88, None).unwrap();
+
+        // Historical transition
+        let trans_hist = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.95)
+            .to_context(&ws.id)
+            .session(&session_hist.id)
+            .build();
+        record_context_transition(&conn, &trans_hist).unwrap();
+
+        // Update database records to true historical timestamps (21 days ago)
+        conn.execute("UPDATE items SET created_at = ?1, updated_at = ?1 WHERE workspace_id = ?2", rusqlite::params![t_hist_end, ws.id]).unwrap();
+        conn.execute("UPDATE workspaces SET created_at = ?1, updated_at = ?1, last_activity_at = ?1 WHERE id = ?2", rusqlite::params![t_hist_end, ws.id]).unwrap();
+        conn.execute("UPDATE context_transitions SET detected_at = ?1 WHERE to_context_id = ?2", rusqlite::params![t_hist_end, ws.id]).unwrap();
+
+        // ---------------------------------------------------------------------
+        // STEP 1: Evaluate Long-Dormant Context State
+        // ---------------------------------------------------------------------
+        invalidate_reconstruction_cache(None);
+
+        let rec_dormant = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // 1. Lifecycle is DORMANT
+        assert_eq!(rec_dormant.context.lifecycle_state.as_deref(), Some("dormant"));
+        assert_eq!(rec_dormant.context.name, "Tokyo Trip");
+        assert_eq!(rec_dormant.context.status, ReconstructionSectionStatus::Available);
+
+        // 2. Context was not deleted
+        assert!(get_workspace(&conn, &ws.id).is_ok());
+
+        // 3. Workset and memories preserved across dormancy
+        assert!(rec_dormant.workset.status.is_present());
+        assert!(rec_dormant.workset.items.iter().any(|i| i.title.as_deref() == Some("ANA Flights to Haneda")));
+        assert!(rec_dormant.workset.items.iter().any(|i| i.title.as_deref() == Some("Shinjuku Prince Hotel")));
+        assert!(rec_dormant.workset.items.iter().any(|i| i.title.as_deref() == Some("Tokyo 7-day Trip Itinerary")));
+        assert!(rec_dormant.workset.items.iter().any(|i| i.title.as_deref() == Some("Tokyo Metro & Train Map")));
+
+        // 4. Task remains preserved as historical reference
+        assert!(rec_dormant.current_task.status.is_present());
+        assert_eq!(rec_dormant.current_task.title.as_deref(), Some("Tokyo Hotel & Flight Booking"));
+
+        // ---------------------------------------------------------------------
+        // STEP 2: Introduce Strong New Tokyo Trip Activity (Resumption)
+        // ---------------------------------------------------------------------
+        let session_new = create_session(&conn).unwrap();
+
+        let ghibli_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_new.id),
+            "url",
+            "https://www.ghibli-museum.jp/en/tickets/tokyo-mitaka",
+            Some("Ghibli Museum Reservation & Ticket Confirmation"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Google Chrome\"}",
+        ).unwrap();
+
+        let ramen_item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session_new.id),
+            "file",
+            "/documents/trips/tokyo_food_guide.md",
+            Some("Tokyo Ramen & Sushi Guide"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Obsidian\"}",
+        ).unwrap();
+
+        create_item_relationship(&conn, &ghibli_item.id, &itinerary_item.id, "attraction_booking", 0.92, None).unwrap();
+        create_item_relationship(&conn, &ramen_item.id, &hotel_item.id, "dining_near_hotel", 0.88, None).unwrap();
+
+        let trans_resume = ContextTransitionBuilder::new(ContextTransitionType::ContextReturn, 0.95)
+            .to_context(&ws.id)
+            .session(&session_new.id)
+            .build();
+        record_context_transition(&conn, &trans_resume).unwrap();
+
+        // ---------------------------------------------------------------------
+        // STEP 3: Verify DORMANT -> ACTIVE Transition & Continuity
+        // ---------------------------------------------------------------------
+        invalidate_reconstruction_cache(Some(&ws.id));
+        invalidate_workset_cache(Some(&ws.id));
+        invalidate_memory_cache(Some(&ws.id));
+        invalidate_snapshot_cache(&ws.id);
+
+        let rec_resumed = service.reconstruct_context(&conn, &ws.id).unwrap();
+
+        // 1. Transitioned DORMANT -> ACTIVE
+        assert_eq!(rec_resumed.context.lifecycle_state.as_deref(), Some("active"));
+        assert_eq!(rec_resumed.context.id, rec_dormant.context.id);
+        assert_eq!(rec_resumed.context.name, "Tokyo Trip");
+
+        // 2. Both historical and new items are connected in the same workspace
+        assert!(rec_resumed.workset.items.iter().any(|i| i.title.as_deref() == Some("Ghibli Museum Reservation & Ticket Confirmation")));
+        assert!(rec_resumed.workset.items.iter().any(|i| i.title.as_deref() == Some("Tokyo Ramen & Sushi Guide")));
+        assert!(rec_resumed.workset.items.iter().any(|i| i.title.as_deref() == Some("ANA Flights to Haneda")));
+        assert!(rec_resumed.workset.items.iter().any(|i| i.title.as_deref() == Some("Tokyo 7-day Trip Itinerary")));
+
+        // 3. Exactly one workspace exists in DB (no duplicates created)
+        let workspaces = crate::db::operations::list_workspaces(&conn).unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].name, "Tokyo Trip");
+    }
 }

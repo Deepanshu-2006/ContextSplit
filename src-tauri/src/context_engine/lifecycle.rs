@@ -1107,4 +1107,71 @@ mod tests {
         let lc_univ_final = ContextLifecycleEvaluator::evaluate(input_univ_final);
         assert_eq!(lc_univ_final.lifecycle_state, ContextLifecycleState::Paused);
     }
+
+    #[test]
+    fn test_long_dormant_context_resumption_simulation() {
+        let now = Utc::now();
+        let t_old = (now - chrono::Duration::days(25)).to_rfc3339();
+        let t_new = (now - chrono::Duration::minutes(2)).to_rfc3339();
+
+        let ws = make_test_workspace("ws_tokyo", "Tokyo Trip", "active", Some(&t_old));
+        let items_hist = vec![
+            make_test_item("item_flight", "ws_tokyo", &t_old),
+            make_test_item("item_hotel", "ws_tokyo", &t_old),
+            make_test_item("item_itinerary", "ws_tokyo", &t_old),
+            make_test_item("item_map", "ws_tokyo", &t_old),
+        ];
+
+        // 1. Inactivity period -> Dormant
+        let input_dormant = LifecycleEvaluationInput {
+            context_id: "ws_tokyo",
+            context_name: Some("Tokyo Trip"),
+            workspace: Some(&ws),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_hist,
+            has_explicit_user_archive: false,
+            reference_time: Some(now - chrono::Duration::days(1)),
+        };
+        let lc_dormant = ContextLifecycleEvaluator::evaluate(input_dormant);
+        assert_eq!(lc_dormant.lifecycle_state, ContextLifecycleState::Dormant);
+
+        // 2. Strong new activity -> Active
+        let mut items_resumed = items_hist.clone();
+        items_resumed.push(make_test_item("item_ghibli", "ws_tokyo", &t_new));
+
+        let mut resume_trans = ContextTransition::new(
+            None,
+            Some("ws_tokyo".to_string()),
+            ContextTransitionType::ContextReturn,
+            0.95,
+        );
+        resume_trans.detected_at = t_new.clone();
+
+        let input_resumed = LifecycleEvaluationInput {
+            context_id: "ws_tokyo",
+            context_name: Some("Tokyo Trip"),
+            workspace: Some(&ws),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[resume_trans],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_resumed,
+            has_explicit_user_archive: false,
+            reference_time: Some(now),
+        };
+        let lc_resumed = ContextLifecycleEvaluator::evaluate(input_resumed);
+        assert_eq!(lc_resumed.lifecycle_state, ContextLifecycleState::Active);
+        assert_eq!(lc_resumed.last_resumed_at, Some(t_new));
+    }
 }
