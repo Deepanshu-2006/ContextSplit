@@ -43,6 +43,11 @@ pub mod ambiguity;
 pub mod pending_activity;
 pub mod correction;
 pub mod lifecycle;
+pub mod pause_detector;
+
+pub use pause_detector::{
+    ContextPauseDetector, PauseAssessment, PauseCause, PauseDetectionConfig, PauseEvaluationInput,
+};
 
 pub use lifecycle::{
     ContextLifecycle, ContextLifecycleEvaluator, ContextLifecycleService, ContextLifecycleState,
