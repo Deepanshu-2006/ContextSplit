@@ -46,6 +46,12 @@ pub mod lifecycle;
 pub mod pause_detector;
 pub mod dormancy;
 pub mod resume_detector;
+pub mod preservation;
+
+pub use preservation::{
+    ContextPreservationService, PreservedContextHierarchy, PreservedSessionSegment,
+    PreservedSnapshotRef, PreservedTaskState, CONTEXT_PRESERVATION_DISCLAIMER,
+};
 
 pub use resume_detector::{
     ContextResumeDetector, ResumeAssessment, ResumeDetectionConfig, ResumeEvidenceSignal,
