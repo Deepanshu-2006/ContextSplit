@@ -22,7 +22,7 @@ mod tests {
     use crate::db::models::{TaskCandidate, TaskCandidateStatus};
     use crate::db::operations::{
         create_item, create_item_relationship, create_session, create_task_candidate,
-        create_workspace,
+        create_workspace, get_workspace,
     };
 
     fn setup_test_db() -> Connection {
@@ -797,5 +797,273 @@ mod tests {
         // Must never panic; returns valid reconstruction model
         assert_eq!(rec.context.id.as_deref(), Some(ws.id.as_str()));
         assert_eq!(rec.context.status, ReconstructionSectionStatus::Available);
+    }
+
+    // =========================================================================
+    // SCENARIO 13 — MULTI-CONTEXT LIFECYCLE TRANSITIONS
+    //
+    // Context A: ContextSplit
+    // Context B: PayX
+    // Context C: University OS
+    //
+    // Simulation:
+    // 1. ContextSplit ACTIVE
+    // 2. PayX becomes active -> ContextSplit PAUSED, PayX ACTIVE
+    // 3. University OS becomes active -> PayX PAUSED, University OS ACTIVE
+    // 4. Return to ContextSplit -> ContextSplit ACTIVE, PayX PAUSED, University OS PAUSED
+    //
+    // Invariants:
+    // - No context deleted
+    // - No context loses state
+    // - No contexts merge
+    // - No historical activity leaks across contexts
+    // =========================================================================
+    #[test]
+    fn test_scenario_13_multi_context_lifecycle_transitions() {
+        let conn = setup_test_db();
+        let session = create_session(&conn).unwrap();
+        let service = ContextReconstructionService::new();
+
+        let base_time = Utc::now() - Duration::hours(3);
+
+        // 1. Create 3 Workspaces
+        let ws_split = create_workspace(&conn, "ContextSplit").unwrap();
+        let ws_payx = create_workspace(&conn, "PayX").unwrap();
+        let ws_univ = create_workspace(&conn, "University OS").unwrap();
+
+        let t_split = (base_time + Duration::minutes(10)).to_rfc3339();
+        let t_payx = (base_time + Duration::minutes(40)).to_rfc3339();
+        let t_univ = (base_time + Duration::minutes(70)).to_rfc3339();
+
+        // ---------------------------------------------------------------------
+        // STEP 1: ContextSplit is ACTIVE
+        // ---------------------------------------------------------------------
+        let task_split = TaskCandidate {
+            id: format!("task-recon-{}", ws_split.id),
+            context_id: Some(ws_split.id.clone()),
+            title: "Context reconstruction".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t_split.clone(),
+            last_active_at: t_split.clone(),
+            created_at: t_split.clone(),
+            updated_at: t_split.clone(),
+        };
+        create_task_candidate(&conn, &task_split).unwrap();
+
+        let _item_split_1 = create_item(
+            &conn,
+            Some(&ws_split.id),
+            Some(&session.id),
+            "file",
+            "/src/context_engine/pause_detector.rs",
+            Some("pause_detector.rs"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let _item_split_2 = create_item(
+            &conn,
+            Some(&ws_split.id),
+            Some(&session.id),
+            "file",
+            "/src/context_engine/lifecycle.rs",
+            Some("lifecycle.rs"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let trans_split_1 = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.95)
+            .to_context(&ws_split.id)
+            .session(&session.id)
+            .build();
+        record_context_transition(&conn, &trans_split_1).unwrap();
+
+        invalidate_reconstruction_cache(None);
+
+        let rec_split_p1 = service.reconstruct_context(&conn, &ws_split.id).unwrap();
+        assert_eq!(rec_split_p1.context.lifecycle_state.as_deref(), Some("active"));
+        assert_eq!(rec_split_p1.current_task.title.as_deref(), Some("Context reconstruction"));
+
+        // ---------------------------------------------------------------------
+        // STEP 2: PayX becomes ACTIVE -> ContextSplit becomes PAUSED
+        // ---------------------------------------------------------------------
+        let task_payx = TaskCandidate {
+            id: format!("task-payx-{}", ws_payx.id),
+            context_id: Some(ws_payx.id.clone()),
+            title: "Payment Checkout API".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t_payx.clone(),
+            last_active_at: t_payx.clone(),
+            created_at: t_payx.clone(),
+            updated_at: t_payx.clone(),
+        };
+        create_task_candidate(&conn, &task_payx).unwrap();
+
+        let _item_payx_1 = create_item(
+            &conn,
+            Some(&ws_payx.id),
+            Some(&session.id),
+            "file",
+            "/src/api/checkout.ts",
+            Some("checkout.ts"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let _item_payx_2 = create_item(
+            &conn,
+            Some(&ws_payx.id),
+            Some(&session.id),
+            "url",
+            "https://dashboard.stripe.com/test/apikeys",
+            Some("Stripe API Keys"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Google Chrome\"}",
+        ).unwrap();
+
+        let trans_split_to_payx = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.92)
+            .from_context(&ws_split.id)
+            .to_context(&ws_payx.id)
+            .session(&session.id)
+            .build();
+        record_context_transition(&conn, &trans_split_to_payx).unwrap();
+
+        invalidate_reconstruction_cache(None);
+
+        let rec_split_p2 = service.reconstruct_context(&conn, &ws_split.id).unwrap();
+        let rec_payx_p2 = service.reconstruct_context(&conn, &ws_payx.id).unwrap();
+
+        assert_eq!(rec_split_p2.context.lifecycle_state.as_deref(), Some("paused"));
+        assert_eq!(rec_split_p2.current_task.title.as_deref(), Some("Context reconstruction")); // Preserved state
+
+        assert_eq!(rec_payx_p2.context.lifecycle_state.as_deref(), Some("active"));
+        assert_eq!(rec_payx_p2.current_task.title.as_deref(), Some("Payment Checkout API"));
+
+        // ---------------------------------------------------------------------
+        // STEP 3: University OS becomes ACTIVE -> PayX becomes PAUSED
+        // ---------------------------------------------------------------------
+        let task_univ = TaskCandidate {
+            id: format!("task-univ-{}", ws_univ.id),
+            context_id: Some(ws_univ.id.clone()),
+            title: "Distributed Systems Assignment".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: t_univ.clone(),
+            last_active_at: t_univ.clone(),
+            created_at: t_univ.clone(),
+            updated_at: t_univ.clone(),
+        };
+        create_task_candidate(&conn, &task_univ).unwrap();
+
+        let _item_univ_1 = create_item(
+            &conn,
+            Some(&ws_univ.id),
+            Some(&session.id),
+            "file",
+            "/cs6400/raft_consensus.go",
+            Some("raft_consensus.go"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let _item_univ_2 = create_item(
+            &conn,
+            Some(&ws_univ.id),
+            Some(&session.id),
+            "file",
+            "/cs6400/docs/lecture_14.pdf",
+            Some("lecture_14.pdf"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Preview\"}",
+        ).unwrap();
+
+        let trans_payx_to_univ = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.90)
+            .from_context(&ws_payx.id)
+            .to_context(&ws_univ.id)
+            .session(&session.id)
+            .build();
+        record_context_transition(&conn, &trans_payx_to_univ).unwrap();
+
+        invalidate_reconstruction_cache(None);
+
+        let rec_split_p3 = service.reconstruct_context(&conn, &ws_split.id).unwrap();
+        let rec_payx_p3 = service.reconstruct_context(&conn, &ws_payx.id).unwrap();
+        let rec_univ_p3 = service.reconstruct_context(&conn, &ws_univ.id).unwrap();
+
+        assert_eq!(rec_split_p3.context.lifecycle_state.as_deref(), Some("paused"));
+        assert_eq!(rec_payx_p3.context.lifecycle_state.as_deref(), Some("paused"));
+        assert_eq!(rec_univ_p3.context.lifecycle_state.as_deref(), Some("active"));
+
+        // ---------------------------------------------------------------------
+        // STEP 4: User returns to ContextSplit
+        // ---------------------------------------------------------------------
+        let _item_split_3 = create_item(
+            &conn,
+            Some(&ws_split.id),
+            Some(&session.id),
+            "file",
+            "/src/components/workspace/ContextOverviewPanel.tsx",
+            Some("ContextOverviewPanel.tsx"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\"}",
+        ).unwrap();
+
+        let trans_univ_to_split = ContextTransitionBuilder::new(ContextTransitionType::ContextReturn, 0.95)
+            .from_context(&ws_univ.id)
+            .to_context(&ws_split.id)
+            .session(&session.id)
+            .build();
+        record_context_transition(&conn, &trans_univ_to_split).unwrap();
+
+        invalidate_reconstruction_cache(None);
+
+        let rec_split_p4 = service.reconstruct_context(&conn, &ws_split.id).unwrap();
+        let rec_payx_p4 = service.reconstruct_context(&conn, &ws_payx.id).unwrap();
+        let rec_univ_p4 = service.reconstruct_context(&conn, &ws_univ.id).unwrap();
+
+        assert_eq!(rec_split_p4.context.lifecycle_state.as_deref(), Some("active"));
+        assert_eq!(rec_payx_p4.context.lifecycle_state.as_deref(), Some("paused"));
+        assert_eq!(rec_univ_p4.context.lifecycle_state.as_deref(), Some("paused"));
+
+        // ---------------------------------------------------------------------
+        // INVARIANT VERIFICATIONS:
+        // ---------------------------------------------------------------------
+        // 1. No context deleted
+        assert!(get_workspace(&conn, &ws_split.id).is_ok());
+        assert!(get_workspace(&conn, &ws_payx.id).is_ok());
+        assert!(get_workspace(&conn, &ws_univ.id).is_ok());
+
+        // 2. No context lost its state
+        assert_eq!(rec_split_p4.current_task.title.as_deref(), Some("Context reconstruction"));
+        assert_eq!(rec_payx_p4.current_task.title.as_deref(), Some("Payment Checkout API"));
+        assert_eq!(rec_univ_p4.current_task.title.as_deref(), Some("Distributed Systems Assignment"));
+
+        // 3. No context merged
+        assert_ne!(rec_split_p4.context.id, rec_payx_p4.context.id);
+        assert_ne!(rec_payx_p4.context.id, rec_univ_p4.context.id);
+        assert_ne!(rec_split_p4.context.id, rec_univ_p4.context.id);
+        assert_eq!(rec_split_p4.context.name, "ContextSplit");
+        assert_eq!(rec_payx_p4.context.name, "PayX");
+        assert_eq!(rec_univ_p4.context.name, "University OS");
+
+        // 4. No historical activity leaked between contexts
+        // ContextSplit workset only contains ContextSplit items
+        for item in &rec_split_p4.workset.items {
+            assert_ne!(item.title.as_deref(), Some("checkout.ts"));
+            assert_ne!(item.title.as_deref(), Some("Stripe API Keys"));
+            assert_ne!(item.title.as_deref(), Some("raft_consensus.go"));
+            assert_ne!(item.title.as_deref(), Some("lecture_14.pdf"));
+        }
+
+        // PayX workset only contains PayX items
+        for item in &rec_payx_p4.workset.items {
+            assert_ne!(item.title.as_deref(), Some("pause_detector.rs"));
+            assert_ne!(item.title.as_deref(), Some("lifecycle.rs"));
+            assert_ne!(item.title.as_deref(), Some("raft_consensus.go"));
+            assert_ne!(item.title.as_deref(), Some("lecture_14.pdf"));
+        }
+
+        // University OS workset only contains University OS items
+        for item in &rec_univ_p4.workset.items {
+            assert_ne!(item.title.as_deref(), Some("pause_detector.rs"));
+            assert_ne!(item.title.as_deref(), Some("lifecycle.rs"));
+            assert_ne!(item.title.as_deref(), Some("checkout.ts"));
+            assert_ne!(item.title.as_deref(), Some("Stripe API Keys"));
+        }
     }
 }
