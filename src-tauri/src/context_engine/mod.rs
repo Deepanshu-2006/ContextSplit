@@ -45,6 +45,12 @@ pub mod correction;
 pub mod lifecycle;
 pub mod pause_detector;
 pub mod dormancy;
+pub mod resume_detector;
+
+pub use resume_detector::{
+    ContextResumeDetector, ResumeAssessment, ResumeDetectionConfig, ResumeEvidenceSignal,
+    ResumeEvidenceType, ResumeEvaluationInput,
+};
 
 pub use dormancy::{
     DormancyDimensionScores, DormancyDistinctionAssessment, DormancyDistinctionEvaluator,
