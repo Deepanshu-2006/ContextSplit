@@ -49,6 +49,12 @@ pub mod resume_detector;
 pub mod preservation;
 pub mod session;
 pub mod session_summary;
+pub mod session_snapshot;
+
+pub use session_snapshot::{
+    SessionSnapshotDecision, SessionSnapshotEvaluationInput, SessionSnapshotIntegrator,
+    SessionSnapshotTriggerReason, SESSION_SNAPSHOT_INTEGRATION_DISCLAIMER,
+};
 
 pub use session_summary::{
     ContextSessionSummaryGenerator, LastMeaningfulActivitySummary, PreservedItemHint,
