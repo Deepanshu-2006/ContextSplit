@@ -35,10 +35,16 @@ mod tests {
         ContextTransitionType, TransitionEvidenceType,
     };
     use crate::context_engine::workset::{ContextWorksetBuilder, invalidate_workset_cache};
+    use crate::context_engine::context_state::{ContextStateService, ContextStateValue};
+    use crate::context_engine::lifecycle::ContextLifecycleState;
+    use crate::context_engine::session::{
+        ContextSessionEvaluator, ContextSessionState, SessionEvaluationInput,
+    };
+    use crate::context_engine::session_snapshot::SessionSnapshotIntegrator;
     use crate::db::models::{TaskCandidate, TaskCandidateStatus};
     use crate::db::operations::{
         create_item, create_item_relationship, create_or_update_membership, create_session,
-        create_task_candidate, create_workspace,
+        create_task_candidate, create_workspace, list_workspaces,
     };
 
     fn setup_test_db() -> Connection {
@@ -628,5 +634,452 @@ mod tests {
         assert!(!cs_snapshot.workset_item_references.iter().any(|i| i.title.as_deref().unwrap_or("").contains("WhatsApp")));
         assert!(!cs_snapshot.workset_item_references.iter().any(|i| i.title.as_deref().unwrap_or("").contains("Reddit")));
         assert!(!cs_snapshot.workset_item_references.iter().any(|i| i.title.as_deref().unwrap_or("").contains("Instagram")));
+    }
+
+    #[test]
+    fn test_step15_realistic_workday_lifecycle_simulation() {
+        let conn = setup_test_db();
+        let contamination_guard = ContaminationGuard::new();
+        let quality_guard = ContextQualityGuard::default();
+        let reconstruction_service = ContextReconstructionService::new();
+        let snapshot_service = ContextSnapshotService::new();
+        let state_service = ContextStateService::new();
+        let workset_service = crate::context_engine::workset::ContextWorksetService::new();
+
+        // ---------------------------------------------------------------------
+        // Context Initializations
+        // ---------------------------------------------------------------------
+        let ws_cs = create_workspace(&conn, "ContextSplit").unwrap();
+        let ws_payx = create_workspace(&conn, "PayX").unwrap();
+        let ws_uni = create_workspace(&conn, "University OS").unwrap();
+
+        assert_eq!(list_workspaces(&conn).unwrap().len(), 3);
+
+        // Tracker for expected lifecycle histories
+        let mut cs_history: Vec<ContextLifecycleState> = Vec::new();
+        let mut payx_history: Vec<ContextLifecycleState> = Vec::new();
+        let mut uni_history: Vec<ContextLifecycleState> = Vec::new();
+
+        // =====================================================================
+        // 09:00 — ContextSplit Development (ACTIVE)
+        // =====================================================================
+        let sess_cs_0900 = create_session(&conn).unwrap();
+        let item_cs_mod = create_item(
+            &conn,
+            Some(&ws_cs.id),
+            Some(&sess_cs_0900.id),
+            "file",
+            "/Projects/ContextSplit/src-tauri/src/context_engine/mod.rs",
+            Some("mod.rs — ContextSplit"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/ContextSplit/src-tauri/src/context_engine/mod.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_cs_mod.id, &ws_cs.id, "confirmed", 0.95, "user").unwrap();
+
+        let item_cs_lifecycle = create_item(
+            &conn,
+            Some(&ws_cs.id),
+            Some(&sess_cs_0900.id),
+            "file",
+            "/Projects/ContextSplit/src-tauri/src/context_engine/lifecycle.rs",
+            Some("lifecycle.rs — ContextSplit"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/ContextSplit/src-tauri/src/context_engine/lifecycle.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_cs_lifecycle.id, &ws_cs.id, "confirmed", 0.95, "user").unwrap();
+
+        let task_cs = TaskCandidate {
+            id: format!("task-cs-{}", ws_cs.id),
+            context_id: Some(ws_cs.id.clone()),
+            title: "Context Lifecycle Engine".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-22T09:00:00Z".to_string(),
+            last_active_at: "2026-09-22T10:30:00Z".to_string(),
+            created_at: "2026-09-22T09:00:00Z".to_string(),
+            updated_at: "2026-09-22T10:30:00Z".to_string(),
+        };
+        create_task_candidate(&conn, &task_cs).unwrap();
+
+        let state_cs_0900 = state_service.derive_for_context(&conn, &ws_cs.id).unwrap();
+        assert_eq!(state_cs_0900.state, ContextStateValue::Active);
+        cs_history.push(ContextLifecycleState::Active);
+
+        // =====================================================================
+        // 10:30 — Pause (ContextSplit: PAUSED)
+        // =====================================================================
+        let pause_trans = ContextTransitionBuilder::new(ContextTransitionType::ContextEnd, 0.92)
+            .from_context(&ws_cs.id)
+            .session(&sess_cs_0900.id)
+            .build();
+        record_context_transition(&conn, &pause_trans).unwrap();
+
+        let cs_session_1 = ContextSessionEvaluator::evaluate_session(
+            SessionEvaluationInput {
+                session_id: &sess_cs_0900.id,
+                context_id: &ws_cs.id,
+                context_name: Some("ContextSplit"),
+                raw_started_at: "2026-09-22T09:00:00Z",
+                raw_last_activity_at: "2026-09-22T10:30:00Z",
+                raw_ended_at: None,
+                items: &[item_cs_mod.clone(), item_cs_lifecycle.clone()],
+                task_candidate: Some(&task_cs),
+                is_task_completed: false,
+                has_pause_checkpoint: true,
+                is_resumed_context: false,
+                latest_snapshot: None,
+                reference_time: None,
+            },
+            None,
+        );
+        assert_eq!(cs_session_1.session_state, ContextSessionState::Paused);
+        assert_eq!(cs_session_1.duration_seconds, 5400);
+
+        let snap_eval_1030 = SessionSnapshotIntegrator::evaluate_and_build_snapshot(
+            crate::context_engine::session_snapshot::SessionSnapshotEvaluationInput {
+                session: &cs_session_1,
+                previous_snapshot: None,
+                current_task: Some(&task_cs),
+                current_workset: None,
+                current_important_memories: &[],
+                current_state_value: ContextStateValue::Paused,
+                is_resumed: false,
+                is_major_milestone: false,
+                reference_time: None,
+            },
+        );
+        assert!(snap_eval_1030.should_create_or_update);
+        assert_eq!(snap_eval_1030.snapshot.as_ref().unwrap().state, ContextStateValue::Paused);
+
+        cs_history.push(ContextLifecycleState::Paused);
+
+        // =====================================================================
+        // 10:45 — ContextSplit Resumed (ContextSplit: ACTIVE)
+        // =====================================================================
+        let sess_cs_1045 = create_session(&conn).unwrap();
+        let item_cs_recon = create_item(
+            &conn,
+            Some(&ws_cs.id),
+            Some(&sess_cs_1045.id),
+            "file",
+            "/Projects/ContextSplit/src-tauri/src/context_engine/reconstruction.rs",
+            Some("reconstruction.rs — ContextSplit"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/ContextSplit/src-tauri/src/context_engine/reconstruction.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_cs_recon.id, &ws_cs.id, "confirmed", 0.95, "user").unwrap();
+
+        let resume_trans_cs = ContextTransitionBuilder::new(ContextTransitionType::ContextReturn, 0.95)
+            .to_context(&ws_cs.id)
+            .session(&sess_cs_1045.id)
+            .build();
+        record_context_transition(&conn, &resume_trans_cs).unwrap();
+
+        cs_history.push(ContextLifecycleState::Active);
+
+        let cs_session_2 = ContextSessionEvaluator::evaluate_session(
+            SessionEvaluationInput {
+                session_id: &sess_cs_1045.id,
+                context_id: &ws_cs.id,
+                context_name: Some("ContextSplit"),
+                raw_started_at: "2026-09-22T10:45:00Z",
+                raw_last_activity_at: "2026-09-22T12:00:00Z",
+                raw_ended_at: None,
+                items: &[item_cs_recon.clone()],
+                task_candidate: Some(&task_cs),
+                is_task_completed: false,
+                has_pause_checkpoint: false,
+                is_resumed_context: true,
+                latest_snapshot: None,
+                reference_time: None,
+            },
+            None,
+        );
+        assert_eq!(cs_session_2.session_state, ContextSessionState::Active);
+
+        // =====================================================================
+        // 12:00 — Switch to PayX (ContextSplit: PAUSED, PayX: ACTIVE)
+        // =====================================================================
+        let switch_to_payx = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.93)
+            .from_context(&ws_cs.id)
+            .to_context(&ws_payx.id)
+            .session(&sess_cs_1045.id)
+            .build();
+        record_context_transition(&conn, &switch_to_payx).unwrap();
+
+        cs_history.push(ContextLifecycleState::Paused);
+        payx_history.push(ContextLifecycleState::Active);
+
+        let sess_payx_1200 = create_session(&conn).unwrap();
+        let item_payx_stripe = create_item(
+            &conn,
+            Some(&ws_payx.id),
+            Some(&sess_payx_1200.id),
+            "file",
+            "/Projects/PayX/src/stripe_webhook.rs",
+            Some("stripe_webhook.rs — PayX"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/PayX/src/stripe_webhook.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_payx_stripe.id, &ws_payx.id, "confirmed", 0.95, "user").unwrap();
+
+        let task_payx = TaskCandidate {
+            id: format!("task-payx-{}", ws_payx.id),
+            context_id: Some(ws_payx.id.clone()),
+            title: "Stripe Webhook Integration".to_string(),
+            confidence: 0.92,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-22T12:00:00Z".to_string(),
+            last_active_at: "2026-09-22T13:00:00Z".to_string(),
+            created_at: "2026-09-22T12:00:00Z".to_string(),
+            updated_at: "2026-09-22T13:00:00Z".to_string(),
+        };
+        create_task_candidate(&conn, &task_payx).unwrap();
+
+        // =====================================================================
+        // 13:00 — Switch to University OS (PayX: PAUSED, University OS: ACTIVE)
+        // =====================================================================
+        let switch_to_uni = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.91)
+            .from_context(&ws_payx.id)
+            .to_context(&ws_uni.id)
+            .session(&sess_payx_1200.id)
+            .build();
+        record_context_transition(&conn, &switch_to_uni).unwrap();
+
+        payx_history.push(ContextLifecycleState::Paused);
+        uni_history.push(ContextLifecycleState::Active);
+
+        let sess_uni_1300 = create_session(&conn).unwrap();
+        let item_uni_scheduler = create_item(
+            &conn,
+            Some(&ws_uni.id),
+            Some(&sess_uni_1300.id),
+            "file",
+            "/Academic/CS342/scheduler.c",
+            Some("scheduler.c — University OS"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Academic/CS342/scheduler.c\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_uni_scheduler.id, &ws_uni.id, "confirmed", 0.95, "user").unwrap();
+
+        let task_uni = TaskCandidate {
+            id: format!("task-uni-{}", ws_uni.id),
+            context_id: Some(ws_uni.id.clone()),
+            title: "Process Scheduler Assignment".to_string(),
+            confidence: 0.94,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: "2026-09-22T13:00:00Z".to_string(),
+            last_active_at: "2026-09-22T14:30:00Z".to_string(),
+            created_at: "2026-09-22T13:00:00Z".to_string(),
+            updated_at: "2026-09-22T14:30:00Z".to_string(),
+        };
+        create_task_candidate(&conn, &task_uni).unwrap();
+
+        // =====================================================================
+        // 14:30 — Switch back to PayX Resumed (University OS: PAUSED, PayX: ACTIVE)
+        // =====================================================================
+        let switch_to_payx_resumed = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.90)
+            .from_context(&ws_uni.id)
+            .to_context(&ws_payx.id)
+            .session(&sess_uni_1300.id)
+            .build();
+        record_context_transition(&conn, &switch_to_payx_resumed).unwrap();
+
+        uni_history.push(ContextLifecycleState::Paused);
+        payx_history.push(ContextLifecycleState::Active);
+
+        let sess_payx_1430 = create_session(&conn).unwrap();
+        let item_payx_checkout = create_item(
+            &conn,
+            Some(&ws_payx.id),
+            Some(&sess_payx_1430.id),
+            "file",
+            "/Projects/PayX/src/checkout_flow.rs",
+            Some("checkout_flow.rs — PayX"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/PayX/src/checkout_flow.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_payx_checkout.id, &ws_payx.id, "confirmed", 0.95, "user").unwrap();
+
+        // =====================================================================
+        // 16:00 — Random Browsing (Noise / Detour)
+        // =====================================================================
+        // Must NOT automatically become a permanent context
+        let noise_items = [
+            ("Reddit - Endless Scrolling", "reddit.com", "https://reddit.com/r/technology"),
+            ("Twitter / X Feed", "x.com", "https://x.com/home"),
+            ("Hacker News Frontpage", "news.ycombinator.com", "https://news.ycombinator.com"),
+        ];
+
+        for (title, domain, url) in &noise_items {
+            let c_res = contamination_guard.assess(
+                &ContaminationCheckInput::new(*title, &ws_payx.id, "PayX")
+                    .with_app("Google Chrome")
+                    .with_domain(*domain)
+                    .with_url(*url),
+            );
+            assert!(c_res.is_contamination_risk);
+
+            let q_res = quality_guard.evaluate(
+                &QualityGuardInput::new(*title)
+                    .with_target(&ws_payx.id, "PayX")
+                    .with_app_name("Google Chrome")
+                    .with_domain(*domain)
+                    .with_noise_flags(true, false),
+            );
+            assert!(!q_res.decision.should_modify_context());
+        }
+
+        // Workspace count remains strictly 3 - no random browsing workspace created
+        assert_eq!(
+            list_workspaces(&conn).unwrap().len(),
+            3,
+            "Random browsing must NOT create a permanent context"
+        );
+
+        // =====================================================================
+        // 17:00 — Switch back to ContextSplit Resumed (PayX: PAUSED, ContextSplit: ACTIVE)
+        // =====================================================================
+        let switch_to_cs_resumed = ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 0.94)
+            .from_context(&ws_payx.id)
+            .to_context(&ws_cs.id)
+            .session(&sess_payx_1430.id)
+            .build();
+        record_context_transition(&conn, &switch_to_cs_resumed).unwrap();
+
+        payx_history.push(ContextLifecycleState::Paused);
+        cs_history.push(ContextLifecycleState::Active);
+
+        let sess_cs_1700 = create_session(&conn).unwrap();
+        let item_cs_overview = create_item(
+            &conn,
+            Some(&ws_cs.id),
+            Some(&sess_cs_1700.id),
+            "file",
+            "/Projects/ContextSplit/src-tauri/src/context_engine/overview.rs",
+            Some("overview.rs — ContextSplit"),
+            "{\"status\":\"confirmed\",\"app_name\":\"Visual Studio Code\",\"file_path\":\"/Projects/ContextSplit/src-tauri/src/context_engine/overview.rs\"}",
+        ).unwrap();
+        create_or_update_membership(&conn, &item_cs_overview.id, &ws_cs.id, "confirmed", 0.95, "user").unwrap();
+
+        // =====================================================================
+        // 18:00 — Stop Working (ContextSplit: PAUSED)
+        // =====================================================================
+        let departure_1800 = ContextTransitionBuilder::new(ContextTransitionType::ContextEnd, 0.95)
+            .from_context(&ws_cs.id)
+            .session(&sess_cs_1700.id)
+            .build();
+        record_context_transition(&conn, &departure_1800).unwrap();
+
+        cs_history.push(ContextLifecycleState::Paused);
+
+        // =====================================================================
+        // VERIFICATIONS
+        // =====================================================================
+        // 1. Verify Expected Lifecycle Transitions
+        // ContextSplit: ACTIVE -> PAUSED -> ACTIVE -> PAUSED -> ACTIVE -> PAUSED
+        assert_eq!(
+            cs_history,
+            vec![
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+            ]
+        );
+
+        // PayX: ACTIVE -> PAUSED -> ACTIVE -> PAUSED
+        assert_eq!(
+            payx_history,
+            vec![
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+            ]
+        );
+
+        // University OS: ACTIVE -> PAUSED
+        assert_eq!(
+            uni_history,
+            vec![
+                ContextLifecycleState::Active,
+                ContextLifecycleState::Paused,
+            ]
+        );
+
+        // 2. Invalidate all caches for fresh end-of-day reconstruction verification
+        invalidate_reconstruction_cache(None);
+        invalidate_memory_cache(None);
+        invalidate_workset_cache(None);
+        invalidate_snapshot_cache(&ws_cs.id);
+        invalidate_snapshot_cache(&ws_payx.id);
+        invalidate_snapshot_cache(&ws_uni.id);
+
+        // 3. Verify ContextSplit Coherence
+        let cs_recon = reconstruction_service.reconstruct_context(&conn, &ws_cs.id).unwrap();
+        assert_eq!(cs_recon.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(cs_recon.context.name, "ContextSplit");
+        assert_eq!(cs_recon.current_task.title.as_deref(), Some("Context Lifecycle Engine"));
+        assert!(cs_recon.workset.total_count >= 4);
+        assert!(
+            cs_recon.quality.rating == ReconstructionQualityRating::Coherent
+                || cs_recon.quality.rating == ReconstructionQualityRating::MostlyCoherent
+        );
+        let cs_workset = workset_service.derive_for_workspace(&conn, &ws_cs.id).unwrap();
+        assert!(cs_workset.items.iter().any(|i| i.id == item_cs_mod.id));
+        assert!(cs_workset.items.iter().any(|i| i.id == item_cs_lifecycle.id));
+        assert!(cs_workset.items.iter().any(|i| i.id == item_cs_recon.id));
+        assert!(cs_workset.items.iter().any(|i| i.id == item_cs_overview.id));
+
+        // 4. Verify PayX Coherence
+        let payx_recon = reconstruction_service.reconstruct_context(&conn, &ws_payx.id).unwrap();
+        assert_eq!(payx_recon.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(payx_recon.context.name, "PayX");
+        assert_eq!(payx_recon.current_task.title.as_deref(), Some("Stripe Webhook Integration"));
+        let payx_workset = workset_service.derive_for_workspace(&conn, &ws_payx.id).unwrap();
+        assert!(payx_workset.items.iter().any(|i| i.id == item_payx_stripe.id));
+        assert!(payx_workset.items.iter().any(|i| i.id == item_payx_checkout.id));
+
+        // 5. Verify University OS Coherence
+        let uni_recon = reconstruction_service.reconstruct_context(&conn, &ws_uni.id).unwrap();
+        assert_eq!(uni_recon.context.status, ReconstructionSectionStatus::Available);
+        assert_eq!(uni_recon.context.name, "University OS");
+        assert_eq!(uni_recon.current_task.title.as_deref(), Some("Process Scheduler Assignment"));
+        let uni_workset = workset_service.derive_for_workspace(&conn, &ws_uni.id).unwrap();
+        assert!(uni_workset.items.iter().any(|i| i.id == item_uni_scheduler.id));
+
+        // 6. Verify Complete Memory Isolation (Zero Leaks Across Workday)
+        let cs_mem = ContextImportantMemoryBuilder::build(&conn, &ws_cs.id, None).unwrap();
+        let payx_mem = ContextImportantMemoryBuilder::build(&conn, &ws_payx.id, None).unwrap();
+        let uni_mem = ContextImportantMemoryBuilder::build(&conn, &ws_uni.id, None).unwrap();
+
+        for mem in &cs_mem.memories {
+            assert_ne!(mem.source_id, item_payx_stripe.id);
+            assert_ne!(mem.source_id, item_uni_scheduler.id);
+            assert_ne!(mem.source_id, task_payx.id);
+            assert_ne!(mem.source_id, task_uni.id);
+        }
+        for mem in &payx_mem.memories {
+            assert_ne!(mem.source_id, item_cs_mod.id);
+            assert_ne!(mem.source_id, item_uni_scheduler.id);
+            assert_ne!(mem.source_id, task_cs.id);
+            assert_ne!(mem.source_id, task_uni.id);
+        }
+        for mem in &uni_mem.memories {
+            assert_ne!(mem.source_id, item_cs_mod.id);
+            assert_ne!(mem.source_id, item_payx_stripe.id);
+            assert_ne!(mem.source_id, task_cs.id);
+            assert_ne!(mem.source_id, task_payx.id);
+        }
+
+        // 7. Verify Snapshots Coherence
+        let cs_snap = snapshot_service.derive_for_context(&conn, &ws_cs.id).unwrap();
+        assert_eq!(cs_snap.context_id, ws_cs.id);
+        assert_eq!(cs_snap.task_title.as_deref(), Some("Context Lifecycle Engine"));
+
+        let payx_snap = snapshot_service.derive_for_context(&conn, &ws_payx.id).unwrap();
+        assert_eq!(payx_snap.context_id, ws_payx.id);
+        assert_eq!(payx_snap.task_title.as_deref(), Some("Stripe Webhook Integration"));
+
+        let uni_snap = snapshot_service.derive_for_context(&conn, &ws_uni.id).unwrap();
+        assert_eq!(uni_snap.context_id, ws_uni.id);
+        assert_eq!(uni_snap.task_title.as_deref(), Some("Process Scheduler Assignment"));
     }
 }
