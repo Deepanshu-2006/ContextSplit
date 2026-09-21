@@ -331,26 +331,32 @@ export function ContextOverviewPanel() {
 // Subcomponents
 // ---------------------------------------------------------------------------
 
-function LifecycleBadge({ state }: { state: 'active' | 'dormant' | 'archived' }) {
-  if (state === 'active') {
+function LifecycleBadge({ state }: { state?: string | null }) {
+  const normalized = (state || 'active').toLowerCase();
+  if (normalized === 'active') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/80">
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
         Active
       </span>
     );
   }
-  if (state === 'dormant') {
+  if (normalized === 'paused') {
     return (
-      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200/80">
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+      <span className="text-xs font-normal text-gray-500">
+        Paused
+      </span>
+    );
+  }
+  if (normalized === 'dormant') {
+    return (
+      <span className="text-xs font-normal text-gray-500">
         Dormant
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 text-gray-600 border border-gray-200">
-      <Archive size={11} />
+    <span className="text-xs font-normal text-gray-400">
       Archived
     </span>
   );
@@ -395,8 +401,11 @@ function ReconstructionOverviewContent({
   const contextName = reconstruction.context.name || 'Workspace';
   const contextId = reconstruction.context.id;
 
-  // 1. Current State Label
-  const stateLabel = formatStateLabel(reconstruction.current_state.state_value);
+  // 1. Lifecycle State
+  const lifecycleState =
+    reconstruction.context.lifecycle_state ||
+    reconstruction.current_state.state_value ||
+    'active';
 
   // 2. YOU WERE WORKING ON (Handle partial reconstruction gracefully: do not invent a task)
   const isTaskAvailable =
@@ -469,14 +478,11 @@ function ReconstructionOverviewContent({
 
   return (
     <div className="space-y-7 animate-in fade-in duration-150">
-      {/* 1. Context & Subtle Status */}
-      <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-        <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-          <span>{contextName}</span>
-          <span className="text-gray-300 font-normal">·</span>
-          <span className="text-xs font-normal text-gray-500">
-            {stateLabel}
-          </span>
+      {/* 1. Context & Subtle Lifecycle Status */}
+      <div className="pb-3 border-b border-gray-100 flex flex-col gap-0.5">
+        <span className="text-base font-semibold text-gray-900 tracking-tight">{contextName}</span>
+        <div>
+          <LifecycleBadge state={lifecycleState} />
         </div>
       </div>
 

@@ -391,15 +391,16 @@ impl ContextLifecycleEvaluator {
         } else {
             let elapsed = elapsed_seconds.unwrap_or(0);
 
-            // Check if context transitions explicitly switched away
-            let latest_trans = input.context_transitions.iter().max_by_key(|t| {
-                parse_ts(&t.detected_at).unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap())
-            });
+            // Check if context transitions explicitly switched away from this context
+            let latest_context_trans = input.context_transitions.iter()
+                .filter(|t| t.from_context_id.as_deref() == Some(input.context_id) || t.to_context_id.as_deref() == Some(input.context_id))
+                .max_by_key(|t| {
+                    parse_ts(&t.detected_at).unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap())
+                });
 
-            let explicitly_switched_away = latest_trans.map(|t| {
+            let explicitly_switched_away = latest_context_trans.map(|t| {
                 t.from_context_id.as_deref() == Some(input.context_id)
                     && t.to_context_id.as_deref() != Some(input.context_id)
-                    && t.transition_type == ContextTransitionType::ContextSwitch
             }).unwrap_or(false);
 
             // Check active state from context state service
@@ -555,13 +556,16 @@ impl ContextLifecycleService {
         let state_res = state_svc.derive_for_context(conn, workspace_id);
         let context_state = state_res.as_ref().ok();
 
+        let context_transitions = crate::db::operations::list_context_transitions_for_context(conn, workspace_id)
+            .unwrap_or_default();
+
         let input = LifecycleEvaluationInput {
             context_id: workspace_id,
             context_name: Some(&ws.name),
             workspace: Some(&ws),
             context_state,
             activity_segments: &[],
-            context_transitions: &[],
+            context_transitions: &context_transitions,
             task_transitions: &[],
             active_task_candidate: None,
             workset: None,
@@ -904,5 +908,203 @@ mod tests {
 
         let deserialized: ContextLifecycle = serde_json::from_str(&json).expect("Deserialization failed");
         assert_eq!(deserialized, lifecycle);
+    }
+
+    #[test]
+    fn test_multi_context_lifecycle_transitions_simulation() {
+        let now = Utc::now();
+        let t1 = (now - chrono::Duration::minutes(45)).to_rfc3339();
+        let t2 = (now - chrono::Duration::minutes(30)).to_rfc3339();
+        let t3 = (now - chrono::Duration::minutes(15)).to_rfc3339();
+        let t4 = (now - chrono::Duration::minutes(2)).to_rfc3339();
+
+        // 1. Contexts Setup
+        let ws_split = make_test_workspace("ws_split", "ContextSplit", "active", Some(&t1));
+        let ws_payx = make_test_workspace("ws_payx", "PayX", "active", Some(&t2));
+        let ws_univ = make_test_workspace("ws_univ", "University OS", "active", Some(&t3));
+
+        let items_split = vec![
+            make_test_item("item_split_1", "ws_split", &t1),
+            make_test_item("item_split_2", "ws_split", &t4),
+        ];
+        let items_payx = vec![
+            make_test_item("item_payx_1", "ws_payx", &t2),
+        ];
+        let items_univ = vec![
+            make_test_item("item_univ_1", "ws_univ", &t3),
+        ];
+
+        // ---------------------------------------------------------------------
+        // Transition 1: ContextSplit -> PayX
+        // ---------------------------------------------------------------------
+        let mut trans_1 = ContextTransition::new(
+            Some("ws_split".to_string()),
+            Some("ws_payx".to_string()),
+            ContextTransitionType::ContextSwitch,
+            0.92,
+        );
+        trans_1.detected_at = t2.clone();
+
+        // Evaluate ContextSplit after switch to PayX
+        let input_split_after_payx = LifecycleEvaluationInput {
+            context_id: "ws_split",
+            context_name: Some("ContextSplit"),
+            workspace: Some(&ws_split),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_split[0..1],
+            has_explicit_user_archive: false,
+            reference_time: Some(now - chrono::Duration::minutes(29)),
+        };
+        let lc_split_p1 = ContextLifecycleEvaluator::evaluate(input_split_after_payx);
+        assert_eq!(lc_split_p1.lifecycle_state, ContextLifecycleState::Paused);
+
+        // Evaluate PayX when active
+        let input_payx_active = LifecycleEvaluationInput {
+            context_id: "ws_payx",
+            context_name: Some("PayX"),
+            workspace: Some(&ws_payx),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_payx,
+            has_explicit_user_archive: false,
+            reference_time: Some(now - chrono::Duration::minutes(29)),
+        };
+        let lc_payx_p1 = ContextLifecycleEvaluator::evaluate(input_payx_active);
+        assert_eq!(lc_payx_p1.lifecycle_state, ContextLifecycleState::Active);
+
+        // ---------------------------------------------------------------------
+        // Transition 2: PayX -> University OS
+        // ---------------------------------------------------------------------
+        let mut trans_2 = ContextTransition::new(
+            Some("ws_payx".to_string()),
+            Some("ws_univ".to_string()),
+            ContextTransitionType::ContextSwitch,
+            0.90,
+        );
+        trans_2.detected_at = t3.clone();
+
+        // Evaluate PayX after switch to University OS
+        let input_payx_after_univ = LifecycleEvaluationInput {
+            context_id: "ws_payx",
+            context_name: Some("PayX"),
+            workspace: Some(&ws_payx),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone(), trans_2.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_payx,
+            has_explicit_user_archive: false,
+            reference_time: Some(now - chrono::Duration::minutes(14)),
+        };
+        let lc_payx_p2 = ContextLifecycleEvaluator::evaluate(input_payx_after_univ);
+        assert_eq!(lc_payx_p2.lifecycle_state, ContextLifecycleState::Paused);
+
+        // Evaluate University OS when active
+        let input_univ_active = LifecycleEvaluationInput {
+            context_id: "ws_univ",
+            context_name: Some("University OS"),
+            workspace: Some(&ws_univ),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone(), trans_2.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_univ,
+            has_explicit_user_archive: false,
+            reference_time: Some(now - chrono::Duration::minutes(14)),
+        };
+        let lc_univ_p2 = ContextLifecycleEvaluator::evaluate(input_univ_active);
+        assert_eq!(lc_univ_p2.lifecycle_state, ContextLifecycleState::Active);
+
+        // ---------------------------------------------------------------------
+        // Transition 3: University OS -> ContextSplit
+        // ---------------------------------------------------------------------
+        let mut trans_3 = ContextTransition::new(
+            Some("ws_univ".to_string()),
+            Some("ws_split".to_string()),
+            ContextTransitionType::ContextReturn,
+            0.95,
+        );
+        trans_3.detected_at = t4.clone();
+
+        // ContextSplit becomes ACTIVE
+        let input_split_returned = LifecycleEvaluationInput {
+            context_id: "ws_split",
+            context_name: Some("ContextSplit"),
+            workspace: Some(&ws_split),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone(), trans_2.clone(), trans_3.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_split,
+            has_explicit_user_archive: false,
+            reference_time: Some(now),
+        };
+        let lc_split_final = ContextLifecycleEvaluator::evaluate(input_split_returned);
+        assert_eq!(lc_split_final.lifecycle_state, ContextLifecycleState::Active);
+
+        // PayX remains PAUSED
+        let input_payx_final = LifecycleEvaluationInput {
+            context_id: "ws_payx",
+            context_name: Some("PayX"),
+            workspace: Some(&ws_payx),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1.clone(), trans_2.clone(), trans_3.clone()],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_payx,
+            has_explicit_user_archive: false,
+            reference_time: Some(now),
+        };
+        let lc_payx_final = ContextLifecycleEvaluator::evaluate(input_payx_final);
+        assert_eq!(lc_payx_final.lifecycle_state, ContextLifecycleState::Paused);
+
+        // University OS becomes PAUSED
+        let input_univ_final = LifecycleEvaluationInput {
+            context_id: "ws_univ",
+            context_name: Some("University OS"),
+            workspace: Some(&ws_univ),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[trans_1, trans_2, trans_3],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items_univ,
+            has_explicit_user_archive: false,
+            reference_time: Some(now),
+        };
+        let lc_univ_final = ContextLifecycleEvaluator::evaluate(input_univ_final);
+        assert_eq!(lc_univ_final.lifecycle_state, ContextLifecycleState::Paused);
     }
 }
