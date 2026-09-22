@@ -50,6 +50,12 @@ pub mod preservation;
 pub mod session;
 pub mod session_summary;
 pub mod session_snapshot;
+pub mod feedback;
+
+pub use feedback::{
+    ContextFeedbackEvent, FeedbackAction, FeedbackMetadata, FeedbackScope,
+    FeedbackSource, FeedbackTargetRef, CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
+};
 
 pub use session_snapshot::{
     SessionSnapshotDecision, SessionSnapshotEvaluationInput, SessionSnapshotIntegrator,
