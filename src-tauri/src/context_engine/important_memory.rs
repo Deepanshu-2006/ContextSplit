@@ -506,35 +506,46 @@ impl ContextImportantMemoryBuilder {
         // 2.5. Extract User Context Signals for Feedback Overrides
         let mut unpinned_from_important_ids: HashSet<String> = HashSet::new();
         let mut forgotten_from_context_ids: HashSet<String> = HashSet::new();
+        let mut explicitly_confirmed_ids: HashSet<String> = HashSet::new();
 
         if let Ok(mut sig_stmt) = conn.prepare(
-            "SELECT item_id, signal_type, payload FROM context_signals
+            "SELECT item_id, signal_type, payload, created_at FROM context_signals
              WHERE workspace_id = ?1 AND item_id IS NOT NULL
-             ORDER BY created_at DESC",
+             ORDER BY created_at ASC",
         ) {
             let sig_rows = sig_stmt.query_map(params![workspace_id], |row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             });
 
             if let Ok(rows) = sig_rows {
-                for (item_id_opt, signal_type, payload) in rows.flatten() {
+                for (item_id_opt, signal_type, payload, _created_at) in rows.flatten() {
                     if let Some(item_id) = item_id_opt {
-                        if signal_type == "user_dismiss" || signal_type == "user_reject" {
-                            forgotten_from_context_ids.insert(item_id);
-                        } else if signal_type == "user_feedback" {
-                            if let Ok(val) = serde_json::from_str::<Value>(&payload) {
-                                if val.get("action").and_then(|v| v.as_str()) == Some("remove_important") {
-                                    unpinned_from_important_ids.insert(item_id);
-                                } else if val.get("action").and_then(|v| v.as_str()) == Some("remove_from_context")
-                                    || val.get("action").and_then(|v| v.as_str()) == Some("forget_association")
-                                {
-                                    forgotten_from_context_ids.insert(item_id);
-                                }
+                        let parsed_action = serde_json::from_str::<Value>(&payload)
+                            .ok()
+                            .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(|s| s.to_string()));
+
+                        let action_str = parsed_action.as_deref().unwrap_or(signal_type.as_str());
+
+                        match action_str {
+                            "mark_important" | "keep_important" | "confirm_context" | "context_confirmed" | "confirm_task" => {
+                                forgotten_from_context_ids.remove(&item_id);
+                                unpinned_from_important_ids.remove(&item_id);
+                                explicitly_confirmed_ids.insert(item_id);
                             }
+                            "remove_important" | "remove_importance" => {
+                                explicitly_confirmed_ids.remove(&item_id);
+                                unpinned_from_important_ids.insert(item_id);
+                            }
+                            "remove_from_context" | "forget_association" | "user_dismiss" | "user_reject" | "user_correction" | "membership_dismissed" | "reject_context" => {
+                                explicitly_confirmed_ids.remove(&item_id);
+                                forgotten_from_context_ids.insert(item_id);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -545,11 +556,11 @@ impl ContextImportantMemoryBuilder {
         let mut confirmed_item_ids: HashSet<String> = HashSet::new();
         {
             let mut stmt = conn.prepare(
-                "SELECT cm.item_id, i.title, i.item_type, i.content, i.metadata, cm.created_at
+                "SELECT DISTINCT i.id, i.title, i.item_type, i.content, i.metadata, cm.created_at as confirmed_at
                  FROM context_memberships cm
-                 JOIN items i ON i.id = cm.item_id
+                 JOIN items i ON cm.item_id = i.id
                  WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'
-                 ORDER BY cm.created_at DESC
+                 ORDER BY confirmed_at DESC
                  LIMIT 30",
             )?;
 
@@ -594,11 +605,24 @@ impl ContextImportantMemoryBuilder {
 
                 let snippet = create_snippet(&content);
 
+                let is_repo = item_type == "url"
+                    && (content.contains("github.com")
+                        || content.contains("gitlab.com")
+                        || content.contains("bitbucket.org")
+                        || raw_title.to_lowercase().contains("repository")
+                        || raw_title.to_lowercase().contains("repo"));
+
+                let mem_type = if is_repo {
+                    ImportantMemoryType::ImportantReference
+                } else {
+                    ImportantMemoryType::ImportantItem
+                };
+
                 let memory = ContextImportantMemory::new(
                     format!("mem_item_conf_{}", item_id),
                     workspace_id,
                     item_id.clone(),
-                    ImportantMemoryType::ImportantItem,
+                    mem_type,
                     1.0, // Maximum importance for user confirmed items
                     1.0, // Maximum confidence
                     Some(created_at.clone()),
@@ -630,6 +654,88 @@ impl ContextImportantMemoryBuilder {
                     },
                 );
                 memories.push(memory);
+            }
+
+            // Include explicitly confirmed items from signals not yet in memberships
+            for conf_id in &explicitly_confirmed_ids {
+                if !confirmed_item_ids.contains(conf_id)
+                    && !forgotten_from_context_ids.contains(conf_id)
+                    && !unpinned_from_important_ids.contains(conf_id)
+                {
+                    let item_res: Result<(Option<String>, String, String, String, String), _> = conn.query_row(
+                        "SELECT title, item_type, content, metadata, created_at FROM items WHERE id = ?1",
+                        params![conf_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                    );
+                    if let Ok((title_opt, item_type, content, meta_str, created_at)) = item_res {
+                        if is_accidental_capture(&item_type, title_opt.as_deref(), &content, false) {
+                            continue;
+                        }
+                        confirmed_item_ids.insert(conf_id.clone());
+                        let raw_title = title_opt.unwrap_or_else(|| {
+                            if item_type == "url" {
+                                content.clone()
+                            } else {
+                                "Important Asset".to_string()
+                            }
+                        });
+                        let title = crate::context_engine::reasoning::privacy::scrub_private_data(&raw_title);
+                        let parsed_meta: Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
+                        let app_name = parsed_meta.get("app_name").and_then(|v| v.as_str()).map(String::from);
+                        let domain = parsed_meta.get("domain").and_then(|v| v.as_str()).map(String::from);
+                        let snippet = create_snippet(&content);
+
+                        let is_repo = item_type == "url"
+                            && (content.contains("github.com")
+                                || content.contains("gitlab.com")
+                                || content.contains("bitbucket.org")
+                                || raw_title.to_lowercase().contains("repository")
+                                || raw_title.to_lowercase().contains("repo"));
+
+                        let mem_type = if is_repo {
+                            ImportantMemoryType::ImportantReference
+                        } else {
+                            ImportantMemoryType::ImportantItem
+                        };
+
+                        let memory = ContextImportantMemory::new(
+                            format!("mem_item_conf_{}", conf_id),
+                            workspace_id,
+                            conf_id.clone(),
+                            mem_type,
+                            1.0,
+                            1.0,
+                            Some(created_at.clone()),
+                            Some(created_at),
+                            InformationProvenance::Confirmed,
+                            title,
+                            Some(snippet),
+                            ImportantMemoryExplanation::new(
+                                "Confirmed important contextual memory.",
+                                vec![
+                                    "Explicitly marked important by user".to_string(),
+                                    "Immune to automatic memory decay".to_string(),
+                                ],
+                                vec![conf_id.clone()],
+                                1.0,
+                                InformationProvenance::Confirmed,
+                                None,
+                            ),
+                            ImportantMemoryMetadata {
+                                item_type: Some(item_type),
+                                app_name,
+                                domain,
+                                session_count: None,
+                                streak_count: None,
+                                action_verb: None,
+                                target_subject: None,
+                                state_value: None,
+                                tags: vec!["user_confirmed".to_string(), "marked_important".to_string()],
+                            },
+                        );
+                        memories.push(memory);
+                    }
+                }
             }
         }
 
@@ -1098,17 +1204,12 @@ pub fn record_context_memory_control(
 
     match action {
         UserMemoryControlAction::KeepImportant => {
-            // 1. Confirm and pin membership
+            // 1. Confirm membership in context_memberships
             let _ = crate::db::operations::confirm_membership(conn, item_id, context_id);
-            let _ = conn.execute(
-                "UPDATE workspace_memberships SET user_confirmed = 1, pinned = 1, updated_at = ?1 
-                 WHERE workspace_id = ?2 AND item_id = ?3",
-                params![now, context_id, item_id],
-            );
 
             // 2. Record explicit user signal
             let payload = serde_json::json!({
-                "action": "keep_important",
+                "action": "mark_important",
                 "item_id": item_id,
                 "workspace_id": context_id,
                 "pinned": true,
@@ -1131,16 +1232,9 @@ pub fn record_context_memory_control(
                 params![now, context_id, item_id],
             );
 
-            // 2. Unpin from workspace_memberships
-            let _ = conn.execute(
-                "UPDATE workspace_memberships SET user_confirmed = 0, pinned = 0, updated_at = ?1 
-                 WHERE workspace_id = ?2 AND item_id = ?3",
-                params![now, context_id, item_id],
-            );
-
-            // 3. Record explicit user signal
+            // 2. Record explicit user signal
             let payload = serde_json::json!({
-                "action": "remove_important",
+                "action": "remove_importance",
                 "item_id": item_id,
                 "workspace_id": context_id,
                 "unpinned": true,
@@ -1157,10 +1251,6 @@ pub fn record_context_memory_control(
         UserMemoryControlAction::RemoveFromContext => {
             // 1. Dismiss membership association in this workspace
             let _ = crate::db::operations::dismiss_membership(conn, item_id, context_id);
-            let _ = conn.execute(
-                "DELETE FROM workspace_memberships WHERE workspace_id = ?1 AND item_id = ?2",
-                params![context_id, item_id],
-            );
 
             // 2. If item directly belonged to this workspace, unassign without deleting
             let _ = conn.execute(
@@ -1803,6 +1893,125 @@ mod tests {
         assert!(results[0].importance > 0.0);
         assert!(results[0].confidence > 0.0);
         assert!(results[0].first_seen_at.is_some());
+    }
+
+    #[test]
+    fn test_feedback_integration_mark_repository_important() {
+        let (conn, ws_id) = setup_test_db();
+        let repo_id = "item-repo-contextsplit";
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES (?1, ?2, 'url', 'https://github.com/org/contextsplit', 'ContextSplit Core Repository', '{\"domain\": \"github.com\"}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![repo_id, ws_id],
+        ).unwrap();
+
+        // User action: Mark repository important
+        let res = record_context_memory_control(&conn, &ws_id, repo_id, UserMemoryControlAction::KeepImportant);
+        assert!(res.is_ok());
+
+        // Expected: Repository becomes confirmed important memory
+        let memory_set = ContextImportantMemoryBuilder::build(&conn, &ws_id, None).unwrap();
+        let repo_mem = memory_set
+            .memories
+            .iter()
+            .find(|m| m.source_id == repo_id)
+            .expect("Repository must become confirmed important memory");
+
+        assert_eq!(repo_mem.provenance, InformationProvenance::Confirmed);
+        assert_eq!(repo_mem.importance, 1.0);
+        assert_eq!(repo_mem.importance_band, MemoryImportanceBand::Critical);
+        assert_eq!(repo_mem.memory_type, ImportantMemoryType::ImportantReference);
+
+        // Verification of decay immunity: user confirmed memory must NOT decay
+        let decay_eval = crate::context_engine::memory_decay::ContextMemoryDecayEvaluator::evaluate_workspace_memories(&conn, &ws_id, None).unwrap();
+        let repo_decay = decay_eval.iter().find(|d| d.entity_id == repo_id).expect("Repo decay evaluated");
+        assert!(repo_decay.is_immune);
+        assert_eq!(repo_decay.decay_factor, 1.0);
+        assert!(!repo_decay.is_stale);
+    }
+
+    #[test]
+    fn test_feedback_integration_remove_repository_from_important_memory() {
+        let (conn, ws_id) = setup_test_db();
+        let repo_id = "item-repo-demo";
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES (?1, ?2, 'url', 'https://github.com/org/demo-repo', 'Demo Repository', '{\"domain\": \"github.com\"}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![repo_id, ws_id],
+        ).unwrap();
+
+        // Initially marked important
+        record_context_memory_control(&conn, &ws_id, repo_id, UserMemoryControlAction::KeepImportant).unwrap();
+
+        // User action: Remove repository from important memory
+        let res = record_context_memory_control(&conn, &ws_id, repo_id, UserMemoryControlAction::RemoveFromImportant);
+        assert!(res.is_ok());
+
+        // Expected: It is no longer treated as important memory
+        let memory_set = ContextImportantMemoryBuilder::build(&conn, &ws_id, None).unwrap();
+        let repo_mem = memory_set.memories.iter().find(|m| m.source_id == repo_id);
+        assert!(repo_mem.is_none(), "Unpinned repository must no longer be treated as important memory");
+
+        // Evaluator check: memory importance evaluation reflects unpinned status
+        let eval = crate::context_engine::memory_importance::ContextMemoryImportanceEvaluator::evaluate_item(&conn, &ws_id, repo_id).unwrap();
+        assert!(!eval.is_retained_as_important);
+    }
+
+    #[test]
+    fn test_feedback_integration_remove_item_from_context() {
+        let (conn, ws_id) = setup_test_db();
+        let item_id = "item-random-article";
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES (?1, ?2, 'url', 'https://medium.com/article-123', 'Random Article', '{\"domain\": \"medium.com\"}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![item_id, ws_id],
+        ).unwrap();
+
+        // User action: Remove item from context
+        let res = record_context_memory_control(&conn, &ws_id, item_id, UserMemoryControlAction::RemoveFromContext);
+        assert!(res.is_ok());
+
+        // Expected: It should not immediately become important memory for that context
+        let memory_set = ContextImportantMemoryBuilder::build(&conn, &ws_id, None).unwrap();
+        let item_mem = memory_set.memories.iter().find(|m| m.source_id == item_id);
+        assert!(item_mem.is_none(), "Removed item must not appear in contextual memory set");
+
+        // Quality Guard check: quality guard rejects promotion
+        let eval = crate::context_engine::memory_importance::ContextMemoryImportanceEvaluator::evaluate_item(&conn, &ws_id, item_id).unwrap();
+        assert!(!eval.is_retained_as_important);
+    }
+
+    #[test]
+    fn test_feedback_integration_conflicting_feedback_resolution() {
+        let (conn, ws_id) = setup_test_db();
+        let item_id = "item-conflict-doc";
+
+        conn.execute(
+            "INSERT INTO items (id, workspace_id, item_type, content, title, metadata, created_at, updated_at)
+             VALUES (?1, ?2, 'text', 'Design Specifications v2', 'Design Spec', '{}', '2026-09-18T00:00:00Z', '2026-09-18T00:00:00Z')",
+            params![item_id, ws_id],
+        ).unwrap();
+
+        // 1. Confirm important
+        record_context_memory_control(&conn, &ws_id, item_id, UserMemoryControlAction::KeepImportant).unwrap();
+        // 2. Remove importance
+        record_context_memory_control(&conn, &ws_id, item_id, UserMemoryControlAction::RemoveFromImportant).unwrap();
+        // 3. Confirm important again
+        record_context_memory_control(&conn, &ws_id, item_id, UserMemoryControlAction::KeepImportant).unwrap();
+
+        // Expected: Latest explicit user feedback takes precedence
+        let memory_set = ContextImportantMemoryBuilder::build(&conn, &ws_id, None).unwrap();
+        let item_mem = memory_set
+            .memories
+            .iter()
+            .find(|m| m.source_id == item_id)
+            .expect("Item should be confirmed after second KeepImportant action");
+
+        assert_eq!(item_mem.importance, 1.0);
+        assert_eq!(item_mem.provenance, InformationProvenance::Confirmed);
     }
 }
 
