@@ -103,16 +103,16 @@ impl FeedbackAction {
     pub fn from_str_lenient(s: &str) -> Result<Self, String> {
         let norm = s.trim().to_lowercase().replace('-', "_");
         match norm.as_str() {
-            "confirm_context" | "confirm" | "confirm_membership" => Ok(Self::ConfirmContext),
-            "reject_context" | "reject" | "reject_membership" => Ok(Self::RejectContext),
-            "remove_from_context" | "remove" | "unassign" => Ok(Self::RemoveFromContext),
-            "mark_important" | "pin_memory" | "set_important" => Ok(Self::MarkImportant),
-            "remove_importance" | "unpin_memory" | "unset_important" => Ok(Self::RemoveImportance),
-            "confirm_task" | "accept_task" => Ok(Self::ConfirmTask),
-            "reject_task" | "dismiss_task" => Ok(Self::RejectTask),
-            "dismiss_suggestion" | "dismiss" | "dismiss_inbox" => Ok(Self::DismissSuggestion),
-            "resume_context" | "resume" => Ok(Self::ResumeContext),
-            "archive_context" | "archive" => Ok(Self::ArchiveContext),
+            "confirm_context" | "confirm" | "confirm_membership" | "membership_confirmed" | "context_confirmed" => Ok(Self::ConfirmContext),
+            "reject_context" | "reject" | "reject_membership" | "membership_dismissed" | "context_dismissed" => Ok(Self::RejectContext),
+            "remove_from_context" | "remove" | "unassign" | "user_removed_from_context" => Ok(Self::RemoveFromContext),
+            "mark_important" | "pin_memory" | "set_important" | "keep_important" => Ok(Self::MarkImportant),
+            "remove_importance" | "unpin_memory" | "unset_important" | "remove_from_important" => Ok(Self::RemoveImportance),
+            "confirm_task" | "accept_task" | "task_confirmed" => Ok(Self::ConfirmTask),
+            "reject_task" | "dismiss_task" | "task_dismissed" | "task_rejected" => Ok(Self::RejectTask),
+            "dismiss_suggestion" | "dismiss" | "dismiss_inbox" | "suggestion_dismissed" => Ok(Self::DismissSuggestion),
+            "resume_context" | "resume" | "context_resumed" => Ok(Self::ResumeContext),
+            "archive_context" | "archive" | "context_archived" => Ok(Self::ArchiveContext),
             _ => Err(format!("Unknown feedback action: '{}'", s)),
         }
     }
@@ -1064,6 +1064,24 @@ impl ContextFeedbackService {
                 )?;
                 applied_systems.push("important_memory_service".to_string());
                 applied_systems.push("context_memberships".to_string());
+
+                let payload = serde_json::json!({
+                    "action": "mark_important",
+                    "item_id": target_id,
+                    "workspace_id": ws_id,
+                    "scope": event.scope.scope_str(),
+                    "source": event.source.as_str(),
+                    "reason": event.reason.as_deref().unwrap_or("User marked as important"),
+                    "recorded_at": event.timestamp
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'user_feedback', NULL, ?4, ?5, ?5)",
+                    rusqlite::params![signal_id, ws_id, target_id, payload, event.timestamp],
+                )
+                .map_err(|e| format!("Failed to insert memory signal: {}", e))?;
                 applied_systems.push("context_signals".to_string());
 
                 Self::invalidate_caches_for_workspace(Some(ws_id));
@@ -1098,6 +1116,24 @@ impl ContextFeedbackService {
                 )?;
                 applied_systems.push("important_memory_service".to_string());
                 applied_systems.push("context_memberships".to_string());
+
+                let payload = serde_json::json!({
+                    "action": "remove_importance",
+                    "item_id": target_id,
+                    "workspace_id": ws_id,
+                    "scope": event.scope.scope_str(),
+                    "source": event.source.as_str(),
+                    "reason": event.reason.as_deref().unwrap_or("User removed importance status"),
+                    "recorded_at": event.timestamp
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'user_feedback', NULL, ?4, ?5, ?5)",
+                    rusqlite::params![signal_id, ws_id, target_id, payload, event.timestamp],
+                )
+                .map_err(|e| format!("Failed to insert memory signal: {}", e))?;
                 applied_systems.push("context_signals".to_string());
 
                 Self::invalidate_caches_for_workspace(Some(ws_id));
@@ -1136,14 +1172,14 @@ impl ContextFeedbackService {
                     "workspace_id": ws_id,
                     "scope": event.scope.scope_str(),
                     "reason": event.reason.as_deref().unwrap_or("User confirmed task in context"),
-                    "recorded_at": now
+                    "recorded_at": event.timestamp
                 })
                 .to_string();
 
                 conn.execute(
                     "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
                      VALUES (?1, ?2, NULL, 'task_confirmed', NULL, ?3, ?4, ?4)",
-                    rusqlite::params![signal_id, ws_id, payload, now],
+                    rusqlite::params![signal_id, ws_id, payload, event.timestamp],
                 )
                 .map_err(|e| format!("Failed to insert task signal: {}", e))?;
                 applied_systems.push("context_signals".to_string());
@@ -1182,14 +1218,14 @@ impl ContextFeedbackService {
                     "workspace_id": ws_id,
                     "scope": event.scope.scope_str(),
                     "reason": event.reason.as_deref().unwrap_or("User dismissed task candidate"),
-                    "recorded_at": now
+                    "recorded_at": event.timestamp
                 })
                 .to_string();
 
                 conn.execute(
                     "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
                      VALUES (?1, ?2, NULL, 'task_dismissed', NULL, ?3, ?4, ?4)",
-                    rusqlite::params![signal_id, ws_id, payload, now],
+                    rusqlite::params![signal_id, ws_id, payload, event.timestamp],
                 )
                 .map_err(|e| format!("Failed to insert task dismissal signal: {}", e))?;
                 applied_systems.push("context_signals".to_string());
@@ -3484,15 +3520,25 @@ impl ContextFeedbackInspector {
             });
 
             let action = action_opt.unwrap_or_else(|| {
-                if sig_type == "user_feedback" || sig_type == "context_confirmed" {
+                if sig_type == "user_feedback"
+                    || sig_type == "context_confirmed"
+                    || sig_type == "membership_confirmed"
+                    || sig_type == "task_confirmed"
+                    || sig_type == "context_resumed"
+                {
                     FeedbackAction::ConfirmContext
                 } else if sig_type == "user_correction"
                     || sig_type == "membership_dismissed"
                     || sig_type == "user_removed_from_context"
+                    || sig_type == "context_dismissed"
                 {
                     FeedbackAction::RemoveFromContext
+                } else if sig_type == "task_dismissed" || sig_type == "task_rejected" {
+                    FeedbackAction::RejectTask
                 } else if sig_type == "suggestion_dismissed" {
                     FeedbackAction::DismissSuggestion
+                } else if sig_type == "context_archived" {
+                    FeedbackAction::ArchiveContext
                 } else {
                     FeedbackAction::RejectContext
                 }

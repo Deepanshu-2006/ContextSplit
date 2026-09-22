@@ -298,6 +298,8 @@ pub mod workday_simulation_tests;
 pub mod quality_guard_performance_tests;
 #[cfg(test)]
 pub mod phase1_e2e_validation_tests;
+#[cfg(test)]
+pub mod feedback_simulation_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
