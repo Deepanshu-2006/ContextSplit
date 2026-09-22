@@ -1816,6 +1816,302 @@ impl ContextPositiveFeedbackEngine {
 }
 
 // =========================================================================
+// Contextual Feedback & Evidence Precedence Engine (Step 7)
+// =========================================================================
+
+/// 7-Tier hierarchy defining deterministic authority and priority among
+/// explicit user actions and inferred contextual evidence.
+///
+/// Precedence Hierarchy (Tier 1 is highest priority):
+/// 1. `ExplicitUserConfirmation` — Authoritative ground truth (manual assignment, confirm action, pinned memory).
+/// 2. `ExplicitUserRejection` — Explicit user suppression/correction (overrides inference, decays with time).
+/// 3. `StrongContextualEvidence` — Corroborated multi-factor anchors (confidence >= 0.85).
+/// 4. `InferredSemanticSimilarity` — Embedding vector cosine score & topic overlap.
+/// 5. `WeakContextualEvidence` — Single-factor, partial, or uncorroborated hints.
+/// 6. `TemporalProximity` — Burst proximity within same active window.
+/// 7. `ApplicationIdentity` — Multi-purpose host application name alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidencePriorityTier {
+    /// Tier 1: Ground-truth affirmative user action or confirmed assignment
+    ExplicitUserConfirmation,
+    /// Tier 2: Explicit negative user feedback or correction
+    ExplicitUserRejection,
+    /// Tier 3: Strong corroborated contextual evidence anchor (>= 0.85)
+    StrongContextualEvidence,
+    /// Tier 4: Inferred semantic similarity (embeddings/topic models)
+    InferredSemanticSimilarity,
+    /// Tier 5: Weak, partial, or uncorroborated indicators
+    WeakContextualEvidence,
+    /// Tier 6: Transient temporal proximity or burst co-occurrence
+    TemporalProximity,
+    /// Tier 7: Host application identity alone (Chrome, VS Code)
+    ApplicationIdentity,
+}
+
+impl EvidencePriorityTier {
+    /// Numeric rank (1 is highest priority, 7 is lowest priority).
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::ExplicitUserConfirmation => 1,
+            Self::ExplicitUserRejection => 2,
+            Self::StrongContextualEvidence => 3,
+            Self::InferredSemanticSimilarity => 4,
+            Self::WeakContextualEvidence => 5,
+            Self::TemporalProximity => 6,
+            Self::ApplicationIdentity => 7,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExplicitUserConfirmation => "explicit_user_confirmation",
+            Self::ExplicitUserRejection => "explicit_user_rejection",
+            Self::StrongContextualEvidence => "strong_contextual_evidence",
+            Self::InferredSemanticSimilarity => "inferred_semantic_similarity",
+            Self::WeakContextualEvidence => "weak_contextual_evidence",
+            Self::TemporalProximity => "temporal_proximity",
+            Self::ApplicationIdentity => "application_identity",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::ExplicitUserConfirmation => "Tier 1: Explicit User Confirmation",
+            Self::ExplicitUserRejection => "Tier 2: Explicit User Rejection",
+            Self::StrongContextualEvidence => "Tier 3: Strong Contextual Evidence",
+            Self::InferredSemanticSimilarity => "Tier 4: Inferred Semantic Similarity",
+            Self::WeakContextualEvidence => "Tier 5: Weak Contextual Evidence",
+            Self::TemporalProximity => "Tier 6: Temporal Proximity",
+            Self::ApplicationIdentity => "Tier 7: Application Identity",
+        }
+    }
+
+    /// Whether this tier represents an authoritative explicit user action.
+    pub fn is_explicit_user_action(&self) -> bool {
+        matches!(self, Self::ExplicitUserConfirmation | Self::ExplicitUserRejection)
+    }
+
+    /// Returns true if this tier strictly dominates `other` in the priority hierarchy.
+    pub fn has_higher_precedence_than(&self, other: &Self) -> bool {
+        self.rank() < other.rank()
+    }
+}
+
+impl PartialOrd for EvidencePriorityTier {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EvidencePriorityTier {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lower rank number means higher priority
+        other.rank().cmp(&self.rank())
+    }
+}
+
+/// Structured prioritized signal used for deterministic multi-source precedence resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PrioritizedEvidenceSignal {
+    pub signal_id: String,
+    pub tier: EvidencePriorityTier,
+    pub context_id: Option<String>,
+    pub entity_id: Option<String>,
+    pub strength: f64,
+    pub timestamp: String,
+    pub description: String,
+    pub is_explicit_user_action: bool,
+}
+
+impl PrioritizedEvidenceSignal {
+    pub fn new(
+        signal_id: impl Into<String>,
+        tier: EvidencePriorityTier,
+        context_id: Option<String>,
+        entity_id: Option<String>,
+        strength: f64,
+        timestamp: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let is_user = tier.is_explicit_user_action();
+        Self {
+            signal_id: signal_id.into(),
+            tier,
+            context_id,
+            entity_id,
+            strength,
+            timestamp: timestamp.into(),
+            description: description.into(),
+            is_explicit_user_action: is_user,
+        }
+    }
+
+    pub fn timestamp_dt(&self) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(&self.timestamp).ok().map(|dt| dt.with_timezone(&Utc))
+    }
+}
+
+/// Policy configuration governing deterministic feedback precedence evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackPrecedencePolicy {
+    /// Minimum confidence threshold for strong evidence override (default: 0.85)
+    pub strong_evidence_override_threshold: f64,
+    /// Whether explicit user confirmation unconditionally overrides prior rejections (default: true)
+    pub explicit_confirmation_dominates: bool,
+    /// Days before negative feedback is considered stale (default: 60.0)
+    pub stale_rejection_decay_days: f64,
+}
+
+impl Default for FeedbackPrecedencePolicy {
+    fn default() -> Self {
+        Self {
+            strong_evidence_override_threshold: 0.85,
+            explicit_confirmation_dominates: true,
+            stale_rejection_decay_days: 60.0,
+        }
+    }
+}
+
+/// Result of resolving precedence among conflicting or competing contextual signals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PrecedenceResolutionResult {
+    pub winning_signal: PrioritizedEvidenceSignal,
+    pub winning_tier: EvidencePriorityTier,
+    pub effective_verdict: String,
+    pub overridden_signals: Vec<PrioritizedEvidenceSignal>,
+    pub explanation: String,
+}
+
+/// Dedicated precedence engine that deterministically arbitrates between conflicting user feedback
+/// and inferred contextual signals based on explicit priority rules.
+pub struct FeedbackPrecedenceEngine;
+
+impl FeedbackPrecedenceEngine {
+    /// Classifies an evidence item into its corresponding priority tier.
+    pub fn classify_evidence_tier(
+        category: &crate::context_engine::evidence::EvidenceCategory,
+        confidence: f64,
+        has_strong_anchor: bool,
+    ) -> EvidencePriorityTier {
+        use crate::context_engine::evidence::EvidenceCategory;
+        match category {
+            EvidenceCategory::ConfirmedMembership => EvidencePriorityTier::ExplicitUserConfirmation,
+            EvidenceCategory::UserFeedback => EvidencePriorityTier::ExplicitUserRejection,
+            EvidenceCategory::BrowserDomain | EvidenceCategory::BrowserUrl | EvidenceCategory::SameSession | EvidenceCategory::RelatedItem => {
+                if has_strong_anchor && confidence >= 0.85 {
+                    EvidencePriorityTier::StrongContextualEvidence
+                } else if confidence >= 0.40 {
+                    EvidencePriorityTier::InferredSemanticSimilarity
+                } else {
+                    EvidencePriorityTier::WeakContextualEvidence
+                }
+            }
+            EvidenceCategory::SemanticSimilarity | EvidenceCategory::WorkspaceHistory => {
+                if has_strong_anchor && confidence >= 0.85 {
+                    EvidencePriorityTier::StrongContextualEvidence
+                } else {
+                    EvidencePriorityTier::InferredSemanticSimilarity
+                }
+            }
+            EvidenceCategory::TemporalProximity => EvidencePriorityTier::TemporalProximity,
+            EvidenceCategory::SourceApp | EvidenceCategory::CaptureMethod | EvidenceCategory::ContentType | EvidenceCategory::FileMetadata | EvidenceCategory::SourceWindow => {
+                EvidencePriorityTier::ApplicationIdentity
+            }
+        }
+    }
+
+    /// Classifies a user feedback action into its corresponding priority tier.
+    pub fn classify_feedback_action_tier(action: FeedbackAction) -> EvidencePriorityTier {
+        match action {
+            FeedbackAction::ConfirmContext
+            | FeedbackAction::MarkImportant
+            | FeedbackAction::ConfirmTask
+            | FeedbackAction::ResumeContext => EvidencePriorityTier::ExplicitUserConfirmation,
+
+            FeedbackAction::RejectContext
+            | FeedbackAction::RemoveFromContext
+            | FeedbackAction::RemoveImportance
+            | FeedbackAction::RejectTask
+            | FeedbackAction::DismissSuggestion
+            | FeedbackAction::ArchiveContext => EvidencePriorityTier::ExplicitUserRejection,
+        }
+    }
+
+    /// Compares two signals deterministically by tier rank, timestamp freshness, and strength.
+    pub fn compare_precedence(
+        sig_a: &PrioritizedEvidenceSignal,
+        sig_b: &PrioritizedEvidenceSignal,
+    ) -> std::cmp::Ordering {
+        // 1. Tier comparison: lower rank number = higher precedence
+        let tier_ord = sig_a.tier.rank().cmp(&sig_b.tier.rank());
+        if tier_ord != std::cmp::Ordering::Equal {
+            // sig_a has higher precedence if rank is smaller (Less)
+            return tier_ord.reverse(); // Reverse so Ordering::Greater means sig_a wins
+        }
+
+        // 2. Same tier: compare timestamps (newer timestamp wins)
+        let ts_a = sig_a.timestamp_dt();
+        let ts_b = sig_b.timestamp_dt();
+        if let (Some(a), Some(b)) = (ts_a, ts_b) {
+            let ts_ord = a.cmp(&b);
+            if ts_ord != std::cmp::Ordering::Equal {
+                return ts_ord;
+            }
+        }
+
+        // 3. Fallback: compare strength
+        sig_a.strength.partial_cmp(&sig_b.strength).unwrap_or(std::cmp::Ordering::Equal)
+    }
+
+    /// Resolves precedence across a collection of candidate evidence signals for a context.
+    pub fn resolve_conflicting_signals(
+        signals: &[PrioritizedEvidenceSignal],
+        _policy: &FeedbackPrecedencePolicy,
+    ) -> Result<PrecedenceResolutionResult, String> {
+        if signals.is_empty() {
+            return Err("Cannot resolve precedence on empty signals list".to_string());
+        }
+
+        // Sort signals by precedence descending (highest priority first)
+        let mut sorted = signals.to_vec();
+        sorted.sort_by(|a, b| Self::compare_precedence(b, a));
+
+        let winner = sorted[0].clone();
+        let mut overridden = Vec::new();
+        for sig in sorted.iter().skip(1) {
+            overridden.push(sig.clone());
+        }
+
+        let explanation = format!(
+            "Signal '{}' ({}) selected as authoritative with precedence over {} other candidate signal(s)",
+            winner.signal_id,
+            winner.tier.display_name(),
+            overridden.len()
+        );
+
+        let verdict = match winner.tier {
+            EvidencePriorityTier::ExplicitUserConfirmation => "confirmed_by_user",
+            EvidencePriorityTier::ExplicitUserRejection => "rejected_by_user",
+            EvidencePriorityTier::StrongContextualEvidence => "strong_corroborated_anchor",
+            EvidencePriorityTier::InferredSemanticSimilarity => "inferred_semantic_association",
+            EvidencePriorityTier::WeakContextualEvidence => "weak_association",
+            EvidencePriorityTier::TemporalProximity => "temporal_proximity_association",
+            EvidencePriorityTier::ApplicationIdentity => "app_identity_association",
+        }
+        .to_string();
+
+        Ok(PrecedenceResolutionResult {
+            winning_signal: winner.clone(),
+            winning_tier: winner.tier,
+            effective_verdict: verdict,
+            overridden_signals: overridden,
+            explanation,
+        })
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -2659,5 +2955,164 @@ mod tests {
 
         let ws = crate::db::operations::get_workspace(&conn, &ws_payx.id).unwrap();
         assert_eq!(ws.lifecycle_state, "active");
+    }
+
+    #[test]
+    fn test_precedence_tier_ranking_order() {
+        use EvidencePriorityTier::*;
+        assert!(ExplicitUserConfirmation.has_higher_precedence_than(&ExplicitUserRejection));
+        assert!(ExplicitUserRejection.has_higher_precedence_than(&StrongContextualEvidence));
+        assert!(StrongContextualEvidence.has_higher_precedence_than(&InferredSemanticSimilarity));
+        assert!(InferredSemanticSimilarity.has_higher_precedence_than(&WeakContextualEvidence));
+        assert!(WeakContextualEvidence.has_higher_precedence_than(&TemporalProximity));
+        assert!(TemporalProximity.has_higher_precedence_than(&ApplicationIdentity));
+
+        assert_eq!(ExplicitUserConfirmation.rank(), 1);
+        assert_eq!(ExplicitUserRejection.rank(), 2);
+        assert_eq!(StrongContextualEvidence.rank(), 3);
+        assert_eq!(InferredSemanticSimilarity.rank(), 4);
+        assert_eq!(WeakContextualEvidence.rank(), 5);
+        assert_eq!(TemporalProximity.rank(), 6);
+        assert_eq!(ApplicationIdentity.rank(), 7);
+    }
+
+    #[test]
+    fn test_precedence_explicit_confirmation_overrides_older_rejection() {
+        let policy = FeedbackPrecedencePolicy::default();
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let t1 = now.to_rfc3339();
+
+        let old_rejection = PrioritizedEvidenceSignal::new(
+            "sig-rej",
+            EvidencePriorityTier::ExplicitUserRejection,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            1.0,
+            t0,
+            "User previously dismissed item from PayX",
+        );
+
+        let new_confirmation = PrioritizedEvidenceSignal::new(
+            "sig-conf",
+            EvidencePriorityTier::ExplicitUserConfirmation,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            1.0,
+            t1,
+            "User explicitly confirmed item into PayX",
+        );
+
+        let res = FeedbackPrecedenceEngine::resolve_conflicting_signals(
+            &[old_rejection, new_confirmation],
+            &policy,
+        )
+        .unwrap();
+
+        assert_eq!(res.winning_tier, EvidencePriorityTier::ExplicitUserConfirmation);
+        assert_eq!(res.winning_signal.signal_id, "sig-conf");
+        assert_eq!(res.effective_verdict, "confirmed_by_user");
+    }
+
+    #[test]
+    fn test_precedence_explicit_rejection_overrides_inferred_semantic() {
+        let policy = FeedbackPrecedencePolicy::default();
+        let now = Utc::now().to_rfc3339();
+
+        let rejection = PrioritizedEvidenceSignal::new(
+            "sig-rej",
+            EvidencePriorityTier::ExplicitUserRejection,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            1.0,
+            &now,
+            "User rejected item from PayX",
+        );
+
+        let high_semantic = PrioritizedEvidenceSignal::new(
+            "sig-semantic",
+            EvidencePriorityTier::InferredSemanticSimilarity,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            0.82,
+            &now,
+            "High cosine similarity with workspace items",
+        );
+
+        let res = FeedbackPrecedenceEngine::resolve_conflicting_signals(
+            &[high_semantic, rejection],
+            &policy,
+        )
+        .unwrap();
+
+        // User explicit rejection strictly dominates inferred semantic similarity
+        assert_eq!(res.winning_tier, EvidencePriorityTier::ExplicitUserRejection);
+        assert_eq!(res.winning_signal.signal_id, "sig-rej");
+        assert_eq!(res.effective_verdict, "rejected_by_user");
+    }
+
+    #[test]
+    fn test_precedence_app_identity_subordinate_to_semantic_and_temporal() {
+        let policy = FeedbackPrecedencePolicy::default();
+        let now = Utc::now().to_rfc3339();
+
+        let app_sig = PrioritizedEvidenceSignal::new(
+            "sig-app",
+            EvidencePriorityTier::ApplicationIdentity,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            0.20,
+            &now,
+            "Generic browser host application",
+        );
+
+        let temporal_sig = PrioritizedEvidenceSignal::new(
+            "sig-temporal",
+            EvidencePriorityTier::TemporalProximity,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            0.50,
+            &now,
+            "Captured during active PayX work session",
+        );
+
+        let semantic_sig = PrioritizedEvidenceSignal::new(
+            "sig-semantic",
+            EvidencePriorityTier::InferredSemanticSimilarity,
+            Some("ws-payx".to_string()),
+            Some("item-123".to_string()),
+            0.65,
+            &now,
+            "Keyword and topic overlap",
+        );
+
+        let res = FeedbackPrecedenceEngine::resolve_conflicting_signals(
+            &[app_sig, temporal_sig, semantic_sig],
+            &policy,
+        )
+        .unwrap();
+
+        // Semantic (Tier 4) wins over Temporal (Tier 6) and App Identity (Tier 7)
+        assert_eq!(res.winning_tier, EvidencePriorityTier::InferredSemanticSimilarity);
+        assert_eq!(res.winning_signal.signal_id, "sig-semantic");
+    }
+
+    #[test]
+    fn test_precedence_deterministic_multi_signal_arbitration() {
+        let policy = FeedbackPrecedencePolicy::default();
+        let now = Utc::now().to_rfc3339();
+
+        let sigs = vec![
+            PrioritizedEvidenceSignal::new("s1", EvidencePriorityTier::ApplicationIdentity, None, None, 0.1, &now, "App"),
+            PrioritizedEvidenceSignal::new("s2", EvidencePriorityTier::WeakContextualEvidence, None, None, 0.2, &now, "Weak"),
+            PrioritizedEvidenceSignal::new("s3", EvidencePriorityTier::StrongContextualEvidence, None, None, 0.9, &now, "Strong Anchor"),
+            PrioritizedEvidenceSignal::new("s4", EvidencePriorityTier::TemporalProximity, None, None, 0.3, &now, "Temporal"),
+            PrioritizedEvidenceSignal::new("s5", EvidencePriorityTier::InferredSemanticSimilarity, None, None, 0.5, &now, "Semantic"),
+        ];
+
+        let res = FeedbackPrecedenceEngine::resolve_conflicting_signals(&sigs, &policy).unwrap();
+        assert_eq!(res.winning_tier, EvidencePriorityTier::StrongContextualEvidence);
+        assert_eq!(res.winning_signal.signal_id, "s3");
+        assert_eq!(res.overridden_signals.len(), 4);
     }
 }
