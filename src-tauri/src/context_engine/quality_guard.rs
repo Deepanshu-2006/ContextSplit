@@ -8,6 +8,10 @@ use crate::context_engine::competition::{AmbiguityState, ContextCompetitionAnaly
 use crate::context_engine::contamination::{ContaminationCategory, ContaminationCheckInput, ContaminationGuard};
 use crate::context_engine::contradiction::ContradictionAnalyzer;
 use crate::context_engine::evidence::ContextEvidenceCollector;
+use crate::context_engine::feedback::{
+    ContextNegativeFeedbackEvaluator, ContextPositiveFeedbackEngine, EffectiveFeedbackState,
+    FeedbackConflictResolver,
+};
 use crate::context_engine::scoring::{
     load_workspace_scoring_contexts, ContextEvidenceScorer, ScoringWeights,
 };
@@ -162,6 +166,9 @@ pub struct QualityGuardInput {
     pub existing_context_confidence: f64,
     pub conflicting_context_evidence: f64,
     pub user_feedback: f64,
+    pub feedback_rejection_count: usize,
+    pub feedback_is_overridden: bool,
+    pub feedback_reason: Option<String>,
     pub is_generic_noise: bool,
     pub is_accidental_glance: bool,
     pub is_explicit_user_action: bool,
@@ -196,6 +203,9 @@ impl QualityGuardInput {
             existing_context_confidence: 0.0,
             conflicting_context_evidence: 0.0,
             user_feedback: 0.0,
+            feedback_rejection_count: 0,
+            feedback_is_overridden: false,
+            feedback_reason: None,
             is_generic_noise: false,
             is_accidental_glance: false,
             is_explicit_user_action: false,
@@ -262,6 +272,20 @@ impl QualityGuardInput {
 
     pub fn with_user_feedback(mut self, feedback: f64) -> Self {
         self.user_feedback = feedback.clamp(-1.0, 1.0);
+        self
+    }
+
+    pub fn with_feedback_assessment(
+        mut self,
+        feedback_score: f64,
+        rejection_count: usize,
+        is_overridden: bool,
+        reason: Option<impl Into<String>>,
+    ) -> Self {
+        self.user_feedback = feedback_score.clamp(-1.0, 1.0);
+        self.feedback_rejection_count = rejection_count;
+        self.feedback_is_overridden = is_overridden;
+        self.feedback_reason = reason.map(|r| r.into());
         self
     }
 
@@ -392,9 +416,9 @@ impl ContextQualityGuard {
             .unwrap_or("target context");
 
         // ---------------------------------------------------------------------
-        // 1. Authoritative Override: Explicit User Organization
+        // 1. Authoritative Override: Explicit Direct User Organization
         // ---------------------------------------------------------------------
-        if input.is_explicit_user_action || input.user_feedback >= 0.95 {
+        if input.is_explicit_user_action {
             reasons.push(format!(
                 "Explicit user confirmation: direct assignment to {}.",
                 target_name
@@ -432,41 +456,9 @@ impl ContextQualityGuard {
         }
 
         // ---------------------------------------------------------------------
-        // 2. Strict Contradiction & Contamination Rejection Check
+        // 2. Anti-Contamination & Severe Conflict Defense
+        // (Invariant: Context boundary integrity cannot be bypassed by feedback)
         // ---------------------------------------------------------------------
-        if input.user_feedback <= -0.50 {
-            warnings.push(format!(
-                "Direct user dismissal: prior negative feedback against {}.",
-                target_name
-            ));
-            let dim = QualityGuardDimensionScores {
-                conflicting_context_evidence: 1.0,
-                user_feedback: input.user_feedback,
-                composite_quality_score: 0.0,
-                ..Default::default()
-            };
-
-            return QualityGuardResult {
-                decision: QualityGuardDecision::Reject,
-                decision_name: QualityGuardDecision::Reject.as_str().to_string(),
-                composite_quality_score: 0.0,
-                confidence: 0.0,
-                dimension_scores: dim,
-                reasons: vec![format!(
-                    "User previously dismissed association with {}.",
-                    target_name
-                )],
-                warnings,
-                suggested_action: format!(
-                    "Suppressed from {} to prevent context contamination.",
-                    target_name
-                ),
-                target_workspace_id: input.target_workspace_id.clone(),
-                target_workspace_name: input.target_workspace_name.clone(),
-            };
-        }
-
-        // Anti-contamination defense: Reject entertainment, social, unrelated search, unrelated repo/file
         if input.contamination_risk_penalty >= 0.50 {
             let cat_str = input
                 .contamination_category
@@ -585,9 +577,8 @@ impl ContextQualityGuard {
         }
 
         // ---------------------------------------------------------------------
-        // 4. Multi-Dimension Scoring & Evidence Diversity
+        // 4. Multi-Dimension Scoring & Positive Signal Counting
         // ---------------------------------------------------------------------
-        // Count independent signal categories supporting the context
         let mut positive_signals_count = 0_usize;
         if input.semantic_relevance >= 0.40 {
             positive_signals_count += 1;
@@ -628,6 +619,64 @@ impl ContextQualityGuard {
             ));
         }
 
+        // ---------------------------------------------------------------------
+        // 5. Contextual Negative Feedback Reassessment Check
+        // (Do not permanently block; reassess if strong new corroborating evidence appears)
+        // ---------------------------------------------------------------------
+        if input.user_feedback <= -0.40 {
+            let has_strong_corroboration = (input.feedback_is_overridden
+                || (positive_signals_count >= 2 && (input.semantic_relevance >= 0.40 || input.task_relevance >= 0.40 || input.item_relationships >= 0.35 || input.recent_contextual_continuity >= 0.40)))
+                && noise_penalty == 0.0
+                && input.contamination_risk_penalty < 0.35;
+
+            if has_strong_corroboration {
+                reasons.push(format!(
+                    "Reassessing association: strong new corroborating evidence ({} independent signals) reassesses prior negative feedback.",
+                    positive_signals_count
+                ));
+                warnings.push(format!(
+                    "Prior negative feedback ({:.2}) against {} noted; applying contextual discount during reassessment.",
+                    input.user_feedback, target_name
+                ));
+            } else {
+                // Prior correction upheld firmly
+                warnings.push(format!(
+                    "Direct user dismissal: prior negative feedback against {} upheld due to lack of strong corroborating evidence.",
+                    target_name
+                ));
+                let dim = QualityGuardDimensionScores {
+                    conflicting_context_evidence: 1.0,
+                    user_feedback: input.user_feedback,
+                    composite_quality_score: 0.0,
+                    ..Default::default()
+                };
+
+                return QualityGuardResult {
+                    decision: QualityGuardDecision::Reject,
+                    decision_name: QualityGuardDecision::Reject.as_str().to_string(),
+                    composite_quality_score: 0.0,
+                    confidence: 0.0,
+                    dimension_scores: dim,
+                    reasons: vec![format!(
+                        "User previously dismissed association with {}. Insufficient new corroborating evidence to override.",
+                        target_name
+                    )],
+                    warnings,
+                    suggested_action: format!(
+                        "Suppressed from {} to respect previous user correction.",
+                        target_name
+                    ),
+                    target_workspace_id: input.target_workspace_id.clone(),
+                    target_workspace_name: input.target_workspace_name.clone(),
+                };
+            }
+        } else if input.user_feedback >= 0.30 {
+            reasons.push(format!(
+                "Positive contextual feedback ({:.2}) strengthens confidence in {}.",
+                input.user_feedback, target_name
+            ));
+        }
+
         // Diversity Multiplier: single signal alone cannot produce high confidence
         let diversity_multiplier = match positive_signals_count {
             0 => 0.0,
@@ -643,20 +692,42 @@ impl ContextQualityGuard {
             );
         }
 
+        // Feedback bonus / penalty integration
+        let feedback_score_adj = if input.user_feedback > 0.0 {
+            input.user_feedback * 0.15
+        } else {
+            0.0
+        };
+
         // Dimension weights
         let weighted_sum = (input.semantic_relevance * 0.25)
             + (input.task_relevance * 0.25)
-            + (input.item_relationships * 0.20)
-            + (input.recent_contextual_continuity * 0.15)
+            + (input.item_relationships * 0.18)
+            + (input.recent_contextual_continuity * 0.14)
             + (input.domain_relevance * 0.08)
-            + (input.temporal_continuity * 0.07);
+            + (input.temporal_continuity * 0.05)
+            + feedback_score_adj;
 
         let base_score = (weighted_sum * diversity_multiplier) - noise_penalty;
-        let conflict_discount = input.conflicting_context_evidence * 0.50;
+        let feedback_discount = if input.user_feedback < 0.0 {
+            (-input.user_feedback * 0.30).min(0.45)
+        } else {
+            0.0
+        };
+        let conflict_discount = (input.conflicting_context_evidence * 0.50) + feedback_discount;
         let composite_quality_score = (base_score - conflict_discount).clamp(0.0, 1.0);
 
+        let feedback_confidence_factor = if input.user_feedback > 0.0 {
+            1.0 + (input.user_feedback * 0.20)
+        } else if input.user_feedback < 0.0 {
+            (1.0 + input.user_feedback * 0.30).max(0.15)
+        } else {
+            1.0
+        };
+
         let calibrated_confidence = (composite_quality_score
-            * input.existing_context_confidence.max(0.20))
+            * input.existing_context_confidence.max(0.20)
+            * feedback_confidence_factor)
         .clamp(0.0, 1.0);
 
         let dim = QualityGuardDimensionScores {
@@ -831,39 +902,7 @@ impl ContextQualityGuard {
         let workspace =
             crate::db::operations::get_workspace(conn, target_workspace_id).map_err(|e| e.to_string())?;
 
-        // 1. Check if user already explicitly confirmed this item in this workspace
-        let is_confirmed: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND membership_type = 'confirmed'",
-                params![item_id, target_workspace_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|cnt| cnt > 0)
-            .unwrap_or(false);
-
-        // 2. Check if user previously dismissed this workspace for this item
-        let is_dismissed: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND membership_type = 'dismissed'",
-                params![item_id, target_workspace_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|cnt| cnt > 0)
-            .unwrap_or(false);
-
-        let user_feedback = if is_confirmed {
-            1.0
-        } else if is_dismissed {
-            -1.0
-        } else {
-            0.0
-        };
-
-        // 3. Check generic noise and accidental capture
-        let is_noise = is_generic_noise(item.title.as_deref(), &item.content, false, is_confirmed);
-        let is_glance = is_accidental_capture(&item.item_type, item.title.as_deref(), &item.content, is_confirmed);
-
-        // 4. Compute item relationships to target workspace
+        // 1. Compute item relationships to target workspace
         let rel_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM item_relationships r
@@ -877,7 +916,7 @@ impl ContextQualityGuard {
             .unwrap_or(0);
         let item_relationships = (rel_count as f64 * 0.35).min(1.0);
 
-        // 5. Semantic similarity
+        // 2. Semantic similarity
         let semantic_relevance = crate::context_engine::scoring::evaluate_item_context(conn, item_id)
             .ok()
             .and_then(|interp| {
@@ -889,7 +928,7 @@ impl ContextQualityGuard {
             })
             .unwrap_or(0.0);
 
-        // 6. Task relevance: check if target workspace has an active task matching item title
+        // 3. Task relevance: check if target workspace has an active task matching item title
         let task_relevance: f64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_candidates
@@ -900,7 +939,7 @@ impl ContextQualityGuard {
             .map(|cnt| if cnt > 0 { 0.50 } else { 0.0 })
             .unwrap_or(0.0);
 
-        // 7. Continuity: check if same session
+        // 4. Continuity: check if same session
         let same_session: bool = if let Some(ref s_id) = item.session_id {
             conn.query_row(
                 "SELECT COUNT(*) FROM items i
@@ -917,7 +956,7 @@ impl ContextQualityGuard {
         let recent_contextual_continuity = if same_session { 0.75 } else { 0.10 };
         let temporal_continuity = if same_session { 0.80 } else { 0.20 };
 
-        // 8. Domain relevance
+        // 5. Domain relevance
         let domain_opt = serde_json::from_str::<Value>(&item.metadata)
             .ok()
             .and_then(|v| v.get("domain").and_then(|d| d.as_str().map(|s| s.to_string())));
@@ -935,10 +974,76 @@ impl ContextQualityGuard {
             0.0
         };
 
-        // 9. Existing context confidence
+        // 6. Existing context confidence
         let existing_context_confidence = (semantic_relevance * 0.50)
             + (if same_session { 0.30 } else { 0.0 })
-            + (item_relationships * 0.20);
+            + (item_relationships * 0.20)
+            + (task_relevance * 0.20);
+
+        // 7. Conflict resolution and negative/positive feedback evaluation from context_feedback_events & signals
+        let conflict_resolution = FeedbackConflictResolver::resolve_from_db(conn, item_id, target_workspace_id)
+            .unwrap_or_else(|_| crate::context_engine::feedback::FeedbackConflictResolution {
+                target_id: item_id.to_string(),
+                context_id: target_workspace_id.to_string(),
+                effective_state: EffectiveFeedbackState::Neutral,
+                total_history_count: 0,
+                confirmations_count: 0,
+                rejections_count: 0,
+                latest_action: None,
+                latest_timestamp: None,
+                is_ambiguous: false,
+                history_preserved: true,
+                explanation: "No feedback records found".to_string(),
+            });
+
+        let (user_feedback, feedback_rejection_count, feedback_is_overridden, feedback_reason, is_confirmed) = match &conflict_resolution.effective_state {
+            EffectiveFeedbackState::Confirmed { confidence, .. } => {
+                ((*confidence as f64).clamp(0.5, 1.0), 0, false, Some("Confirmed by user feedback".to_string()), true)
+            }
+            EffectiveFeedbackState::Rejected { penalty, rejection_count, .. } => {
+                let neg_eval = ContextNegativeFeedbackEvaluator::evaluate(
+                    conn,
+                    item_id,
+                    target_workspace_id,
+                    existing_context_confidence,
+                    item_relationships >= 0.35,
+                    false,
+                );
+                let is_overridden = neg_eval.is_overridden;
+                let p = if is_overridden { 0.0 } else { (*penalty as f64).clamp(0.4, 1.0) };
+                (-p, *rejection_count, is_overridden, Some("Rejected by user feedback".to_string()), false)
+            }
+            EffectiveFeedbackState::Ambiguous { reason, .. } => {
+                (0.0, 0, false, Some(reason.clone()), false)
+            }
+            EffectiveFeedbackState::Neutral => {
+                // Fallback to legacy context_memberships table
+                let is_confirmed: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND membership_type = 'confirmed'",
+                        params![item_id, target_workspace_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|cnt| cnt > 0)
+                    .unwrap_or(false);
+
+                let is_dismissed: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND membership_type = 'dismissed'",
+                        params![item_id, target_workspace_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|cnt| cnt > 0)
+                    .unwrap_or(false);
+
+                let fb = if is_confirmed { 1.0 } else if is_dismissed { -1.0 } else { 0.0 };
+                (fb, if is_dismissed { 1 } else { 0 }, false, None, is_confirmed)
+            }
+        };
+
+        // 8. Check generic noise and accidental capture
+        let is_noise = is_generic_noise(item.title.as_deref(), &item.content, false, is_confirmed);
+        let is_glance = is_accidental_capture(&item.item_type, item.title.as_deref(), &item.content, is_confirmed);
 
         // 10. Anti-contamination defense check (reuse pre-computed semantic relevance to avoid redundant scoring)
         let contamination_eval = ContaminationGuard::new()
@@ -953,7 +1058,7 @@ impl ContextQualityGuard {
             .with_item_relationships(item_relationships)
             .with_domain_relevance(domain_relevance)
             .with_context_confidence(existing_context_confidence)
-            .with_user_feedback(user_feedback)
+            .with_feedback_assessment(user_feedback, feedback_rejection_count, feedback_is_overridden, feedback_reason)
             .with_explicit_user_action(is_confirmed)
             .with_noise_flags(is_noise, is_glance)
             .with_contamination(
@@ -1498,5 +1603,154 @@ mod tests {
         assert_eq!(res.decision, QualityGuardDecision::Reject);
         assert!(!res.decision.should_modify_context());
         assert!(res.warnings.iter().any(|w| w.contains("Anti-contamination defense")));
+    }
+
+    // =========================================================================
+    // Day 25 Step 9: Contextual Feedback Integration Regression Tests
+    // =========================================================================
+
+    #[test]
+    fn test_guard_feedback_previous_rejection_reassessed_on_strong_new_evidence() {
+        let guard = ContextQualityGuard::new();
+        // Item X previously rejected from PayX (negative feedback = -0.60)
+        // Now appears again with strong multi-signal corroboration:
+        // high semantic (0.85), high task grounding (0.80), session continuity (0.80), domain alignment (0.75)
+        let input = QualityGuardInput::new("PayX Checkout API Documentation")
+            .with_target("ws_payx", "PayX")
+            .with_semantic_relevance(0.85)
+            .with_task_relevance(0.80)
+            .with_continuity(0.80, 0.85)
+            .with_domain_relevance(0.75)
+            .with_context_confidence(0.80)
+            .with_user_feedback(-0.60);
+
+        let res = guard.evaluate(&input);
+        // The previous correction is considered and penalized, but NOT a hard permanent block!
+        assert!(res.decision.is_accepted());
+        assert!(res.reasons.iter().any(|r| r.contains("Reassessing association: strong new corroborating evidence")));
+        assert!(res.warnings.iter().any(|w| w.contains("Prior negative feedback")));
+    }
+
+    #[test]
+    fn test_guard_feedback_previous_rejection_blocks_weak_or_isolated_evidence() {
+        let guard = ContextQualityGuard::new();
+        // Item X previously rejected from PayX (-0.75)
+        // Appears with only weak/isolated semantic relevance (0.45) and no other signals
+        let input = QualityGuardInput::new("Random Checkout Article")
+            .with_target("ws_payx", "PayX")
+            .with_semantic_relevance(0.45)
+            .with_user_feedback(-0.75);
+
+        let res = guard.evaluate(&input);
+        // Weak evidence is not enough to overturn prior correction
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.warnings.iter().any(|w| w.contains("prior negative feedback against PayX upheld")));
+    }
+
+    #[test]
+    fn test_guard_feedback_cannot_bypass_severe_contamination() {
+        let guard = ContextQualityGuard::new();
+        // Positive feedback exists in history (user_feedback = 0.90)
+        // But the current item is YouTube entertainment with severe contamination risk
+        let input = QualityGuardInput::new("Funny Cats 2026 - YouTube")
+            .with_target("ws_payx", "PayX")
+            .with_user_feedback(0.90)
+            .with_contamination(
+                0.80,
+                Some("entertainment_media"),
+                Some("Unrelated entertainment media prevented from contaminating PayX"),
+                false,
+            );
+
+        let res = guard.evaluate(&input);
+        // Guard must NOT be bypassed simply because feedback exists
+        assert_eq!(res.decision, QualityGuardDecision::Reject);
+        assert!(!res.decision.should_modify_context());
+        assert!(res.warnings.iter().any(|w| w.contains("Anti-contamination defense")));
+    }
+
+    #[test]
+    fn test_guard_feedback_cannot_bypass_extreme_noise() {
+        let guard = ContextQualityGuard::new();
+        // Positive feedback (+0.70)
+        // But item is generic noise title AND transient glance (<5s)
+        let input = QualityGuardInput::new("Untitled")
+            .with_target("ws_payx", "PayX")
+            .with_user_feedback(0.70)
+            .with_noise_flags(true, true);
+
+        let res = guard.evaluate(&input);
+        // Noise suppression is enforced
+        assert!(res.decision.is_rejected() || res.decision.is_held());
+        assert!(!res.decision.should_modify_context());
+    }
+
+    #[test]
+    fn test_guard_feedback_database_e2e_rejection_and_reassessment() {
+        use crate::context_engine::feedback::{ContextFeedbackEvent, ContextFeedbackService, FeedbackSource};
+        use crate::db::models::TaskCandidate;
+
+        let conn = setup_test_db();
+        let ws = create_workspace(&conn, "PayX").unwrap();
+        let session = create_session(&conn).unwrap();
+
+        let item = create_item(
+            &conn,
+            None,
+            Some(&session.id),
+            "link",
+            "https://payx.internal/docs/gateway",
+            Some("PayX Gateway Internal"),
+            "{\"domain\":\"payx.internal\"}",
+        )
+        .unwrap();
+
+        // 1. User records a negative feedback event: reject_context from PayX
+        let ev = ContextFeedbackEvent::reject_context(
+            &item.id,
+            &ws.id,
+            FeedbackSource::UserExplicitUi,
+            Some("User dismissed from PayX".to_string()),
+        );
+        ContextFeedbackService::apply_feedback(&conn, &ev).unwrap();
+
+        let guard = ContextQualityGuard::new();
+
+        // 2. Initial evaluation with no other signals -> Guard rejects to uphold prior correction
+        let res1 = guard.evaluate_from_db(&conn, &item.id, &ws.id).unwrap();
+        assert_eq!(res1.decision, QualityGuardDecision::Reject);
+
+        // 3. Now add confirmed anchor item in PayX with strong relationship and task
+        let anchor = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "link",
+            "https://payx.internal/docs/spec",
+            Some("PayX Gateway Spec"),
+            "{\"domain\":\"payx.internal\"}",
+        )
+        .unwrap();
+        crate::db::operations::create_or_update_membership(&conn, &anchor.id, &ws.id, "confirmed", 1.0, "user").unwrap();
+
+        crate::db::operations::create_item_relationship(
+            &conn,
+            &item.id,
+            &anchor.id,
+            "semantic_similarity",
+            0.95,
+            None,
+        )
+        .unwrap();
+
+        // Add active task in PayX
+        let mut task_cand = TaskCandidate::new(Some(ws.id.clone()), "PayX Gateway Integration", 0.90);
+        task_cand.status = crate::db::models::TaskCandidateStatus::Active;
+        crate::db::operations::create_task_candidate(&conn, &task_cand).unwrap();
+
+        // 4. Re-evaluate from DB -> Guard reassesses with strong corroborating evidence!
+        let res2 = guard.evaluate_from_db(&conn, &item.id, &ws.id).unwrap();
+        assert!(res2.decision.is_accepted() || res2.composite_quality_score > 0.35);
     }
 }
