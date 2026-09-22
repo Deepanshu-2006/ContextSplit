@@ -2705,6 +2705,7 @@ impl ContextDeterministicAdaptationEngine {
         let mut item_url: Option<String> = None;
         let mut item_domain: Option<String> = None;
         let mut item_repo: Option<String> = None;
+        let mut item_file_path: Option<String> = None;
 
         if let Ok(meta_json) = serde_json::from_str::<serde_json::Value>(&item.metadata) {
             if let Some(u) = meta_json.get("url").and_then(|v| v.as_str()) {
@@ -2716,13 +2717,16 @@ impl ContextDeterministicAdaptationEngine {
             if let Some(r) = meta_json.get("repo_slug").and_then(|v| v.as_str()) {
                 item_repo = Some(r.to_lowercase());
             }
+            if let Some(f) = meta_json.get("file_path").and_then(|v| v.as_str()) {
+                item_file_path = Some(f.to_lowercase());
+            }
         }
 
         if item.item_type == "url" && item_url.is_none() {
             item_url = Some(item_content.clone());
         }
 
-        // 2. Check explicit workspace keywords / tokens in URL, title, or repo slug
+        // 2. Check explicit workspace keywords / tokens in URL, title, repo slug, file path, or content
         for token in &ws_tokens {
             if let Some(ref url) = item_url {
                 if url.contains(token) {
@@ -2742,11 +2746,27 @@ impl ContextDeterministicAdaptationEngine {
                     );
                 }
             }
+            if let Some(ref fp) = item_file_path {
+                if fp.contains(token) {
+                    return (
+                        true,
+                        0.30,
+                        format!("File path '{}' contains specific project identifier '{}'", fp, token),
+                    );
+                }
+            }
             if item_title.contains(token) {
                 return (
                     true,
                     0.25,
                     format!("Item title '{}' contains specific project keyword '{}'", item_title, token),
+                );
+            }
+            if item_content.contains(token) {
+                return (
+                    true,
+                    0.20,
+                    format!("Item content contains specific project keyword '{}'", token),
                 );
             }
         }
@@ -2813,19 +2833,30 @@ impl ContextDeterministicAdaptationEngine {
     /// Checks if a domain is a generic public web surface rather than a project-specific host.
     pub fn is_generic_public_domain(domain: &str) -> bool {
         let d = domain.to_lowercase();
-        d == "google.com"
-            || d == "www.google.com"
-            || d == "bing.com"
-            || d == "duckduckgo.com"
-            || d == "search.yahoo.com"
-            || d == "reddit.com"
-            || d == "twitter.com"
-            || d == "x.com"
-            || d == "youtube.com"
-            || d == "facebook.com"
-            || d == "instagram.com"
-            || d == "linkedin.com"
-            || d == "wikipedia.org"
+        let base = d.strip_prefix("www.").unwrap_or(&d);
+        base == "google.com"
+            || base == "bing.com"
+            || base == "duckduckgo.com"
+            || base == "search.yahoo.com"
+            || base == "reddit.com"
+            || base == "twitter.com"
+            || base == "x.com"
+            || base == "youtube.com"
+            || base == "facebook.com"
+            || base == "instagram.com"
+            || base == "linkedin.com"
+            || base == "wikipedia.org"
+            || base == "github.com"
+            || base == "gitlab.com"
+            || base == "bitbucket.org"
+            || base == "figma.com"
+            || base == "notion.so"
+            || base == "medium.com"
+            || base == "stackoverflow.com"
+            || base == "stackexchange.com"
+            || base == "substack.com"
+            || base == "dev.to"
+            || base == "quora.com"
     }
 
     /// Queries app-level rejections for a given application in a workspace context.
