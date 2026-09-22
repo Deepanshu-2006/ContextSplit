@@ -54,12 +54,13 @@ pub mod feedback;
 
 pub use feedback::{
     AdaptationVerdict, ContextDeterministicAdaptationEngine, ContextFeedbackEvent,
-    ContextFeedbackService, ContextNegativeFeedbackEvaluator, ContextPositiveFeedbackEngine,
-    DeterministicAdaptationAssessment, EvidencePriorityTier, FeedbackAction,
-    FeedbackApplicationResult, FeedbackMetadata, FeedbackPrecedenceEngine, FeedbackPrecedencePolicy,
-    FeedbackScope, FeedbackSource, FeedbackTargetRef, NegativeFeedbackAssessment,
-    NegativeFeedbackVerdict, PositiveFeedbackAssessment, PrecedenceResolutionResult,
-    PrioritizedEvidenceSignal, RelationshipLocalizationAssessment,
+    ContextFeedbackRelevanceEngine, ContextFeedbackService, ContextNegativeFeedbackEvaluator,
+    ContextPositiveFeedbackEngine, DeterministicAdaptationAssessment, EvidencePriorityTier,
+    FeedbackAction, FeedbackApplicationResult, FeedbackMetadata, FeedbackPersistenceCategory,
+    FeedbackPrecedenceEngine, FeedbackPrecedencePolicy, FeedbackRelevanceAssessment,
+    FeedbackRelevanceConfig, FeedbackScope, FeedbackSource, FeedbackTargetRef,
+    NegativeFeedbackAssessment, NegativeFeedbackVerdict, PositiveFeedbackAssessment,
+    PrecedenceResolutionResult, PrioritizedEvidenceSignal, RelationshipLocalizationAssessment,
     CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
 };
 

@@ -204,6 +204,8 @@ pub enum FeedbackSource {
     MemoryInspectionPanel,
     /// Interactive system notification action.
     SystemNotification,
+    /// Automated background heuristic or implicit feedback.
+    ImplicitInference,
     /// Automated test or diagnostic evaluation harness.
     DiagnosticHarness,
 }
@@ -218,7 +220,22 @@ impl FeedbackSource {
             Self::ContextMenu => "context_menu",
             Self::MemoryInspectionPanel => "memory_inspection_panel",
             Self::SystemNotification => "system_notification",
+            Self::ImplicitInference => "implicit_inference",
             Self::DiagnosticHarness => "diagnostic_harness",
+        }
+    }
+
+    /// Whether this feedback source corresponds to a direct explicit user action.
+    pub fn is_explicit_user(&self) -> bool {
+        match self {
+            Self::UserExplicitUi
+            | Self::ShortcutKey
+            | Self::InboxAction
+            | Self::WorksetTray
+            | Self::ContextMenu
+            | Self::MemoryInspectionPanel
+            | Self::SystemNotification => true,
+            Self::ImplicitInference | Self::DiagnosticHarness => false,
         }
     }
 }
@@ -3011,6 +3028,269 @@ impl ContextDeterministicAdaptationEngine {
 }
 
 // =========================================================================
+// Contextual Feedback Relevance Decay & Persistence Policy (Step 14)
+// =========================================================================
+
+/// Semantic category defining the longevity, persistence, and decay schedule of user feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackPersistenceCategory {
+    /// Explicit structural decisions that remain permanently influential (e.g. ArchiveContext, ResumeContext, MarkImportant).
+    PermanentPreference,
+    /// High-longevity relationship adjustments that decay gracefully to an immutable historical anchor floor (e.g. RemoveFromContext, RejectContext, ConfirmTask).
+    ContextualCorrection,
+    /// Transient suppressions with a finite cooldown window (e.g. DismissSuggestion).
+    TemporaryDismissal,
+    /// Automated or heuristic signals that decay rapidly based on elapsed time.
+    HistoricalInferred,
+}
+
+impl FeedbackPersistenceCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PermanentPreference => "permanent_preference",
+            Self::ContextualCorrection => "contextual_correction",
+            Self::TemporaryDismissal => "temporary_dismissal",
+            Self::HistoricalInferred => "historical_inferred",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::PermanentPreference => "Permanent Explicit Preference",
+            Self::ContextualCorrection => "Contextual Relationship Correction",
+            Self::TemporaryDismissal => "Temporary Suggestion Dismissal",
+            Self::HistoricalInferred => "Historical Inferred Feedback",
+        }
+    }
+
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::PermanentPreference)
+    }
+
+    pub fn is_contextual_correction(&self) -> bool {
+        matches!(self, Self::ContextualCorrection)
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        matches!(self, Self::TemporaryDismissal | Self::HistoricalInferred)
+    }
+}
+
+/// Configurable policy parameters governing feedback relevance decay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackRelevanceConfig {
+    /// Baseline weight for permanent explicit preferences (default: 1.0)
+    pub permanent_retention_weight: f32,
+    /// Duration in days where contextual corrections operate at full strength (default: 60.0)
+    pub contextual_correction_active_days: f64,
+    /// Duration in days over which contextual corrections transition to the floor (default: 60.0)
+    pub contextual_correction_decay_window_days: f64,
+    /// Immutable historical anchor floor for contextual corrections (default: 0.40)
+    pub contextual_correction_floor: f32,
+    /// Active cooldown duration in days for temporary suggestion dismissals (default: 14.0)
+    pub temporary_dismissal_cooldown_days: f64,
+    /// Half-life in days for rapid decay of historical inferred feedback (default: 7.0)
+    pub historical_inferred_half_life_days: f64,
+}
+
+impl Default for FeedbackRelevanceConfig {
+    fn default() -> Self {
+        Self {
+            permanent_retention_weight: 1.0,
+            contextual_correction_active_days: 60.0,
+            contextual_correction_decay_window_days: 60.0,
+            contextual_correction_floor: 0.40,
+            temporary_dismissal_cooldown_days: 14.0,
+            historical_inferred_half_life_days: 7.0,
+        }
+    }
+}
+
+/// Evaluation assessment of a feedback item's current mathematical relevance and persistence status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackRelevanceAssessment {
+    pub action: FeedbackAction,
+    pub source: FeedbackSource,
+    pub persistence_category: FeedbackPersistenceCategory,
+    pub base_weight: f32,
+    pub effective_weight: f32,
+    pub elapsed_days: f64,
+    pub decay_factor: f32,
+    pub is_active: bool,
+    pub is_expired: bool,
+    pub explanation: String,
+}
+
+/// Engine that computes deterministic feedback relevance decay and enforces persistence semantics.
+pub struct ContextFeedbackRelevanceEngine;
+
+impl ContextFeedbackRelevanceEngine {
+    /// Classifies feedback into its corresponding persistence category based on action and source.
+    pub fn classify_persistence_category(
+        action: FeedbackAction,
+        source: FeedbackSource,
+    ) -> FeedbackPersistenceCategory {
+        // Inferred or implicit feedback is always categorized as HistoricalInferred
+        if !source.is_explicit_user() {
+            return FeedbackPersistenceCategory::HistoricalInferred;
+        }
+
+        match action {
+            // 1. Permanent Explicit Preferences
+            FeedbackAction::ArchiveContext
+            | FeedbackAction::ResumeContext
+            | FeedbackAction::MarkImportant => FeedbackPersistenceCategory::PermanentPreference,
+
+            // 2. Contextual Relationship Corrections
+            FeedbackAction::ConfirmContext
+            | FeedbackAction::RejectContext
+            | FeedbackAction::RemoveFromContext
+            | FeedbackAction::ConfirmTask
+            | FeedbackAction::RejectTask
+            | FeedbackAction::RemoveImportance => FeedbackPersistenceCategory::ContextualCorrection,
+
+            // 3. Temporary Dismissals
+            FeedbackAction::DismissSuggestion => FeedbackPersistenceCategory::TemporaryDismissal,
+        }
+    }
+
+    /// Evaluates the relevance and decay of an explicit action against an evaluation timestamp.
+    pub fn evaluate_action_relevance(
+        action: FeedbackAction,
+        source: FeedbackSource,
+        created_at: DateTime<Utc>,
+        eval_time: DateTime<Utc>,
+        config: &FeedbackRelevanceConfig,
+    ) -> FeedbackRelevanceAssessment {
+        let category = Self::classify_persistence_category(action, source);
+        let elapsed_secs = (eval_time - created_at).num_seconds().max(0);
+        let elapsed_days = elapsed_secs as f64 / 86400.0;
+
+        let base_weight = if action.is_positive() { 1.0 } else { 1.0 };
+
+        let (decay_factor, is_active, is_expired, explanation) = match category {
+            FeedbackPersistenceCategory::PermanentPreference => {
+                // Permanent preferences NEVER decay or expire with time
+                (
+                    config.permanent_retention_weight,
+                    true,
+                    false,
+                    format!(
+                        "Permanent explicit preference '{}' maintains full weight ({:.2}) indefinitely ({} days elapsed)",
+                        action.as_str(),
+                        config.permanent_retention_weight,
+                        elapsed_days as u64
+                    ),
+                )
+            }
+            FeedbackPersistenceCategory::ContextualCorrection => {
+                // Contextual corrections maintain full strength for active window, then decay to anchor floor
+                let factor = if elapsed_days <= config.contextual_correction_active_days {
+                    1.0
+                } else if elapsed_days <= config.contextual_correction_active_days + config.contextual_correction_decay_window_days {
+                    let progress = (elapsed_days - config.contextual_correction_active_days)
+                        / config.contextual_correction_decay_window_days;
+                    1.0 - (1.0 - config.contextual_correction_floor) * progress as f32
+                } else {
+                    config.contextual_correction_floor
+                };
+
+                (
+                    factor,
+                    true,
+                    false,
+                    format!(
+                        "Contextual correction '{}' active (decay factor: {:.2}, anchor floor: {:.2}, {:.1} days elapsed)",
+                        action.as_str(),
+                        factor,
+                        config.contextual_correction_floor,
+                        elapsed_days
+                    ),
+                )
+            }
+            FeedbackPersistenceCategory::TemporaryDismissal => {
+                // Temporary dismissals decay linearly to 0 over the cooldown window
+                if elapsed_days < config.temporary_dismissal_cooldown_days {
+                    let factor = (1.0 - (elapsed_days / config.temporary_dismissal_cooldown_days) as f32).max(0.0);
+                    (
+                        factor,
+                        true,
+                        false,
+                        format!(
+                            "Temporary dismissal '{}' active in cooldown window (decay factor: {:.2}, {:.1}/{} days elapsed)",
+                            action.as_str(),
+                            factor,
+                            elapsed_days,
+                            config.temporary_dismissal_cooldown_days
+                        ),
+                    )
+                } else {
+                    (
+                        0.0,
+                        false,
+                        true,
+                        format!(
+                            "Temporary dismissal '{}' expired after cooldown window of {} days ({:.1} days elapsed)",
+                            action.as_str(),
+                            config.temporary_dismissal_cooldown_days,
+                            elapsed_days
+                        ),
+                    )
+                }
+            }
+            FeedbackPersistenceCategory::HistoricalInferred => {
+                // Exponential half-life decay
+                let half_life = config.historical_inferred_half_life_days.max(1.0);
+                let factor = (0.5_f64.powf(elapsed_days / half_life)) as f32;
+                let is_active = factor >= 0.05;
+                let is_expired = !is_active;
+
+                (
+                    factor,
+                    is_active,
+                    is_expired,
+                    format!(
+                        "Historical inferred feedback '{}' decayed with half-life {} days (decay factor: {:.3}, {:.1} days elapsed)",
+                        action.as_str(),
+                        half_life as u64,
+                        factor,
+                        elapsed_days
+                    ),
+                )
+            }
+        };
+
+        let effective_weight = base_weight * decay_factor;
+
+        FeedbackRelevanceAssessment {
+            action,
+            source,
+            persistence_category: category,
+            base_weight,
+            effective_weight,
+            elapsed_days,
+            decay_factor,
+            is_active,
+            is_expired,
+            explanation,
+        }
+    }
+
+    /// Evaluates a ContextFeedbackEvent against the default relevance policy.
+    pub fn evaluate_event_relevance(
+        event: &ContextFeedbackEvent,
+        eval_time: DateTime<Utc>,
+        config: &FeedbackRelevanceConfig,
+    ) -> FeedbackRelevanceAssessment {
+        let created_at = event
+            .timestamp_dt()
+            .unwrap_or(eval_time);
+        Self::evaluate_action_relevance(event.action, event.source, created_at, eval_time, config)
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -4626,5 +4906,196 @@ mod tests {
         assert_eq!(assessment.decay_factor, 0.40);
         // Base penalty 0.40 * decay 0.40 = 0.16; adapted score = 0.60 - 0.16 = 0.44
         assert!((assessment.adapted_score - 0.44).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_permanent_preference_longevity_across_time() {
+        let now = Utc::now();
+        let config = FeedbackRelevanceConfig::default();
+
+        // Archive Context is a Permanent Preference
+        let assessment_10d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::ArchiveContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(10),
+            now,
+            &config,
+        );
+        assert_eq!(assessment_10d.persistence_category, FeedbackPersistenceCategory::PermanentPreference);
+        assert_eq!(assessment_10d.decay_factor, 1.0);
+        assert!(assessment_10d.is_active);
+        assert!(!assessment_10d.is_expired);
+
+        let assessment_100d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::ArchiveContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(100),
+            now,
+            &config,
+        );
+        assert_eq!(assessment_100d.decay_factor, 1.0);
+        assert!(assessment_100d.is_active);
+        assert!(!assessment_100d.is_expired);
+
+        let assessment_365d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::MarkImportant,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(365),
+            now,
+            &config,
+        );
+        assert_eq!(assessment_365d.decay_factor, 1.0);
+        assert!(assessment_365d.is_active);
+        assert!(!assessment_365d.is_expired);
+    }
+
+    #[test]
+    fn test_contextual_correction_durability_and_decay_floor() {
+        let now = Utc::now();
+        let config = FeedbackRelevanceConfig::default();
+
+        // "Remove this random item from PayX" -> ContextualCorrection
+        let assess_30d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::RemoveFromContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(30),
+            now,
+            &config,
+        );
+        assert_eq!(assess_30d.persistence_category, FeedbackPersistenceCategory::ContextualCorrection);
+        assert_eq!(assess_30d.decay_factor, 1.0);
+        assert!(assess_30d.is_active);
+        assert!(!assess_30d.is_expired);
+
+        // At 90 days (halfway through 60-day decay window from 60..120 days) -> factor 0.70
+        let assess_90d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::RemoveFromContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(90),
+            now,
+            &config,
+        );
+        assert!((assess_90d.decay_factor - 0.70).abs() < 0.01);
+        assert!(assess_90d.is_active);
+        assert!(!assess_90d.is_expired);
+
+        // At 180 days -> firmly at anchor floor (0.40), never expired
+        let assess_180d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::RemoveFromContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(180),
+            now,
+            &config,
+        );
+        assert_eq!(assess_180d.decay_factor, 0.40);
+        assert!(assess_180d.is_active);
+        assert!(!assess_180d.is_expired);
+    }
+
+    #[test]
+    fn test_temporary_dismissal_cooldown_and_expiration() {
+        let now = Utc::now();
+        let config = FeedbackRelevanceConfig::default();
+
+        // "Dismiss this suggestion" -> TemporaryDismissal (14 day cooldown)
+        let assess_7d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::InboxAction,
+            now - chrono::Duration::days(7),
+            now,
+            &config,
+        );
+        assert_eq!(assess_7d.persistence_category, FeedbackPersistenceCategory::TemporaryDismissal);
+        assert!((assess_7d.decay_factor - 0.50).abs() < 0.01);
+        assert!(assess_7d.is_active);
+        assert!(!assess_7d.is_expired);
+
+        // At 15 days -> expired beyond 14-day window
+        let assess_15d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::InboxAction,
+            now - chrono::Duration::days(15),
+            now,
+            &config,
+        );
+        assert_eq!(assess_15d.decay_factor, 0.0);
+        assert!(!assess_15d.is_active);
+        assert!(assess_15d.is_expired);
+    }
+
+    #[test]
+    fn test_historical_inferred_feedback_rapid_decay() {
+        let now = Utc::now();
+        let config = FeedbackRelevanceConfig::default();
+
+        // Inferred feedback from implicit heuristics
+        let assess_7d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::ImplicitInference,
+            now - chrono::Duration::days(7),
+            now,
+            &config,
+        );
+        assert_eq!(assess_7d.persistence_category, FeedbackPersistenceCategory::HistoricalInferred);
+        // 7 days = 1 half-life -> 0.50
+        assert!((assess_7d.decay_factor - 0.50).abs() < 0.01);
+        assert!(assess_7d.is_active);
+
+        // 28 days = 4 half-lives -> (0.5)^4 = 0.0625
+        let assess_28d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::ImplicitInference,
+            now - chrono::Duration::days(28),
+            now,
+            &config,
+        );
+        assert!((assess_28d.decay_factor - 0.0625).abs() < 0.001);
+        assert!(assess_28d.is_active);
+
+        // 35 days = 5 half-lives -> 0.03125 (< 0.05 threshold) -> expired
+        let assess_35d = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::ImplicitInference,
+            now - chrono::Duration::days(35),
+            now,
+            &config,
+        );
+        assert!((assess_35d.decay_factor - 0.03125).abs() < 0.001);
+        assert!(!assess_35d.is_active);
+        assert!(assess_35d.is_expired);
+    }
+
+    #[test]
+    fn test_configurable_relevance_policy_custom_settings() {
+        let now = Utc::now();
+        let custom_config = FeedbackRelevanceConfig {
+            permanent_retention_weight: 0.90,
+            contextual_correction_active_days: 10.0,
+            contextual_correction_decay_window_days: 20.0,
+            contextual_correction_floor: 0.15,
+            temporary_dismissal_cooldown_days: 5.0,
+            historical_inferred_half_life_days: 3.0,
+        };
+
+        // Temporary dismissal with 5-day window evaluated at 6 days
+        let assess = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::DismissSuggestion,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(6),
+            now,
+            &custom_config,
+        );
+        assert!(assess.is_expired);
+        assert_eq!(assess.decay_factor, 0.0);
+
+        // Contextual correction at 50 days (beyond 10 + 20 = 30 days) -> floor 0.15
+        let assess_corr = ContextFeedbackRelevanceEngine::evaluate_action_relevance(
+            FeedbackAction::RejectContext,
+            FeedbackSource::UserExplicitUi,
+            now - chrono::Duration::days(50),
+            now,
+            &custom_config,
+        );
+        assert_eq!(assess_corr.decay_factor, 0.15);
     }
 }
