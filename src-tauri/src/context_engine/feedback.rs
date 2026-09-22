@@ -1235,7 +1235,7 @@ impl ContextFeedbackService {
                 crate::db::operations::touch_workspace_activity(conn, ws_id)
                     .map_err(|e| format!("Failed to touch workspace: {}", e))?;
                 conn.execute(
-                    "UPDATE workspaces SET lifecycle_state = 'active', updated_at = ?1 WHERE id = ?2",
+                    "UPDATE workspaces SET lifecycle_state = 'active', archived_at = NULL, last_activity_at = ?1, updated_at = ?1 WHERE id = ?2",
                     rusqlite::params![now, ws_id],
                 )
                 .map_err(|e| format!("Failed to set lifecycle_state active: {}", e))?;
@@ -1277,7 +1277,7 @@ impl ContextFeedbackService {
                 let ws_id = target_id;
 
                 conn.execute(
-                    "UPDATE workspaces SET lifecycle_state = 'archived', updated_at = ?1 WHERE id = ?2",
+                    "UPDATE workspaces SET lifecycle_state = 'archived', archived_at = ?1, updated_at = ?1 WHERE id = ?2",
                     rusqlite::params![now, ws_id],
                 )
                 .map_err(|e| format!("Failed to archive workspace: {}", e))?;
@@ -1409,6 +1409,48 @@ impl ContextFeedbackService {
         );
 
         Ok(app_res)
+    }
+
+    /// Explicitly resumes a context workspace from Paused, Dormant, or Archived to Active.
+    ///
+    /// 1. Updates workspace lifecycle_state to 'active', clears archived_at, and touches activity timestamp.
+    /// 2. Records an auditable context_resumed signal and feedback event.
+    /// 3. Invalidates all caches so future reconstruction reflects active state.
+    pub fn resume_context(
+        &self,
+        conn: &rusqlite::Connection,
+        workspace_id: &str,
+        source: FeedbackSource,
+    ) -> Result<FeedbackApplicationResult, String> {
+        let event = ContextFeedbackEvent::resume_context(workspace_id, source);
+        Self::apply_feedback(conn, &event)
+    }
+
+    /// Explicitly archives a context workspace.
+    ///
+    /// 1. Updates workspace lifecycle_state to 'archived' and sets archived_at timestamp.
+    /// 2. Records an auditable context_archived signal and feedback event.
+    /// 3. Invariant: Does NOT delete items, task candidates, relationships, or history (Archived != Deleted).
+    /// 4. Invalidates caches and suppresses automated matching.
+    pub fn archive_context(
+        &self,
+        conn: &rusqlite::Connection,
+        workspace_id: &str,
+        source: FeedbackSource,
+        reason: Option<&str>,
+    ) -> Result<FeedbackApplicationResult, String> {
+        let event = ContextFeedbackEvent::archive_context(workspace_id, source, reason.map(|s| s.to_string()));
+        Self::apply_feedback(conn, &event)
+    }
+
+    /// Explicitly restores / unarchives an archived context workspace back to active.
+    pub fn restore_context(
+        &self,
+        conn: &rusqlite::Connection,
+        workspace_id: &str,
+        source: FeedbackSource,
+    ) -> Result<FeedbackApplicationResult, String> {
+        self.resume_context(conn, workspace_id, source)
     }
 
     /// Helper to invalidate all relevant downstream contextual caches for a workspace.
@@ -3759,5 +3801,137 @@ mod tests {
             .unwrap();
         assert_eq!(recon.current_task.title.as_deref(), Some("Stripe webhook handler"));
         assert_eq!(recon.current_task.confidence, Some(1.0));
+    }
+
+    #[test]
+    fn test_explicit_lifecycle_resume_and_archive_e2e() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Context Engine Day 25").unwrap();
+
+        // 1. Mark workspace as dormant in DB to simulate old project
+        let t_old = (Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+        conn.execute(
+            "UPDATE workspaces SET lifecycle_state = 'dormant', last_activity_at = ?1 WHERE id = ?2",
+            rusqlite::params![t_old, ws.id],
+        )
+        .unwrap();
+
+        let initial_lc = crate::context_engine::lifecycle::ContextLifecycleService::get_context_lifecycle(&conn, &ws.id).unwrap();
+        assert_eq!(initial_lc.lifecycle_state, crate::context_engine::lifecycle::ContextLifecycleState::Dormant);
+
+        // 2. User explicitly resumes context: DORMANT -> ACTIVE
+        let feedback_svc = ContextFeedbackService::new();
+        let resume_res = feedback_svc
+            .resume_context(&conn, &ws.id, FeedbackSource::UserExplicitUi)
+            .unwrap();
+        assert!(resume_res.success);
+        assert!(resume_res.applied_systems.contains(&"workspaces".to_string()));
+        assert!(resume_res.applied_systems.contains(&"context_signals".to_string()));
+
+        let ws_after_resume = crate::db::operations::get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_after_resume.lifecycle_state, "active");
+        assert!(ws_after_resume.archived_at.is_none());
+
+        let resumed_lc = crate::context_engine::lifecycle::ContextLifecycleService::get_context_lifecycle(&conn, &ws.id).unwrap();
+        assert_eq!(resumed_lc.lifecycle_state, crate::context_engine::lifecycle::ContextLifecycleState::Active);
+        assert_eq!(resumed_lc.confidence, 1.0);
+        assert!(resumed_lc.last_resumed_at.is_some());
+        assert!(resumed_lc.source_evidence.iter().any(|e| e.evidence_type == "user_action"));
+
+        // 3. User explicitly archives context: ACTIVE -> ARCHIVED
+        let archive_res = feedback_svc
+            .archive_context(
+                &conn,
+                &ws.id,
+                FeedbackSource::UserExplicitUi,
+                Some("Project sprint completed and shipped"),
+            )
+            .unwrap();
+        assert!(archive_res.success);
+
+        let ws_after_archive = crate::db::operations::get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_after_archive.lifecycle_state, "archived");
+        assert!(ws_after_archive.archived_at.is_some());
+
+        let archived_lc = crate::context_engine::lifecycle::ContextLifecycleService::get_context_lifecycle(&conn, &ws.id).unwrap();
+        assert_eq!(archived_lc.lifecycle_state, crate::context_engine::lifecycle::ContextLifecycleState::Archived);
+        assert_eq!(archived_lc.confidence, 1.0);
+        assert!(!archived_lc.lifecycle_state.allows_automated_matching());
+
+        // 4. User restores/reopens archived context: ARCHIVED -> ACTIVE
+        let restore_res = feedback_svc
+            .restore_context(&conn, &ws.id, FeedbackSource::UserExplicitUi)
+            .unwrap();
+        assert!(restore_res.success);
+
+        let ws_restored = crate::db::operations::get_workspace(&conn, &ws.id).unwrap();
+        assert_eq!(ws_restored.lifecycle_state, "active");
+        assert!(ws_restored.archived_at.is_none());
+
+        let restored_lc = crate::context_engine::lifecycle::ContextLifecycleService::get_context_lifecycle(&conn, &ws.id).unwrap();
+        assert_eq!(restored_lc.lifecycle_state, crate::context_engine::lifecycle::ContextLifecycleState::Active);
+        assert_eq!(restored_lc.confidence, 1.0);
+    }
+
+    #[test]
+    fn test_archived_context_preserves_all_items_and_tasks_without_deletion() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Secure Vault Project").unwrap();
+
+        // Add items
+        let item1 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "code",
+            "fn encrypt_data() {}",
+            Some("Vault Encryption Module"),
+            "{}",
+        )
+        .unwrap();
+
+        let item2 = crate::db::operations::create_item(
+            &conn,
+            Some(&ws.id),
+            None,
+            "url",
+            "https://vault.example.com/docs",
+            Some("Vault Documentation"),
+            "{}",
+        )
+        .unwrap();
+
+        // Add task candidates
+        let task1 = crate::db::models::TaskCandidate::new(
+            Some(ws.id.clone()),
+            "Implement AES256-GCM cipher",
+            0.90,
+        );
+        let created_task = crate::db::operations::create_task_candidate(&conn, &task1).unwrap();
+
+        // User archives context
+        let feedback_svc = ContextFeedbackService::new();
+        let res = feedback_svc
+            .archive_context(&conn, &ws.id, FeedbackSource::UserExplicitUi, Some("Archiving vault project"))
+            .unwrap();
+        assert!(res.success);
+
+        // INVARIANT VERIFICATION: Archived DOES NOT mean deleted!
+        let fetched_item1 = crate::db::operations::get_item(&conn, &item1.id).unwrap();
+        assert_eq!(fetched_item1.title.as_deref(), Some("Vault Encryption Module"));
+
+        let fetched_item2 = crate::db::operations::get_item(&conn, &item2.id).unwrap();
+        assert_eq!(fetched_item2.title.as_deref(), Some("Vault Documentation"));
+
+        let all_tasks = crate::db::operations::list_task_candidates_for_context(&conn, &ws.id).unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        assert_eq!(all_tasks[0].id, created_task.id);
+        assert_eq!(all_tasks[0].title, "Implement AES256-GCM cipher");
+
+        // Context reconstruction should still work on archived context
+        let recon = crate::context_engine::reconstruction::ContextReconstructionService::new()
+            .reconstruct_cold(&conn, &ws.id)
+            .unwrap();
+        assert_eq!(recon.context.lifecycle_state, Some("archived".to_string()));
     }
 }

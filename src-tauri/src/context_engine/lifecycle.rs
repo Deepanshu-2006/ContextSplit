@@ -229,6 +229,8 @@ pub struct LifecycleEvaluationInput<'a> {
     pub latest_snapshot: Option<&'a ContextSnapshot>,
     pub items: &'a [Item],
     pub has_explicit_user_archive: bool,
+    pub has_explicit_user_resume: bool,
+    pub explicit_resume_timestamp: Option<String>,
     pub reference_time: Option<DateTime<Utc>>,
 }
 
@@ -325,9 +327,9 @@ impl ContextLifecycleEvaluator {
         }
 
         // 3. Discover Last Resumed and Last Paused Anchors
-        let mut last_resumed_str: Option<String> = None;
+        let mut last_resumed_str: Option<String> = input.explicit_resume_timestamp.clone();
         let mut last_paused_str: Option<String> = None;
-        let mut latest_resumed_dt: Option<DateTime<Utc>> = None;
+        let mut latest_resumed_dt: Option<DateTime<Utc>> = input.explicit_resume_timestamp.as_deref().and_then(parse_ts);
         let mut latest_paused_dt: Option<DateTime<Utc>> = None;
 
         for trans in input.context_transitions {
@@ -373,10 +375,10 @@ impl ContextLifecycleEvaluator {
 
         // 5. Evaluate Lifecycle State
         // Invariant: Never infer archived from inactivity.
-        // Active: <= 15 minutes with active corroboration / active segment.
+        // Active: <= 15 minutes with active corroboration / active segment, or explicitly resumed.
         // Paused: Switched away, or 15 minutes to 7 days idle.
         // Dormant: > 7 days idle (or > 30 days in DB).
-        let (state, confidence, entered_at, reason) = if latest_active_dt.is_none() {
+        let (state, confidence, entered_at, reason) = if latest_active_dt.is_none() && !input.has_explicit_user_resume {
             // Zero evidence or brand new
             let entered = input
                 .workspace
@@ -409,8 +411,10 @@ impl ContextLifecycleEvaluator {
                 .map(|cs| cs.state == ContextStateValue::Active)
                 .unwrap_or(false);
 
-            if !explicitly_switched_away && (state_is_active || (elapsed <= 900 && !input.items.is_empty())) {
-                // Active State: Currently working within context (<= 15 minutes)
+            let explicitly_resumed = input.has_explicit_user_resume;
+
+            if !explicitly_switched_away && (state_is_active || explicitly_resumed || (elapsed <= 900 && !input.items.is_empty())) {
+                // Active State: Currently working within context (<= 15 minutes) or user explicitly resumed
                 let entered = if let Some(ref r_str) = last_resumed_str {
                     r_str.clone()
                 } else if let Some(ref a_str) = latest_active_str {
@@ -419,29 +423,45 @@ impl ContextLifecycleEvaluator {
                     now.to_rfc3339()
                 };
 
-                evidence.push(LifecycleSourceEvidence {
-                    evidence_type: "telemetry_capture".to_string(),
-                    description: format!("Active work verified within immediate 15-minute observation window (last activity {}s ago).", elapsed),
-                    timestamp: latest_active_str.clone().unwrap_or_else(|| now.to_rfc3339()),
-                    confidence: 0.90,
-                    reference_id: None,
-                });
-
-                if let Some(ref r_str) = last_resumed_str {
+                if input.has_explicit_user_resume {
                     evidence.push(LifecycleSourceEvidence {
-                        evidence_type: "context_transition".to_string(),
-                        description: format!("Returned to context '{}'.", ws_name),
-                        timestamp: r_str.clone(),
-                        confidence: 0.88,
+                        evidence_type: "user_action".to_string(),
+                        description: format!("Context '{}' was explicitly resumed by the user.", ws_name),
+                        timestamp: input.explicit_resume_timestamp.clone().unwrap_or_else(|| now.to_rfc3339()),
+                        confidence: 1.0,
+                        reference_id: Some(input.context_id.to_string()),
+                    });
+                } else {
+                    evidence.push(LifecycleSourceEvidence {
+                        evidence_type: "telemetry_capture".to_string(),
+                        description: format!("Active work verified within immediate 15-minute observation window (last activity {}s ago).", elapsed),
+                        timestamp: latest_active_str.clone().unwrap_or_else(|| now.to_rfc3339()),
+                        confidence: 0.90,
                         reference_id: None,
                     });
                 }
 
+                if let Some(ref r_str) = last_resumed_str {
+                    if !input.has_explicit_user_resume {
+                        evidence.push(LifecycleSourceEvidence {
+                            evidence_type: "context_transition".to_string(),
+                            description: format!("Returned to context '{}'.", ws_name),
+                            timestamp: r_str.clone(),
+                            confidence: 0.88,
+                            reference_id: None,
+                        });
+                    }
+                }
+
                 (
                     ContextLifecycleState::Active,
-                    0.90,
+                    if input.has_explicit_user_resume { 1.0 } else { 0.90 },
                     entered,
-                    format!("User is currently working in '{}'.", ws_name),
+                    if input.has_explicit_user_resume {
+                        format!("Explicitly resumed by user. Context '{}' is active.", ws_name)
+                    } else {
+                        format!("User is currently working in '{}'.", ws_name)
+                    },
                 )
             } else {
                 // Inactive context: Evaluate multidimensional distinction between PAUSED and DORMANT
@@ -559,6 +579,22 @@ impl ContextLifecycleService {
         let context_transitions = crate::db::operations::list_context_transitions_for_context(conn, workspace_id)
             .unwrap_or_default();
 
+        let mut has_explicit_user_resume = false;
+        let mut explicit_resume_timestamp: Option<String> = None;
+        if let Ok(mut sig_stmt) = conn.prepare(
+            "SELECT created_at FROM context_signals
+             WHERE workspace_id = ?1 AND signal_type = 'context_resumed'
+             ORDER BY created_at DESC LIMIT 1",
+        ) {
+            if let Ok(mut rows) = sig_stmt.query(rusqlite::params![workspace_id]) {
+                if let Ok(Some(row)) = rows.next() {
+                    let ts: String = row.get(0).unwrap_or_default();
+                    explicit_resume_timestamp = Some(ts);
+                    has_explicit_user_resume = true;
+                }
+            }
+        }
+
         let input = LifecycleEvaluationInput {
             context_id: workspace_id,
             context_name: Some(&ws.name),
@@ -573,6 +609,8 @@ impl ContextLifecycleService {
             latest_snapshot: None,
             items: &items,
             has_explicit_user_archive: ws.lifecycle_state.eq_ignore_ascii_case("archived"),
+            has_explicit_user_resume,
+            explicit_resume_timestamp,
             reference_time: None,
         };
 
@@ -699,6 +737,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -739,6 +779,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -770,6 +812,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -802,6 +846,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -834,6 +880,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: true,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -873,6 +921,8 @@ mod tests {
             latest_snapshot: None,
             items: &[item],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
 
@@ -960,6 +1010,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_split[0..1],
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now - chrono::Duration::minutes(29)),
         };
         let lc_split_p1 = ContextLifecycleEvaluator::evaluate(input_split_after_payx);
@@ -980,6 +1032,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_payx,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now - chrono::Duration::minutes(29)),
         };
         let lc_payx_p1 = ContextLifecycleEvaluator::evaluate(input_payx_active);
@@ -1011,6 +1065,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_payx,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now - chrono::Duration::minutes(14)),
         };
         let lc_payx_p2 = ContextLifecycleEvaluator::evaluate(input_payx_after_univ);
@@ -1031,6 +1087,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_univ,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now - chrono::Duration::minutes(14)),
         };
         let lc_univ_p2 = ContextLifecycleEvaluator::evaluate(input_univ_active);
@@ -1062,6 +1120,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_split,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
         let lc_split_final = ContextLifecycleEvaluator::evaluate(input_split_returned);
@@ -1082,6 +1142,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_payx,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
         let lc_payx_final = ContextLifecycleEvaluator::evaluate(input_payx_final);
@@ -1102,6 +1164,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_univ,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
         let lc_univ_final = ContextLifecycleEvaluator::evaluate(input_univ_final);
@@ -1137,6 +1201,8 @@ mod tests {
             latest_snapshot: None,
             items: &items_hist,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now - chrono::Duration::days(1)),
         };
         let lc_dormant = ContextLifecycleEvaluator::evaluate(input_dormant);
@@ -1168,10 +1234,114 @@ mod tests {
             latest_snapshot: None,
             items: &items_resumed,
             has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
             reference_time: Some(now),
         };
         let lc_resumed = ContextLifecycleEvaluator::evaluate(input_resumed);
         assert_eq!(lc_resumed.lifecycle_state, ContextLifecycleState::Active);
         assert_eq!(lc_resumed.last_resumed_at, Some(t_new));
+    }
+
+    #[test]
+    fn test_explicit_user_archive_lifecycle_evaluation() {
+        let now = Utc::now();
+        let t_archive = now.to_rfc3339();
+        let ws = make_test_workspace("ws_arch", "Retired Project", "archived", Some(&t_archive));
+        let items = vec![make_test_item("item_1", "ws_arch", &t_archive)];
+
+        let input = LifecycleEvaluationInput {
+            context_id: "ws_arch",
+            context_name: Some("Retired Project"),
+            workspace: Some(&ws),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items,
+            has_explicit_user_archive: true,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
+            reference_time: Some(now),
+        };
+
+        let lc = ContextLifecycleEvaluator::evaluate(input);
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Archived);
+        assert!(lc.reason.contains("Explicitly archived by user"));
+        assert_eq!(lc.confidence, 1.0);
+        assert!(lc.source_evidence.iter().any(|e| e.evidence_type == "user_action"));
+    }
+
+    #[test]
+    fn test_inactivity_alone_never_infers_archived() {
+        let now = Utc::now();
+        // 180 days of complete inactivity
+        let t_very_old = (now - chrono::Duration::days(180)).to_rfc3339();
+        let ws = make_test_workspace("ws_dormant", "Very Old Project", "active", Some(&t_very_old));
+        let items = vec![make_test_item("item_old", "ws_dormant", &t_very_old)];
+
+        let input = LifecycleEvaluationInput {
+            context_id: "ws_dormant",
+            context_name: Some("Very Old Project"),
+            workspace: Some(&ws),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items,
+            has_explicit_user_archive: false,
+            has_explicit_user_resume: false,
+            explicit_resume_timestamp: None,
+            reference_time: Some(now),
+        };
+
+        let lc = ContextLifecycleEvaluator::evaluate(input);
+        // CRITICAL INVARIANT: Inactivity alone MUST derive Dormant, NEVER Archived!
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Dormant);
+        assert_ne!(lc.lifecycle_state, ContextLifecycleState::Archived);
+        assert!(lc.lifecycle_state.allows_automated_matching());
+    }
+
+    #[test]
+    fn test_explicit_user_resume_from_dormant_evaluation() {
+        let now = Utc::now();
+        let t_old = (now - chrono::Duration::days(60)).to_rfc3339();
+        let t_resume = (now - chrono::Duration::minutes(1)).to_rfc3339();
+
+        let ws = make_test_workspace("ws_revived", "Revived Project", "active", Some(&t_resume));
+        let items = vec![make_test_item("item_old", "ws_revived", &t_old)];
+
+        let input = LifecycleEvaluationInput {
+            context_id: "ws_revived",
+            context_name: Some("Revived Project"),
+            workspace: Some(&ws),
+            context_state: None,
+            activity_segments: &[],
+            context_transitions: &[],
+            task_transitions: &[],
+            active_task_candidate: None,
+            workset: None,
+            important_memories: &[],
+            latest_snapshot: None,
+            items: &items,
+            has_explicit_user_archive: false,
+            has_explicit_user_resume: true,
+            explicit_resume_timestamp: Some(t_resume.clone()),
+            reference_time: Some(now),
+        };
+
+        let lc = ContextLifecycleEvaluator::evaluate(input);
+        assert_eq!(lc.lifecycle_state, ContextLifecycleState::Active);
+        assert_eq!(lc.last_resumed_at, Some(t_resume));
+        assert_eq!(lc.confidence, 1.0);
+        assert!(lc.source_evidence.iter().any(|e| e.evidence_type == "user_action"));
     }
 }
