@@ -402,6 +402,11 @@ impl FeedbackScope {
         }
     }
 
+    /// Scope specificity order (1 is most specific, 6 is broadest).
+    pub fn specificity_order(&self) -> u8 {
+        self.granularity_rank()
+    }
+
     /// Associated workspace / context ID if the scope is bound to a context.
     pub fn context_id(&self) -> Option<&str> {
         match self {
@@ -2112,6 +2117,278 @@ impl FeedbackPrecedenceEngine {
 }
 
 // =========================================================================
+// Contextual Feedback Conflict Resolver (Step 8)
+// =========================================================================
+
+/// Derived effective state for an entity in a context after deterministic conflict resolution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveFeedbackState {
+    /// Explicitly confirmed by latest authoritative user feedback (affirmative).
+    Confirmed {
+        confidence: f64,
+        confirmed_at: String,
+        event_id: String,
+    },
+    /// Explicitly rejected or removed by latest user feedback (penalized/suppressed).
+    Rejected {
+        penalty: f32,
+        rejected_at: String,
+        rejection_count: usize,
+        event_id: String,
+    },
+    /// Genuinely ambiguous or contradictory feedback without clear timestamp/scope resolution.
+    Ambiguous {
+        reason: String,
+        ambiguity_level: f32,
+        competing_events_count: usize,
+    },
+    /// Neutral state with no recorded explicit user corrections.
+    Neutral,
+}
+
+impl EffectiveFeedbackState {
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed { .. })
+    }
+
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        matches!(self, Self::Neutral)
+    }
+}
+
+/// Comprehensive result of arbitrating historical feedback conflicts for an entity in a context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedbackConflictResolution {
+    pub target_id: String,
+    pub context_id: String,
+    pub effective_state: EffectiveFeedbackState,
+    pub total_history_count: usize,
+    pub confirmations_count: usize,
+    pub rejections_count: usize,
+    pub latest_action: Option<FeedbackAction>,
+    pub latest_timestamp: Option<String>,
+    pub is_ambiguous: bool,
+    pub history_preserved: bool,
+    pub explanation: String,
+}
+
+/// Resolver that derives the current effective contextual state from historical feedback events
+/// without mutating or deleting historical records.
+pub struct FeedbackConflictResolver;
+
+impl FeedbackConflictResolver {
+    /// Resolves conflicting feedback events for a given target entity and context.
+    ///
+    /// Arbitration principles:
+    /// 1. **Zero History Deletion**: Preserves the complete event trajectory for auditability.
+    /// 2. **Scope Specificity**: Narrower scopes (e.g. `ItemContext` specificity 1) supersede wider scopes (e.g. `SourceContext` specificity 2 or `Global`).
+    /// 3. **Recency**: The newest explicit action governs direction when scopes are comparable.
+    /// 4. **No Fabricated Certainty**: Genuinely ambiguous simultaneous conflicts produce `EffectiveFeedbackState::Ambiguous`.
+    pub fn resolve_events(
+        events: &[ContextFeedbackEvent],
+        target_id: &str,
+        context_id: &str,
+    ) -> FeedbackConflictResolution {
+        // Filter events applicable to (target_id, context_id)
+        let mut applicable: Vec<&ContextFeedbackEvent> = events
+            .iter()
+            .filter(|ev| {
+                let target_matches = ev.target_ref.id() == target_id
+                    || ev.scope.applies_to(Some(target_id), None, None, context_id);
+                let context_matches = ev
+                    .context_ref
+                    .as_deref()
+                    .or_else(|| ev.scope.context_id())
+                    .map(|c| c == context_id)
+                    .unwrap_or(ev.scope == FeedbackScope::Global);
+                target_matches && context_matches
+            })
+            .collect();
+
+        if applicable.is_empty() {
+            return FeedbackConflictResolution {
+                target_id: target_id.to_string(),
+                context_id: context_id.to_string(),
+                effective_state: EffectiveFeedbackState::Neutral,
+                total_history_count: 0,
+                confirmations_count: 0,
+                rejections_count: 0,
+                latest_action: None,
+                latest_timestamp: None,
+                is_ambiguous: false,
+                history_preserved: true,
+                explanation: format!("No feedback history recorded for target '{}' in context '{}'", target_id, context_id),
+            };
+        }
+
+        // Sort events chronologically, then by specificity (narrower scope first)
+        applicable.sort_by(|a, b| {
+            let ts_ord = match (a.timestamp_dt(), b.timestamp_dt()) {
+                (Some(ta), Some(tb)) => ta.cmp(&tb),
+                _ => a.timestamp.cmp(&b.timestamp),
+            };
+            if ts_ord != std::cmp::Ordering::Equal {
+                ts_ord
+            } else {
+                // Same timestamp: narrower specificity (lower number) comes later (higher priority)
+                b.scope.specificity_order().cmp(&a.scope.specificity_order())
+            }
+        });
+
+        let total_history_count = applicable.len();
+        let mut confirmations_count = 0;
+        let mut rejections_count = 0;
+
+        for ev in &applicable {
+            if ev.action.is_positive() {
+                confirmations_count += 1;
+            } else if ev.action.is_negative() {
+                rejections_count += 1;
+            }
+        }
+
+        // Check for genuine ambiguity: conflicting simultaneous actions with identical timestamp & specificity
+        if applicable.len() >= 2 {
+            let last = applicable[applicable.len() - 1];
+            let second_last = applicable[applicable.len() - 2];
+            if last.timestamp == second_last.timestamp
+                && last.scope.specificity_order() == second_last.scope.specificity_order()
+                && last.action.is_positive() != second_last.action.is_positive()
+            {
+                return FeedbackConflictResolution {
+                    target_id: target_id.to_string(),
+                    context_id: context_id.to_string(),
+                    effective_state: EffectiveFeedbackState::Ambiguous {
+                        reason: "Simultaneous conflicting feedback events of equal specificity registered".to_string(),
+                        ambiguity_level: 0.85,
+                        competing_events_count: applicable.len(),
+                    },
+                    total_history_count,
+                    confirmations_count,
+                    rejections_count,
+                    latest_action: Some(last.action),
+                    latest_timestamp: Some(last.timestamp.clone()),
+                    is_ambiguous: true,
+                    history_preserved: true,
+                    explanation: "Genuinely ambiguous simultaneous feedback detected; relationship marked uncertain".to_string(),
+                };
+            }
+        }
+
+        // Latest event dictates effective direction
+        let latest = applicable[applicable.len() - 1];
+        let effective_state = if latest.action.is_positive() {
+            EffectiveFeedbackState::Confirmed {
+                confidence: 1.0,
+                confirmed_at: latest.timestamp.clone(),
+                event_id: latest.id.clone(),
+            }
+        } else {
+            let penalty = ContextNegativeFeedbackEvaluator::calculate_repeated_rejection_penalty(rejections_count);
+            EffectiveFeedbackState::Rejected {
+                penalty,
+                rejected_at: latest.timestamp.clone(),
+                rejection_count: rejections_count,
+                event_id: latest.id.clone(),
+            }
+        };
+
+        let explanation = format!(
+            "Resolved {} feedback event(s) ({} confirm, {} reject). Latest action '{}' at {} determines effective state",
+            total_history_count,
+            confirmations_count,
+            rejections_count,
+            latest.action.as_str(),
+            latest.timestamp
+        );
+
+        FeedbackConflictResolution {
+            target_id: target_id.to_string(),
+            context_id: context_id.to_string(),
+            effective_state,
+            total_history_count,
+            confirmations_count,
+            rejections_count,
+            latest_action: Some(latest.action),
+            latest_timestamp: Some(latest.timestamp.clone()),
+            is_ambiguous: false,
+            history_preserved: true,
+            explanation,
+        }
+    }
+
+    /// Resolves feedback conflicts directly from persisted database context_signals.
+    pub fn resolve_from_db(
+        conn: &rusqlite::Connection,
+        target_id: &str,
+        context_id: &str,
+    ) -> Result<FeedbackConflictResolution, String> {
+        let mut events = Vec::new();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, signal_type, payload, created_at FROM context_signals
+                 WHERE workspace_id = ?1 AND item_id = ?2
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| format!("Failed to prepare context_signals query: {}", e))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![context_id, target_id], |row| {
+                let id: String = row.get(0)?;
+                let sig_type: String = row.get(1)?;
+                let payload: String = row.get(2)?;
+                let created_at: String = row.get(3)?;
+                Ok((id, sig_type, payload, created_at))
+            })
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        for r in rows.flatten() {
+            let (id, sig_type, payload_str, created_at) = r;
+            let action_opt = if sig_type == "user_feedback" || sig_type == "context_confirmed" {
+                Some(FeedbackAction::ConfirmContext)
+            } else if sig_type == "user_correction" || sig_type == "membership_dismissed" || sig_type == "user_removed_from_context" {
+                Some(FeedbackAction::RemoveFromContext)
+            } else if sig_type == "suggestion_dismissed" {
+                Some(FeedbackAction::DismissSuggestion)
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                val.get("action")
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| FeedbackAction::from_str_lenient(s).ok())
+            } else {
+                None
+            };
+
+            if let Some(act) = action_opt {
+                let ev = ContextFeedbackEvent::new(
+                    act,
+                    FeedbackTargetRef::Item(target_id.to_string()),
+                    Some(context_id.to_string()),
+                    FeedbackSource::UserExplicitUi,
+                    FeedbackScope::item_context(target_id, context_id),
+                    None,
+                )
+                .with_timestamp(created_at);
+                let mut ev = ev;
+                ev.id = id;
+                events.push(ev);
+            }
+        }
+
+        Ok(Self::resolve_events(&events, target_id, context_id))
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -3114,5 +3391,154 @@ mod tests {
         assert_eq!(res.winning_tier, EvidencePriorityTier::StrongContextualEvidence);
         assert_eq!(res.winning_signal.signal_id, "s3");
         assert_eq!(res.overridden_signals.len(), 4);
+    }
+
+    #[test]
+    fn test_conflict_confirm_then_reject() {
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let t1 = now.to_rfc3339();
+
+        let ev1 = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(t0);
+        let ev2 = ContextFeedbackEvent::reject_context("item-1", "ws-payx", FeedbackSource::InboxAction, None)
+            .with_timestamp(t1);
+
+        let res = FeedbackConflictResolver::resolve_events(&[ev1, ev2], "item-1", "ws-payx");
+        assert!(res.effective_state.is_rejected());
+        assert_eq!(res.total_history_count, 2);
+        assert_eq!(res.confirmations_count, 1);
+        assert_eq!(res.rejections_count, 1);
+        assert_eq!(res.latest_action, Some(FeedbackAction::RejectContext));
+        assert!(res.history_preserved);
+    }
+
+    #[test]
+    fn test_conflict_reject_then_confirm() {
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let t1 = now.to_rfc3339();
+
+        let ev1 = ContextFeedbackEvent::reject_context("item-1", "ws-payx", FeedbackSource::InboxAction, None)
+            .with_timestamp(t0);
+        let ev2 = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(t1);
+
+        let res = FeedbackConflictResolver::resolve_events(&[ev1, ev2], "item-1", "ws-payx");
+        assert!(res.effective_state.is_confirmed());
+        assert_eq!(res.total_history_count, 2);
+        assert_eq!(res.confirmations_count, 1);
+        assert_eq!(res.rejections_count, 1);
+        assert_eq!(res.latest_action, Some(FeedbackAction::ConfirmContext));
+    }
+
+    #[test]
+    fn test_conflict_confirm_reject_confirm_oscillation() {
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(3)).to_rfc3339();
+        let t1 = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let t2 = now.to_rfc3339();
+
+        // 1. Confirm
+        let ev1 = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(t0);
+        // 2. Remove / Reject
+        let ev2 = ContextFeedbackEvent::remove_from_context("item-1", "ws-payx", FeedbackSource::WorksetTray, None)
+            .with_timestamp(t1);
+        // 3. Confirm again
+        let ev3 = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(t2);
+
+        let res = FeedbackConflictResolver::resolve_events(&[ev1, ev2, ev3], "item-1", "ws-payx");
+        assert!(res.effective_state.is_confirmed());
+        assert_eq!(res.total_history_count, 3);
+        assert_eq!(res.confirmations_count, 2);
+        assert_eq!(res.rejections_count, 1);
+        assert_eq!(res.latest_action, Some(FeedbackAction::ConfirmContext));
+        assert!(res.history_preserved);
+    }
+
+    #[test]
+    fn test_conflict_multiple_contexts_isolation() {
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(1)).to_rfc3339();
+
+        let ev_payx = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(&t0);
+        let ev_personal = ContextFeedbackEvent::reject_context("item-1", "ws-personal", FeedbackSource::InboxAction, None)
+            .with_timestamp(&t0);
+
+        let events = vec![ev_payx, ev_personal];
+
+        // PayX is confirmed
+        let res_payx = FeedbackConflictResolver::resolve_events(&events, "item-1", "ws-payx");
+        assert!(res_payx.effective_state.is_confirmed());
+        assert_eq!(res_payx.total_history_count, 1);
+
+        // Personal is rejected
+        let res_personal = FeedbackConflictResolver::resolve_events(&events, "item-1", "ws-personal");
+        assert!(res_personal.effective_state.is_rejected());
+        assert_eq!(res_personal.total_history_count, 1);
+    }
+
+    #[test]
+    fn test_conflict_different_scopes_specificity_rule() {
+        let now = Utc::now().to_rfc3339();
+
+        // Broader SourceContext rejection (specificity 2)
+        let ev_broad = ContextFeedbackEvent::new(
+            FeedbackAction::RejectContext,
+            FeedbackTargetRef::Other { entity_type: "source".to_string(), entity_id: "chrome".to_string() },
+            Some("ws-payx".to_string()),
+            FeedbackSource::InboxAction,
+            FeedbackScope::SourceContext { source_id: "chrome".to_string(), context_id: "ws-payx".to_string() },
+            None,
+        )
+        .with_timestamp(&now);
+
+        // Specific ItemContext confirmation (specificity 1)
+        let ev_narrow = ContextFeedbackEvent::new(
+            FeedbackAction::ConfirmContext,
+            FeedbackTargetRef::Item("item-stripe".to_string()),
+            Some("ws-payx".to_string()),
+            FeedbackSource::UserExplicitUi,
+            FeedbackScope::ItemContext { item_id: "item-stripe".to_string(), context_id: "ws-payx".to_string() },
+            None,
+        )
+        .with_timestamp(&now);
+
+        // Narrower ItemContext confirmation wins over broader SourceContext rejection
+        let res = FeedbackConflictResolver::resolve_events(&[ev_broad, ev_narrow], "item-stripe", "ws-payx");
+        assert!(res.effective_state.is_confirmed());
+    }
+
+    #[test]
+    fn test_conflict_old_vs_recent_feedback() {
+        let now = Utc::now();
+        let old_ts = (now - chrono::Duration::days(45)).to_rfc3339();
+        let fresh_ts = now.to_rfc3339();
+
+        let old_ev = ContextFeedbackEvent::reject_context("item-1", "ws-payx", FeedbackSource::InboxAction, None)
+            .with_timestamp(old_ts);
+        let fresh_ev = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(fresh_ts);
+
+        let res = FeedbackConflictResolver::resolve_events(&[old_ev, fresh_ev], "item-1", "ws-payx");
+        assert!(res.effective_state.is_confirmed());
+    }
+
+    #[test]
+    fn test_conflict_genuine_ambiguity_no_fabricated_certainty() {
+        let same_ts = Utc::now().to_rfc3339();
+
+        // Two contradictory actions with exact same timestamp and exact same scope specificity
+        let ev1 = ContextFeedbackEvent::confirm_context("item-1", "ws-payx", FeedbackSource::UserExplicitUi)
+            .with_timestamp(&same_ts);
+        let ev2 = ContextFeedbackEvent::reject_context("item-1", "ws-payx", FeedbackSource::InboxAction, None)
+            .with_timestamp(&same_ts);
+
+        let res = FeedbackConflictResolver::resolve_events(&[ev1, ev2], "item-1", "ws-payx");
+        assert!(res.is_ambiguous);
+        assert!(res.effective_state.is_ambiguous());
     }
 }
