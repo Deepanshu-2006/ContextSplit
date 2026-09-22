@@ -171,7 +171,8 @@ impl ContextMemoryDecayEvaluator {
         let is_confirmed = input.is_user_confirmed
             || input.provenance == InformationProvenance::Confirmed
             || input.memory_type == Some(ImportantMemoryType::ConfirmedContextFact)
-            || input.user_feedback == Some("pinned");
+            || input.user_feedback == Some("pinned")
+            || input.user_feedback == Some("keep");
 
         if is_confirmed {
             reasons.push("User-confirmed contextual memory is immune to automatic decay.".to_string());
@@ -407,13 +408,12 @@ impl ContextMemoryDecayEvaluator {
         let now = Utc::now();
 
         let mut stmt = conn.prepare(
-            "SELECT i.id, i.type, i.created_at,
-                    COALESCE(wm.user_confirmed, 0),
-                    COALESCE(wm.pinned, 0),
-                    COALESCE(wm.confidence, 0.5)
+            "SELECT i.id, i.item_type, i.created_at,
+                    COALESCE((SELECT 1 FROM context_memberships cm WHERE cm.item_id = i.id AND cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'), 0) as user_confirmed,
+                    COALESCE(cm.confidence, 0.5)
              FROM items i
-             LEFT JOIN workspace_memberships wm ON i.id = wm.item_id AND wm.workspace_id = ?1
-             WHERE wm.workspace_id = ?1 OR wm.workspace_id IS NULL
+             LEFT JOIN context_memberships cm ON i.id = cm.item_id AND cm.workspace_id = ?1
+             WHERE i.workspace_id = ?1 OR cm.workspace_id = ?1
              ORDER BY i.created_at DESC",
         )?;
 
@@ -422,16 +422,34 @@ impl ContextMemoryDecayEvaluator {
             let item_type: String = row.get(1)?;
             let created_at: String = row.get(2)?;
             let user_confirmed: i64 = row.get(3)?;
-            let pinned: i64 = row.get(4)?;
-            let confidence: f64 = row.get(5)?;
-            Ok((id, item_type, created_at, user_confirmed, pinned, confidence))
+            let confidence: f64 = row.get(4)?;
+            Ok((id, item_type, created_at, user_confirmed, confidence))
         })?;
 
         let mut results = Vec::new();
 
         for row in rows {
-            let (id, item_type, created_at, user_confirmed, pinned, confidence) = row?;
-            let is_confirmed = user_confirmed == 1 || pinned == 1;
+            let (id, item_type, created_at, user_confirmed, confidence) = row?;
+            let mut is_confirmed = user_confirmed == 1;
+            let mut user_feedback_str = if is_confirmed { Some("pinned".to_string()) } else { None };
+
+            if let Ok(res) = crate::context_engine::feedback::FeedbackConflictResolver::resolve_from_db(conn, &id, workspace_id) {
+                match res.effective_state {
+                    crate::context_engine::feedback::EffectiveFeedbackState::Confirmed { .. } => {
+                        is_confirmed = true;
+                        user_feedback_str = Some("pinned".to_string());
+                    }
+                    crate::context_engine::feedback::EffectiveFeedbackState::Rejected { .. } => {
+                        is_confirmed = false;
+                        if res.latest_action == Some(crate::context_engine::feedback::FeedbackAction::RemoveImportance) {
+                            user_feedback_str = Some("unpinned".to_string());
+                        } else {
+                            user_feedback_str = Some("remove".to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             let provenance = if is_confirmed {
                 InformationProvenance::Confirmed
@@ -449,11 +467,11 @@ impl ContextMemoryDecayEvaluator {
 
             let input = MemoryDecayInput {
                 entity_id: &id,
-                initial_importance: confidence,
+                initial_importance: if is_confirmed { 1.0 } else { confidence },
                 initial_tier,
                 provenance,
                 is_user_confirmed: is_confirmed,
-                user_feedback: if pinned == 1 { Some("pinned") } else { None },
+                user_feedback: user_feedback_str.as_deref(),
                 memory_type: if item_type == "task" {
                     Some(ImportantMemoryType::RecentTask)
                 } else {

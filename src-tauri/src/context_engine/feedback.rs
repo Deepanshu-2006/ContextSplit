@@ -1017,7 +1017,7 @@ impl ContextFeedbackService {
                     crate::context_engine::important_memory::UserMemoryControlAction::KeepImportant,
                 )?;
                 applied_systems.push("important_memory_service".to_string());
-                applied_systems.push("workspace_memberships".to_string());
+                applied_systems.push("context_memberships".to_string());
                 applied_systems.push("context_signals".to_string());
 
                 Self::invalidate_caches_for_workspace(Some(ws_id));
@@ -1052,7 +1052,7 @@ impl ContextFeedbackService {
                 )?;
                 applied_systems.push("important_memory_service".to_string());
                 applied_systems.push("context_memberships".to_string());
-                applied_systems.push("workspace_memberships".to_string());
+                applied_systems.push("context_signals".to_string());
 
                 Self::invalidate_caches_for_workspace(Some(ws_id));
                 applied_systems.push("cache_invalidation".to_string());
@@ -1710,11 +1710,11 @@ impl ContextPositiveFeedbackEngine {
             )
             .ok();
 
-        // 3. Check important memory status from workspace_memberships or context_signals
+        // 3. Check important memory status from context_memberships or context_signals
         let is_important = conn
             .query_row(
-                "SELECT COUNT(*) FROM workspace_memberships
-                 WHERE workspace_id = ?1 AND item_id = ?2 AND pinned = 1",
+                "SELECT COUNT(*) FROM context_memberships
+                 WHERE workspace_id = ?1 AND item_id = ?2 AND membership_type = 'confirmed'",
                 rusqlite::params![context_id, entity_id],
                 |r| r.get::<_, i64>(0),
             )
@@ -1723,7 +1723,7 @@ impl ContextPositiveFeedbackEngine {
             || conn
                 .query_row(
                     "SELECT COUNT(*) FROM context_signals
-                     WHERE workspace_id = ?1 AND item_id = ?2 AND (signal_type = 'important_memory_control' OR payload LIKE '%keep_important%')",
+                     WHERE workspace_id = ?1 AND item_id = ?2 AND (signal_type = 'important_memory_control' OR payload LIKE '%keep_important%' OR payload LIKE '%mark_important%')",
                     rusqlite::params![context_id, entity_id],
                     |r| r.get::<_, i64>(0),
                 )
@@ -2354,19 +2354,30 @@ impl FeedbackConflictResolver {
 
         for r in rows.flatten() {
             let (id, sig_type, payload_str, created_at) = r;
-            let action_opt = if sig_type == "user_feedback" || sig_type == "context_confirmed" {
-                Some(FeedbackAction::ConfirmContext)
-            } else if sig_type == "user_correction" || sig_type == "membership_dismissed" || sig_type == "user_removed_from_context" {
-                Some(FeedbackAction::RemoveFromContext)
-            } else if sig_type == "suggestion_dismissed" {
-                Some(FeedbackAction::DismissSuggestion)
-            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
-                val.get("action")
-                    .and_then(|a| a.as_str())
-                    .and_then(|s| FeedbackAction::from_str_lenient(s).ok())
-            } else {
-                None
-            };
+            let parsed_action = serde_json::from_str::<serde_json::Value>(&payload_str)
+                .ok()
+                .and_then(|val| {
+                    val.get("action")
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| FeedbackAction::from_str_lenient(s).ok())
+                });
+
+            let action_opt = parsed_action.or_else(|| {
+                if sig_type == "user_feedback" || sig_type == "context_confirmed" {
+                    Some(FeedbackAction::ConfirmContext)
+                } else if sig_type == "user_correction"
+                    || sig_type == "membership_dismissed"
+                    || sig_type == "user_removed_from_context"
+                    || sig_type == "user_dismiss"
+                    || sig_type == "user_reject"
+                {
+                    Some(FeedbackAction::RemoveFromContext)
+                } else if sig_type == "suggestion_dismissed" {
+                    Some(FeedbackAction::DismissSuggestion)
+                } else {
+                    None
+                }
+            });
 
             if let Some(act) = action_opt {
                 let ev = ContextFeedbackEvent::new(

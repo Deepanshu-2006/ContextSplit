@@ -383,8 +383,8 @@ impl ContextMemoryImportanceEvaluator {
                 why_reasons.push("Confirmed by user feedback.".to_string());
                 0.90
             }
-            Some("dismiss") | Some("remove") => {
-                why_reasons.push("Dismissed by user feedback.".to_string());
+            Some("dismiss") | Some("remove") | Some("unpinned") | Some("forget") | Some("rejected") => {
+                why_reasons.push("Dismissed or unpinned by user feedback.".to_string());
                 0.0
             }
             _ => 0.50,
@@ -459,7 +459,12 @@ impl ContextMemoryImportanceEvaluator {
         }
 
         // Apply user dismissal penalty if present
-        if input.user_feedback == Some("dismiss") || input.user_feedback == Some("remove") {
+        if input.user_feedback == Some("dismiss")
+            || input.user_feedback == Some("remove")
+            || input.user_feedback == Some("unpinned")
+            || input.user_feedback == Some("forget")
+            || input.user_feedback == Some("rejected")
+        {
             base_score *= 0.30;
         }
 
@@ -568,14 +573,46 @@ impl ContextMemoryImportanceEvaluator {
             }
         };
 
-        // Check user confirmation from context_memberships
-        let is_confirmed: bool = conn
+        // Check user confirmation from context_memberships & workspace_memberships
+        let mut is_confirmed: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND membership_type = 'confirmed'",
                 params![item_id, workspace_id],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap_or(0) > 0;
+
+        if !is_confirmed {
+            is_confirmed = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workspace_memberships WHERE item_id = ?1 AND workspace_id = ?2 AND (user_confirmed = 1 OR pinned = 1)",
+                    params![item_id, workspace_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) > 0;
+        }
+
+        let parsed_meta: Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
+        let mut user_feedback_owned = parsed_meta.get("user_feedback").and_then(|v| v.as_str()).map(String::from);
+
+        // Resolve effective feedback state from persistent signals
+        if let Ok(res) = crate::context_engine::feedback::FeedbackConflictResolver::resolve_from_db(conn, item_id, workspace_id) {
+            match res.effective_state {
+                crate::context_engine::feedback::EffectiveFeedbackState::Confirmed { .. } => {
+                    is_confirmed = true;
+                    user_feedback_owned = Some("pinned".to_string());
+                }
+                crate::context_engine::feedback::EffectiveFeedbackState::Rejected { .. } => {
+                    is_confirmed = false;
+                    if res.latest_action == Some(crate::context_engine::feedback::FeedbackAction::RemoveImportance) {
+                        user_feedback_owned = Some("unpinned".to_string());
+                    } else {
+                        user_feedback_owned = Some("remove".to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
 
         // Count distinct sessions
         let session_count: usize = conn
@@ -606,9 +643,6 @@ impl ContextMemoryImportanceEvaluator {
             )
             .unwrap_or(0) as usize;
 
-        let parsed_meta: Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
-        let user_feedback = parsed_meta.get("user_feedback").and_then(|v| v.as_str());
-
         // Derive workset tier if available
         let workset_relevance = if let Ok(workset_builder) = ContextWorksetBuilder::from_db(conn, workspace_id) {
             if let Ok(workset) = workset_builder.build() {
@@ -631,7 +665,7 @@ impl ContextMemoryImportanceEvaluator {
                 InformationProvenance::Observed
             },
             is_user_confirmed: is_confirmed,
-            user_feedback,
+            user_feedback: user_feedback_owned.as_deref(),
             task_relevance: if workset_relevance == Some(WorksetItemRelevance::Primary) { 0.85 } else { 0.50 },
             context_relevance: 0.70,
             workset_relevance,
@@ -780,11 +814,12 @@ impl ContextMemoryQualityGuard {
     ) -> MemoryQualityGuardResult {
         let mut failure_reasons = Vec::new();
 
-        // 9. Check: Not explicitly rejected by the user
+        // 9. Check: Not explicitly rejected or unpinned by the user
         if input.user_feedback == Some("dismiss")
             || input.user_feedback == Some("remove")
             || input.user_feedback == Some("forget")
             || input.user_feedback == Some("rejected")
+            || input.user_feedback == Some("unpinned")
         {
             failure_reasons.push("Explicitly rejected or dismissed by user feedback.".to_string());
             return MemoryQualityGuardResult::rejected(failure_reasons);

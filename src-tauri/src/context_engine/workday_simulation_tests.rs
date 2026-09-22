@@ -788,7 +788,7 @@ mod tests {
                 has_pause_checkpoint: false,
                 is_resumed_context: true,
                 latest_snapshot: None,
-                reference_time: None,
+                reference_time: Some(chrono::DateTime::parse_from_rfc3339("2026-09-22T12:00:00Z").unwrap().with_timezone(&chrono::Utc)),
             },
             None,
         );
