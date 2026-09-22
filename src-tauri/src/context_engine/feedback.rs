@@ -2548,6 +2548,469 @@ impl FeedbackConflictResolver {
 }
 
 // =========================================================================
+// Deterministic Contextual Adaptation Engine (Step 13)
+// =========================================================================
+
+/// Structured verdict explaining the outcome of deterministic adaptation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptationVerdict {
+    /// Item was directly confirmed by user in context -> 1.0 confidence boost.
+    ConfirmedDirectly,
+    /// Item possesses specific contextual entity anchors (repo URL, title, project keywords),
+    /// bypassing generic application dampening and receiving strong recognition.
+    SpecificRelationshipRecognized,
+    /// Generic item from an application with repeated rejections in this context is dampened.
+    GenericAppDampened,
+    /// The specific item itself was directly rejected by user in this context.
+    ItemDirectlyRejected,
+    /// Historical rejection has decayed with time, applying only mild dampening.
+    DecayedHistoricalPenalty,
+    /// No adaptation rules triggered; baseline score is preserved.
+    UnmodifiedBaseline,
+}
+
+/// Comprehensive result of evaluating deterministic adaptation for an item in a context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeterministicAdaptationAssessment {
+    pub item_id: String,
+    pub context_id: String,
+    pub base_score: f32,
+    pub adapted_score: f32,
+    pub confidence: f64,
+    pub adaptation_delta: f32,
+    pub is_generic_suppressed: bool,
+    pub has_specific_entity_match: bool,
+    pub app_rejection_count: usize,
+    pub item_rejection_count: usize,
+    pub item_confirmation_count: usize,
+    pub decay_factor: f32,
+    pub verdict: AdaptationVerdict,
+    pub explanation: String,
+}
+
+/// Engine that performs deterministic contextual adaptation based on structured user feedback
+/// without introducing machine learning models, external training pipelines, or fine-tuning.
+pub struct ContextDeterministicAdaptationEngine;
+
+impl ContextDeterministicAdaptationEngine {
+    /// Computes the time decay factor [0.4, 1.0] for historical feedback.
+    ///
+    /// Decay schedule:
+    /// - <= 30 days: 1.0 (full active effect)
+    /// - 30..90 days: Linear decay from 1.0 to 0.6
+    /// - > 90 days: 0.4 (historical baseline floor)
+    pub fn compute_time_decay(created_at: DateTime<Utc>, eval_time: DateTime<Utc>) -> f32 {
+        let elapsed_secs = (eval_time - created_at).num_seconds().max(0);
+        let days = elapsed_secs as f64 / 86400.0;
+
+        if days <= 30.0 {
+            1.0
+        } else if days <= 90.0 {
+            (1.0 - 0.4 * ((days - 30.0) / 60.0)) as f32
+        } else {
+            0.4
+        }
+    }
+
+    /// Detects if an item possesses specific contextual entity anchors for a workspace
+    /// (e.g. matching repo slug, repository URL, project title tokens, or confirmed domain).
+    pub fn detect_specific_entity_affinity(
+        conn: &rusqlite::Connection,
+        item: &crate::db::models::Item,
+        workspace: &crate::db::models::Workspace,
+    ) -> (bool, f32, String) {
+        let ws_name_clean = workspace.name.trim().to_lowercase();
+        let ws_tokens: Vec<String> = ws_name_clean
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.len() >= 3)
+            .map(|s| s.to_string())
+            .collect();
+
+        // 1. Extract item properties
+        let item_title = item.title.as_deref().unwrap_or("").to_lowercase();
+        let item_content = item.content.to_lowercase();
+        let mut item_url: Option<String> = None;
+        let mut item_domain: Option<String> = None;
+        let mut item_repo: Option<String> = None;
+
+        if let Ok(meta_json) = serde_json::from_str::<serde_json::Value>(&item.metadata) {
+            if let Some(u) = meta_json.get("url").and_then(|v| v.as_str()) {
+                item_url = Some(u.to_lowercase());
+            }
+            if let Some(d) = meta_json.get("domain").and_then(|v| v.as_str()) {
+                item_domain = Some(d.to_lowercase());
+            }
+            if let Some(r) = meta_json.get("repo_slug").and_then(|v| v.as_str()) {
+                item_repo = Some(r.to_lowercase());
+            }
+        }
+
+        if item.item_type == "url" && item_url.is_none() {
+            item_url = Some(item_content.clone());
+        }
+
+        // 2. Check explicit workspace keywords / tokens in URL, title, or repo slug
+        for token in &ws_tokens {
+            if let Some(ref url) = item_url {
+                if url.contains(token) {
+                    return (
+                        true,
+                        0.30,
+                        format!("Item URL '{}' contains specific project identifier '{}'", url, token),
+                    );
+                }
+            }
+            if let Some(ref repo) = item_repo {
+                if repo.contains(token) {
+                    return (
+                        true,
+                        0.35,
+                        format!("Repository slug '{}' matches project identifier '{}'", repo, token),
+                    );
+                }
+            }
+            if item_title.contains(token) {
+                return (
+                    true,
+                    0.25,
+                    format!("Item title '{}' contains specific project keyword '{}'", item_title, token),
+                );
+            }
+        }
+
+        // 3. Check if item domain or URL matches confirmed workspace entities in database
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT i.content, i.title, i.metadata FROM items i
+             JOIN context_memberships m ON i.id = m.item_id
+             WHERE m.workspace_id = ?1 AND m.membership_type = 'confirmed'",
+        ) {
+            let confirmed_rows = stmt.query_map(rusqlite::params![workspace.id], |row| {
+                let content: String = row.get(0)?;
+                let title: Option<String> = row.get(1)?;
+                let metadata: String = row.get(2)?;
+                Ok((content, title, metadata))
+            });
+
+            if let Ok(rows) = confirmed_rows {
+                for r in rows.flatten() {
+                    let (c_content, _c_title, c_meta) = r;
+                    if let Ok(c_meta_json) = serde_json::from_str::<serde_json::Value>(&c_meta) {
+                        if let Some(c_repo) = c_meta_json.get("repo_slug").and_then(|v| v.as_str()) {
+                            if let Some(ref cur_repo) = item_repo {
+                                if cur_repo == &c_repo.to_lowercase() {
+                                    return (
+                                        true,
+                                        0.35,
+                                        format!("Matches confirmed workspace repository '{}'", c_repo),
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(c_domain) = c_meta_json.get("domain").and_then(|v| v.as_str()) {
+                            if let Some(ref cur_domain) = item_domain {
+                                // Exclude generic shared domains from automatic affinity
+                                if cur_domain == &c_domain.to_lowercase()
+                                    && !Self::is_generic_public_domain(cur_domain)
+                                {
+                                    return (
+                                        true,
+                                        0.20,
+                                        format!("Shares confirmed workspace domain '{}'", c_domain),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if let Some(ref url) = item_url {
+                        if c_content.starts_with("http") && c_content.contains(url.as_str()) {
+                            return (
+                                true,
+                                0.30,
+                                format!("Matches confirmed workspace URL reference '{}'", c_content),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        (false, 0.0, "No specific entity anchors found".to_string())
+    }
+
+    /// Checks if a domain is a generic public web surface rather than a project-specific host.
+    pub fn is_generic_public_domain(domain: &str) -> bool {
+        let d = domain.to_lowercase();
+        d == "google.com"
+            || d == "www.google.com"
+            || d == "bing.com"
+            || d == "duckduckgo.com"
+            || d == "search.yahoo.com"
+            || d == "reddit.com"
+            || d == "twitter.com"
+            || d == "x.com"
+            || d == "youtube.com"
+            || d == "facebook.com"
+            || d == "instagram.com"
+            || d == "linkedin.com"
+            || d == "wikipedia.org"
+    }
+
+    /// Queries app-level rejections for a given application in a workspace context.
+    pub fn query_app_rejections(
+        conn: &rusqlite::Connection,
+        app_name: &str,
+        context_id: &str,
+    ) -> (usize, Option<DateTime<Utc>>) {
+        let mut count = 0;
+        let mut latest_dt = None;
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT payload, created_at FROM context_signals
+             WHERE workspace_id = ?1 AND signal_type IN ('user_correction', 'membership_dismissed', 'user_removed_from_context', 'user_dismiss')
+             ORDER BY created_at ASC",
+        ) {
+            let rows = stmt.query_map(rusqlite::params![context_id], |row| {
+                let payload: String = row.get(0)?;
+                let created_at: String = row.get(1)?;
+                Ok((payload, created_at))
+            });
+
+            if let Ok(rows) = rows {
+                for r in rows.flatten() {
+                    let (payload_str, created_str) = r;
+                    let matches_app = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                        val.get("evidence_signature")
+                            .and_then(|sig| sig.get("app_name"))
+                            .and_then(|a| a.as_str())
+                            .map(|a| a.eq_ignore_ascii_case(app_name))
+                            .unwrap_or(false)
+                            || val.get("app_name")
+                                .and_then(|a| a.as_str())
+                                .map(|a| a.eq_ignore_ascii_case(app_name))
+                                .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if matches_app {
+                        count += 1;
+                        if let Ok(dt) = DateTime::parse_from_rfc3339(&created_str) {
+                            latest_dt = Some(dt.with_timezone(&Utc));
+                        }
+                    }
+                }
+            }
+        }
+
+        (count, latest_dt)
+    }
+
+    /// Evaluates deterministic contextual adaptation for an item against a workspace using the current timestamp.
+    pub fn evaluate_adaptation(
+        conn: &rusqlite::Connection,
+        item: &crate::db::models::Item,
+        workspace: &crate::db::models::Workspace,
+        base_score: f32,
+    ) -> DeterministicAdaptationAssessment {
+        Self::evaluate_adaptation_with_time(conn, item, workspace, base_score, Utc::now())
+    }
+
+    /// Evaluates deterministic contextual adaptation with an explicit evaluation timestamp.
+    pub fn evaluate_adaptation_with_time(
+        conn: &rusqlite::Connection,
+        item: &crate::db::models::Item,
+        workspace: &crate::db::models::Workspace,
+        base_score: f32,
+        eval_time: DateTime<Utc>,
+    ) -> DeterministicAdaptationAssessment {
+        let item_id = &item.id;
+        let context_id = &workspace.id;
+
+        // 1. Check direct positive confirmation
+        let pos_assessment = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(conn, item_id, context_id);
+        if pos_assessment.is_confirmed {
+            return DeterministicAdaptationAssessment {
+                item_id: item_id.clone(),
+                context_id: context_id.clone(),
+                base_score,
+                adapted_score: 1.0,
+                confidence: 1.0,
+                adaptation_delta: 1.0 - base_score,
+                is_generic_suppressed: false,
+                has_specific_entity_match: true,
+                app_rejection_count: 0,
+                item_rejection_count: 0,
+                item_confirmation_count: 1,
+                decay_factor: 1.0,
+                verdict: AdaptationVerdict::ConfirmedDirectly,
+                explanation: format!(
+                    "Item '{}' is explicitly confirmed by user in workspace '{}'",
+                    item_id, workspace.name
+                ),
+            };
+        }
+
+        // 2. Check direct negative feedback on this specific item
+        let neg_assessment = ContextNegativeFeedbackEvaluator::evaluate_with_time(
+            conn,
+            item_id,
+            context_id,
+            base_score as f64,
+            false,
+            false,
+            eval_time,
+        );
+
+        if neg_assessment.rejection_count > 0 && !neg_assessment.is_overridden {
+            let latest_rej_dt = neg_assessment
+                .latest_rejection_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc)))
+                .unwrap_or(eval_time);
+
+            let decay_factor = Self::compute_time_decay(latest_rej_dt, eval_time);
+            let effective_penalty = neg_assessment.base_penalty * decay_factor;
+            let adapted_score = (base_score - effective_penalty).max(0.0);
+
+            let verdict = if neg_assessment.is_stale || decay_factor <= 0.6 {
+                AdaptationVerdict::DecayedHistoricalPenalty
+            } else {
+                AdaptationVerdict::ItemDirectlyRejected
+            };
+
+            return DeterministicAdaptationAssessment {
+                item_id: item_id.clone(),
+                context_id: context_id.clone(),
+                base_score,
+                adapted_score,
+                confidence: (base_score as f64 - effective_penalty as f64).max(0.0),
+                adaptation_delta: adapted_score - base_score,
+                is_generic_suppressed: false,
+                has_specific_entity_match: false,
+                app_rejection_count: 0,
+                item_rejection_count: neg_assessment.rejection_count,
+                item_confirmation_count: 0,
+                decay_factor,
+                verdict,
+                explanation: format!(
+                    "Item '{}' was directly rejected {} time(s) for workspace '{}' (effective penalty: -{:.2}, decay factor: {:.2})",
+                    item_id, neg_assessment.rejection_count, workspace.name, effective_penalty, decay_factor
+                ),
+            };
+        }
+
+        // 3. Specific Entity / Contextual Relationship Recognition
+        let (has_specific_match, specific_boost, specific_reason) =
+            Self::detect_specific_entity_affinity(conn, item, workspace);
+
+        // Extract app name from item metadata
+        let app_name = serde_json::from_str::<serde_json::Value>(&item.metadata)
+            .ok()
+            .and_then(|val| val.get("app_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| {
+                if item.item_type == "url" {
+                    "Browser".to_string()
+                } else {
+                    "Application".to_string()
+                }
+            });
+
+        // 4. Query app-level rejections
+        let (app_rejections, latest_app_rejection_dt) =
+            Self::query_app_rejections(conn, &app_name, context_id);
+
+        let app_decay = latest_app_rejection_dt
+            .map(|dt| Self::compute_time_decay(dt, eval_time))
+            .unwrap_or(1.0);
+
+        // 5. Decision Arbitration: Specific Relationship vs Generic App Dampening
+        if has_specific_match {
+            // Specific entity relationship strongly recognized: bypasses generic app dampening!
+            let adapted_score = (base_score + specific_boost).clamp(0.0, 1.0);
+            let confidence = (0.85 + (base_score as f64 * 0.15)).min(1.0);
+
+            DeterministicAdaptationAssessment {
+                item_id: item_id.clone(),
+                context_id: context_id.clone(),
+                base_score,
+                adapted_score,
+                confidence,
+                adaptation_delta: adapted_score - base_score,
+                is_generic_suppressed: false,
+                has_specific_entity_match: true,
+                app_rejection_count: app_rejections,
+                item_rejection_count: 0,
+                item_confirmation_count: 0,
+                decay_factor: 1.0,
+                verdict: AdaptationVerdict::SpecificRelationshipRecognized,
+                explanation: format!(
+                    "Specific relationship recognized for workspace '{}': {}. Bypasses any generic '{}' application dampening.",
+                    workspace.name, specific_reason, app_name
+                ),
+            }
+        } else if app_rejections > 0 {
+            // Generic page from an app with repeated rejections -> apply generic noise dampener
+            let dampening_multiplier = if app_rejections == 1 {
+                1.0 - 0.35 * app_decay
+            } else {
+                // 2+ rejections: strong noise dampener
+                1.0 - 0.70 * app_decay
+            };
+
+            let mut adapted = base_score * dampening_multiplier;
+            if app_rejections >= 2 {
+                // Hard cap to ensure generic page remains a weak candidate (<= 0.30)
+                adapted = adapted.min(0.30);
+            }
+
+            let confidence = (base_score as f64 * dampening_multiplier as f64).max(0.0);
+
+            DeterministicAdaptationAssessment {
+                item_id: item_id.clone(),
+                context_id: context_id.clone(),
+                base_score,
+                adapted_score: adapted,
+                confidence,
+                adaptation_delta: adapted - base_score,
+                is_generic_suppressed: true,
+                has_specific_entity_match: false,
+                app_rejection_count: app_rejections,
+                item_rejection_count: 0,
+                item_confirmation_count: 0,
+                decay_factor: app_decay,
+                verdict: AdaptationVerdict::GenericAppDampened,
+                explanation: format!(
+                    "Generic item from '{}' dampened ({} prior generic rejection(s) in workspace '{}', decay: {:.2}). Score reduced from {:.2} to {:.2}.",
+                    app_name, app_rejections, workspace.name, app_decay, base_score, adapted
+                ),
+            }
+        } else {
+            // Baseline unmodified
+            DeterministicAdaptationAssessment {
+                item_id: item_id.clone(),
+                context_id: context_id.clone(),
+                base_score,
+                adapted_score: base_score,
+                confidence: base_score as f64,
+                adaptation_delta: 0.0,
+                is_generic_suppressed: false,
+                has_specific_entity_match: false,
+                app_rejection_count: 0,
+                item_rejection_count: 0,
+                item_confirmation_count: 0,
+                decay_factor: 1.0,
+                verdict: AdaptationVerdict::UnmodifiedBaseline,
+                explanation: format!(
+                    "No prior feedback or specific entity anchors for item '{}' in workspace '{}'. Baseline score preserved.",
+                    item_id, workspace.name
+                ),
+            }
+        }
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -3933,5 +4396,235 @@ mod tests {
             .reconstruct_cold(&conn, &ws.id)
             .unwrap();
         assert_eq!(recon.context.lifecycle_state, Some("archived".to_string()));
+    }
+
+    #[test]
+    fn test_deterministic_adaptation_generic_chrome_rejection_dampens_future_generic_pages() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        // 1. Create two generic Chrome search items
+        let generic_item1 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://www.google.com/search?q=weather+in+tokyo",
+            Some("Google Search: weather in tokyo"),
+            r#"{"app_name": "Google Chrome", "domain": "google.com", "url": "https://www.google.com/search?q=weather+in+tokyo"}"#,
+        )
+        .unwrap();
+
+        let generic_item2 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://www.google.com/search?q=best+coffee+shops",
+            Some("Google Search: best coffee shops"),
+            r#"{"app_name": "Google Chrome", "domain": "google.com", "url": "https://www.google.com/search?q=best+coffee+shops"}"#,
+        )
+        .unwrap();
+
+        // 2. Reject both generic items from PayX context
+        let ev1 = ContextFeedbackEvent::remove_from_context(
+            &generic_item1.id,
+            &ws.id,
+            FeedbackSource::UserExplicitUi,
+            Some("Not related to PayX".to_string()),
+        );
+        ContextFeedbackService::apply_feedback(&conn, &ev1).unwrap();
+
+        let ev2 = ContextFeedbackEvent::remove_from_context(
+            &generic_item2.id,
+            &ws.id,
+            FeedbackSource::UserExplicitUi,
+            Some("Random search".to_string()),
+        );
+        ContextFeedbackService::apply_feedback(&conn, &ev2).unwrap();
+
+        // 3. New generic Chrome page arrives with base score 0.55
+        let generic_item3 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://www.google.com/search?q=flights+to+london",
+            Some("Google Search: flights to london"),
+            r#"{"app_name": "Google Chrome", "domain": "google.com", "url": "https://www.google.com/search?q=flights+to+london"}"#,
+        )
+        .unwrap();
+
+        let assessment = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+            &conn,
+            &generic_item3,
+            &ws,
+            0.55,
+        );
+
+        assert_eq!(assessment.verdict, AdaptationVerdict::GenericAppDampened);
+        assert!(assessment.is_generic_suppressed);
+        assert!(!assessment.has_specific_entity_match);
+        assert_eq!(assessment.app_rejection_count, 2);
+        assert!(assessment.adapted_score <= 0.30, "Generic page should be dampened to <= 0.30, got {}", assessment.adapted_score);
+        assert!(assessment.adapted_score < assessment.base_score);
+    }
+
+    #[test]
+    fn test_deterministic_adaptation_specific_payx_repo_recognized_despite_chrome_rejections() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        // 1. Record 2 generic Chrome rejections for PayX
+        let generic_item1 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://www.google.com/search?q=funny+memes",
+            Some("Google Search: funny memes"),
+            r#"{"app_name": "Google Chrome", "domain": "google.com", "url": "https://www.google.com/search?q=funny+memes"}"#,
+        )
+        .unwrap();
+        let generic_item2 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://reddit.com/r/rust",
+            Some("Reddit Rust"),
+            r#"{"app_name": "Google Chrome", "domain": "reddit.com", "url": "https://reddit.com/r/rust"}"#,
+        )
+        .unwrap();
+
+        let ev1 = ContextFeedbackEvent::remove_from_context(&generic_item1.id, &ws.id, FeedbackSource::UserExplicitUi, None);
+        ContextFeedbackService::apply_feedback(&conn, &ev1).unwrap();
+
+        let ev2 = ContextFeedbackEvent::remove_from_context(&generic_item2.id, &ws.id, FeedbackSource::UserExplicitUi, None);
+        ContextFeedbackService::apply_feedback(&conn, &ev2).unwrap();
+
+        // 2. Specific PayX GitHub repository URL in Chrome arrives
+        let payx_repo_item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/payx/core-payment-gateway",
+            Some("PayX Core Payment Gateway - PR #128"),
+            r#"{"app_name": "Google Chrome", "domain": "github.com", "url": "https://github.com/payx/core-payment-gateway", "repo_slug": "payx/core-payment-gateway"}"#,
+        )
+        .unwrap();
+
+        let assessment = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+            &conn,
+            &payx_repo_item,
+            &ws,
+            0.70,
+        );
+
+        // Invariant: Specific relationship recognized, bypassing generic app dampening!
+        assert_eq!(assessment.verdict, AdaptationVerdict::SpecificRelationshipRecognized);
+        assert!(assessment.has_specific_entity_match);
+        assert!(!assessment.is_generic_suppressed);
+        assert!(assessment.adapted_score >= 0.85, "Adapted score should be >= 0.85, got {}", assessment.adapted_score);
+        assert!(assessment.confidence >= 0.90, "Confidence should be >= 0.90, got {}", assessment.confidence);
+    }
+
+    #[test]
+    fn test_deterministic_adaptation_cross_workspace_isolation() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let ws_personal = crate::db::operations::create_workspace(&conn, "Personal Notes").unwrap();
+
+        // Reject 3 generic Chrome items from PayX
+        for i in 0..3 {
+            let item = crate::db::operations::create_item(
+                &conn,
+                None,
+                None,
+                "url",
+                &format!("https://google.com/search?q=query_{}", i),
+                Some(&format!("Query {}", i)),
+                r#"{"app_name": "Google Chrome", "domain": "google.com"}"#,
+            )
+            .unwrap();
+
+            let ev = ContextFeedbackEvent::remove_from_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi, None);
+            ContextFeedbackService::apply_feedback(&conn, &ev).unwrap();
+        }
+
+        // New generic item evaluated against Personal Notes workspace
+        let new_item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://google.com/search?q=grocery+recipes",
+            Some("Grocery Recipes"),
+            r#"{"app_name": "Google Chrome", "domain": "google.com"}"#,
+        )
+        .unwrap();
+
+        let assessment = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+            &conn,
+            &new_item,
+            &ws_personal,
+            0.50,
+        );
+
+        // PayX rejections must NOT affect Personal Notes!
+        assert_eq!(assessment.verdict, AdaptationVerdict::UnmodifiedBaseline);
+        assert!(!assessment.is_generic_suppressed);
+        assert_eq!(assessment.app_rejection_count, 0);
+        assert_eq!(assessment.adapted_score, 0.50);
+    }
+
+    #[test]
+    fn test_deterministic_adaptation_decay_over_time() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://docs.example.com/api",
+            Some("Example API Docs"),
+            r#"{"app_name": "Google Chrome", "domain": "docs.example.com"}"#,
+        )
+        .unwrap();
+
+        // Direct rejection recorded 120 days ago
+        let old_time = Utc::now() - chrono::Duration::days(120);
+        let old_time_str = old_time.to_rfc3339();
+
+        let payload = serde_json::json!({
+            "action": "user_removed_from_context",
+            "item_id": item.id,
+            "workspace_id": ws.id,
+            "app_name": "Google Chrome",
+            "reason": "Not related",
+            "recorded_at": old_time_str
+        }).to_string();
+
+        conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'user_correction', NULL, ?4, ?5, ?5)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), ws.id, item.id, payload, old_time_str],
+        ).unwrap();
+
+        let assessment = ContextDeterministicAdaptationEngine::evaluate_adaptation_with_time(
+            &conn,
+            &item,
+            &ws,
+            0.60,
+            Utc::now(),
+        );
+
+        assert_eq!(assessment.verdict, AdaptationVerdict::DecayedHistoricalPenalty);
+        assert_eq!(assessment.decay_factor, 0.40);
+        // Base penalty 0.40 * decay 0.40 = 0.16; adapted score = 0.60 - 0.16 = 0.44
+        assert!((assessment.adapted_score - 0.44).abs() < 0.01);
     }
 }

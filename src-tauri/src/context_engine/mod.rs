@@ -53,12 +53,14 @@ pub mod session_snapshot;
 pub mod feedback;
 
 pub use feedback::{
-    ContextFeedbackEvent, ContextFeedbackService, ContextNegativeFeedbackEvaluator,
-    ContextPositiveFeedbackEngine, EvidencePriorityTier, FeedbackAction, FeedbackApplicationResult,
-    FeedbackMetadata, FeedbackPrecedenceEngine, FeedbackPrecedencePolicy, FeedbackScope,
-    FeedbackSource, FeedbackTargetRef, NegativeFeedbackAssessment, NegativeFeedbackVerdict,
-    PositiveFeedbackAssessment, PrecedenceResolutionResult, PrioritizedEvidenceSignal,
-    RelationshipLocalizationAssessment, CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
+    AdaptationVerdict, ContextDeterministicAdaptationEngine, ContextFeedbackEvent,
+    ContextFeedbackService, ContextNegativeFeedbackEvaluator, ContextPositiveFeedbackEngine,
+    DeterministicAdaptationAssessment, EvidencePriorityTier, FeedbackAction,
+    FeedbackApplicationResult, FeedbackMetadata, FeedbackPrecedenceEngine, FeedbackPrecedencePolicy,
+    FeedbackScope, FeedbackSource, FeedbackTargetRef, NegativeFeedbackAssessment,
+    NegativeFeedbackVerdict, PositiveFeedbackAssessment, PrecedenceResolutionResult,
+    PrioritizedEvidenceSignal, RelationshipLocalizationAssessment,
+    CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
 };
 
 pub use session_snapshot::{
