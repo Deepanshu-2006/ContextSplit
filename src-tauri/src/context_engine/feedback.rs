@@ -909,6 +909,7 @@ impl ContextFeedbackService {
                     .as_deref()
                     .or_else(|| event.scope.context_id())
                     .ok_or_else(|| "ConfirmContext requires a valid context reference".to_string())?;
+                let event_ts = &event.timestamp;
 
                 // A. Update context_memberships to confirmed (conf: 1.0, source: 'user')
                 crate::db::operations::create_or_update_membership(
@@ -920,7 +921,7 @@ impl ContextFeedbackService {
                 // B. Set physical workspace_id on items
                 conn.execute(
                     "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![ws_id, now, target_id],
+                    rusqlite::params![ws_id, event_ts, target_id],
                 )
                 .map_err(|e| format!("Failed to set item workspace_id: {}", e))?;
                 applied_systems.push("items".to_string());
@@ -933,14 +934,14 @@ impl ContextFeedbackService {
                     "scope": event.scope.scope_str(),
                     "source": event.source.as_str(),
                     "reason": event.reason.as_deref().unwrap_or("User confirmed context association"),
-                    "recorded_at": now
+                    "recorded_at": event_ts
                 })
                 .to_string();
 
                 conn.execute(
                     "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
                      VALUES (?1, ?2, ?3, 'user_feedback', NULL, ?4, ?5, ?5)",
-                    rusqlite::params![signal_id, ws_id, target_id, payload, now],
+                    rusqlite::params![signal_id, ws_id, target_id, payload, event_ts],
                 )
                 .map_err(|e| format!("Failed to insert context signal: {}", e))?;
                 applied_systems.push("context_signals".to_string());
@@ -970,12 +971,13 @@ impl ContextFeedbackService {
                     .or_else(|| event.scope.context_id())
                     .ok_or_else(|| "RejectContext / RemoveFromContext requires a valid context reference".to_string())?;
 
-                // Delegate to ContextCorrectionService for signature extraction and demotion
-                let correction = crate::context_engine::correction::ContextCorrectionService::record_context_correction(
+                // Delegate to ContextCorrectionService for signature extraction and demotion with event timestamp
+                let correction = crate::context_engine::correction::ContextCorrectionService::record_context_correction_with_time(
                     conn,
                     target_id,
                     ws_id,
                     event.reason.as_deref(),
+                    Some(&event.timestamp),
                 )?;
                 applied_systems.push("context_correction_service".to_string());
                 applied_systems.push("context_memberships".to_string());
@@ -1306,6 +1308,322 @@ impl ContextFeedbackService {
         if let Some(ws) = workspace_id {
             crate::context_engine::snapshot::invalidate_snapshot_cache(ws);
         }
+    }
+}
+
+// =========================================================================
+// Contextual Negative Feedback Engine (Step 5)
+// =========================================================================
+
+/// Structured verdict produced when evaluating contextual negative feedback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum NegativeFeedbackVerdict {
+    /// No negative feedback exists for this item/context pair; association allowed.
+    Allowed,
+    /// Negative feedback actively discourages this association with a calculated penalty.
+    Discouraged {
+        penalty: f32,
+        rejection_count: usize,
+        reason: String,
+    },
+    /// Prior negative feedback exists, but was explicitly overridden by a later user confirmation.
+    OverriddenByExplicitConfirmation {
+        confirmed_at: String,
+        reason: String,
+    },
+    /// Prior negative feedback exists, but future strong corroborated evidence overrides it.
+    OverriddenByStrongEvidence {
+        confidence: f64,
+        reason: String,
+    },
+}
+
+impl NegativeFeedbackVerdict {
+    pub fn is_allowed(&self) -> bool {
+        matches!(
+            self,
+            Self::Allowed
+                | Self::OverriddenByExplicitConfirmation { .. }
+                | Self::OverriddenByStrongEvidence { .. }
+        )
+    }
+
+    pub fn is_discouraged(&self) -> bool {
+        matches!(self, Self::Discouraged { .. })
+    }
+}
+
+/// Comprehensive assessment of negative feedback for an item in a specific context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NegativeFeedbackAssessment {
+    /// Target item identifier
+    pub item_id: String,
+    /// Target context/workspace identifier
+    pub context_id: String,
+    /// Total count of explicit rejections recorded for this item in this context
+    pub rejection_count: usize,
+    /// Base penalty before time decay or override
+    pub base_penalty: f32,
+    /// Effective penalty discount applied to score [0.0, 1.0] after time decay
+    pub effective_penalty: f32,
+    /// Whether future association is currently discouraged
+    pub is_discouraged: bool,
+    /// Whether prior negative feedback was overridden by explicit confirmation or strong evidence
+    pub is_overridden: bool,
+    /// Whether negative feedback has decayed due to age (>= 60 days)
+    pub is_stale: bool,
+    /// Timestamp of the most recent rejection
+    pub latest_rejection_at: Option<String>,
+    /// Timestamp of the most recent confirmation
+    pub latest_confirmation_at: Option<String>,
+    /// Structured verdict
+    pub verdict: NegativeFeedbackVerdict,
+}
+
+/// Evaluator responsible for computing contextual negative feedback penalties,
+/// resolving feedback conflicts, evaluating repeated rejections, and decaying stale rejections.
+pub struct ContextNegativeFeedbackEvaluator;
+
+impl ContextNegativeFeedbackEvaluator {
+    /// Evaluates negative feedback against the current timestamp.
+    pub fn evaluate(
+        conn: &rusqlite::Connection,
+        item_id: &str,
+        context_id: &str,
+        candidate_confidence: f64,
+        has_strong_anchor: bool,
+        is_explicit_user_action: bool,
+    ) -> NegativeFeedbackAssessment {
+        Self::evaluate_with_time(
+            conn,
+            item_id,
+            context_id,
+            candidate_confidence,
+            has_strong_anchor,
+            is_explicit_user_action,
+            Utc::now(),
+        )
+    }
+
+    /// Evaluates negative feedback against an explicit evaluation timestamp (enabling deterministic testing of time decay).
+    pub fn evaluate_with_time(
+        conn: &rusqlite::Connection,
+        item_id: &str,
+        context_id: &str,
+        candidate_confidence: f64,
+        has_strong_anchor: bool,
+        is_explicit_user_action: bool,
+        current_time: DateTime<Utc>,
+    ) -> NegativeFeedbackAssessment {
+        // 1. Authoritative explicit user action overrides all prior rejections immediately
+        if is_explicit_user_action {
+            return NegativeFeedbackAssessment {
+                item_id: item_id.to_string(),
+                context_id: context_id.to_string(),
+                rejection_count: 0,
+                base_penalty: 0.0,
+                effective_penalty: 0.0,
+                is_discouraged: false,
+                is_overridden: true,
+                is_stale: false,
+                latest_rejection_at: None,
+                latest_confirmation_at: Some(current_time.to_rfc3339()),
+                verdict: NegativeFeedbackVerdict::OverriddenByExplicitConfirmation {
+                    confirmed_at: current_time.to_rfc3339(),
+                    reason: "Explicit user action overrides prior negative feedback".to_string(),
+                },
+            };
+        }
+
+        // 2. Fetch rejection history for this exact (item_id, context_id) pair from context_signals
+        let mut rejection_timestamps: Vec<DateTime<Utc>> = Vec::new();
+        let mut confirmation_timestamps: Vec<DateTime<Utc>> = Vec::new();
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT signal_type, created_at FROM context_signals
+             WHERE workspace_id = ?1 AND item_id = ?2
+             ORDER BY created_at ASC",
+        ) {
+            let rows = stmt.query_map(rusqlite::params![context_id, item_id], |row| {
+                let sig_type: String = row.get(0)?;
+                let created_at_str: String = row.get(1)?;
+                Ok((sig_type, created_at_str))
+            });
+
+            if let Ok(rows) = rows {
+                for r in rows.flatten() {
+                    let (sig_type, created_str) = r;
+                    if let Ok(dt) = DateTime::parse_from_rfc3339(&created_str) {
+                        let utc_dt = dt.with_timezone(&Utc);
+                        if sig_type == "user_correction"
+                            || sig_type == "membership_dismissed"
+                            || sig_type == "user_dismiss"
+                            || sig_type == "suggestion_dismissed"
+                            || sig_type == "user_removed_from_context"
+                        {
+                            rejection_timestamps.push(utc_dt);
+                        } else if sig_type == "user_feedback"
+                            || sig_type == "context_confirmed"
+                            || sig_type == "confirm_context"
+                        {
+                            confirmation_timestamps.push(utc_dt);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to inspect context_memberships table only if no signals exist
+        if rejection_timestamps.is_empty() || confirmation_timestamps.is_empty() {
+            let mem_row: rusqlite::Result<(String, String)> = conn.query_row(
+                "SELECT membership_type, updated_at FROM context_memberships
+                 WHERE item_id = ?1 AND workspace_id = ?2",
+                rusqlite::params![item_id, context_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            );
+
+            if let Ok((mem_type, updated_str)) = mem_row {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&updated_str) {
+                    let utc_dt = dt.with_timezone(&Utc);
+                    if mem_type == "dismissed" && rejection_timestamps.is_empty() {
+                        rejection_timestamps.push(utc_dt);
+                    } else if mem_type == "confirmed" && confirmation_timestamps.is_empty() {
+                        confirmation_timestamps.push(utc_dt);
+                    }
+                }
+            }
+        }
+
+        let latest_rejection = rejection_timestamps.iter().max().copied();
+        let latest_confirmation = confirmation_timestamps.iter().max().copied();
+
+        // 3. If no rejection exists for this context -> Allowed
+        if rejection_timestamps.is_empty() {
+            return NegativeFeedbackAssessment {
+                item_id: item_id.to_string(),
+                context_id: context_id.to_string(),
+                rejection_count: 0,
+                base_penalty: 0.0,
+                effective_penalty: 0.0,
+                is_discouraged: false,
+                is_overridden: false,
+                is_stale: false,
+                latest_rejection_at: None,
+                latest_confirmation_at: latest_confirmation.map(|t| t.to_rfc3339()),
+                verdict: NegativeFeedbackVerdict::Allowed,
+            };
+        }
+
+        let rejection_count = rejection_timestamps.len();
+        let latest_rej_dt = latest_rejection.unwrap();
+        let latest_rej_str = latest_rej_dt.to_rfc3339();
+
+        // 4. Check for conflicting feedback (Later Confirmation supersedes prior rejection)
+        if let Some(latest_conf_dt) = latest_confirmation {
+            if latest_conf_dt > latest_rej_dt {
+                return NegativeFeedbackAssessment {
+                    item_id: item_id.to_string(),
+                    context_id: context_id.to_string(),
+                    rejection_count,
+                    base_penalty: 0.0,
+                    effective_penalty: 0.0,
+                    is_discouraged: false,
+                    is_overridden: true,
+                    is_stale: false,
+                    latest_rejection_at: Some(latest_rej_str),
+                    latest_confirmation_at: Some(latest_conf_dt.to_rfc3339()),
+                    verdict: NegativeFeedbackVerdict::OverriddenByExplicitConfirmation {
+                        confirmed_at: latest_conf_dt.to_rfc3339(),
+                        reason: "Later user confirmation has higher priority over prior rejection".to_string(),
+                    },
+                };
+            }
+        }
+
+        // 5. Calculate repeated rejection penalty
+        let base_penalty = Self::calculate_repeated_rejection_penalty(rejection_count);
+
+        // 6. Calculate stale feedback decay (30-day half life)
+        let (effective_penalty, is_stale) =
+            Self::calculate_decayed_penalty(base_penalty, latest_rej_dt, current_time, 30.0);
+
+        // 7. Check if future strong corroborated evidence overrides it
+        if has_strong_anchor && candidate_confidence >= 0.85 {
+            return NegativeFeedbackAssessment {
+                item_id: item_id.to_string(),
+                context_id: context_id.to_string(),
+                rejection_count,
+                base_penalty,
+                effective_penalty: 0.0,
+                is_discouraged: false,
+                is_overridden: true,
+                is_stale,
+                latest_rejection_at: Some(latest_rej_str),
+                latest_confirmation_at: latest_confirmation.map(|t| t.to_rfc3339()),
+                verdict: NegativeFeedbackVerdict::OverriddenByStrongEvidence {
+                    confidence: candidate_confidence,
+                    reason: format!(
+                        "Strong corroborated anchor (confidence {:.1}%) legitimately overrides prior rejection",
+                        candidate_confidence * 100.0
+                    ),
+                },
+            };
+        }
+
+        // 8. Otherwise, association is discouraged
+        NegativeFeedbackAssessment {
+            item_id: item_id.to_string(),
+            context_id: context_id.to_string(),
+            rejection_count,
+            base_penalty,
+            effective_penalty,
+            is_discouraged: effective_penalty > 0.01,
+            is_overridden: false,
+            is_stale,
+            latest_rejection_at: Some(latest_rej_str),
+            latest_confirmation_at: latest_confirmation.map(|t| t.to_rfc3339()),
+            verdict: NegativeFeedbackVerdict::Discouraged {
+                penalty: effective_penalty,
+                rejection_count,
+                reason: format!(
+                    "Item was rejected {} time(s) from workspace '{}' (effective penalty: {:.2})",
+                    rejection_count, context_id, effective_penalty
+                ),
+            },
+        }
+    }
+
+    /// Computes cumulative penalty for repeated rejections:
+    /// 1 rejection: 0.40, 2 rejections: 0.65, 3 rejections: 0.80, 4+ rejections: 0.90 (max 0.95)
+    pub fn calculate_repeated_rejection_penalty(rejection_count: usize) -> f32 {
+        match rejection_count {
+            0 => 0.0,
+            1 => 0.40,
+            2 => 0.65,
+            3 => 0.80,
+            _ => 0.90_f32.min(0.95),
+        }
+    }
+
+    /// Computes exponential decay for negative feedback over time using a half-life model.
+    /// Returns `(decayed_penalty, is_stale)`.
+    pub fn calculate_decayed_penalty(
+        base_penalty: f32,
+        rejection_time: DateTime<Utc>,
+        current_time: DateTime<Utc>,
+        half_life_days: f64,
+    ) -> (f32, bool) {
+        if current_time <= rejection_time {
+            return (base_penalty, false);
+        }
+
+        let elapsed_seconds = (current_time - rejection_time).num_seconds() as f64;
+        let elapsed_days = (elapsed_seconds / 86400.0).max(0.0);
+        let decay_factor = 0.5_f64.powf(elapsed_days / half_life_days);
+        let decayed_penalty = (base_penalty as f64 * decay_factor) as f32;
+        let is_stale = elapsed_days >= 60.0;
+
+        (decayed_penalty.clamp(0.0, 1.0), is_stale)
     }
 }
 
@@ -1775,5 +2093,223 @@ mod tests {
         assert!(res_archive.success);
         let ws_archived = crate::db::operations::get_workspace(&conn, &ws_payx.id).unwrap();
         assert_eq!(ws_archived.lifecycle_state, "archived");
+    }
+
+    #[test]
+    fn test_negative_feedback_repeated_rejection() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_payx.id),
+            None,
+            "url",
+            "https://medium.com/tech/random-article",
+            Some("Random Tech Article"),
+            "{\"domain\":\"medium.com\"}",
+        )
+        .unwrap();
+
+        // 1st rejection
+        let ev1 = ContextFeedbackEvent::remove_from_context(&item.id, &ws_payx.id, FeedbackSource::WorksetTray, None);
+        ContextFeedbackService::apply_feedback(&conn, &ev1).unwrap();
+
+        let assess1 = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(assess1.is_discouraged);
+        assert!(!assess1.is_overridden);
+        assert_eq!(assess1.rejection_count, 1);
+        assert_eq!(assess1.base_penalty, 0.40);
+        assert!(assess1.verdict.is_discouraged());
+
+        // 2nd rejection
+        let ev2 = ContextFeedbackEvent::reject_context(&item.id, &ws_payx.id, FeedbackSource::InboxAction, Some("Still not relevant".to_string()));
+        ContextFeedbackService::apply_feedback(&conn, &ev2).unwrap();
+
+        let assess2 = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert_eq!(assess2.rejection_count, 2);
+        assert_eq!(assess2.base_penalty, 0.65);
+        assert!(assess2.effective_penalty >= 0.60);
+
+        // 3rd rejection
+        let ev3 = ContextFeedbackEvent::reject_context(&item.id, &ws_payx.id, FeedbackSource::InboxAction, Some("Definitely wrong context".to_string()));
+        ContextFeedbackService::apply_feedback(&conn, &ev3).unwrap();
+
+        let assess3 = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert_eq!(assess3.rejection_count, 3);
+        assert_eq!(assess3.base_penalty, 0.80);
+    }
+
+    #[test]
+    fn test_negative_feedback_later_confirmation() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://medium.com/tech/random-article",
+            Some("Random Tech Article"),
+            "{\"domain\":\"medium.com\"}",
+        )
+        .unwrap();
+
+        // 1. User rejects item from PayX at T0
+        let t0 = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let rej_ev = ContextFeedbackEvent::reject_context(&item.id, &ws_payx.id, FeedbackSource::InboxAction, None)
+            .with_timestamp(t0);
+        ContextFeedbackService::apply_feedback(&conn, &rej_ev).unwrap();
+
+        let assess_before = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(assess_before.is_discouraged);
+        assert_eq!(assess_before.rejection_count, 1);
+
+        // 2. User explicitly confirms item into PayX at T1 > T0
+        let t1 = Utc::now().to_rfc3339();
+        let conf_ev = ContextFeedbackEvent::confirm_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi)
+            .with_timestamp(t1);
+        ContextFeedbackService::apply_feedback(&conn, &conf_ev).unwrap();
+
+        // 3. Negative feedback is overridden by explicit later confirmation
+        let assess_after = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(!assess_after.is_discouraged);
+        assert!(assess_after.is_overridden);
+        assert_eq!(assess_after.effective_penalty, 0.0);
+        assert!(assess_after.verdict.is_allowed());
+        assert!(matches!(assess_after.verdict, NegativeFeedbackVerdict::OverriddenByExplicitConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_negative_feedback_different_context_isolation() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let ws_personal = crate::db::operations::create_workspace(&conn, "Personal").unwrap();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_payx.id),
+            None,
+            "url",
+            "https://medium.com/tech/random-article",
+            Some("Random Tech Article"),
+            "{\"domain\":\"medium.com\"}",
+        )
+        .unwrap();
+
+        // Reject from PayX
+        let rej_ev = ContextFeedbackEvent::remove_from_context(&item.id, &ws_payx.id, FeedbackSource::WorksetTray, None);
+        ContextFeedbackService::apply_feedback(&conn, &rej_ev).unwrap();
+
+        // PayX is discouraged
+        let assess_payx = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(assess_payx.is_discouraged);
+        assert_eq!(assess_payx.rejection_count, 1);
+
+        // Personal is completely unaffected (Scope Isolation)
+        let assess_personal = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_personal.id, 0.50, false, false);
+        assert!(!assess_personal.is_discouraged);
+        assert_eq!(assess_personal.rejection_count, 0);
+        assert_eq!(assess_personal.effective_penalty, 0.0);
+        assert_eq!(assess_personal.verdict, NegativeFeedbackVerdict::Allowed);
+    }
+
+    #[test]
+    fn test_negative_feedback_conflicting_feedback() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/payx/core",
+            Some("PayX Core Repo"),
+            "{\"domain\":\"github.com\"}",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        let t0 = (now - chrono::Duration::hours(3)).to_rfc3339();
+        let t1 = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let t2 = (now - chrono::Duration::hours(1)).to_rfc3339();
+
+        // 1. Confirm at T0
+        let ev_t0 = ContextFeedbackEvent::confirm_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi)
+            .with_timestamp(t0);
+        ContextFeedbackService::apply_feedback(&conn, &ev_t0).unwrap();
+
+        // 2. Reject at T1 > T0 -> Rejection is newest, negative feedback active
+        let ev_t1 = ContextFeedbackEvent::reject_context(&item.id, &ws_payx.id, FeedbackSource::InboxAction, None)
+            .with_timestamp(t1);
+        ContextFeedbackService::apply_feedback(&conn, &ev_t1).unwrap();
+
+        let assess_t1 = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(assess_t1.is_discouraged);
+        assert!(matches!(assess_t1.verdict, NegativeFeedbackVerdict::Discouraged { .. }));
+
+        // 3. Confirm at T2 > T1 -> Affirmative confirmation is newest, overrides prior rejection
+        let ev_t2 = ContextFeedbackEvent::confirm_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi)
+            .with_timestamp(t2);
+        ContextFeedbackService::apply_feedback(&conn, &ev_t2).unwrap();
+
+        let assess_t2 = ContextNegativeFeedbackEvaluator::evaluate(&conn, &item.id, &ws_payx.id, 0.50, false, false);
+        assert!(!assess_t2.is_discouraged);
+        assert!(assess_t2.is_overridden);
+        assert_eq!(assess_t2.effective_penalty, 0.0);
+    }
+
+    #[test]
+    fn test_negative_feedback_stale_decay() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://docs.rs/serde",
+            Some("Serde Docs"),
+            "{\"domain\":\"docs.rs\"}",
+        )
+        .unwrap();
+
+        // Record rejection 90 days ago
+        let now = Utc::now();
+        let t_90_days_ago = (now - chrono::Duration::days(90)).to_rfc3339();
+
+        let rej_ev = ContextFeedbackEvent::reject_context(&item.id, &ws_payx.id, FeedbackSource::InboxAction, None)
+            .with_timestamp(t_90_days_ago);
+        ContextFeedbackService::apply_feedback(&conn, &rej_ev).unwrap();
+
+        // Evaluate at current time (90 days elapsed)
+        let assess = ContextNegativeFeedbackEvaluator::evaluate_with_time(
+            &conn,
+            &item.id,
+            &ws_payx.id,
+            0.50,
+            false,
+            false,
+            now,
+        );
+
+        assert!(assess.is_stale);
+        assert_eq!(assess.base_penalty, 0.40);
+        // After 90 days (3 half-lives of 30 days = 1/8 of base penalty), penalty should decay to ~0.05
+        assert!(assess.effective_penalty < 0.10);
+        assert!(assess.effective_penalty > 0.0);
+
+        // If strong corroborating evidence appears (conf: 0.90 + strong anchor), it can legitimately override
+        let assess_override = ContextNegativeFeedbackEvaluator::evaluate_with_time(
+            &conn,
+            &item.id,
+            &ws_payx.id,
+            0.90,
+            true,
+            false,
+            now,
+        );
+        assert!(assess_override.is_overridden);
+        assert_eq!(assess_override.effective_penalty, 0.0);
+        assert!(matches!(assess_override.verdict, NegativeFeedbackVerdict::OverriddenByStrongEvidence { .. }));
     }
 }

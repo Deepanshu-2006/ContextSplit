@@ -198,7 +198,18 @@ impl ContextCorrectionService {
         workspace_id: &str,
         reason: Option<&str>,
     ) -> Result<CorrectionFeedbackRecord, String> {
-        let now = Utc::now().to_rfc3339();
+        Self::record_context_correction_with_time(conn, item_id, workspace_id, reason, None)
+    }
+
+    /// Executes a contextual correction with an explicit timestamp (preserving auditable event timestamps).
+    pub fn record_context_correction_with_time(
+        conn: &Connection,
+        item_id: &str,
+        workspace_id: &str,
+        reason: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Result<CorrectionFeedbackRecord, String> {
+        let now = timestamp.map(|t| t.to_string()).unwrap_or_else(|| Utc::now().to_rfc3339());
         let signal_id = Uuid::new_v4().to_string();
 
         // 1. Fetch item to extract signature and verify existence
