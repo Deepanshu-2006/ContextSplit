@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 // =========================================================================
@@ -178,6 +178,25 @@ impl FeedbackTargetRef {
             Self::Suggestion(_) => "suggestion",
             Self::Candidate(_) => "candidate",
             Self::Other { entity_type, .. } => entity_type,
+        }
+    }
+
+    pub fn infer_from_id(id: impl Into<String>) -> Self {
+        let s = id.into();
+        if s.starts_with("task_") || s.starts_with("task-") {
+            Self::Task(s)
+        } else if s.starts_with("ws_") || s.starts_with("ctx_") || s.starts_with("context_") {
+            Self::Context(s)
+        } else if s.starts_with("session_") || s.starts_with("sess_") {
+            Self::Session(s)
+        } else if s.starts_with("mem_") || s.starts_with("memory_") {
+            Self::Memory(s)
+        } else if s.starts_with("sug_") || s.starts_with("suggestion_") {
+            Self::Suggestion(s)
+        } else if s.starts_with("cand_") || s.starts_with("candidate_") {
+            Self::Candidate(s)
+        } else {
+            Self::Item(s)
         }
     }
 }
@@ -3291,6 +3310,522 @@ impl ContextFeedbackRelevanceEngine {
 }
 
 // =========================================================================
+// Development Feedback Inspector (Step 15)
+// =========================================================================
+
+/// Diagnostic inspection entry representing an auditable feedback event for development inspection.
+/// Sensitive user text is scrubbed and bounded to prevent leaking raw contents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackInspectorEntry {
+    /// Unique event identifier
+    pub event_id: String,
+    /// Target entity identifier (item, task, workspace, memory, or suggestion)
+    pub target_id: String,
+    /// Type of target ("item", "task", "context", "memory", "suggestion")
+    pub target_type: String,
+    /// Privacy-safe label / sanitized title
+    pub target_label: String,
+    /// Associated workspace/context ID
+    pub context_id: Option<String>,
+    /// Associated workspace name if resolved
+    pub context_name: Option<String>,
+    /// Feedback scope (e.g. "item_context", "source_context", "global")
+    pub scope: String,
+    /// Specificity ranking of the scope (1 = narrowest/highest priority)
+    pub scope_specificity: u8,
+    /// Action executed (e.g. "remove_from_context", "confirm_context")
+    pub action: String,
+    /// User-facing display title for the action
+    pub action_display: String,
+    /// Feedback source / mechanism (e.g. "user_explicit_ui", "inbox_action")
+    pub source: String,
+    /// RFC3339 timestamp of the feedback action
+    pub timestamp: String,
+    /// Human-friendly relative time
+    pub elapsed_human: String,
+    /// Longevity and persistence category
+    pub persistence_category: String,
+    /// Effective state derived from conflict resolution (e.g. "Rejected", "Confirmed", "Ambiguous", "Neutral")
+    pub effective_state: String,
+    /// Current mathematical influence / decay factor [0.0, 1.0]
+    pub current_influence: f32,
+    /// Whether the feedback signal is currently mathematically active
+    pub is_active: bool,
+    /// Whether the feedback signal has expired based on policy
+    pub is_expired: bool,
+    /// Whether conflicting feedback signals were registered for this target
+    pub has_conflict: bool,
+    /// Total count of conflicting feedback signals
+    pub conflicting_events_count: usize,
+    /// Summary of conflicting feedback if any
+    pub conflicting_summary: Option<String>,
+    /// Diagnostic summary of related evidence signatures (scrubbed of sensitive text)
+    pub related_evidence_summary: Vec<String>,
+    /// Explanatory diagnostic reasoning
+    pub explanation: String,
+}
+
+/// Diagnostic report inspecting all contextual feedback for a workspace/context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackInspectorContextReport {
+    pub context_id: String,
+    pub context_name: String,
+    pub total_feedback_events: usize,
+    pub active_feedback_events: usize,
+    pub expired_feedback_events: usize,
+    pub confirmations_count: usize,
+    pub rejections_count: usize,
+    pub conflicted_targets_count: usize,
+    pub entries: Vec<FeedbackInspectorEntry>,
+    pub generated_at: String,
+}
+
+/// Diagnostic report inspecting complete feedback history and effective state for a specific target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackInspectorTargetReport {
+    pub target_id: String,
+    pub target_label: String,
+    pub context_id: Option<String>,
+    pub context_name: Option<String>,
+    pub effective_state: String,
+    pub latest_action: Option<String>,
+    pub current_influence: f32,
+    pub history_entries: Vec<FeedbackInspectorEntry>,
+    pub competing_conflicts: Vec<FeedbackInspectorEntry>,
+    pub adaptation_verdict: Option<String>,
+    pub diagnostic_explanation: String,
+}
+
+/// Development-only Inspector for auditing and diagnosing contextual feedback behavior,
+/// conflict arbitration, and deterministic adaptation without exposing raw sensitive content.
+pub struct ContextFeedbackInspector;
+
+impl ContextFeedbackInspector {
+    /// Inspects the complete feedback trajectory, effective state, and conflicts for a specific target entity.
+    pub fn inspect_target(
+        conn: &rusqlite::Connection,
+        target_id: &str,
+        context_id: Option<&str>,
+    ) -> Result<FeedbackInspectorTargetReport, String> {
+        let now = Utc::now();
+        let relevance_config = FeedbackRelevanceConfig::default();
+
+        // 1. Resolve target label safely
+        let target_label = Self::resolve_safe_target_label(conn, target_id);
+
+        // 2. Resolve context name if provided
+        let context_name = context_id.and_then(|c_id| Self::resolve_context_name(conn, c_id));
+
+        // 3. Query all context_signals related to this target
+        let mut events: Vec<ContextFeedbackEvent> = Vec::new();
+        let mut related_evidence_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        let query = if let Some(_c_id) = context_id {
+            "SELECT id, workspace_id, signal_type, payload, created_at FROM context_signals
+             WHERE (item_id = ?1 OR payload LIKE '%' || ?1 || '%') AND (workspace_id = ?2 OR workspace_id IS NULL)
+             ORDER BY created_at ASC"
+        } else {
+            "SELECT id, workspace_id, signal_type, payload, created_at FROM context_signals
+             WHERE item_id = ?1 OR payload LIKE '%' || ?1 || '%'
+             ORDER BY created_at ASC"
+        };
+
+        let raw_rows: Vec<(String, Option<String>, String, String, String)> = if let Some(c_id) = context_id {
+            let mut stmt = conn
+                .prepare(query)
+                .map_err(|e| format!("Failed to prepare inspector query: {}", e))?;
+            let mapped = stmt
+                .query_map(rusqlite::params![target_id, c_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|e| format!("Query error: {}", e))?;
+            mapped.filter_map(Result::ok).collect()
+        } else {
+            let mut stmt = conn
+                .prepare(query)
+                .map_err(|e| format!("Failed to prepare inspector query: {}", e))?;
+            let mapped = stmt
+                .query_map(rusqlite::params![target_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|e| format!("Query error: {}", e))?;
+            mapped.filter_map(Result::ok).collect()
+        };
+
+        for r in raw_rows {
+            let (sig_id, ws_opt, sig_type, payload_str, created_str) = r;
+            let mut related_evidence = Vec::new();
+
+            let parsed_action = serde_json::from_str::<serde_json::Value>(&payload_str).ok();
+            let action_opt = parsed_action.as_ref().and_then(|val| {
+                if let Some(sig) = val.get("evidence_signature") {
+                    if let Some(app) = sig.get("app_name").and_then(|v| v.as_str()) {
+                        related_evidence.push(format!("Application: {}", app));
+                    }
+                    if let Some(domain) = sig.get("domain").and_then(|v| v.as_str()) {
+                        related_evidence.push(format!("Domain: {}", domain));
+                    }
+                }
+                val.get("action")
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| FeedbackAction::from_str_lenient(s).ok())
+            });
+
+            let action = action_opt.unwrap_or_else(|| {
+                if sig_type == "user_feedback" || sig_type == "context_confirmed" {
+                    FeedbackAction::ConfirmContext
+                } else if sig_type == "user_correction"
+                    || sig_type == "membership_dismissed"
+                    || sig_type == "user_removed_from_context"
+                {
+                    FeedbackAction::RemoveFromContext
+                } else if sig_type == "suggestion_dismissed" {
+                    FeedbackAction::DismissSuggestion
+                } else {
+                    FeedbackAction::RejectContext
+                }
+            });
+
+            let target_ref = FeedbackTargetRef::infer_from_id(target_id);
+            let scope = FeedbackScope::infer_narrowest_scope(action, &target_ref, ws_opt.as_deref());
+
+            let mut ev = ContextFeedbackEvent::new(
+                action,
+                target_ref,
+                ws_opt,
+                FeedbackSource::UserExplicitUi,
+                scope,
+                None,
+            )
+            .with_timestamp(created_str);
+            ev.id = sig_id.clone();
+
+            related_evidence_map.insert(sig_id, related_evidence);
+            events.push(ev);
+        }
+
+        // 4. Resolve effective state using conflict resolver
+        let target_ctx = context_id.unwrap_or("");
+        let conflict_resolution = FeedbackConflictResolver::resolve_events(&events, target_id, target_ctx);
+
+        let effective_state_str = match &conflict_resolution.effective_state {
+            EffectiveFeedbackState::Confirmed { .. } => "Confirmed",
+            EffectiveFeedbackState::Rejected { .. } => "Rejected",
+            EffectiveFeedbackState::Ambiguous { .. } => "Ambiguous",
+            EffectiveFeedbackState::Neutral => "Neutral",
+        }
+        .to_string();
+
+        // 5. Build inspector entries
+        let mut history_entries = Vec::new();
+        let mut competing_conflicts = Vec::new();
+
+        for ev in &events {
+            let relevance = ContextFeedbackRelevanceEngine::evaluate_event_relevance(ev, now, &relevance_config);
+            let elapsed_human = Self::format_relative_time(ev.timestamp_dt().unwrap_or(now), now);
+            let related = related_evidence_map.get(&ev.id).cloned().unwrap_or_default();
+
+            let is_conflicted = (conflict_resolution.confirmations_count > 0
+                && conflict_resolution.rejections_count > 0)
+                || conflict_resolution.is_ambiguous;
+
+            let entry = FeedbackInspectorEntry {
+                event_id: ev.id.clone(),
+                target_id: target_id.to_string(),
+                target_type: ev.target_ref.entity_type_str().to_string(),
+                target_label: target_label.clone(),
+                context_id: ev.context_ref.clone(),
+                context_name: ev.context_ref.as_deref().and_then(|c| Self::resolve_context_name(conn, c)),
+                scope: ev.scope.scope_str().to_string(),
+                scope_specificity: ev.scope.specificity_order(),
+                action: ev.action.as_str().to_string(),
+                action_display: ev.action.display_name().to_string(),
+                source: ev.source.as_str().to_string(),
+                timestamp: ev.timestamp.clone(),
+                elapsed_human,
+                persistence_category: relevance.persistence_category.display_name().to_string(),
+                effective_state: effective_state_str.clone(),
+                current_influence: relevance.effective_weight,
+                is_active: relevance.is_active,
+                is_expired: relevance.is_expired,
+                has_conflict: is_conflicted,
+                conflicting_events_count: conflict_resolution.total_history_count.saturating_sub(1),
+                conflicting_summary: if is_conflicted {
+                    Some(format!(
+                        "{} confirmations vs {} rejections recorded",
+                        conflict_resolution.confirmations_count, conflict_resolution.rejections_count
+                    ))
+                } else {
+                    None
+                },
+                related_evidence_summary: related,
+                explanation: relevance.explanation,
+            };
+
+            if is_conflicted && ev.action.is_positive() != (effective_state_str == "Confirmed") {
+                competing_conflicts.push(entry.clone());
+            }
+            history_entries.push(entry);
+        }
+
+        let latest_action = conflict_resolution.latest_action.map(|a| a.display_name().to_string());
+        let current_influence = history_entries.last().map(|e| e.current_influence).unwrap_or(1.0);
+
+        let diagnostic_explanation = format!(
+            "Target '{}' in context '{}': Effective State = {}. {} total feedback event(s) recorded. Latest action = {}.",
+            target_label,
+            context_name.as_deref().unwrap_or("Global"),
+            effective_state_str,
+            history_entries.len(),
+            latest_action.as_deref().unwrap_or("None")
+        );
+
+        Ok(FeedbackInspectorTargetReport {
+            target_id: target_id.to_string(),
+            target_label,
+            context_id: context_id.map(|s| s.to_string()),
+            context_name,
+            effective_state: effective_state_str,
+            latest_action,
+            current_influence,
+            history_entries,
+            competing_conflicts,
+            adaptation_verdict: None,
+            diagnostic_explanation,
+        })
+    }
+
+    /// Inspects all feedback events associated with a workspace context.
+    pub fn inspect_context(
+        conn: &rusqlite::Connection,
+        context_id: &str,
+    ) -> Result<FeedbackInspectorContextReport, String> {
+        let now = Utc::now();
+        let relevance_config = FeedbackRelevanceConfig::default();
+        let context_name = Self::resolve_context_name(conn, context_id).unwrap_or_else(|| context_id.to_string());
+
+        let mut entries = Vec::new();
+        let mut confirmations_count = 0;
+        let mut rejections_count = 0;
+        let mut active_count = 0;
+        let mut expired_count = 0;
+        let mut conflicted_targets: HashSet<String> = HashSet::new();
+        let mut target_actions: HashMap<String, (usize, usize)> = HashMap::new();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, item_id, signal_type, payload, created_at FROM context_signals
+                 WHERE workspace_id = ?1
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("Prepare error: {}", e))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![context_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|e| format!("Query error: {}", e))?;
+
+        for r in rows.flatten() {
+            let (sig_id, item_opt, sig_type, payload_str, created_str) = r;
+            let target_id = item_opt.unwrap_or_else(|| "unknown_target".to_string());
+            let target_label = Self::resolve_safe_target_label(conn, &target_id);
+
+            let parsed_action = serde_json::from_str::<serde_json::Value>(&payload_str).ok();
+            let action_opt = parsed_action.as_ref().and_then(|val| {
+                val.get("action")
+                    .and_then(|a| a.as_str())
+                    .and_then(|s| FeedbackAction::from_str_lenient(s).ok())
+            });
+
+            let action = action_opt.unwrap_or_else(|| {
+                if sig_type == "user_feedback" || sig_type == "context_confirmed" {
+                    FeedbackAction::ConfirmContext
+                } else if sig_type == "user_correction" || sig_type == "membership_dismissed" {
+                    FeedbackAction::RemoveFromContext
+                } else {
+                    FeedbackAction::RejectContext
+                }
+            });
+
+            let entry_stats = target_actions.entry(target_id.clone()).or_insert((0, 0));
+            if action.is_positive() {
+                confirmations_count += 1;
+                entry_stats.0 += 1;
+            } else if action.is_negative() {
+                rejections_count += 1;
+                entry_stats.1 += 1;
+            }
+            if entry_stats.0 > 0 && entry_stats.1 > 0 {
+                conflicted_targets.insert(target_id.clone());
+            }
+
+            let target_ref = FeedbackTargetRef::infer_from_id(&target_id);
+            let scope = FeedbackScope::infer_narrowest_scope(action, &target_ref, Some(context_id));
+
+            let ev = ContextFeedbackEvent::new(
+                action,
+                target_ref,
+                Some(context_id.to_string()),
+                FeedbackSource::UserExplicitUi,
+                scope.clone(),
+                None,
+            )
+            .with_timestamp(created_str.clone());
+
+            let relevance = ContextFeedbackRelevanceEngine::evaluate_event_relevance(&ev, now, &relevance_config);
+            let elapsed_human = Self::format_relative_time(ev.timestamp_dt().unwrap_or(now), now);
+
+            if relevance.is_active {
+                active_count += 1;
+            } else {
+                expired_count += 1;
+            }
+
+            entries.push(FeedbackInspectorEntry {
+                event_id: sig_id,
+                target_id: target_id.clone(),
+                target_type: ev.target_ref.entity_type_str().to_string(),
+                target_label,
+                context_id: Some(context_id.to_string()),
+                context_name: Some(context_name.clone()),
+                scope: scope.scope_str().to_string(),
+                scope_specificity: scope.specificity_order(),
+                action: action.as_str().to_string(),
+                action_display: action.display_name().to_string(),
+                source: "user_explicit_ui".to_string(),
+                timestamp: created_str,
+                elapsed_human,
+                persistence_category: relevance.persistence_category.display_name().to_string(),
+                effective_state: if action.is_positive() { "Confirmed".to_string() } else { "Rejected".to_string() },
+                current_influence: relevance.effective_weight,
+                is_active: relevance.is_active,
+                is_expired: relevance.is_expired,
+                has_conflict: false,
+                conflicting_events_count: 0,
+                conflicting_summary: None,
+                related_evidence_summary: Vec::new(),
+                explanation: relevance.explanation,
+            });
+        }
+
+        Ok(FeedbackInspectorContextReport {
+            context_id: context_id.to_string(),
+            context_name,
+            total_feedback_events: entries.len(),
+            active_feedback_events: active_count,
+            expired_feedback_events: expired_count,
+            confirmations_count,
+            rejections_count,
+            conflicted_targets_count: conflicted_targets.len(),
+            entries,
+            generated_at: now.to_rfc3339(),
+        })
+    }
+
+    /// Formats a single feedback inspector entry as a structured debug card.
+    pub fn format_entry_card(entry: &FeedbackInspectorEntry) -> String {
+        format!(
+            "Target: {}\nContext: {}\n\nUser feedback:\n{}\n\nScope:\n{}\n\nEffective:\n{}\nCurrent Influence: {:.2} (Active: {})\nExplanation: {}\n",
+            entry.target_label,
+            entry.context_name.as_deref().unwrap_or("Global"),
+            entry.action_display,
+            entry.scope,
+            entry.effective_state,
+            entry.current_influence,
+            entry.is_active,
+            entry.explanation
+        )
+    }
+
+    // --- Private Helper Methods ---
+
+    fn resolve_safe_target_label(conn: &rusqlite::Connection, target_id: &str) -> String {
+        // Try items table
+        if let Ok(title) = conn.query_row(
+            "SELECT title, content FROM items WHERE id = ?1",
+            rusqlite::params![target_id],
+            |r| {
+                let t: Option<String> = r.get(0)?;
+                let c: String = r.get(1)?;
+                Ok(t.unwrap_or(c))
+            },
+        ) {
+            let scrubbed = crate::context_engine::reasoning::privacy::scrub_private_data(&title);
+            if scrubbed.len() > 60 {
+                return format!("{}...", &scrubbed[..57]);
+            }
+            return scrubbed;
+        }
+
+        // Try task_candidates table
+        if let Ok(title) = conn.query_row(
+            "SELECT title FROM task_candidates WHERE id = ?1",
+            rusqlite::params![target_id],
+            |r| r.get::<_, String>(0),
+        ) {
+            let scrubbed = crate::context_engine::reasoning::privacy::scrub_private_data(&title);
+            return scrubbed;
+        }
+
+        // Try workspaces table
+        if let Ok(name) = conn.query_row(
+            "SELECT name FROM workspaces WHERE id = ?1",
+            rusqlite::params![target_id],
+            |r| r.get::<_, String>(0),
+        ) {
+            return format!("Workspace '{}'", name);
+        }
+
+        format!("Target #{}", &target_id[..target_id.len().min(8)])
+    }
+
+    fn resolve_context_name(conn: &rusqlite::Connection, context_id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT name FROM workspaces WHERE id = ?1",
+            rusqlite::params![context_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    fn format_relative_time(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+        let diff = (now - created_at).num_seconds().max(0);
+        let mins = diff / 60;
+        let hours = mins / 60;
+        let days = hours / 24;
+
+        if days > 0 {
+            format!("{} day(s) ago", days)
+        } else if hours > 0 {
+            format!("{} hour(s) ago", hours)
+        } else if mins > 0 {
+            format!("{} minute(s) ago", mins)
+        } else {
+            "just now".to_string()
+        }
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -5097,5 +5632,159 @@ mod tests {
             &custom_config,
         );
         assert_eq!(assess_corr.decay_factor, 0.15);
+    }
+
+    #[test]
+    fn test_feedback_inspector_target_inspection_prompt_example() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://payx.internal/docs",
+            Some("Item X - PayX Documentation"),
+            r#"{"app_name": "Google Chrome", "domain": "payx.internal"}"#,
+        )
+        .unwrap();
+
+        // User feedback: Removed from context
+        let ev = ContextFeedbackEvent::remove_from_context(
+            &item.id,
+            &ws.id,
+            FeedbackSource::UserExplicitUi,
+            Some("Removed from context".to_string()),
+        );
+        ContextFeedbackService::apply_feedback(&conn, &ev).unwrap();
+
+        // Inspect target
+        let report = ContextFeedbackInspector::inspect_target(&conn, &item.id, Some(&ws.id)).unwrap();
+
+        assert_eq!(report.target_id, item.id);
+        assert_eq!(report.context_name.as_deref(), Some("PayX"));
+        assert_eq!(report.effective_state, "Rejected");
+        assert_eq!(report.history_entries.len(), 1);
+
+        let entry = &report.history_entries[0];
+        assert_eq!(entry.action, "remove_from_context");
+        assert_eq!(entry.action_display, "Remove from Context");
+        assert_eq!(entry.scope, "item_context");
+        assert_eq!(entry.effective_state, "Rejected");
+        assert!(entry.is_active);
+
+        let card = ContextFeedbackInspector::format_entry_card(entry);
+        assert!(card.contains("Target:"));
+        assert!(card.contains("PayX"));
+        assert!(card.contains("Remove from Context"));
+        assert!(card.contains("item_context"));
+        assert!(card.contains("Rejected"));
+    }
+
+    #[test]
+    fn test_feedback_inspector_context_level_report() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        let item1 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://payx.com/api",
+            Some("PayX API"),
+            "{}",
+        )
+        .unwrap();
+
+        let item2 = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://google.com/search?q=random",
+            Some("Random Search"),
+            "{}",
+        )
+        .unwrap();
+
+        // 1 confirmation + 1 rejection
+        let ev1 = ContextFeedbackEvent::confirm_context(&item1.id, &ws.id, FeedbackSource::UserExplicitUi);
+        ContextFeedbackService::apply_feedback(&conn, &ev1).unwrap();
+
+        let ev2 = ContextFeedbackEvent::remove_from_context(&item2.id, &ws.id, FeedbackSource::UserExplicitUi, None);
+        ContextFeedbackService::apply_feedback(&conn, &ev2).unwrap();
+
+        let report = ContextFeedbackInspector::inspect_context(&conn, &ws.id).unwrap();
+
+        assert_eq!(report.context_id, ws.id);
+        assert_eq!(report.context_name, "PayX");
+        assert_eq!(report.total_feedback_events, 2);
+        assert_eq!(report.confirmations_count, 1);
+        assert_eq!(report.rejections_count, 1);
+        assert_eq!(report.active_feedback_events, 2);
+    }
+
+    #[test]
+    fn test_feedback_inspector_privacy_sanitization() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Security Project").unwrap();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "text",
+            "Authorization token: sk-live-secret-key-1234567890abcdef",
+            Some("API Key sk-live-secret-key-1234567890abcdef"),
+            "{}",
+        )
+        .unwrap();
+
+        let ev = ContextFeedbackEvent::remove_from_context(&item.id, &ws.id, FeedbackSource::UserExplicitUi, None);
+        ContextFeedbackService::apply_feedback(&conn, &ev).unwrap();
+
+        let report = ContextFeedbackInspector::inspect_target(&conn, &item.id, Some(&ws.id)).unwrap();
+
+        // Secrets must be sanitized from target label
+        assert!(!report.target_label.contains("sk-live-secret-key-1234567890abcdef"));
+        assert!(report.target_label.contains("[API_KEY_REDACTED]") || report.target_label.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_feedback_inspector_conflicting_events_diagnostic() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://payx.internal/service",
+            Some("PayX Service"),
+            "{}",
+        )
+        .unwrap();
+
+        // Confirm first
+        let ev1 = ContextFeedbackEvent::confirm_context(&item.id, &ws.id, FeedbackSource::UserExplicitUi)
+            .with_timestamp((Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
+        ContextFeedbackService::apply_feedback(&conn, &ev1).unwrap();
+
+        // Later rejected
+        let ev2 = ContextFeedbackEvent::remove_from_context(&item.id, &ws.id, FeedbackSource::UserExplicitUi, None)
+            .with_timestamp((Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
+        ContextFeedbackService::apply_feedback(&conn, &ev2).unwrap();
+
+        let report = ContextFeedbackInspector::inspect_target(&conn, &item.id, Some(&ws.id)).unwrap();
+
+        assert_eq!(report.effective_state, "Rejected");
+        assert_eq!(report.history_entries.len(), 2);
+        assert!(report.history_entries[0].has_conflict);
+        assert!(report.history_entries[1].has_conflict);
+        assert_eq!(report.competing_conflicts.len(), 1);
+        assert_eq!(report.competing_conflicts[0].action, "confirm_context");
     }
 }

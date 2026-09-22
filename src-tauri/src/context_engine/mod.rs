@@ -54,9 +54,11 @@ pub mod feedback;
 
 pub use feedback::{
     AdaptationVerdict, ContextDeterministicAdaptationEngine, ContextFeedbackEvent,
-    ContextFeedbackRelevanceEngine, ContextFeedbackService, ContextNegativeFeedbackEvaluator,
-    ContextPositiveFeedbackEngine, DeterministicAdaptationAssessment, EvidencePriorityTier,
-    FeedbackAction, FeedbackApplicationResult, FeedbackMetadata, FeedbackPersistenceCategory,
+    ContextFeedbackInspector, ContextFeedbackRelevanceEngine, ContextFeedbackService,
+    ContextNegativeFeedbackEvaluator, ContextPositiveFeedbackEngine,
+    DeterministicAdaptationAssessment, EvidencePriorityTier, FeedbackAction,
+    FeedbackApplicationResult, FeedbackInspectorContextReport, FeedbackInspectorEntry,
+    FeedbackInspectorTargetReport, FeedbackMetadata, FeedbackPersistenceCategory,
     FeedbackPrecedenceEngine, FeedbackPrecedencePolicy, FeedbackRelevanceAssessment,
     FeedbackRelevanceConfig, FeedbackScope, FeedbackSource, FeedbackTargetRef,
     NegativeFeedbackAssessment, NegativeFeedbackVerdict, PositiveFeedbackAssessment,
