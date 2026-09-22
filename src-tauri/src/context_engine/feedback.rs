@@ -545,6 +545,12 @@ impl ContextFeedbackEvent {
         self
     }
 
+    /// Sets an optional user or system reason.
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+
     /// Parses the timestamp into DateTime<Utc> if valid RFC 3339.
     pub fn timestamp_dt(&self) -> Option<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(&self.timestamp)
@@ -886,6 +892,10 @@ pub struct FeedbackApplicationResult {
 pub struct ContextFeedbackService;
 
 impl ContextFeedbackService {
+    pub fn new() -> Self {
+        Self
+    }
+
     /// Applies a structured ContextFeedbackEvent to the appropriate contextual subsystems.
     ///
     /// Invariants:
@@ -1074,11 +1084,11 @@ impl ContextFeedbackService {
             FeedbackAction::ConfirmTask => {
                 let ws_id = event.context_ref.as_deref().or_else(|| event.scope.context_id());
 
-                // Update task candidate status to Active (confirmed)
-                crate::db::operations::update_task_candidate_status(
+                // Update task candidate status to Confirmed with 1.0 confidence
+                crate::db::operations::confirm_task_candidate(
                     conn,
                     target_id,
-                    crate::db::models::TaskCandidateStatus::Active,
+                    1.0,
                 )
                 .map_err(|e| format!("Failed to update task candidate status: {}", e))?;
                 applied_systems.push("task_candidates".to_string());
@@ -1111,7 +1121,7 @@ impl ContextFeedbackService {
                     scope: event.scope.clone(),
                     applied_systems,
                     signal_id: Some(signal_id),
-                    details: format!("Confirmed task candidate '{}' as active", target_id),
+                    details: format!("Confirmed task candidate '{}' as user-confirmed active task", target_id),
                     success: true,
                 })
             }
@@ -1303,6 +1313,102 @@ impl ContextFeedbackService {
                 })
             }
         }
+    }
+
+    /// Corrects the task understanding for a workspace context.
+    ///
+    /// 1. Updates previous task candidate (if specified or currently active) to Dismissed/Inactive
+    ///    without deleting it from the database (preserving historical task activity).
+    /// 2. Creates or promotes the new task candidate as Confirmed with confidence 1.0.
+    /// 3. Emits auditable feedback event, context signal, and task transition.
+    /// 4. Future context state, memory, and reconstruction respect this correction.
+    pub fn correct_task_candidate(
+        &self,
+        conn: &rusqlite::Connection,
+        workspace_id: &str,
+        previous_task_id_or_title: Option<&str>,
+        new_task_title: &str,
+        source: FeedbackSource,
+        reason: Option<&str>,
+    ) -> Result<FeedbackApplicationResult, String> {
+        let existing_candidates = crate::db::operations::list_task_candidates_for_context(conn, workspace_id)
+            .map_err(|e| format!("Failed to list task candidates: {}", e))?;
+
+        let mut prev_candidate_id: Option<String> = None;
+        let mut prev_candidate_title: Option<String> = None;
+
+        if let Some(prev) = previous_task_id_or_title {
+            for cand in &existing_candidates {
+                if cand.id == prev || cand.title.eq_ignore_ascii_case(prev) {
+                    prev_candidate_id = Some(cand.id.clone());
+                    prev_candidate_title = Some(cand.title.clone());
+                    break;
+                }
+            }
+        } else {
+            // Find currently active candidate
+            for cand in &existing_candidates {
+                if cand.status == crate::db::models::TaskCandidateStatus::Active
+                    || cand.status == crate::db::models::TaskCandidateStatus::Detected
+                    || cand.status == crate::db::models::TaskCandidateStatus::Confirmed
+                {
+                    prev_candidate_id = Some(cand.id.clone());
+                    prev_candidate_title = Some(cand.title.clone());
+                    break;
+                }
+            }
+        }
+
+        if let Some(ref prev_id) = prev_candidate_id {
+            // Demote previous task candidate to Dismissed so it remains in historical activity without deletion
+            crate::db::operations::update_task_candidate_status(
+                conn,
+                prev_id,
+                crate::db::models::TaskCandidateStatus::Dismissed,
+            )
+            .map_err(|e| format!("Failed to update previous task candidate status: {}", e))?;
+        }
+
+        // 2. Find or create the new task candidate
+        let matching_new = existing_candidates.iter().find(|c| c.title.eq_ignore_ascii_case(new_task_title));
+
+        let confirmed_task_id = if let Some(cand) = matching_new {
+            crate::db::operations::confirm_task_candidate(conn, &cand.id, 1.0)
+                .map_err(|e| format!("Failed to confirm task candidate: {}", e))?;
+            cand.id.clone()
+        } else {
+            let new_cand = crate::db::models::TaskCandidate::new(
+                Some(workspace_id.to_string()),
+                new_task_title,
+                1.0,
+            )
+            .with_status(crate::db::models::TaskCandidateStatus::Confirmed);
+            let created = crate::db::operations::create_task_candidate(conn, &new_cand)
+                .map_err(|e| format!("Failed to create confirmed task candidate: {}", e))?;
+            created.id
+        };
+
+        // 3. Record Feedback Event & Apply
+        let event = ContextFeedbackEvent::confirm_task(
+            confirmed_task_id.clone(),
+            workspace_id,
+            source,
+        )
+        .with_reason(reason.unwrap_or(&format!(
+            "User corrected task from '{}' to '{}'",
+            prev_candidate_title.as_deref().unwrap_or("none"),
+            new_task_title
+        )));
+
+        let mut app_res = Self::apply_feedback(conn, &event)?;
+        app_res.details = format!(
+            "Corrected task in workspace '{}' from '{}' to confirmed task '{}'",
+            workspace_id,
+            prev_candidate_title.as_deref().unwrap_or("none"),
+            new_task_title
+        );
+
+        Ok(app_res)
     }
 
     /// Helper to invalidate all relevant downstream contextual caches for a workspace.
@@ -1734,7 +1840,7 @@ impl ContextPositiveFeedbackEngine {
         let is_task_active = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_candidates
-                 WHERE id = ?1 AND (context_id = ?2 OR context_id IS NULL) AND status = 'active'",
+                 WHERE id = ?1 AND (context_id = ?2 OR context_id IS NULL) AND status IN ('active', 'confirmed')",
                 rusqlite::params![entity_id, context_id],
                 |r| r.get::<_, i64>(0),
             )
@@ -2808,12 +2914,13 @@ mod tests {
         );
         let created_task = crate::db::operations::create_task_candidate(&conn, &task_cand).unwrap();
 
-        // Confirm task -> Active
+        // Confirm task -> Confirmed (active)
         let confirm_task_ev = ContextFeedbackEvent::confirm_task(&created_task.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
         let res_confirm_task = ContextFeedbackService::apply_feedback(&conn, &confirm_task_ev).unwrap();
         assert!(res_confirm_task.success);
         let active_task = crate::db::operations::get_task_candidate(&conn, &created_task.id).unwrap();
-        assert_eq!(active_task.status, crate::db::models::TaskCandidateStatus::Active);
+        assert!(active_task.status.is_active());
+        assert_eq!(active_task.status, crate::db::models::TaskCandidateStatus::Confirmed);
 
         // Reject task -> Dismissed
         let reject_task_ev = ContextFeedbackEvent::reject_task(&created_task.id, Some(ws_payx.id.clone()), FeedbackSource::InboxAction, None);
@@ -3551,5 +3658,106 @@ mod tests {
         let res = FeedbackConflictResolver::resolve_events(&[ev1, ev2], "item-1", "ws-payx");
         assert!(res.is_ambiguous);
         assert!(res.effective_state.is_ambiguous());
+    }
+
+    #[test]
+    fn test_user_task_correction_e2e_reconstruction() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Firebase Integration").unwrap();
+
+        // 1. Initial Inferred Task: "Cloudinary integration"
+        let inferred_task = crate::db::models::TaskCandidate::new(
+            Some(ws.id.clone()),
+            "Cloudinary integration",
+            0.75,
+        )
+        .with_status(crate::db::models::TaskCandidateStatus::Active);
+        let created_inferred = crate::db::operations::create_task_candidate(&conn, &inferred_task).unwrap();
+
+        // Verify initial memory picks up the inferred task
+        let mem_service = crate::context_engine::memory::ContextMemoryService::new();
+        let initial_mem = mem_service.reconstruct_memory(&conn, &ws.id).unwrap();
+        assert_eq!(initial_mem.current_task_title.as_deref(), Some("Cloudinary integration"));
+        assert_eq!(initial_mem.current_task_confidence, Some(0.75));
+
+        // 2. User applies correction: "No, I was working on Firebase metadata."
+        let feedback_service = ContextFeedbackService::new();
+        let correct_res = feedback_service
+            .correct_task_candidate(
+                &conn,
+                &ws.id,
+                Some(&created_inferred.id),
+                "Firebase metadata",
+                FeedbackSource::UserExplicitUi,
+                Some("User corrected task from Cloudinary integration to Firebase metadata"),
+            )
+            .unwrap();
+
+        assert!(correct_res.success);
+        assert!(correct_res.applied_systems.contains(&"task_candidates".to_string()));
+
+        // 3. Verify previous inference remains historically available (ZERO DELETION)
+        let old_candidate = crate::db::operations::get_task_candidate(&conn, &created_inferred.id).unwrap();
+        assert_eq!(old_candidate.title, "Cloudinary integration");
+        assert_eq!(old_candidate.status, crate::db::models::TaskCandidateStatus::Dismissed);
+
+        // 4. Verify new task candidate exists, is Confirmed with confidence 1.0
+        let all_candidates = crate::db::operations::list_task_candidates_for_context(&conn, &ws.id).unwrap();
+        assert_eq!(all_candidates.len(), 2, "Historical task candidates must be preserved without deletion");
+
+        let confirmed_candidate = all_candidates
+            .iter()
+            .find(|c| c.title == "Firebase metadata")
+            .expect("New confirmed task candidate must exist");
+        assert_eq!(confirmed_candidate.status, crate::db::models::TaskCandidateStatus::Confirmed);
+        assert_eq!(confirmed_candidate.confidence, 1.0);
+
+        // 5. Verify Context Memory reconstruction reflects correction
+        let updated_mem = mem_service.reconstruct_memory(&conn, &ws.id).unwrap();
+        assert_eq!(updated_mem.current_task_title.as_deref(), Some("Firebase metadata"));
+        assert_eq!(updated_mem.current_task_confidence, Some(1.0));
+        assert_eq!(
+            updated_mem.current_task_provenance,
+            Some(crate::context_engine::memory::InformationProvenance::Confirmed)
+        );
+
+        // 6. Verify Context Reconstruction engine respects user correction
+        let recon_service = crate::context_engine::reconstruction::ContextReconstructionService::new();
+        let recon = recon_service.reconstruct_context(&conn, &ws.id).unwrap();
+        assert_eq!(recon.current_task.status, crate::context_engine::reconstruction::ReconstructionSectionStatus::Available);
+        assert_eq!(recon.current_task.title.as_deref(), Some("Firebase metadata"));
+        assert_eq!(recon.current_task.confidence, Some(1.0));
+    }
+
+    #[test]
+    fn test_user_task_confirmation_via_feedback_action() {
+        let conn = setup_test_db();
+        let ws = crate::db::operations::create_workspace(&conn, "Payment System").unwrap();
+
+        let task = crate::db::models::TaskCandidate::new(
+            Some(ws.id.clone()),
+            "Stripe webhook handler",
+            0.60,
+        );
+        let created = crate::db::operations::create_task_candidate(&conn, &task).unwrap();
+
+        let event = ContextFeedbackEvent::confirm_task(
+            &created.id,
+            &ws.id,
+            FeedbackSource::UserExplicitUi,
+        );
+
+        let res = ContextFeedbackService::apply_feedback(&conn, &event).unwrap();
+        assert!(res.success);
+
+        let updated = crate::db::operations::get_task_candidate(&conn, &created.id).unwrap();
+        assert_eq!(updated.status, crate::db::models::TaskCandidateStatus::Confirmed);
+        assert_eq!(updated.confidence, 1.0);
+
+        let recon = crate::context_engine::reconstruction::ContextReconstructionService::new()
+            .reconstruct_context(&conn, &ws.id)
+            .unwrap();
+        assert_eq!(recon.current_task.title.as_deref(), Some("Stripe webhook handler"));
+        assert_eq!(recon.current_task.confidence, Some(1.0));
     }
 }
