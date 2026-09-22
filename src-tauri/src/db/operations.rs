@@ -2001,6 +2001,23 @@ pub fn update_task_candidate_status(
     Ok(res)
 }
 
+pub fn confirm_task_candidate(
+    conn: &Connection,
+    id: &str,
+    confidence: f64,
+) -> Result<super::models::TaskCandidate> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let clamped = confidence.clamp(0.0, 1.0);
+    conn.execute(
+        "UPDATE task_candidates SET status = 'confirmed', confidence = ?1, updated_at = ?2 WHERE id = ?3",
+        params![clamped, now, id],
+    )?;
+
+    let res = get_task_candidate(conn, id)?;
+    crate::context_engine::memory::invalidate_memory_cache(res.context_id.as_deref());
+    Ok(res)
+}
+
 pub fn update_task_candidate_activity(
     conn: &Connection,
     id: &str,
@@ -3148,6 +3165,7 @@ mod tests {
             TaskCandidateStatus::Inactive,
             TaskCandidateStatus::Uncertain,
             TaskCandidateStatus::Dismissed,
+            TaskCandidateStatus::Confirmed,
         ] {
             let s_str = status.as_str();
             assert_eq!(TaskCandidateStatus::from_str(s_str).unwrap(), status);
@@ -3159,9 +3177,13 @@ mod tests {
         assert_eq!(TaskCandidateStatus::from_str_lenient("idle"), Some(TaskCandidateStatus::Inactive));
         assert_eq!(TaskCandidateStatus::from_str_lenient("ambiguous"), Some(TaskCandidateStatus::Uncertain));
         assert_eq!(TaskCandidateStatus::from_str_lenient("rejected"), Some(TaskCandidateStatus::Dismissed));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("confirmed"), Some(TaskCandidateStatus::Confirmed));
+        assert_eq!(TaskCandidateStatus::from_str_lenient("user_confirmed"), Some(TaskCandidateStatus::Confirmed));
 
         // 2. Test status helpers
         assert!(TaskCandidateStatus::Active.is_active());
+        assert!(TaskCandidateStatus::Confirmed.is_active());
+        assert!(TaskCandidateStatus::Confirmed.is_confirmed());
         assert!(!TaskCandidateStatus::Inactive.is_active());
         assert!(TaskCandidateStatus::Dismissed.is_dismissed());
         assert!(TaskCandidateStatus::Uncertain.is_uncertain());

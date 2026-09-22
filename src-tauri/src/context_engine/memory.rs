@@ -1255,12 +1255,22 @@ impl ContextMemoryBuilder {
 
         // Priority 1: User-confirmed / Active Task Candidate (ignoring Dismissed / Inactive)
         let mut extracted_candidates = Vec::new();
-        let confirmed_candidate = self.task_candidates.iter().find(|tc| {
-            (tc.status == crate::db::models::TaskCandidateStatus::Active
-                || tc.status.as_str() == "confirmed")
-                && tc.confidence >= 0.50
-                && !is_generic_task_name(&tc.title)
+        let mut active_or_confirmed: Vec<&crate::db::models::TaskCandidate> = self.task_candidates
+            .iter()
+            .filter(|tc| {
+                tc.status.is_active()
+                    && tc.confidence >= 0.45
+                    && !is_generic_task_name(&tc.title)
+            })
+            .collect();
+        active_or_confirmed.sort_by(|a, b| {
+            let a_confirmed = a.status == crate::db::models::TaskCandidateStatus::Confirmed || a.confidence >= 0.99;
+            let b_confirmed = b.status == crate::db::models::TaskCandidateStatus::Confirmed || b.confidence >= 0.99;
+            b_confirmed.cmp(&a_confirmed)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+                .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
         });
+        let confirmed_candidate = active_or_confirmed.first().copied();
 
         if let Some(cand) = confirmed_candidate {
             current_task_id = Some(cand.id.clone());

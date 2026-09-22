@@ -598,6 +598,68 @@ impl TaskTransitionDetector {
             self.task_history.push_front(task);
         }
     }
+
+    /// Immediately applies an explicit user task correction.
+    ///
+    /// 1. Current task interpretation changes to the corrected task.
+    /// 2. Previous inference is archived into task history (zero deletion).
+    /// 3. New task becomes user-confirmed with 1.0 confidence.
+    /// 4. Emits a deterministic TaskSwitch or TaskStart transition.
+    pub fn apply_user_correction(
+        &mut self,
+        new_task_title: &str,
+        timestamp: &str,
+        context_id: Option<&str>,
+        reason: Option<&str>,
+    ) -> DetectedTaskTransition {
+        let from_title = self.current_task.as_ref().map(|t| t.title.clone());
+        self.archive_current_task();
+        self.pending_transition = None;
+
+        let snapshot = TaskSnapshot::new(
+            new_task_title,
+            None,
+            None,
+            1.0,
+            timestamp,
+            context_id.map(|s| s.to_string()),
+        );
+        self.current_task = Some(snapshot);
+
+        let trans_type = if from_title.is_some() {
+            TaskTransitionType::TaskSwitch
+        } else {
+            TaskTransitionType::TaskStart
+        };
+
+        let transition = DetectedTaskTransition {
+            id: Uuid::new_v4().to_string(),
+            transition_type: trans_type,
+            from_task: from_title.clone(),
+            to_task: Some(new_task_title.to_string()),
+            context_id: context_id.map(|s| s.to_string()),
+            timestamp: timestamp.to_string(),
+            confidence: 1.0,
+            evidence: vec![
+                format!("User explicitly corrected task understanding: '{}'", new_task_title),
+                reason.unwrap_or("Explicit user confirmation").to_string(),
+            ],
+            trigger_item_id: None,
+            duration_seconds: None,
+            metadata: json!({
+                "user_confirmed": true,
+                "corrected_from": from_title,
+            }),
+        };
+
+        self.last_emitted = Some((
+            trans_type,
+            transition.from_task.clone().unwrap_or_default(),
+            transition.to_task.clone().unwrap_or_default(),
+        ));
+
+        transition
+    }
 }
 
 // =========================================================================
@@ -800,5 +862,39 @@ mod tests {
             }
             _ => panic!("Expected TaskEnd due to inactivity"),
         }
+    }
+
+    #[test]
+    fn test_apply_user_task_correction() {
+        let mut detector = TaskTransitionDetector::new();
+
+        // 1. Initial inferred task: "Cloudinary integration"
+        let task = make_ranked_candidate("Cloudinary integration", Some("Integrating"), Some("Cloudinary"), 0.90, 2);
+        detector.evaluate_ranked_candidate(Some(&task), "2026-09-13T01:00:00Z", Some("i1"), Some("ws_firebase"));
+
+        assert_eq!(detector.current_task.as_ref().unwrap().title, "Cloudinary integration");
+
+        // 2. User explicitly corrects task: "Firebase metadata"
+        let trans = detector.apply_user_correction(
+            "Firebase metadata",
+            "2026-09-13T01:10:00Z",
+            Some("ws_firebase"),
+            Some("User corrected task understanding"),
+        );
+
+        // 3. Verify transition emitted
+        assert_eq!(trans.transition_type, TaskTransitionType::TaskSwitch);
+        assert_eq!(trans.from_task.as_deref(), Some("Cloudinary integration"));
+        assert_eq!(trans.to_task.as_deref(), Some("Firebase metadata"));
+        assert_eq!(trans.confidence, 1.0);
+
+        // 4. Verify current active task is now Firebase metadata
+        let active = detector.current_task.as_ref().unwrap();
+        assert_eq!(active.title, "Firebase metadata");
+        assert_eq!(active.confidence, 1.0);
+
+        // 5. Verify previous task is archived in history without deletion
+        assert_eq!(detector.task_history.len(), 1);
+        assert_eq!(detector.task_history.front().unwrap().title, "Cloudinary integration");
     }
 }

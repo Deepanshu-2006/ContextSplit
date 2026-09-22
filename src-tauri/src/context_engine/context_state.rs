@@ -1447,7 +1447,13 @@ impl ContextStateBuilder {
                         && !c.title.eq_ignore_ascii_case("unknown")
                 })
                 .collect();
-            valid_candidates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+            valid_candidates.sort_by(|a, b| {
+                let a_confirmed = a.status == TaskCandidateStatus::Confirmed || a.confidence >= 0.99;
+                let b_confirmed = b.status == TaskCandidateStatus::Confirmed || b.confidence >= 0.99;
+                b_confirmed.cmp(&a_confirmed)
+                    .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| b.last_active_at.cmp(&a.last_active_at))
+            });
             if let Some(best) = valid_candidates.first() {
                 task_id = Some(best.id.clone());
                 task_title = Some(best.title.clone());

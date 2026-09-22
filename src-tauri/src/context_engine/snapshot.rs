@@ -178,6 +178,12 @@ impl From<&TaskCandidate> for SnapshotTaskReference {
             "Insufficient"
         };
 
+        let prov = if task.status.is_confirmed() || task.status.as_str() == "confirmed" || task.confidence >= 0.99 {
+            InformationProvenance::Confirmed
+        } else {
+            InformationProvenance::Inferred
+        };
+
         Self {
             id: Some(task.id.clone()),
             title: crate::context_engine::reasoning::privacy::scrub_private_data(&task.title),
@@ -185,7 +191,7 @@ impl From<&TaskCandidate> for SnapshotTaskReference {
             target_subject: None,
             confidence: task.confidence,
             confidence_band: band.to_string(),
-            provenance: InformationProvenance::Inferred,
+            provenance: prov,
             first_seen_at: Some(task.first_detected_at.clone()),
             last_active_at: Some(task.last_active_at.clone()),
             status: Some(task.status.as_str().to_string()),

@@ -829,6 +829,7 @@ impl ContextTransition {
 /// - `inactive`: Inactivity detected or focus has shifted away.
 /// - `uncertain`: Competing or ambiguous inferences.
 /// - `dismissed`: Inferred task was dismissed or suppressed.
+/// - `confirmed`: User explicitly confirmed or corrected task interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskCandidateStatus {
@@ -837,6 +838,7 @@ pub enum TaskCandidateStatus {
     Inactive,
     Uncertain,
     Dismissed,
+    Confirmed,
 }
 
 impl TaskCandidateStatus {
@@ -847,6 +849,7 @@ impl TaskCandidateStatus {
             TaskCandidateStatus::Inactive => "inactive",
             TaskCandidateStatus::Uncertain => "uncertain",
             TaskCandidateStatus::Dismissed => "dismissed",
+            TaskCandidateStatus::Confirmed => "confirmed",
         }
     }
 
@@ -857,6 +860,7 @@ impl TaskCandidateStatus {
             "inactive" => Ok(TaskCandidateStatus::Inactive),
             "uncertain" => Ok(TaskCandidateStatus::Uncertain),
             "dismissed" => Ok(TaskCandidateStatus::Dismissed),
+            "confirmed" => Ok(TaskCandidateStatus::Confirmed),
             other => Err(format!("Unknown task candidate status: '{}'", other)),
         }
     }
@@ -868,6 +872,7 @@ impl TaskCandidateStatus {
             "inactive" | "idle" | "paused" | "stale" => Some(TaskCandidateStatus::Inactive),
             "uncertain" | "ambiguous" | "low_confidence" => Some(TaskCandidateStatus::Uncertain),
             "dismissed" | "dismiss" | "rejected" | "ignored" => Some(TaskCandidateStatus::Dismissed),
+            "confirmed" | "user_confirmed" | "approved" | "corrected" => Some(TaskCandidateStatus::Confirmed),
             _ => None,
         }
     }
@@ -879,6 +884,7 @@ impl TaskCandidateStatus {
             TaskCandidateStatus::Inactive => "Inactive",
             TaskCandidateStatus::Uncertain => "Uncertain",
             TaskCandidateStatus::Dismissed => "Dismissed",
+            TaskCandidateStatus::Confirmed => "Confirmed",
         }
     }
 
@@ -889,11 +895,16 @@ impl TaskCandidateStatus {
             TaskCandidateStatus::Inactive => "Task candidate with no recent activity",
             TaskCandidateStatus::Uncertain => "Task candidate with ambiguous or competing inferences",
             TaskCandidateStatus::Dismissed => "Task candidate dismissed or suppressed",
+            TaskCandidateStatus::Confirmed => "Task candidate explicitly confirmed or corrected by user",
         }
     }
 
     pub fn is_active(&self) -> bool {
-        matches!(self, TaskCandidateStatus::Active)
+        matches!(self, TaskCandidateStatus::Active | TaskCandidateStatus::Confirmed)
+    }
+
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, TaskCandidateStatus::Confirmed)
     }
 
     pub fn is_dismissed(&self) -> bool {

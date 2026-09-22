@@ -2132,15 +2132,18 @@ impl ContextReconstructionService {
             .filter(|tc| tc.status != TaskCandidateStatus::Dismissed)
             .collect();
 
-        // Separate active candidates from inactive
+        // Separate active and confirmed candidates from inactive/dismissed
         let mut active_task_candidates: Vec<_> = non_dismissed
             .into_iter()
-            .filter(|tc| tc.status == TaskCandidateStatus::Active)
+            .filter(|tc| tc.status.is_active())
             .collect();
 
-        // Sort candidates primarily by recency (last_active_at descending) then by confidence descending
+        // Sort candidates: Confirmed status / confidence >= 0.99 first, then by recency descending, then confidence descending
         active_task_candidates.sort_by(|a, b| {
-            b.last_active_at.cmp(&a.last_active_at)
+            let a_confirmed = a.status == TaskCandidateStatus::Confirmed || a.confidence >= 0.99;
+            let b_confirmed = b.status == TaskCandidateStatus::Confirmed || b.confidence >= 0.99;
+            b_confirmed.cmp(&a_confirmed)
+                .then_with(|| b.last_active_at.cmp(&a.last_active_at))
                 .then_with(|| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
         });
 
@@ -2151,13 +2154,18 @@ impl ContextReconstructionService {
             // Check if top2 is a competing task:
             // Condition: confidences are close (|top1.confidence - top2.confidence| <= 0.15)
             // AND timestamps are close (e.g. within 3600 seconds or comparable recency).
-            let conf_diff = (top1.confidence - top2.confidence).abs();
-            let is_competing = conf_diff <= 0.15 && {
-                let t1_res = chrono::DateTime::parse_from_rfc3339(&top1.last_active_at);
-                let t2_res = chrono::DateTime::parse_from_rfc3339(&top2.last_active_at);
-                match (t1_res, t2_res) {
-                    (Ok(dt1), Ok(dt2)) => (dt1.timestamp() - dt2.timestamp()).abs() <= 3600,
-                    _ => true,
+            // INVARIANT: An explicit user-confirmed/corrected task has definitive precedence over weak/inferred competitors.
+            let is_competing = if top1.status == TaskCandidateStatus::Confirmed || (top1.confidence >= 0.99 && top2.confidence < 0.99) {
+                false
+            } else {
+                let conf_diff = (top1.confidence - top2.confidence).abs();
+                conf_diff <= 0.15 && {
+                    let t1_res = chrono::DateTime::parse_from_rfc3339(&top1.last_active_at);
+                    let t2_res = chrono::DateTime::parse_from_rfc3339(&top2.last_active_at);
+                    match (t1_res, t2_res) {
+                        (Ok(dt1), Ok(dt2)) => (dt1.timestamp() - dt2.timestamp()).abs() <= 3600,
+                        _ => true,
+                    }
                 }
             };
 
@@ -2175,12 +2183,16 @@ impl ContextReconstructionService {
             } else {
                 // Resolved contradiction: Top1 is clearly newer or significantly higher confidence.
                 // Older candidate is superseded.
-                if top1.confidence >= 0.65 {
+                if top1.confidence >= 0.65 || top1.status == TaskCandidateStatus::Confirmed {
                     let mut sec = ReconstructionTaskSection::available(SnapshotTaskReference::from(top1));
-                    sec.reasons.push(format!(
-                        "Current active task selected; candidate '{}' superseded or has lower confidence",
-                        top2.title
-                    ));
+                    if top1.status == TaskCandidateStatus::Confirmed {
+                        sec.reasons = vec![format!("User-confirmed active task: '{}'", top1.title)];
+                    } else {
+                        sec.reasons.push(format!(
+                            "Current active task selected; candidate '{}' superseded or has lower confidence",
+                            top2.title
+                        ));
+                    }
                     sec
                 } else {
                     let mut sec = ReconstructionTaskSection::partial(&top1.title, top1.confidence);
@@ -2192,7 +2204,7 @@ impl ContextReconstructionService {
                 }
             }
         } else if let Some(best_task) = active_task_candidates.first() {
-            if best_task.confidence >= 0.65 {
+            if best_task.confidence >= 0.65 || best_task.status == TaskCandidateStatus::Confirmed {
                 let task_ref = SnapshotTaskReference::from(best_task);
                 ReconstructionTaskSection::available(task_ref)
             } else if best_task.confidence >= 0.35 {
