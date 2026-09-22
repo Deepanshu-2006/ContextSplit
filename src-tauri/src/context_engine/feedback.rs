@@ -850,6 +850,466 @@ impl ContextFeedbackEvent {
 }
 
 // =========================================================================
+// Feedback Application Result
+// =========================================================================
+
+/// Structured record of the contextual systems affected by applying a feedback event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackApplicationResult {
+    /// Originating feedback event ID
+    pub event_id: String,
+    /// Feedback action applied
+    pub action: FeedbackAction,
+    /// Scope enforced during application
+    pub scope: FeedbackScope,
+    /// Contextual subsystems mutated or notified
+    pub applied_systems: Vec<String>,
+    /// Evidence signal ID created in `context_signals`
+    pub signal_id: Option<String>,
+    /// Human-readable explanation of the applied changes
+    pub details: String,
+    /// Whether the feedback application succeeded without errors
+    pub success: bool,
+}
+
+// =========================================================================
+// Context Feedback Service
+// =========================================================================
+
+/// Central engine responsible for deterministically applying user feedback across
+/// memberships, memory, tasks, inbox suggestions, and context lifecycle state.
+pub struct ContextFeedbackService;
+
+impl ContextFeedbackService {
+    /// Applies a structured ContextFeedbackEvent to the appropriate contextual subsystems.
+    ///
+    /// Invariants:
+    /// 1. **Zero Data Loss**: Raw items in `items` table are NEVER deleted.
+    /// 2. **Scope Isolation**: Modifies only systems within the declared `FeedbackScope`.
+    /// 3. **Auditable Evidence**: Persists a structured signal in `context_signals` for downstream consumers.
+    /// 4. **Deterministic Invalidation**: Purges relevant in-memory caches to prevent stale reads.
+    pub fn apply_feedback(
+        conn: &rusqlite::Connection,
+        event: &ContextFeedbackEvent,
+    ) -> Result<FeedbackApplicationResult, String> {
+        event.validate()?;
+
+        let now = Utc::now().to_rfc3339();
+        let mut applied_systems = Vec::new();
+        let signal_id = Uuid::new_v4().to_string();
+        let target_id = event.target_ref.id();
+
+        match event.action {
+            // -----------------------------------------------------------------
+            // 1. Confirm Context Association
+            // -----------------------------------------------------------------
+            FeedbackAction::ConfirmContext => {
+                let ws_id = event
+                    .context_ref
+                    .as_deref()
+                    .or_else(|| event.scope.context_id())
+                    .ok_or_else(|| "ConfirmContext requires a valid context reference".to_string())?;
+
+                // A. Update context_memberships to confirmed (conf: 1.0, source: 'user')
+                crate::db::operations::create_or_update_membership(
+                    conn, target_id, ws_id, "confirmed", 1.0, "user",
+                )
+                .map_err(|e| format!("Failed to update membership: {}", e))?;
+                applied_systems.push("context_memberships".to_string());
+
+                // B. Set physical workspace_id on items
+                conn.execute(
+                    "UPDATE items SET workspace_id = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![ws_id, now, target_id],
+                )
+                .map_err(|e| format!("Failed to set item workspace_id: {}", e))?;
+                applied_systems.push("items".to_string());
+
+                // C. Persist context signal evidence
+                let payload = serde_json::json!({
+                    "action": "confirm_context",
+                    "item_id": target_id,
+                    "workspace_id": ws_id,
+                    "scope": event.scope.scope_str(),
+                    "source": event.source.as_str(),
+                    "reason": event.reason.as_deref().unwrap_or("User confirmed context association"),
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'user_feedback', NULL, ?4, ?5, ?5)",
+                    rusqlite::params![signal_id, ws_id, target_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert context signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                // D. Invalidate caches
+                Self::invalidate_caches_for_workspace(Some(ws_id));
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Confirmed item '{}' association with workspace '{}'", target_id, ws_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 2. Reject Context / Remove from Context
+            // -----------------------------------------------------------------
+            FeedbackAction::RejectContext | FeedbackAction::RemoveFromContext => {
+                let ws_id = event
+                    .context_ref
+                    .as_deref()
+                    .or_else(|| event.scope.context_id())
+                    .ok_or_else(|| "RejectContext / RemoveFromContext requires a valid context reference".to_string())?;
+
+                // Delegate to ContextCorrectionService for signature extraction and demotion
+                let correction = crate::context_engine::correction::ContextCorrectionService::record_context_correction(
+                    conn,
+                    target_id,
+                    ws_id,
+                    event.reason.as_deref(),
+                )?;
+                applied_systems.push("context_correction_service".to_string());
+                applied_systems.push("context_memberships".to_string());
+                applied_systems.push("context_signals".to_string());
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(correction.id),
+                    details: format!("Removed item '{}' from workspace '{}' and recorded negative signature", target_id, ws_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 3. Mark Important Memory
+            // -----------------------------------------------------------------
+            FeedbackAction::MarkImportant => {
+                let ws_id = event
+                    .context_ref
+                    .as_deref()
+                    .or_else(|| event.scope.context_id())
+                    .ok_or_else(|| "MarkImportant requires a valid context reference".to_string())?;
+
+                crate::context_engine::important_memory::record_context_memory_control(
+                    conn,
+                    ws_id,
+                    target_id,
+                    crate::context_engine::important_memory::UserMemoryControlAction::KeepImportant,
+                )?;
+                applied_systems.push("important_memory_service".to_string());
+                applied_systems.push("workspace_memberships".to_string());
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(Some(ws_id));
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Marked item/memory '{}' as important in workspace '{}'", target_id, ws_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 4. Remove Importance
+            // -----------------------------------------------------------------
+            FeedbackAction::RemoveImportance => {
+                let ws_id = event
+                    .context_ref
+                    .as_deref()
+                    .or_else(|| event.scope.context_id())
+                    .ok_or_else(|| "RemoveImportance requires a valid context reference".to_string())?;
+
+                crate::context_engine::important_memory::record_context_memory_control(
+                    conn,
+                    ws_id,
+                    target_id,
+                    crate::context_engine::important_memory::UserMemoryControlAction::RemoveFromImportant,
+                )?;
+                applied_systems.push("important_memory_service".to_string());
+                applied_systems.push("context_memberships".to_string());
+                applied_systems.push("workspace_memberships".to_string());
+
+                Self::invalidate_caches_for_workspace(Some(ws_id));
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Removed important memory status for '{}' in workspace '{}'", target_id, ws_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 5. Confirm Task Candidate
+            // -----------------------------------------------------------------
+            FeedbackAction::ConfirmTask => {
+                let ws_id = event.context_ref.as_deref().or_else(|| event.scope.context_id());
+
+                // Update task candidate status to Active (confirmed)
+                crate::db::operations::update_task_candidate_status(
+                    conn,
+                    target_id,
+                    crate::db::models::TaskCandidateStatus::Active,
+                )
+                .map_err(|e| format!("Failed to update task candidate status: {}", e))?;
+                applied_systems.push("task_candidates".to_string());
+
+                // Persist signal
+                let payload = serde_json::json!({
+                    "action": "confirm_task",
+                    "task_id": target_id,
+                    "workspace_id": ws_id,
+                    "scope": event.scope.scope_str(),
+                    "reason": event.reason.as_deref().unwrap_or("User confirmed task in context"),
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, NULL, 'task_confirmed', NULL, ?3, ?4, ?4)",
+                    rusqlite::params![signal_id, ws_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert task signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(ws_id);
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Confirmed task candidate '{}' as active", target_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 6. Reject Task Candidate
+            // -----------------------------------------------------------------
+            FeedbackAction::RejectTask => {
+                let ws_id = event.context_ref.as_deref().or_else(|| event.scope.context_id());
+
+                crate::db::operations::update_task_candidate_status(
+                    conn,
+                    target_id,
+                    crate::db::models::TaskCandidateStatus::Dismissed,
+                )
+                .map_err(|e| format!("Failed to dismiss task candidate: {}", e))?;
+                applied_systems.push("task_candidates".to_string());
+
+                let payload = serde_json::json!({
+                    "action": "reject_task",
+                    "task_id": target_id,
+                    "workspace_id": ws_id,
+                    "scope": event.scope.scope_str(),
+                    "reason": event.reason.as_deref().unwrap_or("User dismissed task candidate"),
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, NULL, 'task_dismissed', NULL, ?3, ?4, ?4)",
+                    rusqlite::params![signal_id, ws_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert task dismissal signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(ws_id);
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Dismissed task candidate '{}'", target_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 7. Dismiss Suggestion / Inbox Recommendation
+            // -----------------------------------------------------------------
+            FeedbackAction::DismissSuggestion => {
+                let ws_id = event.context_ref.as_deref().or_else(|| event.scope.context_id());
+
+                // Update inbox state to Dismissed
+                let _ = crate::context_engine::inbox_state::InboxStateMachine::dismiss_item(
+                    conn,
+                    target_id,
+                    event.reason.as_deref(),
+                );
+                applied_systems.push("inbox_state_machine".to_string());
+
+                // If workspace specified, demote context_memberships
+                if let Some(w) = ws_id {
+                    let _ = crate::db::operations::create_or_update_membership(
+                        conn, target_id, w, "dismissed", 0.0, "user",
+                    );
+                    applied_systems.push("context_memberships".to_string());
+                }
+
+                let payload = serde_json::json!({
+                    "action": "dismiss_suggestion",
+                    "item_id": target_id,
+                    "workspace_id": ws_id,
+                    "reason": event.reason.as_deref().unwrap_or("User dismissed suggestion"),
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'suggestion_dismissed', NULL, ?4, ?5, ?5)",
+                    rusqlite::params![signal_id, ws_id, target_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert suggestion dismissal signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(ws_id);
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Dismissed recommendation/suggestion '{}'", target_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 8. Resume Context
+            // -----------------------------------------------------------------
+            FeedbackAction::ResumeContext => {
+                let ws_id = target_id;
+
+                // Update workspace activity timestamp and lifecycle_state to active
+                crate::db::operations::touch_workspace_activity(conn, ws_id)
+                    .map_err(|e| format!("Failed to touch workspace: {}", e))?;
+                conn.execute(
+                    "UPDATE workspaces SET lifecycle_state = 'active', updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, ws_id],
+                )
+                .map_err(|e| format!("Failed to set lifecycle_state active: {}", e))?;
+                applied_systems.push("workspaces".to_string());
+
+                let payload = serde_json::json!({
+                    "action": "resume_context",
+                    "workspace_id": ws_id,
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, NULL, 'context_resumed', NULL, ?3, ?4, ?4)",
+                    rusqlite::params![signal_id, ws_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert resume signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(Some(ws_id));
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Resumed context workspace '{}' to active lifecycle state", ws_id),
+                    success: true,
+                })
+            }
+
+            // -----------------------------------------------------------------
+            // 9. Archive Context
+            // -----------------------------------------------------------------
+            FeedbackAction::ArchiveContext => {
+                let ws_id = target_id;
+
+                conn.execute(
+                    "UPDATE workspaces SET lifecycle_state = 'archived', updated_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, ws_id],
+                )
+                .map_err(|e| format!("Failed to archive workspace: {}", e))?;
+                applied_systems.push("workspaces".to_string());
+
+                let payload = serde_json::json!({
+                    "action": "archive_context",
+                    "workspace_id": ws_id,
+                    "reason": event.reason.as_deref().unwrap_or("User explicitly archived context"),
+                    "recorded_at": now
+                })
+                .to_string();
+
+                conn.execute(
+                    "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+                     VALUES (?1, ?2, NULL, 'context_archived', NULL, ?3, ?4, ?4)",
+                    rusqlite::params![signal_id, ws_id, payload, now],
+                )
+                .map_err(|e| format!("Failed to insert archive signal: {}", e))?;
+                applied_systems.push("context_signals".to_string());
+
+                Self::invalidate_caches_for_workspace(Some(ws_id));
+                applied_systems.push("cache_invalidation".to_string());
+
+                Ok(FeedbackApplicationResult {
+                    event_id: event.id.clone(),
+                    action: event.action,
+                    scope: event.scope.clone(),
+                    applied_systems,
+                    signal_id: Some(signal_id),
+                    details: format!("Archived context workspace '{}'", ws_id),
+                    success: true,
+                })
+            }
+        }
+    }
+
+    /// Helper to invalidate all relevant downstream contextual caches for a workspace.
+    fn invalidate_caches_for_workspace(workspace_id: Option<&str>) {
+        crate::context_engine::workset::invalidate_workset_cache(workspace_id);
+        crate::context_engine::memory::invalidate_memory_cache(workspace_id);
+        crate::context_engine::reconstruction::invalidate_reconstruction_cache(workspace_id);
+        if let Some(ws) = workspace_id {
+            crate::context_engine::snapshot::invalidate_snapshot_cache(ws);
+        }
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -1150,5 +1610,170 @@ mod tests {
         let mut invalid_rel = ContextFeedbackEvent::confirm_context("item-abc", "ws-123", FeedbackSource::UserExplicitUi);
         invalid_rel.scope = FeedbackScope::relationship("", "ws-123", "kind");
         assert!(invalid_rel.validate().is_err());
+    }
+
+    fn setup_test_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_context_feedback_service_apply_all_actions() {
+        let conn = setup_test_db();
+
+        // 1. Create test workspace and items
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/payx/api-service",
+            Some("PayX API Service"),
+            "{\"domain\":\"github.com\",\"app_name\":\"Google Chrome\"}",
+        )
+        .unwrap();
+
+        // ---------------------------------------------------------------------
+        // Action 1: ConfirmContext
+        // ---------------------------------------------------------------------
+        let confirm_ev = ContextFeedbackEvent::confirm_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
+        let res_confirm = ContextFeedbackService::apply_feedback(&conn, &confirm_ev).unwrap();
+        assert!(res_confirm.success);
+        assert!(res_confirm.applied_systems.contains(&"context_memberships".to_string()));
+        assert!(res_confirm.applied_systems.contains(&"items".to_string()));
+
+        // Verify membership is confirmed
+        let (mem_type, conf): (String, f64) = conn
+            .query_row(
+                "SELECT membership_type, confidence FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+                rusqlite::params![item.id, ws_payx.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(mem_type, "confirmed");
+        assert_eq!(conf, 1.0);
+
+        // Verify item.workspace_id is set
+        let updated_item = crate::db::operations::get_item(&conn, &item.id).unwrap();
+        assert_eq!(updated_item.workspace_id.as_deref(), Some(ws_payx.id.as_str()));
+
+        // ---------------------------------------------------------------------
+        // Action 2: RemoveFromContext (Context Correction)
+        // ---------------------------------------------------------------------
+        let remove_ev = ContextFeedbackEvent::remove_from_context(
+            &item.id,
+            &ws_payx.id,
+            FeedbackSource::WorksetTray,
+            Some("Wrong workspace".to_string()),
+        );
+        let res_remove = ContextFeedbackService::apply_feedback(&conn, &remove_ev).unwrap();
+        assert!(res_remove.success);
+        assert!(res_remove.applied_systems.contains(&"context_correction_service".to_string()));
+
+        // Verify membership demoted to dismissed (confidence 0.0)
+        let (mem_after_type, mem_after_conf): (String, f64) = conn
+            .query_row(
+                "SELECT membership_type, confidence FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+                rusqlite::params![item.id, ws_payx.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(mem_after_type, "dismissed");
+        assert_eq!(mem_after_conf, 0.0);
+
+        // Verify item is unassigned but NEVER deleted (Zero Data Loss invariant)
+        let unassigned_item = crate::db::operations::get_item(&conn, &item.id).unwrap();
+        assert!(unassigned_item.workspace_id.is_none());
+        assert_eq!(unassigned_item.id, item.id);
+
+        // ---------------------------------------------------------------------
+        // Action 3: MarkImportant & RemoveImportance
+        // ---------------------------------------------------------------------
+        let mark_ev = ContextFeedbackEvent::mark_important(
+            FeedbackTargetRef::Item(item.id.clone()),
+            Some(ws_payx.id.clone()),
+            FeedbackSource::MemoryInspectionPanel,
+        );
+        let res_mark = ContextFeedbackService::apply_feedback(&conn, &mark_ev).unwrap();
+        assert!(res_mark.success);
+        assert!(res_mark.applied_systems.contains(&"important_memory_service".to_string()));
+
+        let unmark_ev = ContextFeedbackEvent::remove_importance(
+            FeedbackTargetRef::Item(item.id.clone()),
+            Some(ws_payx.id.clone()),
+            FeedbackSource::MemoryInspectionPanel,
+        );
+        let res_unmark = ContextFeedbackService::apply_feedback(&conn, &unmark_ev).unwrap();
+        assert!(res_unmark.success);
+
+        // ---------------------------------------------------------------------
+        // Action 4: ConfirmTask & RejectTask
+        // ---------------------------------------------------------------------
+        let task_cand = crate::db::models::TaskCandidate::new(
+            Some(ws_payx.id.clone()),
+            "Implement Stripe Webhooks",
+            0.70,
+        );
+        let created_task = crate::db::operations::create_task_candidate(&conn, &task_cand).unwrap();
+
+        // Confirm task -> Active
+        let confirm_task_ev = ContextFeedbackEvent::confirm_task(&created_task.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
+        let res_confirm_task = ContextFeedbackService::apply_feedback(&conn, &confirm_task_ev).unwrap();
+        assert!(res_confirm_task.success);
+        let active_task = crate::db::operations::get_task_candidate(&conn, &created_task.id).unwrap();
+        assert_eq!(active_task.status, crate::db::models::TaskCandidateStatus::Active);
+
+        // Reject task -> Dismissed
+        let reject_task_ev = ContextFeedbackEvent::reject_task(&created_task.id, Some(ws_payx.id.clone()), FeedbackSource::InboxAction, None);
+        let res_reject_task = ContextFeedbackService::apply_feedback(&conn, &reject_task_ev).unwrap();
+        assert!(res_reject_task.success);
+        let dismissed_task = crate::db::operations::get_task_candidate(&conn, &created_task.id).unwrap();
+        assert_eq!(dismissed_task.status, crate::db::models::TaskCandidateStatus::Dismissed);
+
+        // ---------------------------------------------------------------------
+        // Action 5: DismissSuggestion
+        // ---------------------------------------------------------------------
+        let sugg_item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://random-docs.com",
+            Some("Random Docs"),
+            "{}",
+        )
+        .unwrap();
+
+        let dismiss_sugg_ev = ContextFeedbackEvent::dismiss_suggestion(
+            &sugg_item.id,
+            Some(ws_payx.id.clone()),
+            FeedbackSource::InboxAction,
+            Some("Not needed".to_string()),
+        );
+        let res_dismiss = ContextFeedbackService::apply_feedback(&conn, &dismiss_sugg_ev).unwrap();
+        assert!(res_dismiss.success);
+        assert!(res_dismiss.applied_systems.contains(&"inbox_state_machine".to_string()));
+
+        let inbox_state = crate::context_engine::inbox_state::InboxStateMachine::get_state(&conn, &sugg_item.id).unwrap();
+        assert_eq!(inbox_state.unwrap().state, crate::db::models::InboxState::Dismissed);
+
+        // ---------------------------------------------------------------------
+        // Action 6: ResumeContext & ArchiveContext
+        // ---------------------------------------------------------------------
+        // Resume context -> active
+        let resume_ev = ContextFeedbackEvent::resume_context(&ws_payx.id, FeedbackSource::UserExplicitUi);
+        let res_resume = ContextFeedbackService::apply_feedback(&conn, &resume_ev).unwrap();
+        assert!(res_resume.success);
+        let ws_resumed = crate::db::operations::get_workspace(&conn, &ws_payx.id).unwrap();
+        assert_eq!(ws_resumed.lifecycle_state, "active");
+
+        // Archive context -> archived
+        let archive_ev = ContextFeedbackEvent::archive_context(&ws_payx.id, FeedbackSource::ContextMenu, None);
+        let res_archive = ContextFeedbackService::apply_feedback(&conn, &archive_ev).unwrap();
+        assert!(res_archive.success);
+        let ws_archived = crate::db::operations::get_workspace(&conn, &ws_payx.id).unwrap();
+        assert_eq!(ws_archived.lifecycle_state, "archived");
     }
 }

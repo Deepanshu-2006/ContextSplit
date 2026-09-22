@@ -53,8 +53,9 @@ pub mod session_snapshot;
 pub mod feedback;
 
 pub use feedback::{
-    ContextFeedbackEvent, FeedbackAction, FeedbackMetadata, FeedbackScope,
-    FeedbackSource, FeedbackTargetRef, CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
+    ContextFeedbackEvent, ContextFeedbackService, FeedbackAction, FeedbackApplicationResult,
+    FeedbackMetadata, FeedbackScope, FeedbackSource, FeedbackTargetRef,
+    CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
 };
 
 pub use session_snapshot::{
