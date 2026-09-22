@@ -660,6 +660,38 @@ impl ContextEvidence {
         ev
     }
 
+    /// Observed evidence: direct user confirmation of an item/entity into a workspace context.
+    pub fn observed_user_confirmation(
+        item_id: impl Into<String>,
+        workspace_id: &str,
+        workspace_name: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Self {
+        let ws_label = workspace_name.unwrap_or("workspace");
+        let expl = EvidenceExplanation::new(
+            "User Confirmation",
+            format!("User explicitly confirmed association with {}.", ws_label),
+        );
+        let mut ev = Self::new(
+            EvidenceCategory::UserFeedback,
+            EvidenceProvenance::Observed,
+            1.0,
+            item_id.into(),
+            expl,
+        );
+        ev = ev.with_source_ref(EntityReference::workspace(workspace_id, workspace_name.map(|s| s.to_string())));
+        if let Some(ts) = timestamp {
+            ev.observed_at = ts.to_string();
+        }
+        ev.attributes.insert("feedback_type".to_string(), serde_json::json!("user_confirmation"));
+        ev.attributes.insert("workspace_id".to_string(), serde_json::json!(workspace_id));
+        ev.attributes.insert("is_affirmative".to_string(), serde_json::json!(true));
+        if let Some(name) = workspace_name {
+            ev.attributes.insert("workspace_name".to_string(), serde_json::json!(name));
+        }
+        ev
+    }
+
     // =========================================================================
     // Standard Inferred Evidence Factory Methods
     // =========================================================================

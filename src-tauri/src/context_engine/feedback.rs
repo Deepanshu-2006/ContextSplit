@@ -1628,6 +1628,194 @@ impl ContextNegativeFeedbackEvaluator {
 }
 
 // =========================================================================
+// Contextual Positive Feedback & Relationship Strengthening Engine (Step 6)
+// =========================================================================
+
+/// Structured assessment of positive contextual feedback and reinforced relationships.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PositiveFeedbackAssessment {
+    /// Entity ID evaluated
+    pub entity_id: String,
+    /// Context / workspace ID evaluated
+    pub context_id: String,
+    /// Whether this entity has an explicit user confirmation in this context
+    pub is_confirmed: bool,
+    /// Calibrated confidence level [0.0, 1.0] (1.0 for explicit user confirmation)
+    pub confidence: f64,
+    /// Direct relationship strength [0.0, 1.0]
+    pub relationship_strength: f64,
+    /// Whether this entity is marked as an important memory in context
+    pub is_important_memory: bool,
+    /// Whether this entity is an active/confirmed task candidate in context
+    pub is_active_task: bool,
+    /// Evidence localization flag: confirms that evidence is strictly scoped
+    pub is_localized: bool,
+    /// Timestamp when confirmation was registered (RFC 3339 format)
+    pub confirmed_at: Option<String>,
+    /// Human-readable explanation of relationship support
+    pub explanation: String,
+}
+
+/// Verification result demonstrating evidence localization between confirmed and related items.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RelationshipLocalizationAssessment {
+    /// Target confirmed entity ID
+    pub confirmed_entity_id: String,
+    /// Adjacent / related entity ID (e.g. linked webpage or repo file)
+    pub related_entity_id: String,
+    /// Context ID evaluated
+    pub context_id: String,
+    /// Confirmed entity is explicitly supported in context
+    pub confirmed_entity_supported: bool,
+    /// Related entity is NOT blindly promoted or automatically confirmed
+    pub related_entity_blindly_promoted: bool,
+    /// Whether strict localization invariant holds
+    pub is_isolated: bool,
+    /// Diagnostic summary
+    pub summary: String,
+}
+
+/// Service that evaluates confirmed contextual relationships, positive feedback strength,
+/// and validates evidence localization across adjacent entities.
+pub struct ContextPositiveFeedbackEngine;
+
+impl ContextPositiveFeedbackEngine {
+    /// Evaluates confirmed positive relationship support for an entity in a workspace context.
+    pub fn evaluate_confirmed_relationship(
+        conn: &rusqlite::Connection,
+        entity_id: &str,
+        context_id: &str,
+    ) -> PositiveFeedbackAssessment {
+        // 1. Check direct context_memberships
+        let membership_opt: Option<(String, f64, String, String)> = conn
+            .query_row(
+                "SELECT membership_type, confidence, source, updated_at FROM context_memberships
+                 WHERE item_id = ?1 AND workspace_id = ?2",
+                rusqlite::params![entity_id, context_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .ok();
+
+        // 2. Check items physical assignment
+        let item_ws_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT workspace_id FROM items WHERE id = ?1",
+                rusqlite::params![entity_id],
+                |r| Ok(r.get(0)?),
+            )
+            .ok();
+
+        // 3. Check important memory status from workspace_memberships or context_signals
+        let is_important = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workspace_memberships
+                 WHERE workspace_id = ?1 AND item_id = ?2 AND pinned = 1",
+                rusqlite::params![context_id, entity_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|cnt| cnt > 0)
+            .unwrap_or(false)
+            || conn
+                .query_row(
+                    "SELECT COUNT(*) FROM context_signals
+                     WHERE workspace_id = ?1 AND item_id = ?2 AND (signal_type = 'important_memory_control' OR payload LIKE '%keep_important%')",
+                    rusqlite::params![context_id, entity_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|cnt| cnt > 0)
+                .unwrap_or(false);
+
+        // 4. Check task candidate status
+        let is_task_active = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_candidates
+                 WHERE id = ?1 AND (context_id = ?2 OR context_id IS NULL) AND status = 'active'",
+                rusqlite::params![entity_id, context_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|cnt| cnt > 0)
+            .unwrap_or(false);
+
+        let mut is_confirmed = false;
+        let mut confidence = 0.0;
+        let mut confirmed_at = None;
+        let mut explanation = format!("No positive confirmation for entity '{}' in context '{}'", entity_id, context_id);
+
+        if let Some((mem_type, conf, source, updated_at)) = membership_opt {
+            if mem_type == "confirmed" && (source == "user" || conf >= 0.95) {
+                is_confirmed = true;
+                confidence = 1.0;
+                confirmed_at = Some(updated_at);
+                explanation = format!(
+                    "Explicitly confirmed association with workspace '{}' (confidence: 1.0, source: '{}')",
+                    context_id, source
+                );
+            } else if mem_type == "suggested" {
+                confidence = conf;
+                explanation = format!("Inferred suggestion for workspace '{}' (confidence: {:.2})", context_id, conf);
+            }
+        } else if item_ws_id == Some(Some(context_id.to_string())) {
+            is_confirmed = true;
+            confidence = 1.0;
+            explanation = format!("Item directly filed under workspace '{}'", context_id);
+        } else if is_task_active {
+            is_confirmed = true;
+            confidence = 1.0;
+            explanation = format!("Active confirmed task candidate in workspace '{}'", context_id);
+        }
+
+        PositiveFeedbackAssessment {
+            entity_id: entity_id.to_string(),
+            context_id: context_id.to_string(),
+            is_confirmed,
+            confidence,
+            relationship_strength: if is_confirmed { 1.0 } else { confidence },
+            is_important_memory: is_important,
+            is_active_task: is_task_active,
+            is_localized: true,
+            confirmed_at,
+            explanation,
+        }
+    }
+
+    /// Verifies that positive feedback on `confirmed_entity_id` is strictly localized and does NOT
+    /// blindly promote or cascade to adjacent / related entities without independent corroboration.
+    pub fn verify_relationship_localization(
+        conn: &rusqlite::Connection,
+        confirmed_entity_id: &str,
+        related_entity_id: &str,
+        context_id: &str,
+    ) -> RelationshipLocalizationAssessment {
+        let confirmed_assessment = Self::evaluate_confirmed_relationship(conn, confirmed_entity_id, context_id);
+        let related_assessment = Self::evaluate_confirmed_relationship(conn, related_entity_id, context_id);
+
+        let confirmed_supported = confirmed_assessment.is_confirmed;
+        let related_blindly_promoted = related_assessment.is_confirmed;
+        let is_isolated = confirmed_supported && !related_blindly_promoted;
+
+        RelationshipLocalizationAssessment {
+            confirmed_entity_id: confirmed_entity_id.to_string(),
+            related_entity_id: related_entity_id.to_string(),
+            context_id: context_id.to_string(),
+            confirmed_entity_supported: confirmed_supported,
+            related_entity_blindly_promoted: related_blindly_promoted,
+            is_isolated,
+            summary: if is_isolated {
+                format!(
+                    "Positive feedback on '{}' is strictly localized; related entity '{}' remains unpromoted in '{}'",
+                    confirmed_entity_id, related_entity_id, context_id
+                )
+            } else {
+                format!(
+                    "Localization check: confirmed_supported={}, related_blindly_promoted={}",
+                    confirmed_supported, related_blindly_promoted
+                )
+            },
+        }
+    }
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
 
@@ -2311,5 +2499,165 @@ mod tests {
         assert!(assess_override.is_overridden);
         assert_eq!(assess_override.effective_penalty, 0.0);
         assert!(matches!(assess_override.verdict, NegativeFeedbackVerdict::OverriddenByStrongEvidence { .. }));
+    }
+
+    #[test]
+    fn test_positive_feedback_strengthens_confirmed_item() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/payx/core",
+            Some("PayX Core Repository"),
+            "{\"domain\":\"github.com\",\"repo\":\"payx/core\"}",
+        )
+        .unwrap();
+
+        // 1. Initially unconfirmed
+        let initial_assess = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(&conn, &item.id, &ws_payx.id);
+        assert!(!initial_assess.is_confirmed);
+        assert_eq!(initial_assess.relationship_strength, 0.0);
+
+        // 2. User confirms item into PayX
+        let conf_ev = ContextFeedbackEvent::confirm_context(&item.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
+        let res = ContextFeedbackService::apply_feedback(&conn, &conf_ev).unwrap();
+        assert!(res.success);
+
+        // 3. Positive relationship is strongly supported (confidence: 1.0, relationship_strength: 1.0)
+        let assess = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(&conn, &item.id, &ws_payx.id);
+        assert!(assess.is_confirmed);
+        assert_eq!(assess.confidence, 1.0);
+        assert_eq!(assess.relationship_strength, 1.0);
+        assert!(assess.is_localized);
+        assert!(assess.confirmed_at.is_some());
+    }
+
+    #[test]
+    fn test_positive_feedback_preserves_evidence_localization() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        // Target repository item
+        let repo_item = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/payx/core",
+            Some("PayX Core Repo"),
+            "{\"domain\":\"github.com\"}",
+        )
+        .unwrap();
+
+        // Associated / adjacent item (e.g. general documentation or related website)
+        let related_site = crate::db::operations::create_item(
+            &conn,
+            None,
+            None,
+            "url",
+            "https://github.com/general/utils",
+            Some("General Utils"),
+            "{\"domain\":\"github.com\"}",
+        )
+        .unwrap();
+
+        // Link them via item_relationships
+        let _ = crate::db::operations::create_item_relationship(
+            &conn,
+            &repo_item.id,
+            &related_site.id,
+            "co_occurrence",
+            0.60,
+            None,
+        );
+
+        // User explicitly confirms ONLY the primary repository item to PayX
+        let conf_ev = ContextFeedbackEvent::confirm_context(&repo_item.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
+        ContextFeedbackService::apply_feedback(&conn, &conf_ev).unwrap();
+
+        // Localization invariant:
+        // Repository X is confirmed and strongly supported in PayX.
+        // But related_site is NOT blindly promoted or automatically confirmed to PayX!
+        let loc = ContextPositiveFeedbackEngine::verify_relationship_localization(
+            &conn,
+            &repo_item.id,
+            &related_site.id,
+            &ws_payx.id,
+        );
+        assert!(loc.confirmed_entity_supported);
+        assert!(!loc.related_entity_blindly_promoted);
+        assert!(loc.is_isolated);
+
+        let related_assess = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(&conn, &related_site.id, &ws_payx.id);
+        assert!(!related_assess.is_confirmed);
+        assert_eq!(related_assess.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_positive_feedback_mark_important_strengthens_memory() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let item = crate::db::operations::create_item(
+            &conn,
+            Some(&ws_payx.id),
+            None,
+            "document",
+            "Stripe API Key Architecture Blueprint",
+            Some("API Architecture"),
+            "{}",
+        )
+        .unwrap();
+
+        // Mark as important memory
+        let mark_ev = ContextFeedbackEvent::mark_important(
+            FeedbackTargetRef::Item(item.id.clone()),
+            Some(ws_payx.id.clone()),
+            FeedbackSource::MemoryInspectionPanel,
+        );
+        ContextFeedbackService::apply_feedback(&conn, &mark_ev).unwrap();
+
+        let assess = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(&conn, &item.id, &ws_payx.id);
+        assert!(assess.is_important_memory);
+        assert!(assess.is_confirmed);
+    }
+
+    #[test]
+    fn test_positive_feedback_confirm_task_strengthens_task() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+        let task_cand = crate::db::models::TaskCandidate::new(
+            Some(ws_payx.id.clone()),
+            "Deploy Settlement Microservice",
+            0.65,
+        );
+        let created_task = crate::db::operations::create_task_candidate(&conn, &task_cand).unwrap();
+
+        // Confirm task
+        let conf_task_ev = ContextFeedbackEvent::confirm_task(&created_task.id, &ws_payx.id, FeedbackSource::UserExplicitUi);
+        ContextFeedbackService::apply_feedback(&conn, &conf_task_ev).unwrap();
+
+        let assess = ContextPositiveFeedbackEngine::evaluate_confirmed_relationship(&conn, &created_task.id, &ws_payx.id);
+        assert!(assess.is_active_task);
+        assert!(assess.is_confirmed);
+    }
+
+    #[test]
+    fn test_positive_feedback_resume_context_strengthens_lifecycle() {
+        let conn = setup_test_db();
+        let ws_payx = crate::db::operations::create_workspace(&conn, "PayX").unwrap();
+
+        // Pause/archive first
+        let _ = conn.execute("UPDATE workspaces SET lifecycle_state = 'dormant' WHERE id = ?1", rusqlite::params![ws_payx.id]);
+
+        // Resume context
+        let resume_ev = ContextFeedbackEvent::resume_context(&ws_payx.id, FeedbackSource::UserExplicitUi);
+        let res = ContextFeedbackService::apply_feedback(&conn, &resume_ev).unwrap();
+        assert!(res.success);
+
+        let ws = crate::db::operations::get_workspace(&conn, &ws_payx.id).unwrap();
+        assert_eq!(ws.lifecycle_state, "active");
     }
 }

@@ -54,8 +54,9 @@ pub mod feedback;
 
 pub use feedback::{
     ContextFeedbackEvent, ContextFeedbackService, ContextNegativeFeedbackEvaluator,
-    FeedbackAction, FeedbackApplicationResult, FeedbackMetadata, FeedbackScope, FeedbackSource,
-    FeedbackTargetRef, NegativeFeedbackAssessment, NegativeFeedbackVerdict,
+    ContextPositiveFeedbackEngine, FeedbackAction, FeedbackApplicationResult, FeedbackMetadata,
+    FeedbackScope, FeedbackSource, FeedbackTargetRef, NegativeFeedbackAssessment,
+    NegativeFeedbackVerdict, PositiveFeedbackAssessment, RelationshipLocalizationAssessment,
     CONTEXT_FEEDBACK_EVENT_DISCLAIMER,
 };
 
