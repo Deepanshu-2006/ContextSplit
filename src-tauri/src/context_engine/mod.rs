@@ -56,6 +56,12 @@ pub mod decision_explanation;
 pub mod lifecycle_explanation;
 pub mod memory_explanation;
 pub mod feedback_explanation;
+pub mod health_check;
+
+pub use health_check::{
+    ContextHealthCheckService, ContextHealthIssue, ContextHealthReport, ContextHealthStatus,
+    HealthIssueCategory, HealthIssueSeverity, CONTEXT_HEALTH_CHECK_DISCLAIMER,
+};
 
 pub use feedback_explanation::{
     ContextFeedbackEffectExplanation, ContextFeedbackExplanationService,
