@@ -57,6 +57,12 @@ pub mod lifecycle_explanation;
 pub mod memory_explanation;
 pub mod feedback_explanation;
 pub mod health_check;
+pub mod cross_system_consistency;
+
+pub use cross_system_consistency::{
+    ContextIdentityMismatch, CrossSystemConsistencyChecker, CrossSystemConsistencyReport,
+    SubsystemIdentityCheck, WorkspaceCrossSystemReport, CROSS_SYSTEM_CONSISTENCY_DISCLAIMER,
+};
 
 pub use health_check::{
     ContextHealthCheckService, ContextHealthIssue, ContextHealthReport, ContextHealthStatus,
