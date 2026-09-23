@@ -6,6 +6,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::context_engine::evidence::{ContextEvidence, EvidenceCategory, EvidenceProvenance};
+use crate::context_engine::feedback::ContextFeedbackEvent;
+
 // =========================================================================
 // Epistemic Disclaimer
 // =========================================================================
@@ -228,6 +231,59 @@ pub struct CandidateContextTrace {
 }
 
 // =========================================================================
+// Qualitative Evidence Strength Rating
+// =========================================================================
+
+/// Qualitative strength rating derived from existing evidence metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStrengthRating {
+    Definite,
+    Strong,
+    Medium,
+    Weak,
+}
+
+impl EvidenceStrengthRating {
+    /// Maps a normalized strength in [0.0, 1.0] to a qualitative rating.
+    pub fn from_f64(val: f64) -> Self {
+        if val >= 0.95 {
+            Self::Definite
+        } else if val >= 0.70 {
+            Self::Strong
+        } else if val >= 0.40 {
+            Self::Medium
+        } else {
+            Self::Weak
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Definite => "definite",
+            Self::Strong => "strong",
+            Self::Medium => "medium",
+            Self::Weak => "weak",
+        }
+    }
+
+    pub fn display_title(&self) -> &'static str {
+        match self {
+            Self::Definite => "Definite",
+            Self::Strong => "Strong",
+            Self::Medium => "Medium",
+            Self::Weak => "Weak",
+        }
+    }
+}
+
+impl std::fmt::Display for EvidenceStrengthRating {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+// =========================================================================
 // Evidence Considered Trace
 // =========================================================================
 
@@ -237,11 +293,145 @@ pub struct EvidenceConsideredTrace {
     pub evidence_id: Option<String>,
     pub category: String,
     pub provenance: String,
+    pub signal_name: String,
+    pub signal_value: String,
+    pub strength_rating: Option<EvidenceStrengthRating>,
     pub strength: f64,
     pub effective_weight: f64,
     pub summary: String,
     pub is_contradictory: bool,
     pub is_correlated: bool,
+}
+
+impl EvidenceConsideredTrace {
+    /// Creates a direct evidence trace item from human-readable signal name and value.
+    pub fn new(signal_name: impl Into<String>, signal_value: impl Into<String>) -> Self {
+        let name = signal_name.into();
+        let val = signal_value.into();
+        let summary = format!("{}: {}", name, val);
+        Self {
+            evidence_id: None,
+            category: "custom".to_string(),
+            provenance: "observed".to_string(),
+            signal_name: name,
+            signal_value: val,
+            strength_rating: None,
+            strength: 1.0,
+            effective_weight: 1.0,
+            summary,
+            is_contradictory: false,
+            is_correlated: false,
+        }
+    }
+
+    pub fn with_strength_rating(mut self, rating: EvidenceStrengthRating) -> Self {
+        self.strength_rating = Some(rating);
+        self
+    }
+
+    pub fn with_strength(mut self, strength: f64) -> Self {
+        self.strength = strength.clamp(0.0, 1.0);
+        self.strength_rating = Some(EvidenceStrengthRating::from_f64(self.strength));
+        self
+    }
+
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = category.into();
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = provenance.into();
+        self
+    }
+
+    /// Converts an existing `ContextEvidence` record into an `EvidenceConsideredTrace`.
+    pub fn from_context_evidence(ev: &ContextEvidence) -> Self {
+        let category_str = ev.category.as_str().to_string();
+        let provenance_str = ev.provenance.as_str().to_string();
+        let rating = EvidenceStrengthRating::from_f64(ev.strength);
+
+        let (signal_name, signal_value) = match ev.category {
+            EvidenceCategory::SourceApp => {
+                let app = ev.attributes.get("app_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| &ev.explanation.title);
+                ("Application".to_string(), app.to_string())
+            }
+            EvidenceCategory::SourceWindow => {
+                let title = ev.attributes.get("window_title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| &ev.explanation.title);
+                ("Window title".to_string(), title.to_string())
+            }
+            EvidenceCategory::BrowserDomain => {
+                let domain = ev.attributes.get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| &ev.explanation.title);
+                ("Browser domain".to_string(), domain.to_string())
+            }
+            EvidenceCategory::BrowserUrl => {
+                if let Some(slug) = ev.attributes.get("repo_slug").and_then(|v| v.as_str()) {
+                    ("Repository".to_string(), slug.to_string())
+                } else {
+                    let url = ev.attributes.get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_else(|| &ev.explanation.title);
+                    ("Browser URL".to_string(), url.to_string())
+                }
+            }
+            EvidenceCategory::FileMetadata => {
+                let path = ev.attributes.get("file_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| &ev.explanation.title);
+                ("Project path".to_string(), path.to_string())
+            }
+            EvidenceCategory::SemanticSimilarity => {
+                ("Semantic similarity".to_string(), rating.as_str().to_string())
+            }
+            EvidenceCategory::WorkspaceHistory | EvidenceCategory::SameSession => {
+                let ws = ev.attributes.get("workspace_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| &ev.explanation.title);
+                ("Recent context activity".to_string(), ws.to_string())
+            }
+            EvidenceCategory::ConfirmedMembership | EvidenceCategory::UserFeedback => {
+                ("User feedback".to_string(), ev.explanation.description.clone())
+            }
+            _ => (ev.category.as_str().to_string(), ev.explanation.title.clone()),
+        };
+
+        Self {
+            evidence_id: Some(ev.id.clone()),
+            category: category_str,
+            provenance: provenance_str,
+            signal_name,
+            signal_value,
+            strength_rating: Some(rating),
+            strength: ev.strength,
+            effective_weight: ev.strength,
+            summary: ev.explanation.description.clone(),
+            is_contradictory: false,
+            is_correlated: false,
+        }
+    }
+
+    /// Converts a user `ContextFeedbackEvent` into an `EvidenceConsideredTrace`.
+    pub fn from_feedback_event(fb: &ContextFeedbackEvent) -> Self {
+        Self {
+            evidence_id: Some(fb.id.clone()),
+            category: "user_feedback".to_string(),
+            provenance: "observed".to_string(),
+            signal_name: "User feedback".to_string(),
+            signal_value: fb.action.display_name().to_string(),
+            strength_rating: Some(EvidenceStrengthRating::Definite),
+            strength: 1.0,
+            effective_weight: 1.0,
+            summary: format!("User feedback: {}", fb.action.display_name()),
+            is_contradictory: false,
+            is_correlated: false,
+        }
+    }
 }
 
 // =========================================================================
@@ -358,6 +548,53 @@ pub struct ContextDecisionTrace {
     pub disclaimer: &'static str,
     /// Additional debugging metadata
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+impl ContextDecisionTrace {
+    /// Formats a developer-readable contextual evidence report matching the standard observability format.
+    pub fn format_evidence_report(&self) -> String {
+        let mut out = String::new();
+
+        out.push_str("Decision:\n");
+        let decision_target = self
+            .final_decision
+            .primary_context_name
+            .as_deref()
+            .or(self.final_decision.primary_context_id.as_deref())
+            .unwrap_or("Workspace");
+
+        let decision_line = match self.decision_type {
+            DecisionType::ContextAssignment => format!("Assign item to {}", decision_target),
+            DecisionType::ContextRejection => format!("Reject item from {}", decision_target),
+            DecisionType::ContextTransition => format!("Transition focus to {}", decision_target),
+            DecisionType::TaskAssignment => format!("Assign task to {}", decision_target),
+            DecisionType::MemoryCreation => format!("Create memory for {}", decision_target),
+            DecisionType::MemoryImportance => format!("Evaluate memory importance for {}", decision_target),
+            DecisionType::SnapshotCreation => format!("Create snapshot for {}", decision_target),
+            DecisionType::LifecycleTransition => format!("Update lifecycle for {}", decision_target),
+            DecisionType::ContextReconstruction => format!("Reconstruct context for {}", decision_target),
+            DecisionType::ResumeReadiness => format!("Assess resume readiness for {}", decision_target),
+            DecisionType::FeedbackAdaptation => format!("Apply user feedback for {}", decision_target),
+        };
+        out.push_str(&decision_line);
+        out.push_str("\n\nEvidence:\n\n");
+
+        for ev in &self.evidence_considered {
+            out.push_str(&format!("{}:\n{}\n", ev.signal_name, ev.signal_value));
+            if let Some(strength) = ev.strength_rating {
+                out.push_str(&format!("Strength:\n{}\n\n", strength.as_str()));
+            } else {
+                out.push('\n');
+            }
+        }
+
+        for fb in &self.feedback_considered {
+            out.push_str(&format!("User feedback:\n{}\n\n", fb.rationale));
+        }
+
+        out.push_str(&format!("Final:\n{}\n", self.final_decision.status));
+        out
+    }
 }
 
 // =========================================================================
@@ -1266,16 +1503,12 @@ mod tests {
             Some("Dashboard ?token=secret_12345&tab=home"),
         )
         .with_reason("Navigated to https://example.com/api?access_token=super_secret_token_99999&auth=true")
-        .with_evidence(EvidenceConsideredTrace {
-            evidence_id: Some("ev-1".to_string()),
-            category: "BrowserUrl".to_string(),
-            provenance: "browser".to_string(),
-            strength: 0.9,
-            effective_weight: 0.8,
-            summary: "URL contains key=my_api_key_12345 in query".to_string(),
-            is_contradictory: false,
-            is_correlated: false,
-        })
+        .with_evidence(
+            EvidenceConsideredTrace::new("BrowserUrl", "URL contains key=my_api_key_12345 in query")
+                .with_strength(0.9)
+                .with_category("BrowserUrl")
+                .with_provenance("browser"),
+        )
         .build();
 
         sanitize_trace(&mut trace);
@@ -1320,6 +1553,107 @@ mod tests {
         assert_eq!(recent[0].source_entity.entity_id(), "item-9");
         // Oldest retained should be item-5
         assert_eq!(recent[4].source_entity.entity_id(), "item-5");
+    }
+
+    #[test]
+    fn test_evidence_strength_rating_mapping() {
+        assert_eq!(EvidenceStrengthRating::from_f64(1.0), EvidenceStrengthRating::Definite);
+        assert_eq!(EvidenceStrengthRating::from_f64(0.85), EvidenceStrengthRating::Strong);
+        assert_eq!(EvidenceStrengthRating::from_f64(0.55), EvidenceStrengthRating::Medium);
+        assert_eq!(EvidenceStrengthRating::from_f64(0.20), EvidenceStrengthRating::Weak);
+        assert_eq!(EvidenceStrengthRating::Strong.as_str(), "strong");
+        assert_eq!(EvidenceStrengthRating::Medium.as_str(), "medium");
+        assert_eq!(EvidenceStrengthRating::Weak.as_str(), "weak");
+    }
+
+    #[test]
+    fn test_evidence_trace_from_context_evidence() {
+        let mut app_ev = ContextEvidence::observed_app("item-1", "VS Code", None);
+        app_ev.strength = 0.35;
+        let trace_app = EvidenceConsideredTrace::from_context_evidence(&app_ev);
+        assert_eq!(trace_app.signal_name, "Application");
+        assert_eq!(trace_app.signal_value, "VS Code");
+        assert_eq!(trace_app.strength_rating, Some(EvidenceStrengthRating::Weak));
+
+        let mut url_ev = ContextEvidence::observed_url("item-1", "https://github.com/org/PayX/pull/42", None);
+        url_ev.attributes.insert("repo_slug".to_string(), serde_json::json!("PayX"));
+        url_ev.strength = 0.85;
+        let trace_repo = EvidenceConsideredTrace::from_context_evidence(&url_ev);
+        assert_eq!(trace_repo.signal_name, "Repository");
+        assert_eq!(trace_repo.signal_value, "PayX");
+        assert_eq!(trace_repo.strength_rating, Some(EvidenceStrengthRating::Strong));
+    }
+
+    #[test]
+    fn test_formatted_evidence_report_exact_match() {
+        let trace = ContextDecisionTraceBuilder::new_context_assignment(
+            "item-payx",
+            Some("VS Code"),
+            Some("CheckoutController.ts"),
+        )
+        .with_outcome("accepted", Some("ctx-payx"), Some("PayX"), Some("confirmed"), "Assigned item to PayX")
+        .with_evidence(
+            EvidenceConsideredTrace::new("Repository", "PayX")
+                .with_strength_rating(EvidenceStrengthRating::Strong),
+        )
+        .with_evidence(
+            EvidenceConsideredTrace::new("Project path", "Projects/PayX")
+                .with_strength_rating(EvidenceStrengthRating::Strong),
+        )
+        .with_evidence(
+            EvidenceConsideredTrace::new("Recent context activity", "PayX")
+                .with_strength_rating(EvidenceStrengthRating::Medium),
+        )
+        .with_evidence(
+            EvidenceConsideredTrace::new("Semantic similarity", "medium"),
+        )
+        .with_evidence(
+            EvidenceConsideredTrace::new("Application", "VS Code")
+                .with_strength_rating(EvidenceStrengthRating::Weak),
+        )
+        .with_evidence(
+            EvidenceConsideredTrace::new("User feedback", "confirmed repository relationship"),
+        )
+        .build();
+
+        let report = trace.format_evidence_report();
+
+        let expected = "\
+Decision:
+Assign item to PayX
+
+Evidence:
+
+Repository:
+PayX
+Strength:
+strong
+
+Project path:
+Projects/PayX
+Strength:
+strong
+
+Recent context activity:
+PayX
+Strength:
+medium
+
+Semantic similarity:
+medium
+
+Application:
+VS Code
+Strength:
+weak
+
+User feedback:
+confirmed repository relationship
+
+Final:
+accepted
+";
+        assert_eq!(report.trim(), expected.trim());
     }
 }
 
