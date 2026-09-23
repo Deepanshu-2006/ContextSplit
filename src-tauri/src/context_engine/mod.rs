@@ -53,6 +53,12 @@ pub mod session_snapshot;
 pub mod feedback;
 pub mod decision_trace;
 pub mod decision_explanation;
+pub mod lifecycle_explanation;
+
+pub use lifecycle_explanation::{
+    ContextLifecycleTransitionExplanation, ContextLifecycleExplanationService,
+    LIFECYCLE_TRANSITION_EXPLANATION_DISCLAIMER,
+};
 
 pub use timeline::{
     format_timestamp_display, get_context_timeline, ContextTimelineCategory, ContextTimelineFilter,

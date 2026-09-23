@@ -264,6 +264,13 @@ impl ContextDecisionExplanationService {
             .map(|t| Self::explain(&t))
             .collect()
     }
+
+    /// Explains a lifecycle transition trace specifically using the developer diagnostics format.
+    pub fn explain_lifecycle_transition(
+        trace: &ContextDecisionTrace,
+    ) -> crate::context_engine::lifecycle_explanation::ContextLifecycleTransitionExplanation {
+        crate::context_engine::lifecycle_explanation::ContextLifecycleExplanationService::explain_decision_trace(trace)
+    }
 }
 
 // =========================================================================
@@ -441,5 +448,21 @@ PayX
         let explanation = ContextDecisionExplanationService::explain(&trace);
         assert_eq!(explanation.headline, "WHY DID FOCUS SWITCH TO CONTEXTSPLIT?");
         assert!(explanation.primary_evidence.iter().any(|s| s.contains("Observed 3 consecutive telemetry events")));
+    }
+
+    #[test]
+    fn test_lifecycle_transition_explanation_via_decision_service() {
+        let trace = ContextDecisionTraceBuilder::new_lifecycle_transition("ctx-cs", "ContextSplit")
+            .with_lifecycle_state("active")
+            .with_outcome("resumed", Some("ctx-cs"), Some("ContextSplit"), Some("active"), "ContextSplit resumed")
+            .with_reason("ContextSplit repository opened and project files active")
+            .build();
+
+        let expl = ContextDecisionExplanationService::explain_lifecycle_transition(&trace);
+        assert_eq!(expl.context_name, "ContextSplit");
+        assert_eq!(expl.state_transition_display(), "PAUSED → ACTIVE");
+        assert!(expl.is_valid_evidence_based());
+        assert!(expl.format_diagnostic().contains("ContextSplit"));
+        assert!(expl.format_diagnostic().contains("PAUSED → ACTIVE"));
     }
 }
