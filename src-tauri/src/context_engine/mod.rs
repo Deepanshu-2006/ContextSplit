@@ -59,6 +59,12 @@ pub mod feedback_explanation;
 pub mod health_check;
 pub mod cross_system_consistency;
 pub mod performance_tracing;
+pub mod diagnostics_guard;
+
+pub use diagnostics_guard::{
+    get_diagnostics_controller, DiagnosticsController, DiagnosticsMode, DiagnosticsPolicy,
+    DiagnosticsSafetyStatus, CONTEXT_DIAGNOSTICS_SAFETY_DISCLAIMER,
+};
 
 pub use performance_tracing::{
     start_span, get_performance_tracer, ActiveSpan, CategoryPerformanceSummary,
