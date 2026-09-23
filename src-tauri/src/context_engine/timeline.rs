@@ -498,6 +498,660 @@ pub fn get_context_timeline(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Day 26 Step 5: Development-Only Context Timeline Inspector
+// ---------------------------------------------------------------------------
+
+pub const CONTEXT_TIMELINE_INSPECTOR_DISCLAIMER: &str =
+    "Development-only context timeline inspector. Strictly non-hallucinatory, aggregates existing database records without secondary event stores.";
+
+/// High-level event categories for the developer timeline inspector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTimelineCategory {
+    Lifecycle,
+    Task,
+    Memory,
+    Assignment,
+    Feedback,
+    Snapshot,
+}
+
+impl ContextTimelineCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Lifecycle => "lifecycle",
+            Self::Task => "task",
+            Self::Memory => "memory",
+            Self::Assignment => "assignment",
+            Self::Feedback => "feedback",
+            Self::Snapshot => "snapshot",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().trim() {
+            "lifecycle" => Some(Self::Lifecycle),
+            "task" => Some(Self::Task),
+            "memory" => Some(Self::Memory),
+            "assignment" => Some(Self::Assignment),
+            "feedback" => Some(Self::Feedback),
+            "snapshot" => Some(Self::Snapshot),
+            _ => None,
+        }
+    }
+}
+
+/// A concise, developer-readable event in the contextual timeline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ContextTimelineInspectorEvent {
+    pub id: String,
+    pub timestamp: String,
+    pub time_display: String,
+    pub category: ContextTimelineCategory,
+    pub headline: String,
+    pub detail: Option<String>,
+    pub entity_id: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+/// Filter options for querying the contextual timeline.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ContextTimelineFilter {
+    pub categories: Option<HashSet<ContextTimelineCategory>>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub search_query: Option<String>,
+    pub limit: Option<usize>,
+    pub reverse: bool,
+}
+
+impl ContextTimelineFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_category(mut self, cat: ContextTimelineCategory) -> Self {
+        let mut set = self.categories.unwrap_or_default();
+        set.insert(cat);
+        self.categories = Some(set);
+        self
+    }
+
+    pub fn with_categories<I: IntoIterator<Item = ContextTimelineCategory>>(mut self, cats: I) -> Self {
+        let mut set = self.categories.unwrap_or_default();
+        for c in cats {
+            set.insert(c);
+        }
+        self.categories = Some(set);
+        self
+    }
+
+    pub fn with_time_range(mut self, start: Option<String>, end: Option<String>) -> Self {
+        self.start_time = start;
+        self.end_time = end;
+        self
+    }
+
+    pub fn with_search(mut self, query: impl Into<String>) -> Self {
+        self.search_query = Some(query.into());
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn with_reverse(mut self, reverse: bool) -> Self {
+        self.reverse = reverse;
+        self
+    }
+
+    pub fn only_lifecycle() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Lifecycle)
+    }
+
+    pub fn only_task() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Task)
+    }
+
+    pub fn only_memory() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Memory)
+    }
+
+    pub fn only_assignment() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Assignment)
+    }
+
+    pub fn only_feedback() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Feedback)
+    }
+
+    pub fn only_snapshot() -> Self {
+        Self::new().with_category(ContextTimelineCategory::Snapshot)
+    }
+
+    pub fn matches(&self, event: &ContextTimelineInspectorEvent) -> bool {
+        if let Some(cats) = &self.categories {
+            if !cats.contains(&event.category) {
+                return false;
+            }
+        }
+        if let Some(start) = &self.start_time {
+            if event.timestamp < *start {
+                return false;
+            }
+        }
+        if let Some(end) = &self.end_time {
+            if event.timestamp > *end {
+                return false;
+            }
+        }
+        if let Some(q) = &self.search_query {
+            let q_lower = q.to_lowercase();
+            let headline_match = event.headline.to_lowercase().contains(&q_lower);
+            let detail_match = event
+                .detail
+                .as_ref()
+                .map(|d| d.to_lowercase().contains(&q_lower))
+                .unwrap_or(false);
+            if !headline_match && !detail_match {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Chronological report containing contextual timeline events for developer inspection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContextTimelineInspectorReport {
+    pub context_id: String,
+    pub context_name: String,
+    pub total_events: usize,
+    pub events: Vec<ContextTimelineInspectorEvent>,
+    pub categories_present: Vec<ContextTimelineCategory>,
+    pub first_event_at: Option<String>,
+    pub latest_event_at: Option<String>,
+}
+
+impl ContextTimelineInspectorReport {
+    /// Formats the chronological events into the standard developer-readable timeline view.
+    /// Example:
+    /// 09:00
+    /// Context became active
+    ///
+    /// 09:05
+    /// Repository detected
+    pub fn format_developer_view(&self) -> String {
+        let mut out = String::new();
+        for (i, ev) in self.events.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\n\n");
+            }
+            out.push_str(&format!("{}\n{}", ev.time_display, ev.headline));
+        }
+        out
+    }
+
+    /// Formats the timeline view including optional sanitized details.
+    pub fn format_detailed_developer_view(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("CONTEXT TIMELINE: {}\n", self.context_name.to_uppercase()));
+        out.push_str(&format!("ID: {}\n", self.context_id));
+        out.push_str(&format!("Total Events: {}\n", self.total_events));
+        out.push_str("----------------------------------------\n\n");
+        for (i, ev) in self.events.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\n\n");
+            }
+            out.push_str(&format!("{}\n{}", ev.time_display, ev.headline));
+            if let Some(detail) = &ev.detail {
+                if !detail.is_empty() {
+                    out.push_str(&format!("\n  {}", detail));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Formats a raw timestamp or ISO-8601 string to a clean `HH:MM` developer time display.
+pub fn format_timestamp_display(ts: &str) -> String {
+    if ts.len() == 5 && ts.contains(':') {
+        return ts.to_string();
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return dt.format("%H:%M").to_string();
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
+        return dt.format("%H:%M").to_string();
+    }
+    if let Some(t_idx) = ts.find('T') {
+        if ts.len() >= t_idx + 6 {
+            return ts[t_idx + 1..t_idx + 6].to_string();
+        }
+    }
+    ts.to_string()
+}
+
+/// Inspector service to build contextual timelines without duplicate event stores.
+pub struct ContextTimelineInspector;
+
+impl ContextTimelineInspector {
+    /// Reconstructs the chronological event timeline for a given context directly from existing database tables.
+    pub fn inspect_context(
+        conn: &Connection,
+        context_id: &str,
+        filter: Option<&ContextTimelineFilter>,
+    ) -> Result<ContextTimelineInspectorReport, String> {
+        let ws = crate::db::operations::get_workspace(conn, context_id)
+            .map_err(|e| format!("Context '{}' not found: {}", context_id, e))?;
+
+        let mut events: Vec<ContextTimelineInspectorEvent> = Vec::new();
+
+        // 1. LIFECYCLE: Sessions & Transitions
+        // Fetch sessions linked to this context
+        let mut session_ids = HashSet::new();
+        if let Ok(all_sessions) = crate::db::operations::list_sessions(conn) {
+            for sess in all_sessions {
+                // Check if session had activity in this workspace
+                let has_items = conn.query_row(
+                    "SELECT COUNT(*) FROM items WHERE session_id = ?1 AND (workspace_id = ?2 OR id IN (SELECT item_id FROM context_memberships WHERE workspace_id = ?2))",
+                    params![sess.id, context_id],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap_or(0) > 0;
+
+                let has_signals = conn.query_row(
+                    "SELECT COUNT(*) FROM context_signals WHERE session_id = ?1 AND workspace_id = ?2",
+                    params![sess.id, context_id],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap_or(0) > 0;
+
+                if has_items || has_signals {
+                    session_ids.insert(sess.id.clone());
+
+                    events.push(ContextTimelineInspectorEvent {
+                        id: format!("sess-start-{}", sess.id),
+                        timestamp: sess.started_at.clone(),
+                        time_display: format_timestamp_display(&sess.started_at),
+                        category: ContextTimelineCategory::Lifecycle,
+                        headline: "Context became active".to_string(),
+                        detail: Some(format!("Session status: {}", sess.status)),
+                        entity_id: Some(sess.id.clone()),
+                        metadata: serde_json::json!({
+                            "session_id": sess.id,
+                            "status": sess.status,
+                        }),
+                    });
+
+                    if let Some(ended_at) = &sess.ended_at {
+                        let is_paused = sess.status.to_lowercase().contains("pause")
+                            || sess.status.to_lowercase().contains("idle");
+                        let headline = if is_paused {
+                            "Context paused".to_string()
+                        } else {
+                            "Context concluded".to_string()
+                        };
+
+                        events.push(ContextTimelineInspectorEvent {
+                            id: format!("sess-end-{}", sess.id),
+                            timestamp: ended_at.clone(),
+                            time_display: format_timestamp_display(ended_at),
+                            category: ContextTimelineCategory::Lifecycle,
+                            headline,
+                            detail: Some(format!("Session status: {}", sess.status)),
+                            entity_id: Some(sess.id.clone()),
+                            metadata: serde_json::json!({
+                                "session_id": sess.id,
+                                "status": sess.status,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Transitions for this context
+        if let Ok(transitions) = crate::db::operations::list_context_transitions_for_context(conn, context_id) {
+            for trans in transitions {
+                let is_target = trans.to_context_id.as_deref() == Some(context_id);
+                let (category, headline) = match trans.transition_type {
+                    crate::db::models::ContextTransitionType::ContextStart => {
+                        (ContextTimelineCategory::Lifecycle, "Context became active".to_string())
+                    }
+                    crate::db::models::ContextTransitionType::ContextReturn => {
+                        (ContextTimelineCategory::Lifecycle, "Context resumed".to_string())
+                    }
+                    crate::db::models::ContextTransitionType::ContextEnd => {
+                        (ContextTimelineCategory::Lifecycle, "Context paused".to_string())
+                    }
+                    crate::db::models::ContextTransitionType::ContextSwitch => {
+                        if is_target {
+                            (ContextTimelineCategory::Lifecycle, "Context became active".to_string())
+                        } else {
+                            (ContextTimelineCategory::Lifecycle, "Context paused".to_string())
+                        }
+                    }
+                    crate::db::models::ContextTransitionType::AmbiguousTransition => {
+                        (ContextTimelineCategory::Lifecycle, "Context transition detected".to_string())
+                    }
+                };
+
+                events.push(ContextTimelineInspectorEvent {
+                    id: format!("trans-{}", trans.id),
+                    timestamp: trans.detected_at.clone(),
+                    time_display: format_timestamp_display(&trans.detected_at),
+                    category,
+                    headline,
+                    detail: Some(format!("Transition confidence: {:.0}%", trans.confidence * 100.0)),
+                    entity_id: Some(trans.id),
+                    metadata: serde_json::json!({
+                        "transition_type": trans.transition_type.as_str(),
+                        "confidence": trans.confidence,
+                    }),
+                });
+            }
+        }
+
+        // 2. ASSIGNMENT & FEEDBACK: Context Signals
+        if let Ok(mut sig_stmt) = conn.prepare(
+            "SELECT id, item_id, session_id, signal_type, payload, created_at
+             FROM context_signals
+             WHERE workspace_id = ?1 OR session_id IN (SELECT session_id FROM items WHERE workspace_id = ?1)
+             ORDER BY created_at ASC"
+        ) {
+            if let Ok(rows) = sig_stmt.query_map(params![context_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            }) {
+                for r in rows.flatten() {
+                    let (sig_id, it_id, sess_id, sig_type, payload_str, created_at) = r;
+                    let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+
+                    let (cat, headline, detail) = match sig_type.as_str() {
+                        "repository_signal" | "git_remote" | "repository" => {
+                            let repo_name = payload.get("repository")
+                                .or_else(|| payload.get("repo"))
+                                .or_else(|| payload.get("repo_name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Repository");
+                            (
+                                ContextTimelineCategory::Assignment,
+                                "Repository detected".to_string(),
+                                Some(repo_name.to_string()),
+                            )
+                        }
+                        "project_path" | "path_match" => {
+                            let path = payload.get("path").and_then(|v| v.as_str()).unwrap_or("Project path");
+                            (
+                                ContextTimelineCategory::Assignment,
+                                "Project path matched".to_string(),
+                                Some(path.to_string()),
+                            )
+                        }
+                        "user_action" | "feedback" => {
+                            let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("action");
+                            match action {
+                                "rejected" | "candidate_item_removed" | "membership_dismissed" | "suggestion_dismissed" | "item_dismissed" => (
+                                    ContextTimelineCategory::Feedback,
+                                    "User rejected unrelated item".to_string(),
+                                    payload.get("reason").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                ),
+                                "confirmed" | "moved_to_workspace" | "candidate_accepted" | "suggestion_accepted" => (
+                                    ContextTimelineCategory::Feedback,
+                                    "User confirmed repository relationship".to_string(),
+                                    Some("Confirmed assignment".to_string()),
+                                ),
+                                "task_accepted" | "task_completed" => (
+                                    ContextTimelineCategory::Feedback,
+                                    "User accepted task candidate".to_string(),
+                                    None,
+                                ),
+                                other => (
+                                    ContextTimelineCategory::Feedback,
+                                    format!("User action: {}", other.replace('_', " ")),
+                                    None,
+                                ),
+                            }
+                        }
+                        "pause_signal" => (
+                            ContextTimelineCategory::Lifecycle,
+                            "Context paused".to_string(),
+                            None,
+                        ),
+                        "resume_signal" => (
+                            ContextTimelineCategory::Lifecycle,
+                            "Context resumed".to_string(),
+                            None,
+                        ),
+                        "important_item" | "memory_signal" | "important_memory" => {
+                            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("Important item");
+                            (
+                                ContextTimelineCategory::Memory,
+                                "Important item identified".to_string(),
+                                Some(title.to_string()),
+                            )
+                        }
+                        _ => {
+                            // Check if payload indicates a repository
+                            if let Some(repo) = payload.get("repository").and_then(|v| v.as_str()) {
+                                (
+                                    ContextTimelineCategory::Assignment,
+                                    "Repository detected".to_string(),
+                                    Some(repo.to_string()),
+                                )
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
+
+                    events.push(ContextTimelineInspectorEvent {
+                        id: format!("sig-{}", sig_id),
+                        timestamp: created_at.clone(),
+                        time_display: format_timestamp_display(&created_at),
+                        category: cat,
+                        headline,
+                        detail,
+                        entity_id: it_id.or(sess_id),
+                        metadata: payload,
+                    });
+                }
+            }
+        }
+
+        // 3. TASK: Task candidates
+        if let Ok(candidates) = crate::db::operations::list_task_candidates_for_context(conn, context_id) {
+            for cand in candidates {
+                events.push(ContextTimelineInspectorEvent {
+                    id: format!("task-cand-{}", cand.id),
+                    timestamp: cand.created_at.clone(),
+                    time_display: format_timestamp_display(&cand.created_at),
+                    category: ContextTimelineCategory::Task,
+                    headline: "Task candidate created".to_string(),
+                    detail: Some(cand.title.clone()),
+                    entity_id: Some(cand.id.clone()),
+                    metadata: serde_json::json!({
+                        "task_id": cand.id,
+                        "title": cand.title,
+                        "status": cand.status.as_str(),
+                        "confidence": cand.confidence,
+                    }),
+                });
+
+                if cand.updated_at != cand.created_at {
+                    let status_headline = match cand.status {
+                        crate::db::models::TaskCandidateStatus::Active => "Task candidate activated",
+                        crate::db::models::TaskCandidateStatus::Confirmed => "Task candidate confirmed",
+                        crate::db::models::TaskCandidateStatus::Dismissed => "Task candidate dismissed",
+                        _ => "Task candidate updated",
+                    };
+                    events.push(ContextTimelineInspectorEvent {
+                        id: format!("task-update-{}", cand.id),
+                        timestamp: cand.updated_at.clone(),
+                        time_display: format_timestamp_display(&cand.updated_at),
+                        category: ContextTimelineCategory::Task,
+                        headline: status_headline.to_string(),
+                        detail: Some(cand.title.clone()),
+                        entity_id: Some(cand.id.clone()),
+                        metadata: serde_json::json!({
+                            "task_id": cand.id,
+                            "status": cand.status.as_str(),
+                        }),
+                    });
+                }
+            }
+        }
+
+        // 4. MEMORY: Important Memories & High-Signal Items
+        if let Ok(important_memories) = crate::context_engine::important_memory::ContextMemoryQueryService::get_important_memories(conn, context_id, None) {
+            for mem in important_memories {
+                // Only include item/document memories (skip tasks and workspace facts)
+                if mem.memory_type == crate::context_engine::important_memory::ImportantMemoryType::ActiveTask
+                    || mem.memory_type == crate::context_engine::important_memory::ImportantMemoryType::RecentTask
+                    || mem.memory_type == crate::context_engine::important_memory::ImportantMemoryType::ConfirmedContextFact
+                    || mem.memory_type == crate::context_engine::important_memory::ImportantMemoryType::MeaningfulState
+                {
+                    continue;
+                }
+                let ts = mem.first_seen_at.as_deref().or(mem.last_seen_at.as_deref()).unwrap_or(&ws.created_at);
+                events.push(ContextTimelineInspectorEvent {
+                    id: format!("mem-{}", mem.id),
+                    timestamp: ts.to_string(),
+                    time_display: format_timestamp_display(ts),
+                    category: ContextTimelineCategory::Memory,
+                    headline: "Important item identified".to_string(),
+                    detail: Some(format!("{} ({:?} band, importance {:.2})", mem.title, mem.importance_band, mem.importance)),
+                    entity_id: Some(mem.source_id.clone()),
+                    metadata: serde_json::json!({
+                        "memory_id": mem.id,
+                        "source_id": mem.source_id,
+                        "importance_band": format!("{:?}", mem.importance_band),
+                        "importance": mem.importance,
+                    }),
+                });
+            }
+        }
+
+        // Also check items assigned or confirmed to this workspace for important items
+        if let Ok(items) = crate::db::operations::list_items(conn, Some(context_id)) {
+            for it in items {
+                let already_captured = events.iter().any(|e| {
+                    e.category == ContextTimelineCategory::Memory && e.entity_id.as_deref() == Some(&it.id)
+                });
+                if already_captured {
+                    continue;
+                }
+
+                let is_important = it.item_type == "file"
+                    || it.metadata.contains("VS Code")
+                    || it.metadata.contains("important")
+                    || it.metadata.contains("core");
+                if is_important {
+                    events.push(ContextTimelineInspectorEvent {
+                        id: format!("item-mem-{}", it.id),
+                        timestamp: it.created_at.clone(),
+                        time_display: format_timestamp_display(&it.created_at),
+                        category: ContextTimelineCategory::Memory,
+                        headline: "Important item identified".to_string(),
+                        detail: it.title.clone(),
+                        entity_id: Some(it.id.clone()),
+                        metadata: serde_json::json!({
+                            "item_id": it.id,
+                            "item_type": it.item_type,
+                        }),
+                    });
+                }
+            }
+        }
+
+        // 5. SNAPSHOT: Context Snapshots
+        if let Ok(snapshots) = crate::db::operations::list_context_snapshots_bounded(conn, context_id, 100) {
+            for (idx, snap) in snapshots.iter().enumerate() {
+                let headline = if idx > 0 || snapshots.len() == 1 {
+                    "Context snapshot updated".to_string()
+                } else {
+                    "Context snapshot created".to_string()
+                };
+
+                let items_cnt = snap.workset_item_references.len();
+                let tasks_cnt = snap.recent_task_references.len();
+
+                events.push(ContextTimelineInspectorEvent {
+                    id: format!("snap-{}", snap.id),
+                    timestamp: snap.created_at.clone(),
+                    time_display: format_timestamp_display(&snap.created_at),
+                    category: ContextTimelineCategory::Snapshot,
+                    headline,
+                    detail: Some(format!("State {:?} ({} items, {} tasks)", snap.state, items_cnt, tasks_cnt)),
+                    entity_id: Some(snap.id.clone()),
+                    metadata: serde_json::json!({
+                        "snapshot_id": snap.id,
+                        "state": format!("{:?}", snap.state),
+                        "item_count": items_cnt,
+                    }),
+                });
+            }
+        }
+
+        // Sort events chronologically (ascending by timestamp by default)
+        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        // Deduplicate identical headline + timestamp events
+        let mut deduplicated: Vec<ContextTimelineInspectorEvent> = Vec::new();
+        let mut seen = HashSet::new();
+        for ev in events {
+            let key = format!("{}:{}:{}", ev.timestamp, ev.headline, ev.category.as_str());
+            if seen.insert(key) {
+                deduplicated.push(ev);
+            }
+        }
+
+        // Apply filter if provided
+        let filtered_events: Vec<ContextTimelineInspectorEvent> = if let Some(flt) = filter {
+            let mut matched: Vec<_> = deduplicated.into_iter().filter(|ev| flt.matches(ev)).collect();
+            if flt.reverse {
+                matched.reverse();
+            }
+            if let Some(lim) = flt.limit {
+                matched.truncate(lim);
+            }
+            matched
+        } else {
+            deduplicated
+        };
+
+        // Extract categories present and timestamp bounds
+        let mut cats_present = HashSet::new();
+        for ev in &filtered_events {
+            cats_present.insert(ev.category);
+        }
+        let categories_present: Vec<ContextTimelineCategory> = cats_present.into_iter().collect();
+
+        let first_event_at = filtered_events.first().map(|e| e.timestamp.clone());
+        let latest_event_at = filtered_events.last().map(|e| e.timestamp.clone());
+        let total_events = filtered_events.len();
+
+        Ok(ContextTimelineInspectorReport {
+            context_id: ws.id,
+            context_name: ws.name,
+            total_events,
+            events: filtered_events,
+            categories_present,
+            first_event_at,
+            latest_event_at,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,4 +1314,186 @@ mod tests {
         assert_eq!(trans_ev.metadata.get("from_context_name").and_then(|v| v.as_str()), Some("College"));
         assert_eq!(trans_ev.metadata.get("to_context_name").and_then(|v| v.as_str()), Some("Portfolio"));
     }
+
+    #[test]
+    fn test_context_timeline_inspector_matching_example() {
+        let conn = setup_in_memory_db();
+        let ws = create_workspace(&conn, "PayX").unwrap();
+        let session = create_session(&conn).unwrap();
+
+        // 09:00 - Context became active
+        let _ = conn.execute(
+            "UPDATE sessions SET started_at = '2026-09-24T09:00:00Z', status = 'active' WHERE id = ?1",
+            params![session.id],
+        );
+        let _ = create_context_signal(
+            &conn,
+            Some(&ws.id),
+            None,
+            "session_active",
+            Some(&session.id),
+            "{\"status\":\"active\"}",
+        ).unwrap();
+
+        // 09:05 - Repository detected
+        let sig_repo = serde_json::json!({
+            "repository": "PayX",
+            "remote": "github.com/org/payx"
+        }).to_string();
+        let _ = conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, session_id, signal_type, payload, created_at, updated_at)
+             VALUES (?1, ?2, NULL, ?3, 'repository_signal', ?4, '2026-09-24T09:05:00Z', '2026-09-24T09:05:00Z')",
+            params![uuid::Uuid::new_v4().to_string(), ws.id, session.id, sig_repo],
+        ).unwrap();
+
+        // 09:12 - Task candidate created
+        let cand = crate::db::models::TaskCandidate {
+            id: uuid::Uuid::new_v4().to_string(),
+            context_id: Some(ws.id.clone()),
+            title: "Implement payment webhook listener".to_string(),
+            confidence: 0.95,
+            status: crate::db::models::TaskCandidateStatus::Detected,
+            first_detected_at: "2026-09-24T09:12:00Z".to_string(),
+            last_active_at: "2026-09-24T09:12:00Z".to_string(),
+            created_at: "2026-09-24T09:12:00Z".to_string(),
+            updated_at: "2026-09-24T09:12:00Z".to_string(),
+        };
+        crate::db::operations::create_task_candidate(&conn, &cand).unwrap();
+
+        // 09:20 - Important item identified
+        let item = create_item(
+            &conn,
+            Some(&ws.id),
+            Some(&session.id),
+            "file",
+            "src/controllers/CheckoutController.ts",
+            Some("CheckoutController.ts"),
+            "{\"app_name\":\"VS Code\"}",
+        ).unwrap();
+        let _ = conn.execute(
+            "UPDATE items SET created_at = '2026-09-24T09:20:00Z' WHERE id = ?1",
+            params![item.id],
+        );
+        let _ = crate::db::operations::create_or_update_membership(
+            &conn,
+            &item.id,
+            &ws.id,
+            "confirmed",
+            1.0,
+            "user",
+        );
+        let _ = conn.execute(
+            "UPDATE context_memberships SET created_at = '2026-09-24T09:20:00Z', updated_at = '2026-09-24T09:20:00Z' WHERE item_id = ?1",
+            params![item.id],
+        );
+
+        // 09:45 - Context paused (transition out)
+        let trans_pause = crate::db::models::ContextTransition {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_context_id: Some(ws.id.clone()),
+            to_context_id: None,
+            transition_type: crate::db::models::ContextTransitionType::ContextEnd,
+            confidence: 0.88,
+            detected_at: "2026-09-24T09:45:00Z".to_string(),
+            session_id: Some(session.id.clone()),
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: "2026-09-24T09:45:00Z".to_string(),
+        };
+        crate::db::operations::create_context_transition(&conn, &trans_pause).unwrap();
+
+        // 10:30 - Context resumed
+        let trans_resume = crate::db::models::ContextTransition {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_context_id: None,
+            to_context_id: Some(ws.id.clone()),
+            transition_type: crate::db::models::ContextTransitionType::ContextReturn,
+            confidence: 0.94,
+            detected_at: "2026-09-24T10:30:00Z".to_string(),
+            session_id: Some(session.id.clone()),
+            trigger_item_id: None,
+            trigger_signal_id: None,
+            metadata: "{}".to_string(),
+            created_at: "2026-09-24T10:30:00Z".to_string(),
+        };
+        crate::db::operations::create_context_transition(&conn, &trans_resume).unwrap();
+
+        // 10:45 - User rejected unrelated item
+        let sig_reject = serde_json::json!({
+            "action": "rejected",
+            "reason": "Unrelated item from University OS"
+        }).to_string();
+        let _ = conn.execute(
+            "INSERT INTO context_signals (id, workspace_id, item_id, session_id, signal_type, payload, created_at, updated_at)
+             VALUES (?1, ?2, NULL, ?3, 'user_action', ?4, '2026-09-24T10:45:00Z', '2026-09-24T10:45:00Z')",
+            params![uuid::Uuid::new_v4().to_string(), ws.id, session.id, sig_reject],
+        ).unwrap();
+
+        // 11:00 - Context snapshot updated
+        let mut snap = crate::context_engine::snapshot::ContextSnapshotBuilder::new(&ws.id, &ws.name).build();
+        snap.created_at = "2026-09-24T11:00:00Z".to_string();
+        let snap_json = serde_json::to_string(&snap).unwrap();
+        let _ = conn.execute(
+            "INSERT INTO context_snapshots (id, context_id, context_name, created_at, state, snapshot_confidence, quality_rating, snapshot_json)
+             VALUES (?1, ?2, ?3, '2026-09-24T11:00:00Z', 'Active', 0.95, 'complete', ?4)",
+            params![snap.id, ws.id, ws.name, snap_json],
+        ).unwrap();
+
+        // Run inspection
+        let report = ContextTimelineInspector::inspect_context(&conn, &ws.id, None).unwrap();
+        assert_eq!(report.context_name, "PayX");
+        assert_eq!(report.total_events, 8);
+
+        let dev_view = report.format_developer_view();
+        let expected_lines = vec![
+            "09:00",
+            "Context became active",
+            "09:05",
+            "Repository detected",
+            "09:12",
+            "Task candidate created",
+            "09:20",
+            "Important item identified",
+            "09:45",
+            "Context paused",
+            "10:30",
+            "Context resumed",
+            "10:45",
+            "User rejected unrelated item",
+            "11:00",
+            "Context snapshot updated",
+        ];
+
+        for expected in expected_lines {
+            assert!(dev_view.contains(expected), "Dev view missing line: {}", expected);
+        }
+
+        // Test Filtering by category
+        let lifecycle_filter = ContextTimelineFilter::only_lifecycle();
+        let lifecycle_report = ContextTimelineInspector::inspect_context(&conn, &ws.id, Some(&lifecycle_filter)).unwrap();
+        assert_eq!(lifecycle_report.total_events, 3); // 09:00 active, 09:45 paused, 10:30 resumed
+        assert!(lifecycle_report.events.iter().all(|e| e.category == ContextTimelineCategory::Lifecycle));
+
+        let task_filter = ContextTimelineFilter::only_task();
+        let task_report = ContextTimelineInspector::inspect_context(&conn, &ws.id, Some(&task_filter)).unwrap();
+        assert_eq!(task_report.total_events, 1);
+        assert_eq!(task_report.events[0].headline, "Task candidate created");
+
+        let memory_filter = ContextTimelineFilter::only_memory();
+        let memory_report = ContextTimelineInspector::inspect_context(&conn, &ws.id, Some(&memory_filter)).unwrap();
+        assert_eq!(memory_report.total_events, 1);
+        assert_eq!(memory_report.events[0].headline, "Important item identified");
+
+        let feedback_filter = ContextTimelineFilter::only_feedback();
+        let feedback_report = ContextTimelineInspector::inspect_context(&conn, &ws.id, Some(&feedback_filter)).unwrap();
+        assert_eq!(feedback_report.total_events, 1);
+        assert_eq!(feedback_report.events[0].headline, "User rejected unrelated item");
+
+        let snapshot_filter = ContextTimelineFilter::only_snapshot();
+        let snapshot_report = ContextTimelineInspector::inspect_context(&conn, &ws.id, Some(&snapshot_filter)).unwrap();
+        assert_eq!(snapshot_report.total_events, 1);
+        assert_eq!(snapshot_report.events[0].headline, "Context snapshot updated");
+    }
 }
+

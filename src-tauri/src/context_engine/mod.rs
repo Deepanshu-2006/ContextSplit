@@ -54,6 +54,12 @@ pub mod feedback;
 pub mod decision_trace;
 pub mod decision_explanation;
 
+pub use timeline::{
+    format_timestamp_display, get_context_timeline, ContextTimelineCategory, ContextTimelineFilter,
+    ContextTimelineInspector, ContextTimelineInspectorEvent, ContextTimelineInspectorReport,
+    CONTEXT_TIMELINE_INSPECTOR_DISCLAIMER,
+};
+
 pub use decision_explanation::{
     ContextDecisionExplanation, ContextDecisionExplanationService,
     CONTEXT_DECISION_EXPLANATION_DISCLAIMER,
