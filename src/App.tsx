@@ -9,12 +9,14 @@ import { CandidateReviewModal } from "./components/discovery/CandidateReviewModa
 import { ContextTimelineDrawer } from "./components/timeline/ContextTimelineDrawer";
 import { ContextOverviewPanel } from "./components/workspace/ContextOverviewPanel";
 import { ContextReconstructionInspector } from "./components/workspace/ContextReconstructionInspector";
+import { ContextDiagnosticsScreen } from "./components/diagnostics/ContextDiagnosticsScreen";
 import { Toaster } from 'sonner';
 import { CaptureTarget } from "./components/workspace/CaptureTarget";
 import { CaptureOrb } from "./components/workspace/CaptureOrb";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+import { Terminal } from "lucide-react";
 import "./App.css";
 
 function App() {
@@ -26,6 +28,9 @@ function App() {
     isReconstructionInspectorOpen,
     reconstructionInspectorWorkspaceId,
     closeReconstructionInspector,
+    isDiagnosticsOpen,
+    toggleDiagnostics,
+    closeDiagnostics,
   } = useWorkspaceStore();
   const { checkForCandidates } = useDiscoveryStore();
   
@@ -35,6 +40,19 @@ function App() {
   
   // Initialize global drag and drop listeners
   useDragAndDrop();
+
+  useEffect(() => {
+    // Global shortcut for developer diagnostics: Cmd+Shift+D or Ctrl+Shift+D
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+        e.preventDefault();
+        toggleDiagnostics();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleDiagnostics]);
 
   useEffect(() => {
     // Only main window loads workspaces and clipboard monitor
@@ -114,6 +132,22 @@ function App() {
           workspaceId={reconstructionInspectorWorkspaceId}
           onClose={closeReconstructionInspector}
         />
+      )}
+      {import.meta.env.DEV && isDiagnosticsOpen && (
+        <ContextDiagnosticsScreen
+          onClose={closeDiagnostics}
+        />
+      )}
+      {import.meta.env.DEV && !isDiagnosticsOpen && (
+        <button
+          onClick={toggleDiagnostics}
+          title="Open Developer Diagnostics (Cmd+Shift+D)"
+          className="fixed bottom-3 left-3 z-40 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/90 hover:bg-slate-900 text-slate-300 hover:text-emerald-400 border border-slate-700/60 shadow-lg backdrop-blur text-[11px] font-mono transition-all group cursor-pointer"
+        >
+          <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+          <span className="font-semibold text-white">Dev Diagnostics</span>
+          <span className="text-[10px] text-slate-400 opacity-60 group-hover:opacity-100">⌘⇧D</span>
+        </button>
       )}
       <Toaster
         position="bottom-right"

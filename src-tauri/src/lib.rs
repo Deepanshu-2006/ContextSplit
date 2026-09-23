@@ -1302,6 +1302,136 @@ fn get_context_snapshot_diff(
     Ok(service.compare_latest_with_previous(context_id))
 }
 
+// ---------------------------------------------------------------------------
+// Day 26: Development Diagnostics & Observability
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_diagnostics_safety_status() -> context_engine::diagnostics_guard::DiagnosticsSafetyStatus {
+    context_engine::diagnostics_guard::get_diagnostics_controller().get_status()
+}
+
+#[tauri::command]
+fn set_diagnostics_enabled(enabled: bool) -> context_engine::diagnostics_guard::DiagnosticsSafetyStatus {
+    let controller = context_engine::diagnostics_guard::get_diagnostics_controller();
+    if enabled {
+        controller.enable_local_dev();
+    } else {
+        controller.disable_all();
+    }
+    controller.get_status()
+}
+
+#[tauri::command]
+fn purge_all_diagnostics() {
+    context_engine::diagnostics_guard::get_diagnostics_controller().purge_all_diagnostics();
+}
+
+#[tauri::command]
+fn get_recent_decision_traces(
+    limit: Option<usize>,
+    decision_type: Option<String>,
+) -> Vec<context_engine::decision_trace::ContextDecisionTrace> {
+    let lim = limit.unwrap_or(50);
+    if let Some(dt_str) = decision_type {
+        let dt_opt = match dt_str.to_lowercase().as_str() {
+            "context_assignment" | "assignment" => Some(context_engine::decision_trace::DecisionType::ContextAssignment),
+            "context_rejection" | "rejection" => Some(context_engine::decision_trace::DecisionType::ContextRejection),
+            "context_transition" | "transition" => Some(context_engine::decision_trace::DecisionType::ContextTransition),
+            "task_assignment" | "task" => Some(context_engine::decision_trace::DecisionType::TaskAssignment),
+            "memory_creation" => Some(context_engine::decision_trace::DecisionType::MemoryCreation),
+            "memory_importance" => Some(context_engine::decision_trace::DecisionType::MemoryImportance),
+            "snapshot_creation" | "snapshot" => Some(context_engine::decision_trace::DecisionType::SnapshotCreation),
+            "lifecycle_transition" | "lifecycle" => Some(context_engine::decision_trace::DecisionType::LifecycleTransition),
+            "context_reconstruction" | "reconstruction" => Some(context_engine::decision_trace::DecisionType::ContextReconstruction),
+            "resume_readiness" | "resume" => Some(context_engine::decision_trace::DecisionType::ResumeReadiness),
+            "feedback_adaptation" | "feedback" => Some(context_engine::decision_trace::DecisionType::FeedbackAdaptation),
+            _ => None,
+        };
+        if let Some(dt) = dt_opt {
+            return context_engine::decision_trace::ContextDecisionTracer::get_by_type(dt, lim);
+        }
+    }
+    context_engine::decision_trace::ContextDecisionTracer::get_recent(lim)
+}
+
+#[tauri::command]
+fn explain_decision_trace(
+    decision_id: String,
+) -> Option<context_engine::decision_explanation::ContextDecisionExplanation> {
+    context_engine::decision_explanation::ContextDecisionExplanationService::explain_by_id(&decision_id)
+}
+
+#[tauri::command]
+fn explain_workspace_lifecycle(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<context_engine::lifecycle_explanation::ContextLifecycleTransitionExplanation, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::lifecycle_explanation::ContextLifecycleExplanationService::explain_from_db(&conn, &workspace_id)
+}
+
+#[tauri::command]
+fn explain_workspace_memories(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<context_engine::memory_explanation::ContextMemoryProvenanceExplanation>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::memory_explanation::ContextMemoryExplanationService::explain_all_context_memories(&conn, &workspace_id)
+}
+
+#[tauri::command]
+fn explain_workspace_feedback(
+    workspace_id: String,
+    target_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<context_engine::feedback_explanation::ContextFeedbackEffectExplanation, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let target = target_id.unwrap_or_else(|| workspace_id.clone());
+    context_engine::feedback_explanation::ContextFeedbackExplanationService::explain_target(&conn, &target, Some(&workspace_id))
+}
+
+#[tauri::command]
+fn run_context_health_checks(
+    state: State<'_, AppState>,
+) -> Result<context_engine::health_check::ContextHealthReport, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::health_check::ContextHealthCheckService::run_all_checks(&conn)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn run_cross_system_consistency_checks(
+    state: State<'_, AppState>,
+) -> Result<context_engine::cross_system_consistency::CrossSystemConsistencyReport, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::cross_system_consistency::CrossSystemConsistencyChecker::validate_all(&conn)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_performance_traces_summary() -> context_engine::performance_tracing::PerformanceDiagnosticsReport {
+    context_engine::performance_tracing::get_performance_tracer().analyze(None)
+}
+
+#[tauri::command]
+fn get_recent_performance_spans(
+    limit: Option<usize>,
+) -> Vec<context_engine::performance_tracing::PerformanceSpan> {
+    context_engine::performance_tracing::get_performance_tracer().get_recent_spans(limit.unwrap_or(100))
+}
+
+#[tauri::command]
+fn list_all_task_candidates(
+    context_id: Option<String>,
+    status: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::models::TaskCandidate>, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::list_task_candidates(&conn, context_id.as_deref(), status.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1515,7 +1645,21 @@ pub fn run() {
             // Context Snapshots & Differential Analysis (Day 20)
             get_context_snapshot,
             get_context_snapshot_history,
-            get_context_snapshot_diff
+            get_context_snapshot_diff,
+            // Context Diagnostics & Observability (Day 26)
+            get_diagnostics_safety_status,
+            set_diagnostics_enabled,
+            purge_all_diagnostics,
+            get_recent_decision_traces,
+            explain_decision_trace,
+            explain_workspace_lifecycle,
+            explain_workspace_memories,
+            explain_workspace_feedback,
+            run_context_health_checks,
+            run_cross_system_consistency_checks,
+            get_performance_traces_summary,
+            get_recent_performance_spans,
+            list_all_task_candidates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
