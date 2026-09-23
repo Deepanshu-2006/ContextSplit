@@ -51,6 +51,14 @@ pub mod session;
 pub mod session_summary;
 pub mod session_snapshot;
 pub mod feedback;
+pub mod decision_trace;
+
+pub use decision_trace::{
+    CandidateContextTrace, ContextDecisionTrace, ContextDecisionTraceBuilder, ContextDecisionTracer,
+    DecisionTraceConfig, DecisionTraceFilter, DecisionTraceStats, DecisionType,
+    EvidenceConsideredTrace, EvidenceStrengthSummary, FeedbackConsideredTrace, FinalDecisionOutcome,
+    SourceEntityRef, CONTEXT_DECISION_TRACE_DISCLAIMER,
+};
 
 pub use feedback::{
     AdaptationVerdict, ContextDeterministicAdaptationEngine, ContextFeedbackEvent,
