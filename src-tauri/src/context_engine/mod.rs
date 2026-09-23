@@ -52,6 +52,12 @@ pub mod session_summary;
 pub mod session_snapshot;
 pub mod feedback;
 pub mod decision_trace;
+pub mod decision_explanation;
+
+pub use decision_explanation::{
+    ContextDecisionExplanation, ContextDecisionExplanationService,
+    CONTEXT_DECISION_EXPLANATION_DISCLAIMER,
+};
 
 pub use decision_trace::{
     CandidateContextTrace, ContextDecisionTrace, ContextDecisionTraceBuilder, ContextDecisionTracer,
