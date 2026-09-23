@@ -55,6 +55,12 @@ pub mod decision_trace;
 pub mod decision_explanation;
 pub mod lifecycle_explanation;
 pub mod memory_explanation;
+pub mod feedback_explanation;
+
+pub use feedback_explanation::{
+    ContextFeedbackEffectExplanation, ContextFeedbackExplanationService,
+    CONTEXT_FEEDBACK_EFFECT_EXPLANATION_DISCLAIMER,
+};
 
 pub use memory_explanation::{
     ContextMemoryProvenanceExplanation, ContextMemoryExplanationService,
