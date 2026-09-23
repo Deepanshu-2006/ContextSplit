@@ -344,6 +344,17 @@ impl ContextImportantMemory {
             ImportantMemoryMetadata::default(),
         )
     }
+
+    /// Returns the structured developer diagnostic explanation for why this memory exists and its provenance.
+    pub fn explain_provenance(
+        &self,
+        context_name: Option<&str>,
+    ) -> crate::context_engine::memory_explanation::ContextMemoryProvenanceExplanation {
+        crate::context_engine::memory_explanation::ContextMemoryExplanationService::explain_important_memory(
+            self,
+            context_name,
+        )
+    }
 }
 
 // =========================================================================

@@ -271,6 +271,17 @@ impl ContextDecisionExplanationService {
     ) -> crate::context_engine::lifecycle_explanation::ContextLifecycleTransitionExplanation {
         crate::context_engine::lifecycle_explanation::ContextLifecycleExplanationService::explain_decision_trace(trace)
     }
+
+    /// Explains an important contextual memory provenance specifically using developer diagnostics.
+    pub fn explain_memory_provenance(
+        memory: &crate::context_engine::important_memory::ContextImportantMemory,
+        context_name: Option<&str>,
+    ) -> crate::context_engine::memory_explanation::ContextMemoryProvenanceExplanation {
+        crate::context_engine::memory_explanation::ContextMemoryExplanationService::explain_important_memory(
+            memory,
+            context_name,
+        )
+    }
 }
 
 // =========================================================================
@@ -464,5 +475,30 @@ PayX
         assert!(expl.is_valid_evidence_based());
         assert!(expl.format_diagnostic().contains("ContextSplit"));
         assert!(expl.format_diagnostic().contains("PAUSED → ACTIVE"));
+    }
+
+    #[test]
+    fn test_memory_provenance_explanation_via_decision_service() {
+        let memory = crate::context_engine::important_memory::ContextImportantMemory::confirmed_fact(
+            "mem-cloud",
+            "ctx-payx",
+            "fact-1",
+            "PayX uses Cloudinary for image storage.",
+            None,
+            vec![
+                "related to PayX".to_string(),
+                "repeatedly observed".to_string(),
+                "connected to relevant project activity".to_string(),
+                "confirmed or strongly supported".to_string(),
+            ],
+            None,
+        );
+
+        let expl = ContextDecisionExplanationService::explain_memory_provenance(&memory, Some("PayX"));
+        assert_eq!(expl.context_name, "PayX");
+        assert_eq!(expl.source, "User confirmation");
+        assert!(expl.is_valid_evidence_based());
+        assert!(expl.format_diagnostic().contains("PayX uses Cloudinary for image storage."));
+        assert!(expl.format_diagnostic().contains("Source:\nUser confirmation"));
     }
 }
