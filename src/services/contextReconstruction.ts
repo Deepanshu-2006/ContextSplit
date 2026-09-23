@@ -192,7 +192,9 @@ export interface ContextReconstruction {
   resume_readiness: ReconstructionResumeReadinessSection;
   confidence: ReconstructionConfidence;
   quality: ContextReconstructionQuality;
-  disclaimer: string;
+  disclaimer?: string;
+  epistemic_disclaimer?: string;
+  summary_statement?: string;
   reconstructed_at: string;
 }
 

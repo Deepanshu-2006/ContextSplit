@@ -5,9 +5,14 @@ import {
   RefreshCw,
   AlertTriangle,
   ArrowRightLeft,
-  Cpu,
   Snowflake,
   History,
+  CheckCircle2,
+  AlertCircle,
+  HelpCircle,
+  Layers,
+  FileText,
+  Bookmark,
 } from 'lucide-react';
 import {
   contextReconstructionService,
@@ -54,7 +59,7 @@ export function ContextReconstructionInspector({
       });
 
       if (cold) {
-        toast.success('Cold reconstruction completed (bypassed all in-memory caches)');
+        toast.success('Cold reconstruction completed (bypassed in-memory caches)');
       }
     } catch (err: any) {
       setError(err?.toString() || 'Failed to reconstruct context');
@@ -80,58 +85,57 @@ export function ContextReconstructionInspector({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
+  const contextName = currentReconstruction?.context?.name || 'Workspace';
+
   return createPortal(
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150 font-sans">
       <div className="fixed inset-0" onClick={onClose} />
 
       <div
-        className="relative w-full max-w-6xl bg-slate-900 text-slate-100 rounded-2xl shadow-2xl border border-slate-800 flex flex-col max-h-[92vh] overflow-hidden z-10 font-sans"
+        className="relative w-full max-w-4xl bg-white text-gray-900 rounded-2xl shadow-2xl border border-gray-100 flex flex-col max-h-[88vh] overflow-hidden z-10"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* DEV Header */}
-        <div className="px-6 py-4 border-b border-slate-800 bg-slate-950/70 flex flex-wrap items-center justify-between gap-3">
+        {/* Top Header */}
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 flex-shrink-0">
-              <Cpu size={18} />
+            <div className="w-8 h-8 rounded-lg bg-gray-50 border border-gray-200/80 flex items-center justify-center text-gray-700">
+              <Layers size={16} />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white tracking-tight">
-                  Context Reconstruction Inspector
-                </h2>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                  DEV ONLY
+                <span className="text-sm font-semibold text-gray-900">{contextName}</span>
+                <span className="text-gray-300">/</span>
+                <span className="text-xs text-gray-500 font-medium">Reconstruction Diagnostics</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
+                  DEV
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-mono">
-                Workspace ID: {workspaceId} · Reconstructed at:{' '}
-                {currentReconstruction?.reconstructed_at
-                  ? new Date(currentReconstruction.reconstructed_at).toLocaleTimeString()
-                  : '—'}
+              <p className="text-[11px] text-gray-400 font-mono mt-0.5">
+                ID: {workspaceId.slice(0, 16)}... {currentReconstruction?.reconstructed_at && `· ${new Date(currentReconstruction.reconstructed_at).toLocaleTimeString()}`}
               </p>
             </div>
           </div>
 
           {/* Action Toolbar */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               onClick={() => fetchReconstruction(false)}
               disabled={isLoading || isColdLoading}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer disabled:opacity-50"
-              title="Run cached deterministic reconstruction"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-50"
+              title="Refresh cached reconstruction"
             >
-              <RefreshCw size={13} className={isLoading ? 'animate-spin text-emerald-400' : ''} />
-              <span>Reconstruct</span>
+              <RefreshCw size={13} className={isLoading ? 'animate-spin text-gray-900' : 'text-gray-500'} />
+              <span>Refresh</span>
             </button>
 
             <button
               onClick={() => fetchReconstruction(true)}
               disabled={isLoading || isColdLoading}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/60 transition-colors cursor-pointer disabled:opacity-50"
-              title="Bypass all caches and reconstruct cold from persisted SQLite store"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg text-emerald-700 bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-200/60 transition-colors cursor-pointer disabled:opacity-50"
+              title="Bypass all caches and reconstruct cold from SQLite"
             >
-              <Snowflake size={13} className={isColdLoading ? 'animate-spin text-emerald-400' : ''} />
-              <span>Cold Reconstruct</span>
+              <Snowflake size={13} className={isColdLoading ? 'animate-spin' : ''} />
+              <span>Cold Test</span>
             </button>
 
             {previousReconstruction && (
@@ -140,21 +144,22 @@ export function ContextReconstructionInspector({
                   setIsCompareMode(!isCompareMode);
                   if (!isCompareMode) setActiveTab('diff');
                 }}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer ${
                   isCompareMode
-                    ? 'bg-indigo-600 text-white border-indigo-500'
-                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                    ? 'bg-indigo-600 text-white shadow-2xs'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
                 }`}
-                title="Compare with previous reconstruction in this session"
               >
                 <ArrowRightLeft size={13} />
                 <span>Compare</span>
               </button>
             )}
 
+            <div className="w-px h-4 bg-gray-200 mx-1" />
+
             <button
               onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer ml-1"
+              className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors cursor-pointer"
               title="Close (Esc)"
             >
               <X size={16} />
@@ -162,57 +167,60 @@ export function ContextReconstructionInspector({
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex border-b border-slate-800 bg-slate-950/40 px-6 text-xs font-medium">
+        {/* Tab Navigation */}
+        <div className="flex border-b border-gray-100 px-6 bg-white text-xs gap-6">
           <button
             onClick={() => setActiveTab('overview')}
-            className={`py-2.5 px-3 border-b-2 transition-colors cursor-pointer ${
+            className={`py-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'overview'
-                ? 'border-emerald-400 text-emerald-300'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
+                ? 'border-gray-900 text-gray-900 font-semibold'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            Reconstruction Overview
+            Overview
           </button>
           <button
             onClick={() => setActiveTab('workset')}
-            className={`py-2.5 px-3 border-b-2 transition-colors cursor-pointer ${
+            className={`py-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'workset'
-                ? 'border-emerald-400 text-emerald-300'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
+                ? 'border-gray-900 text-gray-900 font-semibold'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            Working Set & Memories ({currentReconstruction?.workset.total_count || 0})
+            Working Set & Memories
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-gray-100 text-gray-600 font-medium">
+              {currentReconstruction?.workset?.total_count ?? 0}
+            </span>
           </button>
           <button
             onClick={() => setActiveTab('quality')}
-            className={`py-2.5 px-3 border-b-2 transition-colors cursor-pointer ${
+            className={`py-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'quality'
-                ? 'border-emerald-400 text-emerald-300'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
+                ? 'border-gray-900 text-gray-900 font-semibold'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
-            Quality & Contradictions ({currentReconstruction?.quality.factors.contradiction_count || 0})
+            Quality & Signals
           </button>
           {previousReconstruction && (
             <button
               onClick={() => setActiveTab('diff')}
-              className={`py-2.5 px-3 border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+              className={`py-3 font-medium border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
                 activeTab === 'diff'
-                  ? 'border-indigo-400 text-indigo-300'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'border-indigo-600 text-indigo-600 font-semibold'
+                  : 'border-transparent text-gray-400 hover:text-gray-700'
               }`}
             >
-              <History size={12} />
-              <span>Diff Comparison</span>
+              <History size={13} />
+              <span>Diff</span>
             </button>
           )}
           <button
             onClick={() => setActiveTab('raw')}
-            className={`py-2.5 px-3 border-b-2 transition-colors cursor-pointer ${
+            className={`py-3 font-medium border-b-2 transition-colors cursor-pointer ${
               activeTab === 'raw'
-                ? 'border-emerald-400 text-emerald-300'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
+                ? 'border-gray-900 text-gray-900 font-semibold'
+                : 'border-transparent text-gray-400 hover:text-gray-700'
             }`}
           >
             Raw JSON
@@ -220,49 +228,48 @@ export function ContextReconstructionInspector({
         </div>
 
         {/* Content Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-900/90 text-slate-200">
+        <div className="flex-1 overflow-y-auto p-6 bg-gray-50/50">
           {isLoading && !currentReconstruction ? (
-            <div className="h-72 flex flex-col items-center justify-center text-slate-400 gap-2">
-              <RefreshCw size={24} className="animate-spin text-emerald-400" />
-              <p className="text-xs font-mono">Running deterministic 12-step reconstruction pipeline...</p>
+            <div className="h-64 flex flex-col items-center justify-center text-gray-400 gap-2">
+              <RefreshCw size={20} className="animate-spin text-gray-500" />
+              <p className="text-xs text-gray-500 font-medium">Evaluating context reconstruction...</p>
             </div>
           ) : error ? (
-            <div className="p-4 bg-red-950/60 border border-red-800 rounded-xl text-red-200 text-sm flex items-start gap-3">
-              <AlertTriangle size={18} className="flex-shrink-0 text-red-400 mt-0.5" />
+            <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200/80 text-sm flex items-start gap-3">
+              <AlertTriangle size={18} className="flex-shrink-0 text-red-500 mt-0.5" />
               <div>
-                <div className="font-semibold">Reconstruction Error</div>
-                <div className="text-xs font-mono text-red-300 mt-1">{error}</div>
+                <div className="font-semibold text-red-900">Reconstruction Error</div>
+                <div className="text-xs font-mono text-red-700 mt-1">{error}</div>
               </div>
             </div>
           ) : currentReconstruction ? (
             activeTab === 'overview' ? (
-              <InspectorOverviewTab reconstruction={currentReconstruction} />
+              <MinimalOverviewTab reconstruction={currentReconstruction} />
             ) : activeTab === 'workset' ? (
-              <InspectorWorksetTab reconstruction={currentReconstruction} />
+              <MinimalWorksetTab reconstruction={currentReconstruction} />
             ) : activeTab === 'quality' ? (
-              <InspectorQualityTab reconstruction={currentReconstruction} />
+              <MinimalQualityTab reconstruction={currentReconstruction} />
             ) : activeTab === 'diff' ? (
-              <InspectorDiffTab
+              <MinimalDiffTab
                 current={currentReconstruction}
                 previous={previousReconstruction}
               />
             ) : (
-              <pre className="p-4 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono text-emerald-300 overflow-x-auto max-h-[60vh] leading-relaxed">
+              <pre className="p-4 bg-gray-900 text-emerald-400 rounded-xl text-xs font-mono overflow-x-auto max-h-[55vh] leading-relaxed">
                 <code>{JSON.stringify(currentReconstruction, null, 2)}</code>
               </pre>
             )
           ) : null}
         </div>
 
-        {/* Epistemic Disclaimer Footer */}
-        <div className="px-6 py-2.5 border-t border-slate-800 bg-slate-950 text-[11px] font-mono text-slate-500 flex items-center justify-between">
-          <div className="truncate mr-4">
-            <span className="text-slate-400 font-semibold">Disclaimer: </span>
-            {currentReconstruction?.disclaimer}
-          </div>
-          <div className="flex-shrink-0 text-slate-400">
-            Rating: <strong className="text-emerald-400">{currentReconstruction?.quality.rating}</strong>
-          </div>
+        {/* Minimal Footer */}
+        <div className="px-6 py-2.5 border-t border-gray-100 bg-white text-[11px] text-gray-400 flex items-center justify-between">
+          <span className="truncate pr-4">
+            {currentReconstruction?.epistemic_disclaimer || currentReconstruction?.disclaimer || 'Deterministic evaluation based on recorded workspace activity signals.'}
+          </span>
+          <span className="flex-shrink-0 font-medium text-gray-600">
+            Engine Rating: <strong className="text-emerald-700 uppercase font-semibold">{currentReconstruction?.quality?.rating || '—'}</strong>
+          </span>
         </div>
       </div>
     </div>,
@@ -271,435 +278,374 @@ export function ContextReconstructionInspector({
 }
 
 // ---------------------------------------------------------------------------
-// Epistemic Badges
+// Helpers & Subcomponents
 // ---------------------------------------------------------------------------
 
-function StatusBadge({ status }: { status: ReconstructionSectionStatus | string }) {
-  switch (status) {
-    case 'available':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-          AVAILABLE
-        </span>
-      );
-    case 'partial':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-          PARTIAL
-        </span>
-      );
-    case 'uncertain':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">
-          UNCERTAIN
-        </span>
-      );
-    case 'unavailable':
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-700/50 text-slate-400 border border-slate-600/50">
-          UNAVAILABLE
-        </span>
-      );
-    default:
-      return <span className="text-slate-400">{status}</span>;
-  }
+function formatExplanationLines(text?: string | null): string[] {
+  if (!text) return [];
+  // Strip "Why ContextSplit thinks this::" or similar prefixes
+  let cleaned = text.replace(/^(why contextsplit thinks this\s*::\s*)/i, '');
+  return cleaned
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
-function ProvenanceBadge({ provenance }: { provenance?: string | null }) {
-  if (!provenance) return null;
-  const p = provenance.toLowerCase();
-  if (p === 'observed') {
+function SectionStatusPill({ status }: { status?: ReconstructionSectionStatus | string | null }) {
+  const s = (status || 'unavailable').toLowerCase();
+  if (s === 'available') {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-mono font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800">
-        OBSERVED
+      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+        <CheckCircle2 size={12} className="text-emerald-600" />
+        Available
       </span>
     );
   }
-  if (p === 'confirmed') {
+  if (s === 'partial') {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-mono font-semibold bg-blue-950 text-blue-400 border border-blue-800">
-        CONFIRMED
+      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700">
+        <AlertCircle size={12} className="text-amber-600" />
+        Partial
+      </span>
+    );
+  }
+  if (s === 'uncertain') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-700">
+        <AlertCircle size={12} className="text-rose-600" />
+        Uncertain
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-mono font-semibold bg-purple-950 text-purple-400 border border-purple-800">
-      INFERRED
+    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-gray-400">
+      <HelpCircle size={12} />
+      Unavailable
     </span>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Tabs
+// Minimal Overview Tab
 // ---------------------------------------------------------------------------
 
-function InspectorOverviewTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
-  const { context, current_task, current_state, last_meaningful_activity, confidence, resume_readiness } = reconstruction;
+function MinimalOverviewTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
+  const {
+    context,
+    current_task,
+    current_state,
+    last_meaningful_activity,
+    confidence,
+    resume_readiness,
+    quality,
+  } = reconstruction;
+
+  const scorePct = Math.round((confidence?.score ?? 0) * 100);
+  const explanationBullets = formatExplanationLines(current_state?.explanation);
 
   return (
-    <div className="space-y-6">
-      {/* 1. Context & Task Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Context Entity */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Context Entity</span>
+    <div className="space-y-4">
+      {/* 1. Hero Summary Card */}
+      <div className="p-5 bg-white rounded-xl border border-gray-200/70 shadow-2xs">
+        <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+          <div className="space-y-1.5 max-w-xl">
             <div className="flex items-center gap-2">
-              <ProvenanceBadge provenance={context.provenance} />
-              <StatusBadge status={context.status} />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">Active Task</span>
+              <SectionStatusPill status={current_task?.status} />
             </div>
-          </div>
-          <div className="text-lg font-bold text-white tracking-tight">{context.name}</div>
-          <div className="grid grid-cols-2 gap-2 text-xs font-mono text-slate-400 pt-2 border-t border-slate-800/80">
-            <div>ID: <span className="text-slate-200">{context.id || 'None'}</span></div>
-            <div>Lifecycle: <span className="text-slate-200">{context.lifecycle_state || 'None'}</span></div>
-            <div>Confidence: <span className="text-emerald-400">{Math.round(context.confidence * 100)}%</span></div>
-          </div>
-        </div>
-
-        {/* Current Task */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Current Task</span>
-            <div className="flex items-center gap-2">
-              {current_task.provenance && <ProvenanceBadge provenance={current_task.provenance} />}
-              <StatusBadge status={current_task.status} />
-            </div>
-          </div>
-          <div className="text-lg font-bold text-white tracking-tight">
-            {current_task.title || <span className="text-slate-500 italic">No Task Identified</span>}
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs font-mono text-slate-400 pt-2 border-t border-slate-800/80">
-            <div>Verb: <span className="text-slate-200">{current_task.action_verb || '—'}</span></div>
-            <div>Target: <span className="text-slate-200">{current_task.target_subject || '—'}</span></div>
-            <div>Confidence: <span className="text-emerald-400">{current_task.confidence != null ? `${Math.round(current_task.confidence * 100)}%` : '—'}</span></div>
-          </div>
-          {current_task.reasons && current_task.reasons.length > 0 && (
-            <div className="text-xs text-slate-400 pt-1">
-              <span className="text-slate-500 font-semibold">Reason: </span>
-              {current_task.reasons[0]}
-            </div>
-          )}
-          {current_task.conflict_reason && (
-            <div className="p-2 rounded bg-rose-950/40 border border-rose-800/50 text-xs text-rose-300">
-              <strong>Contradiction: </strong> {current_task.conflict_reason}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 2. Operational State & Last Meaningful Activity */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Operational State */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Operational State</span>
-            <StatusBadge status={current_state.status} />
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-base font-bold text-white uppercase tracking-wider font-mono">
-              {current_state.state_value || 'None'}
-            </span>
-            {current_state.freshness && (
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                {current_state.freshness.toUpperCase()}
+            <h3 className="text-lg font-bold text-gray-900 tracking-tight">
+              {current_task?.title || <span className="text-gray-400 font-normal italic">No active task identified</span>}
+            </h3>
+            <div className="flex items-center gap-3 text-xs text-gray-500 pt-0.5">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                {context?.name} ({context?.lifecycle_state || 'active'})
               </span>
-            )}
-          </div>
-          <div className="text-xs text-slate-400 font-mono space-y-1 pt-2 border-t border-slate-800/80">
-            <div>Display: <span className="text-slate-200">{current_state.freshness_display || '—'}</span></div>
-            <div>Last Active: <span className="text-slate-200">{current_state.last_active_at ? new Date(current_state.last_active_at).toLocaleString() : '—'}</span></div>
-            {current_state.explanation && <div className="text-slate-400 italic">{current_state.explanation}</div>}
-          </div>
-        </div>
-
-        {/* Meaningful Activity */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Last Meaningful Activity</span>
-            <div className="flex items-center gap-2">
-              {last_meaningful_activity.provenance && <ProvenanceBadge provenance={last_meaningful_activity.provenance} />}
-              <StatusBadge status={last_meaningful_activity.status} />
+              <span className="text-gray-300">•</span>
+              <span>{current_state?.freshness_display || 'Active recently'}</span>
             </div>
           </div>
-          <div className="text-sm font-semibold text-slate-100">
-            {last_meaningful_activity.description || <span className="text-slate-500 italic">No meaningful event</span>}
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs font-mono text-slate-400 pt-2 border-t border-slate-800/80">
-            <div>Timestamp: <span className="text-slate-200">{last_meaningful_activity.timestamp ? new Date(last_meaningful_activity.timestamp).toLocaleTimeString() : '—'}</span></div>
-            <div>Confidence: <span className="text-emerald-400">{last_meaningful_activity.confidence != null ? `${Math.round(last_meaningful_activity.confidence * 100)}%` : '—'}</span></div>
+
+          {/* Confidence Score Pill */}
+          <div className="flex sm:flex-col items-baseline sm:items-end justify-between sm:justify-start gap-1 p-3 sm:p-0 bg-gray-50 sm:bg-transparent rounded-lg">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl font-bold text-gray-900 tracking-tight">{scorePct}%</span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60 uppercase">
+                {quality?.rating || 'COHERENT'}
+              </span>
+            </div>
+            <span className="text-[11px] text-gray-400">Confidence Score</span>
           </div>
         </div>
       </div>
 
-      {/* 3. Composite Confidence & Resume Readiness */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Composite Confidence */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Reconstruction Confidence</span>
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-              {confidence.band.toUpperCase()}
-            </span>
-          </div>
-          <div className="text-2xl font-black font-mono text-emerald-400">
-            {Math.round(confidence.score * 100)}%
-          </div>
-          <div className="space-y-1 pt-2 border-t border-slate-800/80">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Rationale:</span>
-            <ul className="text-xs text-slate-300 space-y-1">
-              {confidence.reasons.map((r, i) => (
-                <li key={i} className="flex items-start gap-1.5">
-                  <span className="text-emerald-500 select-none">•</span>
-                  <span>{r}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </div>
-
-        {/* Resume Readiness */}
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Resume Readiness</span>
-            <StatusBadge status={resume_readiness.status} />
-          </div>
-          <div className="text-base font-bold font-mono text-white uppercase tracking-wider">
-            {resume_readiness.readiness}
-          </div>
-          <div className="space-y-1 text-xs text-slate-300 pt-2 border-t border-slate-800/80">
-            <div><strong className="text-slate-400">Action: </strong>{resume_readiness.suggested_action}</div>
-            {resume_readiness.blockers.length > 0 && (
-              <div className="text-rose-400">
-                <strong>Blockers: </strong>{resume_readiness.blockers.join(', ')}
+      {/* 2. Structured Two-Column Breakdown */}
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+        {/* Left Column (Primary Story & Activity - 7 cols) */}
+        <div className="md:col-span-7 space-y-4">
+          {/* Last Activity Card */}
+          <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                Last Verified Activity
+              </span>
+              <SectionStatusPill status={last_meaningful_activity?.status} />
+            </div>
+            <div className="text-sm font-medium text-gray-900">
+              {last_meaningful_activity?.description || <span className="text-gray-400 italic font-normal">No activity recorded</span>}
+            </div>
+            {last_meaningful_activity?.timestamp && (
+              <div className="text-xs text-gray-400 font-mono">
+                {new Date(last_meaningful_activity.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
               </div>
             )}
           </div>
+
+          {/* Engine Rationale Card */}
+          <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-2.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+              Evidence & Rationale
+            </span>
+            {explanationBullets.length > 0 ? (
+              <ul className="text-xs text-gray-600 space-y-1.5">
+                {explanationBullets.map((bullet, idx) => (
+                  <li key={idx} className="flex items-start gap-2">
+                    <span className="text-emerald-600 font-bold select-none">•</span>
+                    <span>{bullet}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : confidence?.reasons && confidence.reasons.length > 0 ? (
+              <ul className="text-xs text-gray-600 space-y-1.5">
+                {confidence.reasons.map((r, idx) => (
+                  <li key={idx} className="flex items-start gap-2">
+                    <span className="text-emerald-600 font-bold select-none">•</span>
+                    <span>{r}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-gray-400 italic">No explicit rationale recorded.</p>
+            )}
+          </div>
+        </div>
+
+        {/* Right Column (Vitals & Resumability - 5 cols) */}
+        <div className="md:col-span-5 space-y-4">
+          {/* Context Vitals */}
+          <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-3">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+              Workspace Vitals
+            </span>
+            <div className="space-y-2.5 text-xs divide-y divide-gray-100">
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-gray-500">Working Set</span>
+                <span className="font-medium text-gray-800">{reconstruction.workset?.total_count ?? 0} assets</span>
+              </div>
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-gray-500">Memories</span>
+                <span className="font-medium text-gray-800">{reconstruction.important_memories?.total_count ?? 0} saved</span>
+              </div>
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-gray-500">State Freshness</span>
+                <span className="font-medium text-gray-800 capitalize">{current_state?.freshness || 'Active'}</span>
+              </div>
+              <div className="flex items-center justify-between pt-2">
+                <span className="text-gray-500">Contradictions</span>
+                <span className="font-medium text-emerald-700">
+                  {quality?.factors?.contradiction_count ?? 0} detected
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Resumability Status */}
+          <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                Resumability
+              </span>
+              <span className="text-[11px] font-semibold text-gray-700 capitalize">
+                {resume_readiness?.readiness || 'Ready'}
+              </span>
+            </div>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              {resume_readiness?.suggested_action || quality?.explanation || 'Context is coherent and ready to resume.'}
+            </p>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function InspectorWorksetTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
-  const { workset, important_memories, latest_snapshot } = reconstruction;
+// ---------------------------------------------------------------------------
+// Minimal Working Set Tab
+// ---------------------------------------------------------------------------
+
+function MinimalWorksetTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
+  const { workset, important_memories } = reconstruction;
 
   return (
-    <div className="space-y-6">
-      {/* Workset Items Table */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
-        <div className="flex items-center justify-between">
+    <div className="space-y-4">
+      {/* Workset Items */}
+      <div className="bg-white rounded-xl border border-gray-200/70 shadow-2xs overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">Working Set Assets</h3>
-            <p className="text-xs text-slate-400 font-mono">
-              Total: {workset.total_count} · Primary: {workset.primary_count} · Supporting: {workset.supporting_count} · Quality: {Math.round(workset.quality_score * 100)}%
+            <h4 className="text-xs font-semibold text-gray-800">Working Set Assets</h4>
+            <p className="text-[11px] text-gray-400">
+              {workset?.total_count ?? 0} items ({workset?.primary_count ?? 0} primary, {workset?.supporting_count ?? 0} supporting)
             </p>
           </div>
-          <StatusBadge status={workset.status} />
+          <SectionStatusPill status={workset?.status} />
         </div>
 
-        {workset.items.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-mono text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px]">
-                  <th className="py-2 px-2">ID</th>
-                  <th className="py-2 px-2">Type</th>
-                  <th className="py-2 px-2">Title / Content</th>
-                  <th className="py-2 px-2">App / Domain</th>
-                  <th className="py-2 px-2">Relevance</th>
-                  <th className="py-2 px-2">Score</th>
-                  <th className="py-2 px-2">Provenance</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {workset.items.map((item) => (
-                  <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="py-2 px-2 text-slate-400">{item.id.slice(0, 8)}...</td>
-                    <td className="py-2 px-2 uppercase text-[10px] text-slate-400">{item.item_type}</td>
-                    <td className="py-2 px-2 font-sans font-medium text-white max-w-xs truncate">
-                      {item.title || item.content_snippet}
-                    </td>
-                    <td className="py-2 px-2 text-slate-400">{item.app_name || item.domain || '—'}</td>
-                    <td className="py-2 px-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase font-bold ${
-                        item.relevance === 'primary' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700/50 text-slate-300'
-                      }`}>
-                        {item.relevance}
-                      </span>
-                    </td>
-                    <td className="py-2 px-2 text-emerald-400 font-bold">{Math.round(item.relevance_score * 100)}%</td>
-                    <td className="py-2 px-2"><ProvenanceBadge provenance={item.provenance} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {workset?.items && workset.items.length > 0 ? (
+          <div className="divide-y divide-gray-100 text-xs">
+            {workset.items.map((item) => (
+              <div key={item.id} className="px-4 py-3 hover:bg-gray-50/70 transition-colors flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-6 h-6 rounded bg-gray-100 flex items-center justify-center text-gray-500 flex-shrink-0">
+                    <FileText size={12} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-medium text-gray-900 truncate">
+                      {item.title || item.content_snippet || 'Untitled item'}
+                    </div>
+                    <div className="text-[11px] text-gray-400 truncate">
+                      {item.app_name || item.domain || item.item_type}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                    item.relevance === 'primary' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {item.relevance}
+                  </span>
+                  <span className="text-xs font-semibold text-gray-600 w-8 text-right">
+                    {Math.round(item.relevance_score * 100)}%
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
-          <div className="text-xs text-slate-500 italic py-4 text-center">No working set items identified.</div>
+          <div className="p-8 text-center text-xs text-gray-400 italic">No assets in current working set.</div>
         )}
       </div>
 
-      {/* Important Memories Table */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
-        <div className="flex items-center justify-between">
+      {/* Important Memories */}
+      <div className="bg-white rounded-xl border border-gray-200/70 shadow-2xs overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">Important Contextual Memories</h3>
-            <p className="text-xs text-slate-400 font-mono">
-              Total: {important_memories.total_count} · Pinned: {important_memories.pinned_count}
-            </p>
+            <h4 className="text-xs font-semibold text-gray-800">Contextual Memories</h4>
+            <p className="text-[11px] text-gray-400">{important_memories?.total_count ?? 0} recorded memories</p>
           </div>
-          <StatusBadge status={important_memories.status} />
+          <SectionStatusPill status={important_memories?.status} />
         </div>
 
-        {important_memories.memories.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-mono text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px]">
-                  <th className="py-2 px-2">Type</th>
-                  <th className="py-2 px-2">Title</th>
-                  <th className="py-2 px-2">Importance</th>
-                  <th className="py-2 px-2">Score</th>
-                  <th className="py-2 px-2">Provenance</th>
-                  <th className="py-2 px-2">Explanation</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                {important_memories.memories.map((mem) => (
-                  <tr key={mem.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="py-2 px-2 uppercase text-[10px] text-slate-400">{mem.memory_type}</td>
-                    <td className="py-2 px-2 font-sans font-medium text-white max-w-xs truncate">{mem.title}</td>
-                    <td className="py-2 px-2 uppercase text-[10px] text-amber-400 font-bold">{mem.importance_band}</td>
-                    <td className="py-2 px-2 text-emerald-400 font-bold">{Math.round(mem.importance_score * 100)}%</td>
-                    <td className="py-2 px-2"><ProvenanceBadge provenance={mem.provenance} /></td>
-                    <td className="py-2 px-2 font-sans text-slate-400 max-w-sm truncate">{mem.explanation}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {important_memories?.memories && important_memories.memories.length > 0 ? (
+          <div className="divide-y divide-gray-100 text-xs">
+            {important_memories.memories.map((mem) => (
+              <div key={mem.id} className="px-4 py-3 hover:bg-gray-50/70 transition-colors flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Bookmark size={13} className="text-amber-500 flex-shrink-0" />
+                  <div className="min-w-0">
+                    <div className="font-medium text-gray-900 truncate">{mem.title}</div>
+                    <div className="text-[11px] text-gray-400 truncate">{mem.explanation}</div>
+                  </div>
+                </div>
+                <span className="text-[10px] font-semibold uppercase text-amber-700 bg-amber-50 px-2 py-0.5 rounded flex-shrink-0">
+                  {mem.importance_band}
+                </span>
+              </div>
+            ))}
           </div>
         ) : (
-          <div className="text-xs text-slate-500 italic py-4 text-center">No important memories recorded.</div>
-        )}
-      </div>
-
-      {/* Snapshot Details */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-white uppercase tracking-wider">Latest Departure Snapshot</h3>
-          <StatusBadge status={latest_snapshot.status} />
-        </div>
-        {latest_snapshot.snapshot ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono text-slate-300 pt-2">
-            <div>Snapshot ID: <span className="text-slate-400">{latest_snapshot.snapshot.id.slice(0, 8)}...</span></div>
-            <div>Captured: <span className="text-slate-400">{new Date(latest_snapshot.snapshot.created_at).toLocaleString()}</span></div>
-            <div>Rating: <span className="text-emerald-400 uppercase font-bold">{latest_snapshot.snapshot.quality_rating}</span></div>
-            <div>Workset Count: <span className="text-slate-400">{latest_snapshot.snapshot.workset_count}</span></div>
-          </div>
-        ) : (
-          <div className="text-xs text-slate-500 italic py-2">No departure snapshot available.</div>
+          <div className="p-8 text-center text-xs text-gray-400 italic">No long-term memories recorded.</div>
         )}
       </div>
     </div>
   );
 }
 
-function InspectorQualityTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
+// ---------------------------------------------------------------------------
+// Minimal Quality Tab
+// ---------------------------------------------------------------------------
+
+function MinimalQualityTab({ reconstruction }: { reconstruction: ContextReconstruction }) {
   const { quality } = reconstruction;
-  const { factors } = quality;
+  const factors = quality?.factors;
+
+  const dims = [
+    { label: 'Context Confidence', value: factors?.context_confidence || 'strong' },
+    { label: 'Task Confidence', value: factors?.task_confidence || 'strong' },
+    { label: 'State Confidence', value: factors?.state_confidence || 'strong' },
+    { label: 'Workset Quality', value: factors?.workset_quality || 'moderate' },
+    { label: 'Memory Quality', value: factors?.memory_quality || 'moderate' },
+    { label: 'Snapshot Freshness', value: factors?.snapshot_freshness || 'fresh' },
+    { label: 'Evidence Consistency', value: factors?.evidence_consistency || 'consistent' },
+    { label: 'Data Freshness', value: factors?.data_freshness || 'recent' },
+  ];
 
   return (
-    <div className="space-y-6">
-      {/* Quality Summary Header */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
+    <div className="space-y-4">
+      {/* Quality Summary Banner */}
+      <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-1.5">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Quality Classification</span>
-          <span className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 uppercase">
-            {quality.rating}
+          <span className="text-xs font-semibold text-gray-900">{quality?.display_label || 'Coherent Reconstruction'}</span>
+          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 uppercase">
+            {quality?.rating || 'COHERENT'}
           </span>
         </div>
-        <div className="text-lg font-bold text-white">{quality.display_label}</div>
-        <p className="text-xs text-slate-300 font-sans leading-relaxed">{quality.explanation}</p>
-        <div className="text-xs font-mono text-slate-400 pt-2 border-t border-slate-800">
-          Can Confidently Resume: <strong className={quality.can_confidently_resume ? 'text-emerald-400' : 'text-rose-400'}>{quality.can_confidently_resume ? 'TRUE' : 'FALSE'}</strong>
-        </div>
+        <p className="text-xs text-gray-600 leading-relaxed">{quality?.explanation}</p>
       </div>
 
-      {/* 9 Quality Dimensions Breakdown */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-3">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Evaluated Quality Dimensions</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs font-mono">
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Context Confidence</span>
-            <div className="text-emerald-400 font-bold mt-1 uppercase">{factors.context_confidence}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Task Confidence</span>
-            <div className="text-emerald-400 font-bold mt-1 uppercase">{factors.task_confidence}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">State Confidence</span>
-            <div className="text-emerald-400 font-bold mt-1 uppercase">{factors.state_confidence}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Workset Quality</span>
-            <div className="text-indigo-400 font-bold mt-1 uppercase">{factors.workset_quality}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Memory Quality</span>
-            <div className="text-indigo-400 font-bold mt-1 uppercase">{factors.memory_quality}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Snapshot Freshness</span>
-            <div className="text-indigo-400 font-bold mt-1 uppercase">{factors.snapshot_freshness}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Evidence Consistency</span>
-            <div className="text-amber-400 font-bold mt-1 uppercase">{factors.evidence_consistency}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Data Freshness</span>
-            <div className="text-amber-400 font-bold mt-1 uppercase">{factors.data_freshness}</div>
-          </div>
-          <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800">
-            <span className="text-slate-500 uppercase text-[10px]">Contradictions Count</span>
-            <div className="text-rose-400 font-bold mt-1">{factors.contradiction_count}</div>
-          </div>
+      {/* Dimensions Grid */}
+      <div className="bg-white rounded-xl border border-gray-200/70 shadow-2xs p-4 space-y-3">
+        <h4 className="text-xs font-semibold text-gray-800">Quality Dimensions (9 Factors)</h4>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          {dims.map((d, i) => (
+            <div key={i} className="p-2.5 bg-gray-50 rounded-lg space-y-1">
+              <span className="text-[10px] text-gray-400 font-medium block truncate">{d.label}</span>
+              <span className="font-semibold text-gray-800 uppercase text-[11px]">{d.value}</span>
+            </div>
+          ))}
         </div>
       </div>
 
       {/* Contradictions & Gaps */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Contradictions Detected</span>
-          {factors.contradictions.length > 0 ? (
-            <ul className="text-xs text-rose-300 space-y-1 font-mono">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-2">
+          <h4 className="text-xs font-semibold text-gray-800">Contradictions Detected</h4>
+          {factors?.contradictions && factors.contradictions.length > 0 ? (
+            <ul className="text-xs text-rose-700 space-y-1">
               {factors.contradictions.map((c, idx) => (
                 <li key={idx} className="flex items-start gap-1.5">
-                  <span className="text-rose-500 select-none">•</span>
+                  <span className="text-rose-500 font-bold">•</span>
                   <span>{c}</span>
                 </li>
               ))}
             </ul>
           ) : (
-            <div className="text-xs text-emerald-400 font-mono">No contradictions detected. Clean consistency.</div>
+            <p className="text-xs text-emerald-700 font-medium">0 detected · Clean consistency</p>
           )}
         </div>
 
-        <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 space-y-2">
-          <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Gaps & Missing Evidence</span>
-          {factors.gaps.length > 0 ? (
-            <ul className="text-xs text-amber-300 space-y-1 font-mono">
+        <div className="p-4 bg-white rounded-xl border border-gray-200/70 shadow-2xs space-y-2">
+          <h4 className="text-xs font-semibold text-gray-800">Evidence Gaps</h4>
+          {factors?.gaps && factors.gaps.length > 0 ? (
+            <ul className="text-xs text-amber-700 space-y-1">
               {factors.gaps.map((g, idx) => (
                 <li key={idx} className="flex items-start gap-1.5">
-                  <span className="text-amber-500 select-none">•</span>
+                  <span className="text-amber-500 font-bold">•</span>
                   <span>{g}</span>
                 </li>
               ))}
             </ul>
           ) : (
-            <div className="text-xs text-emerald-400 font-mono">No evidence gaps. Fully specified.</div>
+            <p className="text-xs text-emerald-700 font-medium">0 gaps · Fully specified evidence</p>
           )}
         </div>
       </div>
@@ -707,7 +653,11 @@ function InspectorQualityTab({ reconstruction }: { reconstruction: ContextRecons
   );
 }
 
-function InspectorDiffTab({
+// ---------------------------------------------------------------------------
+// Minimal Diff Tab
+// ---------------------------------------------------------------------------
+
+function MinimalDiffTab({
   current,
   previous,
 }: {
@@ -716,91 +666,53 @@ function InspectorDiffTab({
 }) {
   if (!previous) {
     return (
-      <div className="p-8 text-center text-xs text-slate-400 font-mono">
-        No previous reconstruction state recorded yet. Click &ldquo;Reconstruct&rdquo; or &ldquo;Cold Reconstruct&rdquo; to produce a second state to compare.
+      <div className="p-8 text-center text-xs text-gray-400">
+        No previous state snapshot in this session. Trigger &ldquo;Refresh&rdquo; or &ldquo;Cold Test&rdquo; to compare states.
       </div>
     );
   }
 
-  const taskChanged = current.current_task.title !== previous.current_task.title;
-  const stateChanged = current.current_state.state_value !== previous.current_state.state_value;
-  const confidenceDiff = current.confidence.score - previous.confidence.score;
-  const worksetCountDiff = current.workset.total_count - previous.workset.total_count;
+  const confidenceDelta = Math.round(((current.confidence?.score ?? 0) - (previous.confidence?.score ?? 0)) * 100);
 
   return (
-    <div className="space-y-6">
-      {/* Diff Metrics Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
-        <div className="p-3 bg-slate-950/70 rounded-lg border border-slate-800">
-          <span className="text-slate-500 uppercase text-[10px]">Task Delta</span>
-          <div className={`font-bold mt-1 ${taskChanged ? 'text-amber-400' : 'text-slate-300'}`}>
-            {taskChanged ? 'CHANGED' : 'IDENTICAL'}
-          </div>
-        </div>
-        <div className="p-3 bg-slate-950/70 rounded-lg border border-slate-800">
-          <span className="text-slate-500 uppercase text-[10px]">State Delta</span>
-          <div className={`font-bold mt-1 ${stateChanged ? 'text-amber-400' : 'text-slate-300'}`}>
-            {stateChanged ? 'TRANSITIONED' : 'UNCHANGED'}
-          </div>
-        </div>
-        <div className="p-3 bg-slate-950/70 rounded-lg border border-slate-800">
-          <span className="text-slate-500 uppercase text-[10px]">Confidence Delta</span>
-          <div className={`font-bold mt-1 ${confidenceDiff !== 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
-            {confidenceDiff > 0 ? `+${Math.round(confidenceDiff * 100)}%` : `${Math.round(confidenceDiff * 100)}%`}
-          </div>
-        </div>
-        <div className="p-3 bg-slate-950/70 rounded-lg border border-slate-800">
-          <span className="text-slate-500 uppercase text-[10px]">Workset Item Delta</span>
-          <div className="font-bold text-indigo-300 mt-1">
-            {worksetCountDiff > 0 ? `+${worksetCountDiff} items` : `${worksetCountDiff} items`}
-          </div>
-        </div>
+    <div className="bg-white rounded-xl border border-gray-200/70 shadow-2xs overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <h4 className="text-xs font-semibold text-gray-800">Session State Comparison</h4>
+        <span className="text-[11px] text-gray-400">
+          Confidence Delta: <strong className={confidenceDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'}>{confidenceDelta >= 0 ? `+${confidenceDelta}%` : `${confidenceDelta}%`}</strong>
+        </span>
       </div>
-
-      {/* Side-by-Side Comparison Table */}
-      <div className="p-4 bg-slate-950/60 rounded-xl border border-slate-800 overflow-x-auto">
-        <table className="w-full text-xs font-mono text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-800 text-slate-400 uppercase text-[10px]">
-              <th className="py-2 px-3">Field</th>
-              <th className="py-2 px-3 text-slate-400">Previous Reconstruction</th>
-              <th className="py-2 px-3 text-emerald-400">Current Reconstruction</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60 text-slate-300">
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">Context Name</td>
-              <td className="py-2.5 px-3 text-slate-400">{previous.context.name}</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold">{current.context.name}</td>
-            </tr>
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">Task Title</td>
-              <td className="py-2.5 px-3 text-slate-400">{previous.current_task.title || 'None'}</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold">{current.current_task.title || 'None'}</td>
-            </tr>
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">State Value</td>
-              <td className="py-2.5 px-3 text-slate-400">{previous.current_state.state_value || 'None'}</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold">{current.current_state.state_value || 'None'}</td>
-            </tr>
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">Workset Items</td>
-              <td className="py-2.5 px-3 text-slate-400">{previous.workset.total_count} items</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold">{current.workset.total_count} items</td>
-            </tr>
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">Confidence</td>
-              <td className="py-2.5 px-3 text-slate-400">{Math.round(previous.confidence.score * 100)}%</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold">{Math.round(current.confidence.score * 100)}%</td>
-            </tr>
-            <tr>
-              <td className="py-2.5 px-3 font-semibold text-slate-400">Quality Rating</td>
-              <td className="py-2.5 px-3 text-slate-400 uppercase">{previous.quality.rating}</td>
-              <td className="py-2.5 px-3 text-emerald-300 font-bold uppercase">{current.quality.rating}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <table className="w-full text-xs text-left border-collapse">
+        <thead>
+          <tr className="border-b border-gray-100 bg-gray-50 text-gray-400 uppercase text-[10px] font-semibold">
+            <th className="py-2.5 px-4">Field</th>
+            <th className="py-2.5 px-4">Previous State</th>
+            <th className="py-2.5 px-4 text-emerald-700">Current State</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100 text-gray-700">
+          <tr>
+            <td className="py-2.5 px-4 font-medium text-gray-500">Active Task</td>
+            <td className="py-2.5 px-4 text-gray-500">{previous.current_task?.title || 'None'}</td>
+            <td className="py-2.5 px-4 font-semibold text-gray-900">{current.current_task?.title || 'None'}</td>
+          </tr>
+          <tr>
+            <td className="py-2.5 px-4 font-medium text-gray-500">Operational State</td>
+            <td className="py-2.5 px-4 text-gray-500 uppercase">{previous.current_state?.state_value || 'None'}</td>
+            <td className="py-2.5 px-4 font-semibold text-gray-900 uppercase">{current.current_state?.state_value || 'None'}</td>
+          </tr>
+          <tr>
+            <td className="py-2.5 px-4 font-medium text-gray-500">Working Set Count</td>
+            <td className="py-2.5 px-4 text-gray-500">{previous.workset?.total_count ?? 0} assets</td>
+            <td className="py-2.5 px-4 font-semibold text-gray-900">{current.workset?.total_count ?? 0} assets</td>
+          </tr>
+          <tr>
+            <td className="py-2.5 px-4 font-medium text-gray-500">Confidence Score</td>
+            <td className="py-2.5 px-4 text-gray-500">{Math.round((previous.confidence?.score ?? 0) * 100)}%</td>
+            <td className="py-2.5 px-4 font-semibold text-emerald-700">{Math.round((current.confidence?.score ?? 0) * 100)}%</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }

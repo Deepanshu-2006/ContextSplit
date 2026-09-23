@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db, ContextCandidate, CandidateWithItems, CandidateScore, ContextReasoningResult, AIFailureReason } from '../services/db';
 import { useWorkspaceStore } from './workspaceStore';
+import { toast } from 'sonner';
 
 export const HIGH_CONFIDENCE_THRESHOLD = 0.70;
 
@@ -71,10 +72,22 @@ export const useDiscoveryStore = create<DiscoveryState>((set, get) => ({
   runDiscoveryScan: async () => {
     try {
       set({ isLoading: true });
-      await db.runContextDiscovery();
+      const newCandidates = await db.runContextDiscovery();
       await get().checkForCandidates();
-    } catch (err) {
+      const highConfidenceCandidates = get().candidates;
+
+      if (newCandidates && newCandidates.length > 0) {
+        toast.success(`Discovered ${newCandidates.length} new context candidate${newCandidates.length > 1 ? 's' : ''}!`);
+        await get().reviewCandidate(newCandidates[0].id);
+      } else if (highConfidenceCandidates.length > 0) {
+        toast.info(`Found ${highConfidenceCandidates.length} context candidate${highConfidenceCandidates.length > 1 ? 's' : ''} ready for review.`);
+        await get().reviewCandidate(highConfidenceCandidates[0].id);
+      } else {
+        toast.info('No new context clusters detected yet. ContextSplit discovers new contexts when you collect 3+ related items in your Inbox.');
+      }
+    } catch (err: any) {
       console.error('Failed to run discovery scan:', err);
+      toast.error(`Discovery scan failed: ${err?.message || err}`);
     } finally {
       set({ isLoading: false });
     }

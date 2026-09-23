@@ -63,10 +63,10 @@ export function TopBar() {
               <button
                 onClick={() => openReconstructionInspector(currentWorkspace.id)}
                 title="[DEV ONLY] Open Context Reconstruction Inspector"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-bold text-emerald-300 bg-slate-950 hover:bg-slate-900 rounded-lg border border-emerald-800/80 shadow-xs transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50/80 hover:bg-emerald-100/80 rounded-lg border border-emerald-200/60 transition-colors cursor-pointer"
               >
-                <Cpu size={13} className="text-emerald-400" />
-                <span>REC DEV</span>
+                <Cpu size={13} className="text-emerald-600" />
+                <span>Inspector</span>
               </button>
             )}
           </>

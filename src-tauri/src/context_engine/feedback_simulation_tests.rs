@@ -435,7 +435,7 @@ fn test_scenario_6_removal_from_important_memory_prevents_immediate_return() {
 fn test_scenario_7_user_corrects_current_task_reconstruction_reflects_correction() {
     let conn = setup_simulation_db();
     let payx = create_workspace(&conn, "PayX").unwrap();
-    let session = create_session(&conn).unwrap();
+    let _session = create_session(&conn).unwrap();
 
     // Insert task candidate into DB
     let initial_task_id = "task_payx_stripe_initial";
