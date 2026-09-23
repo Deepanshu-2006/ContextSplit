@@ -58,6 +58,14 @@ pub mod memory_explanation;
 pub mod feedback_explanation;
 pub mod health_check;
 pub mod cross_system_consistency;
+pub mod performance_tracing;
+
+pub use performance_tracing::{
+    start_span, get_performance_tracer, ActiveSpan, CategoryPerformanceSummary,
+    ExcessiveDbQueryDiagnostic, NPlusOneDiagnostic, OperationCategory,
+    PerformanceDiagnosticsReport, PerformanceSpan, PerformanceTracer,
+    RepeatedSemanticDiagnostic, UnnecessaryRecomputationDiagnostic,
+};
 
 pub use cross_system_consistency::{
     ContextIdentityMismatch, CrossSystemConsistencyChecker, CrossSystemConsistencyReport,
