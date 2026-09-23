@@ -301,7 +301,7 @@ mod tests {
 
         controller.purge_all_diagnostics();
         assert_eq!(get_performance_tracer().len(), 0);
-        assert_eq!(ContextDecisionTracer::stats().total_recorded, 0);
+        assert_eq!(ContextDecisionTracer::stats().currently_retained, 0);
     }
 
     #[test]
