@@ -943,6 +943,31 @@ fn notch_drop(state: State<'_, capture::SystemTarget>) -> bool {
 }
 
 #[tauri::command]
+fn notch_cursor_moved(cursor_x: f64, cursor_y: f64, state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "macos")]
+    state.notch_controller.on_cursor_moved(cursor_x, cursor_y);
+}
+
+#[tauri::command]
+fn get_notch_debug_snapshot(
+    cursor_x: Option<f64>,
+    cursor_y: Option<f64>,
+    state: State<'_, capture::SystemTarget>,
+) -> Option<capture::notch::NotchDebugSnapshot> {
+    #[cfg(target_os = "macos")]
+    return Some(state.get_debug_snapshot(cursor_x, cursor_y));
+    
+    #[cfg(not(target_os = "macos"))]
+    return None;
+}
+
+#[tauri::command]
+fn set_notch_debug_mode(enabled: bool, state: State<'_, capture::SystemTarget>) {
+    #[cfg(target_os = "macos")]
+    state.notch_controller.set_debug_mode(enabled);
+}
+
+#[tauri::command]
 fn show_windows_target(state: State<'_, capture::SystemTarget>) -> Result<(), String> {
     use capture::target::CaptureTarget;
     state.show()
@@ -1531,6 +1556,9 @@ pub fn run() {
             notch_drag_over,
             notch_drag_leave,
             notch_drop,
+            notch_cursor_moved,
+            get_notch_debug_snapshot,
+            set_notch_debug_mode,
             show_windows_target,
             hide_windows_target,
             windows_target_drag_enter,

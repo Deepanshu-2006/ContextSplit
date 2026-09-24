@@ -1,22 +1,24 @@
-use super::target::{CaptureTarget, CaptureRequest};
-use super::notch::{NotchCaptureController, NotchState};
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize, Emitter};
+use super::target::{CaptureTarget, CaptureRequest, TargetState};
+use super::notch::{NotchInteractionController, NotchInteractionState, NotchGeometry, NotchCaptureEventPayload, NotchDebugSnapshot};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, Emitter};
 use std::sync::Arc;
 
 pub struct MacOSTarget {
     app_handle: AppHandle,
-    pub notch_controller: Arc<NotchCaptureController<Box<dyn Fn(NotchState) + Send + Sync>>>,
+    pub notch_controller: Arc<NotchInteractionController<Box<dyn Fn(NotchInteractionState) + Send + Sync>>>,
 }
 
 impl MacOSTarget {
     pub fn new(app_handle: AppHandle) -> Self {
         let app_handle_clone = app_handle.clone();
-        let notch_controller = Arc::new(NotchCaptureController::new(Box::new(move |state| {
+        let notch_controller = Arc::new(NotchInteractionController::new(Box::new(move |state: NotchInteractionState| {
             if let Some(window) = app_handle_clone.get_webview_window("macos-notch-target") {
-                let _ = window.emit("target-state-changed", state);
+                // Emit both strongly typed notch states and legacy target states for UI compatibility
                 let _ = window.emit("notch-state-changed", state);
+                let legacy_state: TargetState = state.into();
+                let _ = window.emit("target-state-changed", legacy_state);
             }
-        }) as Box<dyn Fn(NotchState) + Send + Sync>));
+        }) as Box<dyn Fn(NotchInteractionState) + Send + Sync>));
 
         // Initialize the overlay window with native OS drag-and-drop handler
         if app_handle.get_webview_window("macos-notch-target").is_none() {
@@ -28,8 +30,8 @@ impl MacOSTarget {
                 "macos-notch-target",
                 WebviewUrl::App("index.html".into())
             )
-            .title("ContextSplit Capture Notch")
-            .inner_size(480.0, 80.0) // Sized for notch + animated sliding wings
+            .title("ContextSplit Notch Capture")
+            .inner_size(600.0, 220.0) // Sized for physical notch + expanded island + intake chamber
             .transparent(true)
             .decorations(false)
             .always_on_top(true)
@@ -37,7 +39,7 @@ impl MacOSTarget {
             .skip_taskbar(true)
             .visible(true)
             .shadow(false)
-            .accept_first_mouse(true) // Allow drag and drop immediately
+            .accept_first_mouse(true) // Immediate drag and drop reception
             .build()
             .map(|window| {
                 #[cfg(target_os = "macos")]
@@ -47,12 +49,23 @@ impl MacOSTarget {
                     use cocoa::appkit::{NSWindow, NSWindowCollectionBehavior};
                     use cocoa::foundation::{NSRect, NSPoint, NSSize};
 
+                    #[repr(C)]
+                    #[derive(Copy, Clone, Debug)]
+                    struct NSEdgeInsets {
+                        top: f64,
+                        left: f64,
+                        bottom: f64,
+                        right: f64,
+                    }
+
                     if let Ok(ns_win_ptr) = window.ns_window() {
                         let ns_win = ns_win_ptr as id;
                         if ns_win != nil {
                             // Ensure the window background is COMPLETELY transparent natively
                             ns_win.setOpaque_(cocoa::base::NO);
                             ns_win.setBackgroundColor_(cocoa::appkit::NSColor::clearColor(nil));
+                            ns_win.setHasShadow_(cocoa::base::NO);
+                            ns_win.setMovable_(cocoa::base::NO);
 
                             // NSStatusWindowLevel (25) floats directly above the menu bar and notch
                             ns_win.setLevel_(25);
@@ -64,17 +77,53 @@ impl MacOSTarget {
                             );
 
                             let nsscreen_class = class!(NSScreen);
-                            let screen: id = msg_send![ns_win, screen];
-                            let screen = if screen != nil { screen } else { msg_send![nsscreen_class, mainScreen] };
+                            let screens: id = msg_send![nsscreen_class, screens];
+                            let count: usize = if screens != nil { msg_send![screens, count] } else { 0 };
+
+                            let mut built_in_screen = nil;
+                            for i in 0..count {
+                                let s: id = msg_send![screens, objectAtIndex: i];
+                                if s != nil {
+                                    let insets: NSEdgeInsets = msg_send![s, safeAreaInsets];
+                                    if insets.top > 0.0 {
+                                        built_in_screen = s;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let screen = if built_in_screen != nil {
+                                built_in_screen
+                            } else if count > 0 {
+                                msg_send![screens, objectAtIndex: 0usize]
+                            } else {
+                                msg_send![nsscreen_class, mainScreen]
+                            };
+
                             if screen != nil {
                                 let sf: NSRect = msg_send![screen, frame];
-                                let win_w = 480.0;
-                                let win_h = 80.0;
+                                let backing_scale: f64 = msg_send![screen, backingScaleFactor];
+                                
+                                let win_w = 600.0;
+                                let win_h = 220.0;
                                 let x = sf.origin.x + (sf.size.width - win_w) / 2.0;
                                 let y = sf.origin.y + sf.size.height - win_h;
                                 
                                 let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(win_w, win_h));
                                 ns_win.setFrame_display_(frame, YES);
+
+                                // Update controller geometry with dynamic screen bounds & Retina scale
+                                let dynamic_geom = NotchGeometry::for_display(
+                                    "built_in_display",
+                                    sf.size.width,
+                                    sf.size.height,
+                                    sf.origin.x,
+                                    sf.origin.y,
+                                    backing_scale,
+                                    true,
+                                    true,
+                                );
+                                ctrl_drag.update_geometry(dynamic_geom);
                             }
                         }
                     }
@@ -82,22 +131,66 @@ impl MacOSTarget {
 
                 let ctrl_drag = ctrl_drag.clone();
                 let app_drag = app_drag.clone();
+                let win_clone = window.clone();
                 window.on_window_event(move |event| {
                     match event {
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter { .. }) => {
+                            #[cfg(target_os = "macos")]
+                            unsafe {
+                                use objc::{msg_send, sel, sel_impl, class};
+                                use cocoa::base::{id, nil, YES};
+                                use cocoa::foundation::{NSRect, NSPoint, NSSize};
+                                use cocoa::appkit::NSWindow;
+
+                                if let Ok(ns_win_ptr) = win_clone.ns_window() {
+                                    let ns_win = ns_win_ptr as id;
+                                    if ns_win != nil {
+                                        let nsevent_class = class!(NSEvent);
+                                        let mouse_loc: NSPoint = msg_send![nsevent_class, mouseLocation];
+
+                                        let nsscreen_class = class!(NSScreen);
+                                        let screens: id = msg_send![nsscreen_class, screens];
+                                        let count: usize = if screens != nil { msg_send![screens, count] } else { 0 };
+
+                                        let mut target_screen = nil;
+                                        for i in 0..count {
+                                            let s: id = msg_send![screens, objectAtIndex: i];
+                                            if s != nil {
+                                                let sf: NSRect = msg_send![s, frame];
+                                                if mouse_loc.x >= sf.origin.x 
+                                                    && mouse_loc.x <= sf.origin.x + sf.size.width
+                                                    && mouse_loc.y >= sf.origin.y
+                                                    && mouse_loc.y <= sf.origin.y + sf.size.height 
+                                                {
+                                                    target_screen = s;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if target_screen != nil {
+                                            let sf: NSRect = msg_send![target_screen, frame];
+                                            let win_w = 600.0;
+                                            let win_h = 220.0;
+                                            let x = sf.origin.x + (sf.size.width - win_w) / 2.0;
+                                            let y = sf.origin.y + sf.size.height - win_h;
+                                            let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(win_w, win_h));
+                                            ns_win.setFrame_display_(frame, YES);
+                                        }
+                                    }
+                                }
+                            }
                             ctrl_drag.on_drag_enter();
                         }
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { .. }) => {
-                            ctrl_drag.on_drag_over(true);
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Over { position }) => {
+                            // Check if cursor is over the drop zone center
+                            let is_center = position.x >= 130.0 && position.x <= 470.0 && position.y <= 135.0;
+                            ctrl_drag.on_drag_over(is_center);
                         }
                         tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Leave) => {
                             ctrl_drag.on_drag_leave();
                         }
-                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                        tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, position: _ }) => {
                             if ctrl_drag.on_drop() {
-                                // Instantly reset to Idle so the notch is immediately ready for the next rapid-fire drag
-                                ctrl_drag.reset();
-                                
                                 let paths = paths.clone();
                                 let app_drag = app_drag.clone();
                                 std::thread::spawn(move || {
@@ -129,18 +222,18 @@ impl MacOSTarget {
                                             (path_str.clone(), None)
                                         };
                                         
-                                        let req = CaptureRequest {
-                                            data_type: if is_image { "image".to_string() } else { "file".to_string() },
+                                        // Build canonical NotchCaptureEventPayload and forward to CaptureService
+                                        let mut payload = NotchCaptureEventPayload::new(
+                                            if is_image { "image" } else { "file" },
                                             content,
-                                            title: filename.clone(),
-                                            source: Some("drag_drop".to_string()),
-                                            filename,
-                                            mime_type,
-                                            original_url: None,
-                                            size: std::fs::metadata(path).ok().map(|m| m.len() as usize),
-                                            workspace_id: None,
-                                        };
-                                        let _ = super::engine::process_capture(app_drag.clone(), req);
+                                        );
+                                        payload.mime_type = mime_type;
+                                        payload.title = filename;
+
+                                        let req = payload.into_capture_request();
+                                        if let Err(e) = super::engine::process_capture(app_drag.clone(), req) {
+                                            eprintln!("Capture error: {}", e);
+                                        }
                                     }
                                 });
                             }
@@ -152,6 +245,10 @@ impl MacOSTarget {
         }
         
         Self { app_handle, notch_controller }
+    }
+
+    pub fn get_debug_snapshot(&self, cursor_x: Option<f64>, cursor_y: Option<f64>) -> NotchDebugSnapshot {
+        self.notch_controller.get_debug_snapshot(cursor_x, cursor_y)
     }
 }
 
@@ -171,8 +268,7 @@ impl CaptureTarget for MacOSTarget {
     }
 
     fn set_active(&self, active: bool) -> Result<(), String> {
-        // TODO: Highlight the drop zone
-        println!("MacOSTarget: set_active({})", active);
+        self.notch_controller.on_drag_over(active);
         Ok(())
     }
 
