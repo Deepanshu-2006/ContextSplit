@@ -26,7 +26,11 @@ pub fn process_capture(app_handle: AppHandle, req: CaptureRequest) -> Result<(),
         }
     }
 
-    let core = CaptureCore::new();
+    let core = if req.source.as_deref() == Some("drag_drop") {
+        CaptureCore::new().without_deduplication()
+    } else {
+        CaptureCore::new()
+    };
     let _result = core.process_app(app_handle.clone(), payload).map_err(|e| e.to_string())?;
 
     // Report success to target overlay if active, but ONLY for non-drag-and-drop sources (like hotkeys).

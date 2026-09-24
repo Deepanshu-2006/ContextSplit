@@ -28,7 +28,8 @@ export function useDragAndDrop() {
       e.stopPropagation();
       
       if (isNotch) {
-        const isNearCenter = e.clientX > window.innerWidth * 0.1 && e.clientX < window.innerWidth * 0.9;
+        const isNearCenter = e.clientX > window.innerWidth * 0.15 && e.clientX < window.innerWidth * 0.85;
+        invoke('notch_cursor_moved', { cursorX: e.clientX, cursorY: e.clientY }).catch(() => {});
         await invoke('notch_drag_over', { isNearCenter });
       } else if (isWindowsOrb) {
         const isInsideTarget = e.clientX > window.innerWidth * 0.2 && e.clientX < window.innerWidth * 0.8 && e.clientY < 120;
