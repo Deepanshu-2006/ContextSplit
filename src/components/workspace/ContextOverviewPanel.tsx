@@ -75,6 +75,8 @@ export function ContextOverviewPanel() {
         .then((tl) => setTimelineEvents(tl.chronological_activity || []))
         .catch(() => {});
     } catch (err: any) {
+      console.error("Context Overview Error:", err);
+      toast.error(`Context Overview failed: ${err?.toString() || 'Unknown error'}`);
       setError(err?.toString() || 'Failed to load context reconstruction');
     } finally {
       setIsLoading(false);

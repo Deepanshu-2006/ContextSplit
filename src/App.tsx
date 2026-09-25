@@ -117,7 +117,7 @@ function App() {
   }
 
   return (
-    <div className="w-screen h-screen flex overflow-hidden bg-white font-sans text-gray-900">
+    <div className="w-screen h-screen flex overflow-hidden bg-white font-sans text-stone-900">
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
         {activeWorkspaceId !== "inbox" && <TopBar />}

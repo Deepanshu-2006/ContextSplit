@@ -69,13 +69,13 @@ export function Sidebar() {
 
   return (
     <>
-      <aside className="w-60 h-full bg-[#FAFAFA] border-r border-black/5 flex flex-col pt-7 pb-4 select-none shrink-0">
+      <aside className="w-60 h-full bg-[#FFFBF9] border-r border-orange-200/50 flex flex-col pt-7 pb-4 select-none shrink-0">
         {/* Brand Header */}
         <div className="px-5 mb-6 flex items-center gap-2.5">
           <div className="w-5 h-5 rounded-md bg-gray-900 shadow-xs flex items-center justify-center">
             <span className="w-2 h-2 rounded-xs bg-white" />
           </div>
-          <h1 className="font-semibold text-[14px] tracking-tight text-gray-900">
+          <h1 className="font-semibold text-[14px] tracking-tight text-stone-900">
             ContextSplit
           </h1>
         </div>
@@ -88,12 +88,12 @@ export function Sidebar() {
             onClick={() => selectWorkspace("inbox")}
             className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-all duration-150 cursor-pointer ${
               hoveredWorkspaceId === "inbox"
-                ? "bg-blue-50 text-blue-600 ring-2 ring-blue-500/20"
+                ? "bg-rose-50 text-rose-600 ring-2 ring-rose-500/20"
                 : activeWorkspaceId === "inbox"
-                ? "bg-black/5 text-gray-900 font-semibold"
+                ? "bg-orange-100/50 text-orange-950 font-semibold"
                 : isDraggingCard
-                ? "text-gray-400 hover:text-gray-600"
-                : "text-gray-600 hover:text-gray-900 hover:bg-black/3"
+                ? "text-stone-400 hover:text-stone-600"
+                : "text-stone-600 hover:text-stone-900 hover:bg-black/3"
             }`}
           >
             <div className="flex items-center gap-2.5">
@@ -101,10 +101,10 @@ export function Sidebar() {
                 size={14}
                 className={
                   hoveredWorkspaceId === "inbox"
-                    ? "text-blue-500"
+                    ? "text-rose-500"
                     : activeWorkspaceId === "inbox"
-                    ? "text-gray-900"
-                    : "text-gray-400"
+                    ? "text-stone-900"
+                    : "text-stone-400"
                 }
               />
               <span>Inbox</span>
@@ -113,10 +113,10 @@ export function Sidebar() {
               <span
                 className={`px-1.5 py-0.2 rounded-md text-[11px] font-semibold ${
                   hoveredWorkspaceId === "inbox"
-                    ? "bg-blue-100/50 text-blue-600"
+                    ? "bg-rose-100/50 text-rose-600"
                     : activeWorkspaceId === "inbox"
-                    ? "bg-black/10 text-gray-900"
-                    : "bg-black/5 text-gray-500"
+                    ? "bg-orange-200/50 text-orange-950"
+                    : "bg-black/5 text-stone-500"
                 }`}
               >
                 {inboxCount}
@@ -127,18 +127,18 @@ export function Sidebar() {
           {/* Search */}
           <div
             onClick={handleSearchClick}
-            className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-gray-600 hover:text-gray-900 hover:bg-black/3 transition-all duration-150 cursor-pointer"
+            className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-stone-600 hover:text-stone-900 hover:bg-black/3 transition-all duration-150 cursor-pointer"
           >
-            <Search size={14} className="text-gray-400" />
+            <Search size={14} className="text-stone-400" />
             <span>Search</span>
           </div>
 
           {/* Timeline */}
           <div
             onClick={handleTimelineClick}
-            className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-gray-600 hover:text-gray-900 hover:bg-black/3 transition-all duration-150 cursor-pointer"
+            className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-stone-600 hover:text-stone-900 hover:bg-black/3 transition-all duration-150 cursor-pointer"
           >
-            <Clock size={14} className="text-gray-400" />
+            <Clock size={14} className="text-stone-400" />
             <span>Timeline</span>
           </div>
         </div>
@@ -146,7 +146,7 @@ export function Sidebar() {
         {/* Workspaces Section */}
         <div className="px-3 flex-1 overflow-y-auto min-h-0 flex flex-col">
           <div className="px-2.5 mb-1.5 flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-gray-400 tracking-wider uppercase">
+            <span className="text-[11px] font-semibold text-stone-400 tracking-wider uppercase">
               Workspaces
             </span>
           </div>
@@ -164,12 +164,12 @@ export function Sidebar() {
                   onClick={() => !isEditing && selectWorkspace(workspace.id)}
                   className={`group flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-all duration-150 cursor-pointer ${
                     isHoveredTarget
-                      ? "bg-blue-50 text-blue-600 ring-2 ring-blue-500/20"
+                      ? "bg-rose-50 text-rose-600 ring-2 ring-rose-500/20"
                       : isActive
-                      ? "bg-black/5 text-gray-900 font-semibold"
+                      ? "bg-orange-100/50 text-orange-950 font-semibold"
                       : isDraggingCard
-                      ? "text-gray-400 hover:text-gray-600"
-                      : "text-gray-600 hover:text-gray-900 hover:bg-black/3"
+                      ? "text-stone-400 hover:text-stone-600"
+                      : "text-stone-600 hover:text-stone-900 hover:bg-black/3"
                   }`}
                 >
                   <div className="flex items-center gap-2.5 flex-1 min-w-0">
@@ -177,10 +177,10 @@ export function Sidebar() {
                       size={14}
                       className={
                         isHoveredTarget
-                          ? "text-blue-500 shrink-0"
+                          ? "text-rose-500 shrink-0"
                           : isActive
-                          ? "text-gray-900 shrink-0"
-                          : "text-gray-400 shrink-0"
+                          ? "text-stone-900 shrink-0"
+                          : "text-stone-400 shrink-0"
                       }
                     />
                     {isEditing ? (
@@ -191,7 +191,7 @@ export function Sidebar() {
                         onChange={(e) => setEditValue(e.target.value)}
                         onBlur={handleRenameSubmit}
                         onKeyDown={handleKeyDown}
-                        className="bg-white border border-black/15 rounded px-1.5 py-0.5 w-full text-gray-900 outline-none text-[13px]"
+                        className="bg-white border border-black/15 rounded px-1.5 py-0.5 w-full text-stone-900 outline-none text-[13px]"
                         onClick={(e) => e.stopPropagation()}
                       />
                     ) : (
@@ -206,14 +206,14 @@ export function Sidebar() {
                           e.stopPropagation();
                           openTimeline(workspace.id);
                         }}
-                        className="p-1 text-gray-400 hover:text-gray-700 rounded"
+                        className="p-1 text-stone-400 hover:text-gray-700 rounded"
                         title="Workspace Timeline"
                       >
                         <Clock size={12} />
                       </button>
                       <button
                         onClick={(e) => startEditing(workspace, e)}
-                        className="p-1 text-gray-400 hover:text-gray-700 rounded"
+                        className="p-1 text-stone-400 hover:text-gray-700 rounded"
                         title="Rename"
                       >
                         <Pencil size={12} />
@@ -223,7 +223,7 @@ export function Sidebar() {
                           e.stopPropagation();
                           deleteWorkspace(workspace.id);
                         }}
-                        className="p-1 text-gray-400 hover:text-red-500 rounded"
+                        className="p-1 text-stone-400 hover:text-red-500 rounded"
                         title="Delete"
                       >
                         <Trash2 size={12} />
@@ -234,26 +234,26 @@ export function Sidebar() {
               );
             })}
             {workspaces.length === 0 && (
-              <p className="px-2.5 text-[12px] text-gray-400 py-2">No workspaces yet.</p>
+              <p className="px-2.5 text-[12px] text-stone-400 py-2">No workspaces yet.</p>
             )}
           </nav>
 
           <button
             onClick={() => createWorkspace("New Workspace")}
-            className="mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-gray-500 hover:text-gray-900 hover:bg-black/3 transition-colors text-left cursor-pointer"
+            className="mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-stone-500 hover:text-stone-900 hover:bg-black/3 transition-colors text-left cursor-pointer"
           >
-            <Plus size={13} className="text-gray-400" />
+            <Plus size={13} className="text-stone-400" />
             <span>New Workspace</span>
           </button>
         </div>
 
         {/* Footer: Settings at bottom */}
-        <div className="px-3 pt-3 mt-auto border-t border-black/5">
+        <div className="px-3 pt-3 mt-auto border-t border-orange-200/50">
           <button
             onClick={() => setIsSettingsOpen(true)}
-            className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-gray-600 hover:text-gray-900 hover:bg-black/3 transition-colors cursor-pointer"
+            className="w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-[13px] font-medium text-stone-600 hover:text-stone-900 hover:bg-black/3 transition-colors cursor-pointer"
           >
-            <Settings size={14} className="text-gray-400" />
+            <Settings size={14} className="text-stone-400" />
             <span>Settings</span>
           </button>
         </div>

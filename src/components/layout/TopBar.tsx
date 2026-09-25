@@ -20,19 +20,17 @@ export function TopBar() {
 
   return (
     <header 
-      // data-tauri-drag-region allows the user to drag the window from the top bar if decorations are disabled
-      data-tauri-drag-region 
-      className="h-14 w-full flex items-center justify-between px-6 bg-white/50 backdrop-blur-md border-b border-black/4 select-none sticky top-0 z-10"
+      className="h-14 w-full flex items-center justify-between px-6 bg-[#FFFBF9]/80 backdrop-blur-md border-b border-orange-200/50 select-none sticky top-0 z-10"
     >
       <div className="flex items-center gap-4 flex-1">
         <div className="relative group w-64">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search size={14} className="text-gray-400 group-hover:text-gray-600 transition-colors" />
+            <Search size={14} className="text-stone-400 group-hover:text-stone-600 transition-colors" />
           </div>
           <input
             type="text"
             placeholder="Search anything..."
-            className="w-full bg-gray-50/50 hover:bg-gray-100/50 border border-transparent rounded-md py-1.5 pl-9 pr-3 text-[13px] placeholder-gray-400 focus:outline-none transition-all shadow-sm"
+            className="w-full bg-stone-100/50 hover:bg-stone-200/50 border border-transparent rounded-md py-1.5 pl-9 pr-3 text-[13px] placeholder-stone-400 focus:outline-none transition-all shadow-sm"
           />
         </div>
       </div>
@@ -43,18 +41,18 @@ export function TopBar() {
             <button
               onClick={() => openOverview(currentWorkspace.id)}
               title={`View ${currentWorkspace.name} Context Overview`}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-violet-700 bg-violet-50/70 hover:bg-violet-100/70 rounded-lg border border-violet-200/60 transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-rose-700 bg-rose-50/70 hover:bg-rose-100/70 rounded-lg border border-rose-200/60 transition-colors cursor-pointer"
             >
-              <Layers size={13} className="text-violet-600" />
+              <Layers size={13} className="text-rose-600" />
               <span>Overview</span>
             </button>
 
             <button
               onClick={() => openTimeline(currentWorkspace.id)}
               title={`View ${currentWorkspace.name} Context Timeline`}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100/70 rounded-lg border border-indigo-200/60 transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-orange-700 bg-orange-50/70 hover:bg-orange-100/70 rounded-lg border border-orange-200/60 transition-colors cursor-pointer"
             >
-              <Clock size={13} className="text-indigo-600" />
+              <Clock size={13} className="text-orange-600" />
               <span>Timeline</span>
             </button>
 
@@ -63,9 +61,9 @@ export function TopBar() {
               <button
                 onClick={() => openReconstructionInspector(currentWorkspace.id)}
                 title="[DEV ONLY] Open Context Reconstruction Inspector"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-700 bg-emerald-50/80 hover:bg-emerald-100/80 rounded-lg border border-emerald-200/60 transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-amber-700 bg-amber-50/80 hover:bg-amber-100/80 rounded-lg border border-amber-200/60 transition-colors cursor-pointer"
               >
-                <Cpu size={13} className="text-emerald-600" />
+                <Cpu size={13} className="text-amber-600" />
                 <span>Inspector</span>
               </button>
             )}
@@ -76,17 +74,17 @@ export function TopBar() {
           onClick={runDiscoveryScan}
           disabled={isLoading}
           title="Run Context Discovery scan"
-          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100/80 rounded-lg border border-gray-200/60 transition-colors cursor-pointer"
+          className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-orange-800 bg-orange-50/40 hover:bg-orange-100/60 rounded-lg border border-orange-200/60 transition-colors cursor-pointer"
         >
-          <Sparkles size={13} className={`text-amber-500 ${isLoading ? "animate-spin" : ""}`} />
+          <Sparkles size={13} className={`text-orange-500 ${isLoading ? "animate-spin" : ""}`} />
           <span>Discover</span>
           {detectedCount > 0 && (
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse" />
           )}
         </button>
 
         <button 
-          className="p-1.5 text-gray-400 hover:text-gray-900 transition-colors rounded-lg hover:bg-gray-100/80 cursor-pointer"
+          className="p-1.5 text-stone-400 hover:text-stone-900 transition-colors rounded-lg hover:bg-stone-100/80 cursor-pointer"
           onClick={() => setIsSettingsOpen(true)}
           title="Settings"
         >

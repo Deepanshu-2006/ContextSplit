@@ -1,5 +1,83 @@
 @import "tailwindcss";
 
+@theme {
+  /* Warm Sand (Stone) replacing cool grays */
+  --color-gray-50: var(--color-stone-50);
+  --color-gray-100: var(--color-stone-100);
+  --color-gray-200: var(--color-stone-200);
+  --color-gray-300: var(--color-stone-300);
+  --color-gray-400: var(--color-stone-400);
+  --color-gray-500: var(--color-stone-500);
+  --color-gray-600: var(--color-stone-600);
+  --color-gray-700: var(--color-stone-700);
+  --color-gray-800: var(--color-stone-800);
+  --color-gray-900: var(--color-stone-900);
+  --color-gray-950: var(--color-stone-950);
+
+  --color-slate-50: var(--color-stone-50);
+  --color-slate-100: var(--color-stone-100);
+  --color-slate-200: var(--color-stone-200);
+  --color-slate-300: var(--color-stone-300);
+  --color-slate-400: var(--color-stone-400);
+  --color-slate-500: var(--color-stone-500);
+  --color-slate-600: var(--color-stone-600);
+  --color-slate-700: var(--color-stone-700);
+  --color-slate-800: var(--color-stone-800);
+  --color-slate-900: var(--color-stone-900);
+  --color-slate-950: var(--color-stone-950);
+
+  /* Coral (Rose) replacing blue/violet */
+  --color-blue-50: var(--color-rose-50);
+  --color-blue-100: var(--color-rose-100);
+  --color-blue-200: var(--color-rose-200);
+  --color-blue-300: var(--color-rose-300);
+  --color-blue-400: var(--color-rose-400);
+  --color-blue-500: var(--color-rose-500);
+  --color-blue-600: var(--color-rose-600);
+  --color-blue-700: var(--color-rose-700);
+  --color-blue-800: var(--color-rose-800);
+  --color-blue-900: var(--color-rose-900);
+  --color-blue-950: var(--color-rose-950);
+
+  --color-violet-50: var(--color-rose-50);
+  --color-violet-100: var(--color-rose-100);
+  --color-violet-200: var(--color-rose-200);
+  --color-violet-300: var(--color-rose-300);
+  --color-violet-400: var(--color-rose-400);
+  --color-violet-500: var(--color-rose-500);
+  --color-violet-600: var(--color-rose-600);
+  --color-violet-700: var(--color-rose-700);
+  --color-violet-800: var(--color-rose-800);
+  --color-violet-900: var(--color-rose-900);
+  --color-violet-950: var(--color-rose-950);
+
+  /* Sand Accent (Orange) replacing indigo */
+  --color-indigo-50: var(--color-orange-50);
+  --color-indigo-100: var(--color-orange-100);
+  --color-indigo-200: var(--color-orange-200);
+  --color-indigo-300: var(--color-orange-300);
+  --color-indigo-400: var(--color-orange-400);
+  --color-indigo-500: var(--color-orange-500);
+  --color-indigo-600: var(--color-orange-600);
+  --color-indigo-700: var(--color-orange-700);
+  --color-indigo-800: var(--color-orange-800);
+  --color-indigo-900: var(--color-orange-900);
+  --color-indigo-950: var(--color-orange-950);
+
+  /* Amber replacing emerald */
+  --color-emerald-50: var(--color-amber-50);
+  --color-emerald-100: var(--color-amber-100);
+  --color-emerald-200: var(--color-amber-200);
+  --color-emerald-300: var(--color-amber-300);
+  --color-emerald-400: var(--color-amber-400);
+  --color-emerald-500: var(--color-amber-500);
+  --color-emerald-600: var(--color-amber-600);
+  --color-emerald-700: var(--color-amber-700);
+  --color-emerald-800: var(--color-amber-800);
+  --color-emerald-900: var(--color-amber-900);
+  --color-emerald-950: var(--color-amber-950);
+}
+
 body {
   margin: 0;
   background-color: transparent;

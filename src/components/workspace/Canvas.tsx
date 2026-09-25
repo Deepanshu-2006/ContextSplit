@@ -155,16 +155,16 @@ export function Canvas() {
   if (!activeWorkspace && !isInbox) {
     return (
       <div 
-        className="flex-1 w-full h-full relative bg-[#FDFDFD] flex items-center justify-center"
+        className="flex-1 w-full h-full relative bg-gradient-to-br from-orange-50/60 via-rose-50/40 to-stone-50 flex items-center justify-center"
       >
         <div className="flex flex-col items-center text-center p-8 max-w-sm opacity-60">
-          <div className="w-16 h-16 rounded-2xl bg-gray-50 flex items-center justify-center mb-6">
-            <LayoutTemplate className="text-gray-300" size={32} strokeWidth={1.5} />
+          <div className="w-16 h-16 rounded-2xl bg-[#FFF0E8] flex items-center justify-center mb-6 border border-orange-200/50 shadow-sm">
+            <LayoutTemplate className="text-stone-400" size={32} strokeWidth={1.5} />
           </div>
-          <h2 className="text-lg font-medium text-gray-800 mb-2 tracking-tight">
+          <h2 className="text-lg font-medium text-stone-800 mb-2 tracking-tight">
             No Workspace Selected
           </h2>
-          <p className="text-[13px] text-gray-500 leading-relaxed">
+          <p className="text-[13px] text-stone-500 leading-relaxed">
             Create a new workspace from the sidebar to start collecting your context.
           </p>
         </div>
@@ -177,7 +177,7 @@ export function Canvas() {
     "This workspace is empty. Drop images, code snippets, colors, or links anywhere on the canvas to add them to this context.";
 
   return (
-    <div className="flex-1 w-full h-full relative bg-[#FDFDFD] overflow-hidden flex flex-col">
+    <div className="flex-1 w-full h-full relative bg-gradient-to-br from-orange-50/60 via-rose-50/40 to-stone-50 overflow-hidden flex flex-col">
       <ReactFlow
         nodes={nodes}
         onNodesChange={onNodesChange}
@@ -198,11 +198,11 @@ export function Canvas() {
         zoomActivationKeyCode="Meta"
       >
         <Background 
-          color="#9CA3AF" 
+          color="#fca5a5" 
           variant={BackgroundVariant.Dots} 
-          gap={32} 
-          size={1.5} 
-          className="opacity-50"
+          gap={24} 
+          size={2} 
+          className="opacity-70"
         />
         
         {/* Floating Workspace Title & Actions */}

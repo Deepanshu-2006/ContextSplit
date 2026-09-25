@@ -222,15 +222,15 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
   }
 
   return (
-    <div className={`bg-white rounded-xl border ${selected ? 'border-gray-800 shadow-xl ring-1 ring-gray-900/10' : 'border-black/5 shadow-sm hover:shadow-md hover:border-black/10'} overflow-hidden flex flex-col w-75 transition-all duration-200 ${className}`}>
+    <div className={`bg-[#FFFCFA] rounded-xl border ${selected ? 'border-rose-500 shadow-xl ring-1 ring-rose-500/20' : 'border-orange-200/60 shadow-sm hover:shadow-md hover:border-orange-300'} overflow-hidden flex flex-col w-75 transition-all duration-200 ${className}`}>
       {/* Invisible Handles for ReactFlow */}
       <Handle type="target" position={Position.Top} className="opacity-0" />
       
       {/* Header (Drag Handle) */}
       {(icon || title || itemId) && (
-        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2.5 border-b border-black/3 bg-white relative active:cursor-grabbing">
-          {icon && <div className="text-gray-400">{icon}</div>}
-          {title && <h3 className="text-[12px] font-medium text-gray-700 tracking-tight truncate flex-1">{title}</h3>}
+        <div className="custom-drag-handle flex items-center gap-2 px-3 py-2.5 border-b border-orange-200/60 bg-[#FFFCFA] relative active:cursor-grabbing">
+          {icon && <div className="text-stone-400">{icon}</div>}
+          {title && <h3 className="text-[12px] font-medium text-stone-700 tracking-tight truncate flex-1">{title}</h3>}
           {!title && <div className="flex-1" />}
           
           {itemId && activeWorkspaceId === "inbox" && (
@@ -247,7 +247,7 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
               <button
                 ref={menuBtnRef}
                 onClick={openMenu}
-                className="p-1 rounded-md hover:bg-black/5 text-gray-400 hover:text-gray-900 transition-colors"
+                className="p-1 rounded-md hover:bg-stone-200/50 text-stone-400 hover:text-stone-900 transition-colors"
                 title="Actions"
               >
                 <MoreHorizontal size={14} />
@@ -257,14 +257,14 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
                 <div
                   ref={menuRef}
                   style={{ top: menuPos.top, right: menuPos.right }}
-                  className="fixed w-52 bg-white rounded-xl shadow-xl border border-gray-200/80 py-1.5 z-[9999] overflow-hidden"
+                  className="fixed w-52 bg-[#FFFCFA] rounded-xl shadow-xl border border-orange-200/80 py-1.5 z-[9999] overflow-hidden"
                 >
                   {/* Inspect */}
-                  <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                  <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider">
                     Actions
                   </div>
                   <button
-                    className="w-full text-left px-3 py-2 text-[13px] text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 transition-colors"
+                    className="w-full text-left px-3 py-2 text-[13px] text-stone-700 hover:bg-stone-100/50 flex items-center gap-2.5 transition-colors"
                     onClick={() => { setInspectorOpen(true); setMenuOpen(false); }}
                   >
                     <Search size={14} className="text-indigo-500" />
@@ -272,17 +272,17 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
                   </button>
 
                   {/* Move to */}
-                  <div className="my-1 border-t border-gray-100" />
-                  <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                  <div className="my-1 border-t border-stone-100" />
+                  <div className="px-3 pt-1 pb-0.5 text-[10px] font-semibold text-stone-400 uppercase tracking-wider">
                     Move to
                   </div>
 
                   {activeWorkspaceId !== "inbox" && (
                     <button
-                      className="w-full text-left px-3 py-2 text-[13px] text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 transition-colors"
+                      className="w-full text-left px-3 py-2 text-[13px] text-stone-700 hover:bg-stone-100/50 flex items-center gap-2.5 transition-colors"
                       onClick={() => handleManualMove("inbox")}
                     >
-                      <Inbox size={14} className="text-gray-400" />
+                      <Inbox size={14} className="text-stone-400" />
                       <span>Inbox</span>
                     </button>
                   )}
@@ -292,10 +292,10 @@ export function BaseCard({ icon, title, children, className = "", itemId, select
                     .map(ws => (
                       <button
                         key={ws.id}
-                        className="w-full text-left px-3 py-2 text-[13px] text-gray-700 hover:bg-gray-50 flex items-center gap-2.5 transition-colors"
+                        className="w-full text-left px-3 py-2 text-[13px] text-stone-700 hover:bg-stone-100/50 flex items-center gap-2.5 transition-colors"
                         onClick={() => handleManualMove(ws.id)}
                       >
-                        <BoxSelect size={14} className="text-gray-400" />
+                        <BoxSelect size={14} className="text-stone-400" />
                         <span className="truncate">{ws.name}</span>
                       </button>
                     ))}

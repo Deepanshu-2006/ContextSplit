@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { toast } from 'sonner';
 import { db, Workspace, Item } from '../services/db';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
@@ -75,7 +76,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   openOverview: (workspaceId?: string) => {
     const targetId = workspaceId || (get().activeWorkspaceId !== 'inbox' ? (get().activeWorkspaceId as string) : null);
     if (targetId) {
+      console.log("Opening overview for", targetId);
+      toast.info("Opening Overview Panel...");
       set({ isOverviewOpen: true, overviewWorkspaceId: targetId });
+    } else {
+      console.warn("Cannot open overview: No active workspace");
     }
   },
   closeOverview: () => set({ isOverviewOpen: false, overviewWorkspaceId: null }),
