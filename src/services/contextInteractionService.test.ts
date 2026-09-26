@@ -21,13 +21,13 @@ describe('contextInteractionService', () => {
     expect(result).toEqual(mockContext);
   });
 
-  it('getRecentContexts calls get_recent_work_sequence', async () => {
-    const mockContexts = [{ id: 'ctx1' }];
-    vi.mocked(invoke).mockResolvedValueOnce(mockContexts);
-    
+  it('getRecentContexts calls get_recent_work_sequence and unwraps the engine envelope', async () => {
+    const entries = [{ id: 'ctx1' }];
+    vi.mocked(invoke).mockResolvedValueOnce({ entries });
+
     const result = await contextInteractionService.getRecentContexts(10);
-    expect(invoke).toHaveBeenCalledWith('get_recent_work_sequence', { limit: 10 });
-    expect(result).toEqual(mockContexts);
+    expect(invoke).toHaveBeenCalledWith('get_recent_work_sequence', { limitDays: 10 });
+    expect(result).toEqual(entries);
   });
 
   it('getContextSummary calls get_context_overview', async () => {
@@ -58,23 +58,25 @@ describe('contextInteractionService', () => {
     expect(invoke).toHaveBeenCalledWith('get_resume_state', { contextId: 'ctx1' });
   });
 
-  it('resumeContext calls create_context_signal', async () => {
+  it('resumeContext emits a resume user_action signal via create_context_signal', async () => {
     await contextInteractionService.resumeContext('ctx1');
     expect(invoke).toHaveBeenCalledWith('create_context_signal', {
-      signalType: 'Resume',
-      source: 'InteractionAPI',
-      contextId: 'ctx1',
-      metadata: null
+      workspaceId: 'ctx1',
+      itemId: null,
+      signalType: 'user_action',
+      sessionId: null,
+      payload: JSON.stringify({ action: 'resume', source: 'InteractionAPI' })
     });
   });
 
-  it('pauseContext calls create_context_signal', async () => {
+  it('pauseContext emits a pause user_action signal via create_context_signal', async () => {
     await contextInteractionService.pauseContext('ctx1');
     expect(invoke).toHaveBeenCalledWith('create_context_signal', {
-      signalType: 'Pause',
-      source: 'InteractionAPI',
-      contextId: 'ctx1',
-      metadata: null
+      workspaceId: 'ctx1',
+      itemId: null,
+      signalType: 'user_action',
+      sessionId: null,
+      payload: JSON.stringify({ action: 'pause', source: 'InteractionAPI' })
     });
   });
 
@@ -92,9 +94,11 @@ describe('contextInteractionService', () => {
     });
   });
 
-  it('searchContexts calls search_inbox_items', async () => {
+  it('searchContexts calls search_inbox_items with a params envelope', async () => {
     await contextInteractionService.searchContexts('query');
-    expect(invoke).toHaveBeenCalledWith('search_inbox_items', { query: 'query' });
+    expect(invoke).toHaveBeenCalledWith('search_inbox_items', {
+      params: { query: 'query', enableSemantic: true }
+    });
   });
 
   it('getContextSuggestions calls list_item_context_memberships', async () => {

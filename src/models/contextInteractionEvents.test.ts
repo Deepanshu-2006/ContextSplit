@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createInteractionEvent, ContextInteractionEvent } from './contextInteractionEvents';
+import { createInteractionEvent } from './contextInteractionEvents';
 
 describe('Context Interaction Events', () => {
   it('should create a basic interaction event with correct defaults', () => {

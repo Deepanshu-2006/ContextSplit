@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SurfaceCapturePipeline } from './surfaceCapturePipeline';
 import { InteractionSurface } from '../adapters/surfaces/InteractionSurface';
 import { contextInteractionService } from './contextInteractionService';

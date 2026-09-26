@@ -12,9 +12,10 @@ The API is exposed via `src/services/contextInteractionService.ts` and maps stri
 - **Purpose:** Retrieves the currently active context from the engine.
 - **Returns:** Promise resolving to the active context object.
 
-### `getRecentContexts(limit?: number)`
+### `getRecentContexts(limitDays?: number)`
 - **Purpose:** Retrieves the user's recent work sequence to populate quick-switch menus (e.g., in the Launcher).
-- **Returns:** Promise resolving to a list of recently active contexts.
+- **Backend:** `get_recent_work_sequence` with a `limitDays` window (default 7).
+- **Returns:** Promise resolving to the unwrapped `entries` list of the engine's `RecentWorkSequenceResponse`.
 
 ### `getContextSummary(contextId: string)`
 - **Purpose:** Provides a high-level overview of a context, including basic metadata and aggregated stats.
@@ -34,15 +35,19 @@ The API is exposed via `src/services/contextInteractionService.ts` and maps stri
 
 ### `resumeContext(contextId: string)`
 - **Purpose:** Signals the engine to transition the given context to an active state.
-- **Returns:** Promise resolving when complete.
+- **Backend:** `create_context_signal` with `signal_type: "user_action"` and payload `{ "action": "resume", "source": "InteractionAPI" }` — lifecycle interpretation belongs to the engine, not the UI layer.
+- **Returns:** Promise resolving to the created `ContextSignal`.
 
 ### `pauseContext(contextId: string)`
 - **Purpose:** Signals the engine to transition the given context to a paused state.
-- **Returns:** Promise resolving when complete.
+- **Backend:** `create_context_signal` with `signal_type: "user_action"` and payload `{ "action": "pause", "source": "InteractionAPI" }`.
+- **Returns:** Promise resolving to the created `ContextSignal`.
 
 ### `captureItem(item: CaptureRequest)`
 - **Purpose:** Captures a new raw item (clipboard, text, file) and passes it through the CapturePipeline.
-- **Returns:** Promise resolving with the capture result.
+- **Backend:** `handle_capture` (routed through `CaptureCore`).
+- **Returns:** Promise resolving when the engine accepts the capture.
+- **⚠ Phase 1 gap:** the backend command returns `Result<(), String>` — no item ID is handed back to the caller. Surfaces that need the captured item's ID (e.g. to resolve candidate contexts) must resolve it via `searchContexts` until the backend returns a `CaptureResult`.
 
 ### `assignItemToContext(itemId: string, contextId: string)`
 - **Purpose:** Explicitly assigns a captured item to a context (e.g., when a user drops an item onto a specific workspace in the Notch).
@@ -50,6 +55,7 @@ The API is exposed via `src/services/contextInteractionService.ts` and maps stri
 
 ### `searchContexts(query: string)`
 - **Purpose:** Performs a universal semantic and text search across the context engine.
+- **Backend:** `search_inbox_items` with an `InboxSearchParams` envelope (`{ params: { query, enableSemantic: true } }`).
 - **Returns:** Promise resolving to a list of matching items/contexts.
 
 ### `getContextSuggestions(itemId: string)`
@@ -60,3 +66,10 @@ The API is exposed via `src/services/contextInteractionService.ts` and maps stri
 1. **Stateless UI:** UI surfaces (Notch, Launcher) must be stateless consumers of this API.
 2. **No Data Duplication:** UI surfaces must not cache context worksets or attempt to manipulate assignments directly in SQLite.
 3. **Event-Driven Updates:** Where real-time updates are needed, UIs should combine these APIs with global Tauri event listeners (e.g., `target-state-changed`, `notch-context-insight`).
+
+## Contract Validation
+The contract is enforced by `src/services/contextInteractionContract.test.ts`, which verifies:
+- All 12 APIs exist and map to existing Context Engine commands with correct envelopes.
+- The 8 standardized interaction events (`context.open`, `context.resume`, `context.pause`, `context.capture`, `context.assign`, `context.search`, `context.preview`, `context.mark_important`) are constructible from any platform surface.
+- The 6 standardized result states (`SUCCESS`, `PENDING`, `AMBIGUOUS`, `REJECTED`, `ERROR`, `CANCELLED`) are representable.
+- **No separate context logic:** the interaction layer performs exactly one `invoke` per API, holds no local state or persistence, and calls only registered engine commands.

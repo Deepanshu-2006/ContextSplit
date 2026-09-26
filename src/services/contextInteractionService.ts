@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { ContextState, ContextResumeState, ResumeReadinessAssessment } from './contextState';
+import { ContextState, ContextResumeState } from './contextState';
 import { ContextWorkset } from './contextWorkset';
 
 /**
@@ -20,9 +20,12 @@ export const contextInteractionService = {
 
   /**
    * Retrieves a list of recently active contexts.
+   * The engine's `get_recent_work_sequence` command expects a `limitDays` window.
    */
-  getRecentContexts: async (limit: number = 5): Promise<any[]> => {
-    return await invoke<any[]>('get_recent_work_sequence', { limit });
+  getRecentContexts: async (limitDays: number = 7): Promise<any[]> => {
+    const response = await invoke<any>('get_recent_work_sequence', { limitDays });
+    // The engine returns a RecentWorkSequenceResponse envelope; unwrap the sequence for UI surfaces.
+    return (response && Array.isArray(response.entries)) ? response.entries : (Array.isArray(response) ? response : []);
   },
 
   /**
@@ -55,32 +58,38 @@ export const contextInteractionService = {
 
   /**
    * Resumes a specific context (sets it as active).
+   * Delegates to the Context Engine's signal operations — no local state is mutated.
+   * Backend signature: create_context_signal(workspace_id, item_id, signal_type, session_id, payload)
    */
-  resumeContext: async (contextId: string): Promise<void> => {
-    // We assume resuming a context involves transitioning an inbox item or creating a transition.
-    // Given the Phase 1 architecture, setting a context active is typically handled via context transitions.
-    return await invoke<void>('create_context_signal', {
-        signalType: 'Resume',
-        source: 'InteractionAPI',
-        contextId: contextId,
-        metadata: null
+  resumeContext: async (contextId: string): Promise<unknown> => {
+    return await invoke<unknown>('create_context_signal', {
+      workspaceId: contextId,
+      itemId: null,
+      signalType: 'user_action',
+      sessionId: null,
+      payload: JSON.stringify({ action: 'resume', source: 'InteractionAPI' })
     });
   },
 
   /**
    * Pauses the currently active context.
+   * Delegates to the Context Engine's signal operations — no local state is mutated.
    */
-  pauseContext: async (contextId: string): Promise<void> => {
-    return await invoke<void>('create_context_signal', {
-        signalType: 'Pause',
-        source: 'InteractionAPI',
-        contextId: contextId,
-        metadata: null
+  pauseContext: async (contextId: string): Promise<unknown> => {
+    return await invoke<unknown>('create_context_signal', {
+      workspaceId: contextId,
+      itemId: null,
+      signalType: 'user_action',
+      sessionId: null,
+      payload: JSON.stringify({ action: 'pause', source: 'InteractionAPI' })
     });
   },
 
   /**
-   * Captures a raw item and sends it to the engine.
+   * Captures a raw item and sends it to the engine's CapturePipeline.
+   * NOTE (Phase 1 gap): the backend `handle_capture` command currently returns
+   * `Result<(), String>` and routes processing asynchronously, so no item ID is
+   * returned to the caller. Surfaces needing an ID must resolve it via search.
    */
   captureItem: async (item: any): Promise<any> => {
     // Assumes `item` matches the capture::target::CaptureRequest struct
@@ -98,10 +107,13 @@ export const contextInteractionService = {
   },
 
   /**
-   * Searches across all contexts.
+   * Searches across all contexts (text + optional semantic ranking via the engine).
+   * The backend command takes an InboxSearchParams envelope, not a bare query.
    */
-  searchContexts: async (query: string): Promise<any> => {
-    return await invoke<any>('search_inbox_items', { query });
+  searchContexts: async (query: string): Promise<any[]> => {
+    return await invoke<any[]>('search_inbox_items', {
+      params: { query, enableSemantic: true }
+    });
   },
 
   /**
