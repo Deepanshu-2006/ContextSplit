@@ -1173,3 +1173,239 @@ fn test_case_n_feedback_regression() {
         "Decision tracer must have recorded the confirmation decision for item_a"
     );
 }
+
+// =========================================================================
+// CASE O: Context Internal Consistency
+// =========================================================================
+
+/// CASE O: Cross-dimensional internal consistency checker.
+///
+/// For every entity in PayX and University, verify that:
+/// - tasks resolve to the right context and never appear in the other
+/// - memories are associated with the right context
+/// - workset items are isolated
+/// - sessions are not shared
+/// - snapshots reference the correct context
+/// - lifecycle is consistent with activity
+/// - feedback is scoped correctly and does not bleed across contexts
+#[test]
+fn test_case_o_internal_consistency() {
+    use crate::context_engine::feedback::{
+        ContextFeedbackEvent, ContextFeedbackInspector, ContextFeedbackService,
+        FeedbackSource,
+    };
+    use crate::context_engine::important_memory::ContextMemoryQueryService;
+    use crate::context_engine::lifecycle::ContextLifecycleService;
+    use crate::context_engine::reconstruction::ContextReconstructionService;
+    use crate::context_engine::snapshot::ContextSnapshotService;
+    use crate::context_engine::workset::ContextWorksetBuilder;
+    use crate::db::models::TaskCandidate;
+    use crate::db::operations::{
+        create_item, create_or_update_membership, create_session, create_task_candidate,
+        create_workspace, list_task_candidates_for_context,
+    };
+    use serde_json::json;
+
+    let conn = setup_phase1_db();
+
+    // Two isolated contexts
+    let payx = create_workspace(&conn, "PayX").unwrap();
+    let university = create_workspace(&conn, "University").unwrap();
+    let session_payx = create_session(&conn).unwrap();
+    let session_university = create_session(&conn).unwrap();
+
+    assert_ne!(session_payx.id, session_university.id, "Sessions must be distinct");
+
+    // PayX items
+    let payx_item_1 = create_item(
+        &conn, Some(&payx.id), Some(&session_payx.id),
+        "window_focus", "stripe-webhook.ts", Some("Stripe Webhook Handler"),
+        &json!({ "app_name": "VS Code" }).to_string(),
+    ).unwrap();
+    let payx_item_2 = create_item(
+        &conn, Some(&payx.id), Some(&session_payx.id),
+        "url", "https://dashboard.stripe.com/events", Some("Stripe Dashboard"),
+        &json!({ "app_name": "Chrome" }).to_string(),
+    ).unwrap();
+    create_or_update_membership(&conn, &payx_item_1.id, &payx.id, "confirmed", 1.0, "engine").unwrap();
+    create_or_update_membership(&conn, &payx_item_2.id, &payx.id, "confirmed", 0.9, "engine").unwrap();
+
+    // University items
+    let uni_item_1 = create_item(
+        &conn, Some(&university.id), Some(&session_university.id),
+        "window_focus", "lecture-notes.pdf", Some("CS301 Lecture Notes"),
+        &json!({ "app_name": "Preview" }).to_string(),
+    ).unwrap();
+    let uni_item_2 = create_item(
+        &conn, Some(&university.id), Some(&session_university.id),
+        "url", "https://canvas.uni.edu/courses/cs301", Some("CS301 Canvas"),
+        &json!({ "app_name": "Chrome" }).to_string(),
+    ).unwrap();
+    create_or_update_membership(&conn, &uni_item_1.id, &university.id, "confirmed", 1.0, "engine").unwrap();
+    create_or_update_membership(&conn, &uni_item_2.id, &university.id, "confirmed", 0.9, "engine").unwrap();
+
+    // Tasks — each bound to correct context
+    let payx_task = create_task_candidate(&conn, &TaskCandidate::new(
+        Some(payx.id.clone()), "Implement Stripe webhook retry logic", 0.92,
+    )).unwrap();
+    let uni_task = create_task_candidate(&conn, &TaskCandidate::new(
+        Some(university.id.clone()), "Submit CS301 assignment", 0.85,
+    )).unwrap();
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 1: Tasks resolve to correct context
+    // -----------------------------------------------------------------------
+    let payx_tasks = list_task_candidates_for_context(&conn, &payx.id).unwrap();
+    let uni_tasks  = list_task_candidates_for_context(&conn, &university.id).unwrap();
+
+    assert!(payx_tasks.iter().any(|t| t.id == payx_task.id), "PayX task must appear in PayX list");
+    assert!(!payx_tasks.iter().any(|t| t.id == uni_task.id),  "Uni task must NOT appear in PayX list");
+    assert!(uni_tasks.iter().any(|t| t.id == uni_task.id),   "Uni task must appear in Uni list");
+    assert!(!uni_tasks.iter().any(|t| t.id == payx_task.id),  "PayX task must NOT appear in Uni list");
+
+    assert_eq!(payx_task.context_id.as_deref(), Some(payx.id.as_str()), "PayX task context_id must match");
+    assert_eq!(uni_task.context_id.as_deref(), Some(university.id.as_str()), "Uni task context_id must match");
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 2: Memories are associated with correct context
+    // -----------------------------------------------------------------------
+    let payx_mems = ContextMemoryQueryService::get_important_memories(&conn, &payx.id, None).unwrap();
+    let uni_mems  = ContextMemoryQueryService::get_important_memories(&conn, &university.id, None).unwrap();
+
+    for mem in &payx_mems {
+        assert_eq!(mem.context_id, payx.id, "PayX memory {} must be scoped to PayX", mem.id);
+        assert_ne!(mem.context_id, university.id, "PayX memory {} must NOT bleed to University", mem.id);
+    }
+    for mem in &uni_mems {
+        assert_eq!(mem.context_id, university.id, "Uni memory {} must be scoped to University", mem.id);
+        assert_ne!(mem.context_id, payx.id, "Uni memory {} must NOT bleed to PayX", mem.id);
+    }
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 3: Workset items are isolated
+    // -----------------------------------------------------------------------
+    let payx_ws = ContextWorksetBuilder::from_db(&conn, &payx.id).unwrap().build().unwrap();
+    let uni_ws  = ContextWorksetBuilder::from_db(&conn, &university.id).unwrap().build().unwrap();
+
+    assert_eq!(payx_ws.context_id, payx.id, "PayX workset must carry PayX context_id");
+    assert_eq!(uni_ws.context_id, university.id, "Uni workset must carry Uni context_id");
+
+    let payx_ws_ids: std::collections::HashSet<&str> = payx_ws.items.iter().map(|i| i.id.as_str()).collect();
+    let uni_ws_ids:  std::collections::HashSet<&str> = uni_ws.items.iter().map(|i| i.id.as_str()).collect();
+
+    assert!(!payx_ws_ids.contains(uni_item_1.id.as_str()), "Uni item_1 must NOT appear in PayX workset");
+    assert!(!payx_ws_ids.contains(uni_item_2.id.as_str()), "Uni item_2 must NOT appear in PayX workset");
+    assert!(!uni_ws_ids.contains(payx_item_1.id.as_str()), "PayX item_1 must NOT appear in Uni workset");
+    assert!(!uni_ws_ids.contains(payx_item_2.id.as_str()), "PayX item_2 must NOT appear in Uni workset");
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 4: Sessions are not shared
+    // -----------------------------------------------------------------------
+    assert_eq!(payx_item_1.session_id.as_deref(), Some(session_payx.id.as_str()), "PayX item_1 must reference PayX session");
+    assert_eq!(payx_item_2.session_id.as_deref(), Some(session_payx.id.as_str()), "PayX item_2 must reference PayX session");
+    assert_eq!(uni_item_1.session_id.as_deref(), Some(session_university.id.as_str()), "Uni item_1 must reference Uni session");
+    assert_eq!(uni_item_2.session_id.as_deref(), Some(session_university.id.as_str()), "Uni item_2 must reference Uni session");
+    assert_ne!(payx_item_1.session_id.as_deref(), Some(session_university.id.as_str()), "PayX item_1 must NOT reference Uni session");
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 5: Snapshots reference the correct context
+    // -----------------------------------------------------------------------
+    let snap_svc = ContextSnapshotService::new();
+    let payx_snap = snap_svc.derive_for_context(&conn, &payx.id).unwrap();
+    let uni_snap  = snap_svc.derive_for_context(&conn, &university.id).unwrap();
+
+    assert_eq!(payx_snap.context_id, payx.id, "PayX snapshot must carry PayX context_id");
+    assert_eq!(uni_snap.context_id, university.id, "Uni snapshot must carry Uni context_id");
+    assert_ne!(payx_snap.context_id, university.id, "PayX snapshot must NOT reference Uni context");
+    assert_ne!(uni_snap.context_id, payx.id, "Uni snapshot must NOT reference PayX context");
+
+    for tr in &payx_snap.recent_task_references {
+        if let Some(ref task_id) = tr.id {
+            assert!(payx_tasks.iter().any(|t| &t.id == task_id),
+                "Task '{}' in PayX snapshot must be in PayX task list", task_id);
+        }
+    }
+    for tr in &uni_snap.recent_task_references {
+        if let Some(ref task_id) = tr.id {
+            assert!(uni_tasks.iter().any(|t| &t.id == task_id),
+                "Task '{}' in Uni snapshot must be in Uni task list", task_id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 6: Lifecycle state is valid and context-scoped
+    // -----------------------------------------------------------------------
+    let payx_lc = ContextLifecycleService::get_context_lifecycle(&conn, &payx.id).unwrap();
+    let uni_lc  = ContextLifecycleService::get_context_lifecycle(&conn, &university.id).unwrap();
+
+    assert_eq!(payx_lc.context_id, payx.id, "PayX lifecycle must reference PayX context");
+    assert_eq!(uni_lc.context_id, university.id, "Uni lifecycle must reference Uni context");
+    assert!(
+        payx_lc.lifecycle_state.is_active() || payx_lc.lifecycle_state.is_paused()
+            || payx_lc.lifecycle_state.is_dormant() || payx_lc.lifecycle_state.is_archived(),
+        "PayX lifecycle state must be recognized; got: {:?}", payx_lc.lifecycle_state
+    );
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 7: Reconstruction restores correct context
+    // -----------------------------------------------------------------------
+    let recon_svc = ContextReconstructionService::new();
+    let payx_recon = recon_svc.reconstruct_context(&conn, &payx.id).unwrap();
+    let uni_recon  = recon_svc.reconstruct_context(&conn, &university.id).unwrap();
+
+    assert_eq!(payx_recon.context.id.as_deref(), Some(payx.id.as_str()), "PayX reconstruction context_id must match PayX");
+    assert_eq!(uni_recon.context.id.as_deref(), Some(university.id.as_str()), "Uni reconstruction context_id must match Uni");
+
+    if let Some(ref task_ref) = payx_recon.current_task.task_ref {
+        assert!(payx_tasks.iter().any(|t| Some(&t.id) == task_ref.id.as_ref()),
+            "Task from PayX reconstruction must be in PayX task list");
+    }
+    if let Some(ref task_ref) = uni_recon.current_task.task_ref {
+        assert!(uni_tasks.iter().any(|t| Some(&t.id) == task_ref.id.as_ref()),
+            "Task from Uni reconstruction must be in Uni task list");
+    }
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 8: Feedback is scoped — no cross-context bleed
+    // -----------------------------------------------------------------------
+    let rej = ContextFeedbackEvent::reject_context(
+        &payx_item_1.id, &payx.id, FeedbackSource::UserExplicitUi,
+        Some("Not relevant to PayX".to_string()),
+    );
+    ContextFeedbackService::apply_feedback(&conn, &rej).unwrap();
+
+    let conf = ContextFeedbackEvent::confirm_context(
+        &uni_item_1.id, &university.id, FeedbackSource::UserExplicitUi,
+    );
+    ContextFeedbackService::apply_feedback(&conn, &conf).unwrap();
+
+    // PayX rejection must NOT affect University's view of payx_item_1
+    let cross1 = ContextFeedbackInspector::inspect_target(&conn, &payx_item_1.id, Some(&university.id)).unwrap();
+    assert_eq!(cross1.effective_state, "Neutral", "PayX rejection must NOT affect University view");
+    assert_eq!(cross1.history_entries.len(), 0, "No PayX-scoped events visible in University inspector");
+
+    // University confirmation must NOT affect PayX's view of uni_item_1
+    let cross2 = ContextFeedbackInspector::inspect_target(&conn, &uni_item_1.id, Some(&payx.id)).unwrap();
+    assert_eq!(cross2.effective_state, "Neutral", "Uni confirmation must NOT affect PayX view");
+
+    // -----------------------------------------------------------------------
+    // CONSISTENCY 9: DB-level referential integrity
+    // -----------------------------------------------------------------------
+    let payx_task_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_candidates WHERE context_id = ?1",
+        rusqlite::params![payx.id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(payx_task_count, 1, "PayX must have exactly 1 task candidate");
+
+    let uni_task_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM task_candidates WHERE context_id = ?1",
+        rusqlite::params![university.id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(uni_task_count, 1, "University must have exactly 1 task candidate");
+
+    let cross_mem: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM context_memberships WHERE item_id = ?1 AND workspace_id = ?2",
+        rusqlite::params![payx_item_1.id, university.id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(cross_mem, 0, "PayX item_1 must NOT have a membership in University");
+}
