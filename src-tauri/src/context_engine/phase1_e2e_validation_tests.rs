@@ -883,4 +883,293 @@ fn test_case_m_context_data_recovery() {
     assert_eq!(task_count, 1, "Orphaned task must not be silently deleted");
 }
 
+// =========================================================================
+// CASE N: Feedback Regression — Rejection → Confirmation Override
+// =========================================================================
 
+/// CASE N: Feedback Integration Regression
+/// Validates the complete feedback pipeline:
+///   assign → reject → adaptation considers rejection → confirm → adaptation considers confirmation
+#[test]
+fn test_case_n_feedback_regression() {
+    use crate::context_engine::decision_trace::{
+        ContextDecisionTraceBuilder, ContextDecisionTracer, DecisionType,
+        FeedbackConsideredTrace, FinalDecisionOutcome,
+    };
+    use crate::context_engine::feedback::{
+        AdaptationVerdict, ContextDeterministicAdaptationEngine, ContextFeedbackEvent,
+        ContextFeedbackInspector, ContextFeedbackService, EffectiveFeedbackState,
+        FeedbackAction, FeedbackConflictResolver, FeedbackScope, FeedbackSource,
+    };
+    use crate::db::operations::{create_or_update_membership, create_item, create_session, create_workspace};
+
+    let conn = setup_phase1_db();
+
+    // Setup: Two distinct contexts
+    let payx = create_workspace(&conn, "PayX").unwrap();
+    let university = create_workspace(&conn, "University").unwrap();
+    let session = create_session(&conn).unwrap();
+
+    // Item A: assigned to PayX initially
+    let item_a = create_item(
+        &conn,
+        Some(&payx.id),
+        Some(&session.id),
+        "window_focus",
+        "main.py",
+        Some("main.py"),
+        &json!({ "app_name": "VS Code", "file_path": "/payx/src/main.py" }).to_string(),
+    ).unwrap();
+
+    // Set engine-assigned candidate membership at confidence 0.8
+    create_or_update_membership(&conn, &item_a.id, &payx.id, "candidate", 0.8, "engine").unwrap();
+
+    // =====================================================================
+    // PHASE 1: User rejects Item A → PayX
+    // =====================================================================
+
+    let rejection_event = ContextFeedbackEvent::reject_context(
+        &item_a.id,
+        &payx.id,
+        FeedbackSource::UserExplicitUi,
+        Some("Not related to PayX".to_string()),
+    );
+    let rejection_result = ContextFeedbackService::apply_feedback(&conn, &rejection_event).unwrap();
+
+    // Feedback application succeeded
+    assert!(rejection_result.success, "Rejection must be applied successfully");
+    assert_eq!(rejection_result.action, FeedbackAction::RejectContext);
+    assert!(!rejection_result.applied_systems.is_empty(), "Must mutate at least one system");
+
+    // Scope is narrowly scoped to (item, context) — not global
+    assert_eq!(
+        rejection_result.scope,
+        FeedbackScope::item_context(&item_a.id, &payx.id),
+        "Scope must be ItemContext, not Global"
+    );
+
+    // Effective state after rejection is Rejected
+    let post_rejection_report =
+        ContextFeedbackInspector::inspect_target(&conn, &item_a.id, Some(&payx.id)).unwrap();
+    assert_eq!(
+        post_rejection_report.effective_state, "Rejected",
+        "Effective state must be Rejected after rejection"
+    );
+    assert_eq!(
+        post_rejection_report.history_entries.len(), 1,
+        "History must contain exactly 1 event so far"
+    );
+    assert!(post_rejection_report.history_entries[0].is_active, "Rejection entry must be active");
+
+    // Adaptation engine considers the rejection — adapted_score < base_score
+    let adapt_after_rejection = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+        &conn, &item_a, &payx, 0.8,
+    );
+    assert!(
+        adapt_after_rejection.adapted_score < 0.8,
+        "Adapted score must be lower than base after rejection; got {}",
+        adapt_after_rejection.adapted_score
+    );
+    assert_eq!(
+        adapt_after_rejection.verdict,
+        AdaptationVerdict::ItemDirectlyRejected,
+        "Verdict must reflect direct item rejection"
+    );
+    assert!(adapt_after_rejection.item_rejection_count >= 1);
+
+    // Record decision trace: rejection
+    let rejection_trace = ContextDecisionTraceBuilder::new_context_rejection(
+        &item_a.id, Some("VS Code"), Some("main.py"),
+    )
+    .with_reason("User rejected PayX association for item_a")
+    .with_feedback(FeedbackConsideredTrace {
+        feedback_id: Some(rejection_event.id.clone()),
+        action: rejection_event.action.as_str().to_string(),
+        scope: "item_context".to_string(),
+        target_ref: item_a.id.clone(),
+        precedence_tier: 1,
+        is_applied: true,
+        adaptation_delta: Some(adapt_after_rejection.adaptation_delta),
+        rationale: "User explicitly rejected PayX association".to_string(),
+    })
+    .with_final_decision(FinalDecisionOutcome {
+        status: "rejected".to_string(),
+        primary_context_id: Some(payx.id.clone()),
+        primary_context_name: Some("PayX".to_string()),
+        target_entity_id: Some(item_a.id.clone()),
+        decision_tier: Some("item_context".to_string()),
+        action_taken: "reject_context".to_string(),
+        details: std::collections::HashMap::new(),
+    })
+    .record();
+
+    assert_eq!(rejection_trace.decision_type, DecisionType::ContextRejection);
+
+    // =====================================================================
+    // PHASE 2: User later explicitly confirms Item A → PayX
+    // =====================================================================
+
+    let confirmation_event = ContextFeedbackEvent::confirm_context(
+        &item_a.id,
+        &payx.id,
+        FeedbackSource::UserExplicitUi,
+    );
+    let confirmation_result =
+        ContextFeedbackService::apply_feedback(&conn, &confirmation_event).unwrap();
+
+    assert!(confirmation_result.success, "Confirmation must be applied successfully");
+    assert_eq!(confirmation_result.action, FeedbackAction::ConfirmContext);
+
+    // Scope is still narrowly item-scoped (not global)
+    assert_eq!(
+        confirmation_result.scope,
+        FeedbackScope::item_context(&item_a.id, &payx.id),
+        "Confirmation scope must be ItemContext, not Global"
+    );
+
+    // Feedback history is fully preserved (both events intact)
+    let post_confirm_report =
+        ContextFeedbackInspector::inspect_target(&conn, &item_a.id, Some(&payx.id)).unwrap();
+    assert_eq!(
+        post_confirm_report.history_entries.len(), 2,
+        "History must contain both rejection and confirmation events"
+    );
+
+    // Effective state is now Confirmed (confirmation overrides rejection by recency)
+    assert_eq!(
+        post_confirm_report.effective_state, "Confirmed",
+        "Effective state must be Confirmed after explicit confirmation overrides rejection"
+    );
+
+    // Latest action reflects confirmation
+    let latest_action = post_confirm_report.latest_action.as_deref().unwrap_or("");
+    assert!(
+        latest_action.to_lowercase().contains("confirm"),
+        "Latest action must reflect confirmation; got: {latest_action}"
+    );
+
+    // Conflict resolver produces Confirmed variant
+    let resolution = FeedbackConflictResolver::resolve_from_db(&conn, &item_a.id, &payx.id).unwrap();
+    assert!(
+        matches!(resolution.effective_state, EffectiveFeedbackState::Confirmed { .. }),
+        "Conflict resolver must derive Confirmed state; got {:?}", resolution.effective_state
+    );
+    assert_eq!(resolution.total_history_count, 2, "History must have 2 entries");
+    assert_eq!(resolution.confirmations_count, 1);
+    assert_eq!(resolution.rejections_count, 1);
+    assert!(resolution.history_preserved, "History must be explicitly preserved");
+
+    // Adaptation engine now boosts score fully due to explicit confirmation
+    let adapt_after_confirmation = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+        &conn, &item_a, &payx, 0.8,
+    );
+    assert_eq!(
+        adapt_after_confirmation.adapted_score, 1.0,
+        "Adapted score must be 1.0 after explicit confirmation"
+    );
+    assert_eq!(
+        adapt_after_confirmation.verdict,
+        AdaptationVerdict::ConfirmedDirectly,
+        "Verdict must reflect direct confirmation"
+    );
+    assert_eq!(adapt_after_confirmation.item_confirmation_count, 1);
+
+    // Record decision trace: confirmation
+    let confirmation_trace = ContextDecisionTraceBuilder::new_context_assignment(
+        &item_a.id, Some("VS Code"), Some("main.py"),
+    )
+    .with_reason("User confirmed PayX association for item_a — overrides prior rejection")
+    .with_feedback(FeedbackConsideredTrace {
+        feedback_id: Some(confirmation_event.id.clone()),
+        action: confirmation_event.action.as_str().to_string(),
+        scope: "item_context".to_string(),
+        target_ref: item_a.id.clone(),
+        precedence_tier: 1,
+        is_applied: true,
+        adaptation_delta: Some(adapt_after_confirmation.adaptation_delta),
+        rationale: "User explicitly confirmed PayX (supersedes rejection by recency)".to_string(),
+    })
+    .with_final_decision(FinalDecisionOutcome {
+        status: "confirmed".to_string(),
+        primary_context_id: Some(payx.id.clone()),
+        primary_context_name: Some("PayX".to_string()),
+        target_entity_id: Some(item_a.id.clone()),
+        decision_tier: Some("item_context".to_string()),
+        action_taken: "confirm_context".to_string(),
+        details: std::collections::HashMap::new(),
+    })
+    .record();
+
+    assert_eq!(confirmation_trace.decision_type, DecisionType::ContextAssignment);
+
+    // =====================================================================
+    // PHASE 3: Cross-context isolation — University unaffected
+    // =====================================================================
+
+    // Item A's feedback is scoped to PayX — University must see neutral state
+    let university_report =
+        ContextFeedbackInspector::inspect_target(&conn, &item_a.id, Some(&university.id)).unwrap();
+    assert_eq!(
+        university_report.effective_state, "Neutral",
+        "University context must see Neutral — feedback is PayX-scoped"
+    );
+    assert_eq!(
+        university_report.history_entries.len(), 0,
+        "No feedback events should appear for University context"
+    );
+
+    // University item must not be penalised by PayX-scoped feedback
+    let univ_item = create_item(
+        &conn,
+        Some(&university.id),
+        Some(&session.id),
+        "window_focus",
+        "lecture-notes.pdf",
+        Some("lecture-notes.pdf"),
+        &json!({ "app_name": "Preview", "file_path": "/uni/lecture-notes.pdf" }).to_string(),
+    ).unwrap();
+    let adapt_univ = ContextDeterministicAdaptationEngine::evaluate_adaptation(
+        &conn, &univ_item, &university, 0.6,
+    );
+    assert!(
+        adapt_univ.adapted_score >= 0.5,
+        "University item must not be suppressed by PayX-scoped feedback; got {}",
+        adapt_univ.adapted_score
+    );
+
+    // =====================================================================
+    // PHASE 4: No global rule created
+    // =====================================================================
+
+    let global_signals_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM context_signals WHERE item_id = ?1 AND payload LIKE '%global%'",
+            rusqlite::params![item_a.id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(global_signals_count, 0, "No global-scoped signals must exist for item_a");
+
+    // =====================================================================
+    // PHASE 5: Decision tracer recorded both changes
+    // =====================================================================
+
+    let recent_traces = ContextDecisionTracer::get_recent(10);
+    let rejection_in_trace = recent_traces.iter().any(|t| {
+        t.decision_type == DecisionType::ContextRejection
+            && t.source_entity.entity_id() == item_a.id
+    });
+    let confirmation_in_trace = recent_traces.iter().any(|t| {
+        t.decision_type == DecisionType::ContextAssignment
+            && t.source_entity.entity_id() == item_a.id
+    });
+
+    assert!(
+        rejection_in_trace,
+        "Decision tracer must have recorded the rejection decision for item_a"
+    );
+    assert!(
+        confirmation_in_trace,
+        "Decision tracer must have recorded the confirmation decision for item_a"
+    );
+}
