@@ -12,6 +12,7 @@ use crate::context_engine::reconstruction::ContextReconstructionService;
 use crate::context_engine::snapshot::ContextSnapshotService;
 use crate::context_engine::transitions::classify_transition_evidence;
 use crate::context_engine::workset::ContextWorksetService;
+use crate::context_engine::health_check::{ContextHealthCheckService, ContextHealthStatus};
 use crate::db::operations::{create_item, create_session, create_workspace};
 
 fn setup_phase1_db() -> Connection {
@@ -772,3 +773,114 @@ fn test_case_l_cold_start_reconstruction() {
     let alpha_titles: Vec<String> = rec_a.workset.items.iter().map(|i| i.title.clone().unwrap_or_default()).collect();
     assert!(!alpha_titles.iter().any(|t| t.contains("Beta") || t.contains("Gamma")));
 }
+
+/// CASE M: Context Data Recovery
+/// Test how ContextSplit behaves when data is incomplete or inconsistent.
+#[test]
+fn test_case_m_context_data_recovery() {
+    let conn = setup_phase1_db();
+    let ws = create_workspace(&conn, "Valid Context").unwrap();
+    let session = create_session(&conn).unwrap();
+    
+    // Insert valid data to ensure it is preserved after all corruption fixtures
+    let _valid_item = create_item(&conn, Some(&ws.id), Some(&session.id), "window_focus", "Valid File", Some("Valid File"), &json!({ "app": "test" }).to_string()).unwrap();
+    
+    // Disable FK enforcement temporarily so we can inject intentionally orphaned fixtures
+    // (the health check is what must detect these — not the DB constraint layer)
+    conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+
+    // 1. Missing context reference: item points to non-existent workspace
+    conn.execute(
+        "INSERT INTO items (id, workspace_id, session_id, item_type, title, content, metadata, created_at, updated_at)
+         VALUES ('item_orphan', 'missing_ctx', ?1, 'window_focus', 'Orphan Item', 'content', '{}', datetime('now'), datetime('now'))",
+        rusqlite::params![session.id],
+    ).unwrap();
+
+
+    // 2. Missing task reference: task_candidate points to non-existent context
+    conn.execute(
+        "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+         VALUES ('task_orphan', 'missing_ctx', 'Orphan Task', 0.9, 'active', datetime('now'), datetime('now'), datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+
+    // 3. Missing memory reference: context_signal (memory type) with missing workspace
+    conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES ('sig_mem_orphan', 'missing_ctx', NULL, 'important_memory', NULL, '{\"memory\":\"orphaned\"}', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+
+    // 4. Invalid snapshot reference: context_snapshot points to non-existent context
+    conn.execute(
+        "INSERT INTO context_snapshots (id, context_id, context_name, task_id, task_title, created_at, last_activity_at, state, snapshot_confidence, quality_rating, snapshot_json)
+         VALUES ('snap_orphan', 'missing_ctx', 'Bad Snap', NULL, NULL, datetime('now'), NULL, 'active', 0.5, 'partial', '{}')",
+        [],
+    ).unwrap();
+
+    // 5. Conflicting lifecycle state: transition from non-existent context
+    conn.execute(
+        "INSERT INTO context_transitions (id, from_context_id, to_context_id, transition_type, confidence, detected_at, metadata, created_at)
+         VALUES ('trans_orphan', 'missing_ctx', ?1, 'manual', 1.0, datetime('now'), '{}', datetime('now'))",
+        rusqlite::params![ws.id],
+    ).unwrap();
+
+    // 6. Incomplete feedback: context_signal with dangling item reference
+    conn.execute(
+        "INSERT INTO context_signals (id, workspace_id, item_id, signal_type, session_id, payload, created_at, updated_at)
+         VALUES ('sig_fb_orphan', 'missing_ctx', 'missing_item', 'user_feedback', NULL, '{\"correction\":\"orphaned\"}', datetime('now'), datetime('now'))",
+        [],
+    ).unwrap();
+
+    // 7. Duplicate event: same item inserted twice (duplicate event scenario)
+    conn.execute(
+        "INSERT INTO items (id, workspace_id, session_id, item_type, title, content, metadata, created_at, updated_at)
+         VALUES ('item_dup', ?1, ?2, 'window_focus', 'Dup Event', 'content', '{}', datetime('now'), datetime('now'))",
+        rusqlite::params![ws.id, session.id],
+    ).unwrap();
+    // Attempt second insert with same PK — DB must reject it (PRIMARY KEY constraint)
+    let dup_result = conn.execute(
+        "INSERT INTO items (id, workspace_id, session_id, item_type, title, content, metadata, created_at, updated_at)
+         VALUES ('item_dup', ?1, ?2, 'window_focus', 'Dup Event', 'content', '{}', datetime('now'), datetime('now'))",
+        rusqlite::params![ws.id, session.id],
+    );
+    assert!(dup_result.is_err(), "DB must reject a duplicate item ID");
+
+    // 8. Malformed metadata: item with invalid JSON in metadata field
+    conn.execute(
+        "INSERT INTO items (id, workspace_id, session_id, item_type, title, content, metadata, created_at, updated_at)
+         VALUES ('item_malformed', ?1, ?2, 'window_focus', 'Malformed JSON', 'content', '{ malformed_json: ', datetime('now'), datetime('now'))",
+        rusqlite::params![ws.id, session.id],
+    ).unwrap();
+
+    // Run health check — must not crash
+    // Re-enable FK enforcement so health check operates under normal conditions
+    conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+    let report = ContextHealthCheckService::run_all_checks(&conn).unwrap();
+    
+    // 1. Detect the problem
+    assert!(!report.issues.is_empty(), "Health check must detect inconsistencies");
+    assert!(
+        report.status == ContextHealthStatus::Error || report.status == ContextHealthStatus::Warning,
+        "Should report Error or Warning status due to data integrity issues"
+    );
+
+    // 2. Report through ContextHealthCheck — multiple issues expected
+    assert!(report.issues.len() >= 2, "Expected multiple issues; got: {}", report.issues.len());
+
+    // 3. Avoid crashing / 4. Avoid silently inventing missing data / 5. Preserve valid data
+    let rec_valid = ContextReconstructionService::new().reconstruct_context(&conn, &ws.id).unwrap();
+    assert_eq!(rec_valid.context.name, "Valid Context");
+    
+    // 6. Data must not be silently deleted — malformed row must still exist
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM items WHERE id = 'item_malformed'").unwrap();
+    let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+    assert_eq!(count, 1, "Do not silently delete data without a safe rule");
+
+    // 7. Orphaned task candidate must remain in DB (not purged without explicit rule)
+    let mut stmt2 = conn.prepare("SELECT COUNT(*) FROM task_candidates WHERE id = 'task_orphan'").unwrap();
+    let task_count: i64 = stmt2.query_row([], |row| row.get(0)).unwrap();
+    assert_eq!(task_count, 1, "Orphaned task must not be silently deleted");
+}
+
+
