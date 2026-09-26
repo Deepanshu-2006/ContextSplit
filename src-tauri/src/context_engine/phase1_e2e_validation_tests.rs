@@ -623,3 +623,152 @@ fn test_case_j_multi_context_isolation_simulation() {
     assert!(!cs_titles.iter().any(|t| t.contains("DriveNest")));
     assert!(!px_titles.iter().any(|t| t.contains("ContextSplit")));
 }
+
+/// CASE K: Rapid Context Switching Stress Test
+/// Simulates sequence: A → B → A → C → B → D → A
+#[test]
+fn test_case_k_rapid_context_switching_stress() {
+    let conn = setup_phase1_db();
+    
+    let ws_a = create_workspace(&conn, "Context A").unwrap();
+    let ws_b = create_workspace(&conn, "Context B").unwrap();
+    let ws_c = create_workspace(&conn, "Context C").unwrap();
+    let ws_d = create_workspace(&conn, "Context D").unwrap();
+
+    let seq = vec![
+        (&ws_a, "A"), (&ws_b, "B"), (&ws_a, "A"), (&ws_c, "C"),
+        (&ws_b, "B"), (&ws_d, "D"), (&ws_a, "A")
+    ];
+
+    let guard = ContextQualityGuard::new();
+    let mut iteration = 0;
+
+    for (ws, tag) in seq.iter() {
+        iteration += 1;
+        // 1. Create a session to simulate switching
+        let session = create_session(&conn).unwrap();
+        
+        let path = format!("/dev/project_{}/file_{}.rs", tag, iteration);
+        let title = format!("{} File {}", tag, iteration);
+        
+        let item = create_item(
+            &conn, 
+            Some(&ws.id), 
+            Some(&session.id), 
+            "window_focus", 
+            &title, 
+            Some(tag), 
+            &json!({ "app_name": "Code", "file_path": path }).to_string()
+        ).unwrap();
+
+        // 2. Evaluate through guard
+        let eval = guard.evaluate_from_db(&conn, &item.id, &ws.id).unwrap();
+        assert!(eval.decision.is_accepted(), "Must accept rapid valid context changes");
+
+        // 3. Force Snapshot
+        ContextSnapshotService::new().derive_for_context(&conn, &ws.id).unwrap();
+    }
+
+    // Force caches to invalidate to prove DB state is uncorrupted
+    crate::context_engine::reconstruction::invalidate_reconstruction_cache(None);
+    crate::context_engine::workset::get_global_workset_cache().invalidate(None);
+    crate::context_engine::memory::get_global_memory_cache().invalidate(None);
+
+    // Verify reconstruction
+    let rec_a = ContextReconstructionService::new().reconstruct_context(&conn, &ws_a.id).unwrap();
+    let rec_b = ContextReconstructionService::new().reconstruct_context(&conn, &ws_b.id).unwrap();
+    let rec_c = ContextReconstructionService::new().reconstruct_context(&conn, &ws_c.id).unwrap();
+    let rec_d = ContextReconstructionService::new().reconstruct_context(&conn, &ws_d.id).unwrap();
+
+    // Verify states are uncorrupted and worksets isolated
+    assert_eq!(rec_a.workset.items.len(), 3, "A should have exactly 3 items");
+    assert_eq!(rec_b.workset.items.len(), 2, "B should have exactly 2 items");
+    assert_eq!(rec_c.workset.items.len(), 1, "C should have exactly 1 item");
+    assert_eq!(rec_d.workset.items.len(), 1, "D should have exactly 1 item");
+    
+    // Verify isolated contents
+    assert!(rec_a.workset.items.iter().all(|i| i.title.as_deref().unwrap_or("").starts_with("A")));
+    assert!(rec_b.workset.items.iter().all(|i| i.title.as_deref().unwrap_or("").starts_with("B")));
+    assert!(rec_c.workset.items.iter().all(|i| i.title.as_deref().unwrap_or("").starts_with("C")));
+    assert!(rec_d.workset.items.iter().all(|i| i.title.as_deref().unwrap_or("").starts_with("D")));
+}
+
+/// CASE L: Complete Cold Start Reconstruction
+/// Simulates full application shutdown and restart after a complex multi-context session.
+#[test]
+fn test_case_l_cold_start_reconstruction() {
+    let conn = setup_phase1_db();
+    
+    // 1. Create several contexts
+    let ws_a = create_workspace(&conn, "Context Alpha").unwrap();
+    let ws_b = create_workspace(&conn, "Context Beta").unwrap();
+    let ws_c = create_workspace(&conn, "Context Gamma").unwrap();
+
+    let sess = create_session(&conn).unwrap();
+    
+    // 2. Generate activity
+    let item_a = create_item(&conn, Some(&ws_a.id), Some(&sess.id), "window_focus", "Alpha File", Some("Alpha"), &json!({ "app_name": "Editor", "file_path": "/alpha.rs" }).to_string()).unwrap();
+    let item_b = create_item(&conn, Some(&ws_b.id), Some(&sess.id), "window_focus", "Beta File", Some("Beta"), &json!({ "app_name": "Editor", "file_path": "/beta.rs" }).to_string()).unwrap();
+    let item_c = create_item(&conn, Some(&ws_c.id), Some(&sess.id), "window_focus", "Gamma File", Some("Gamma"), &json!({ "app_name": "Editor", "file_path": "/gamma.rs" }).to_string()).unwrap();
+
+    // 3. Generate tasks
+    conn.execute(
+        "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+         VALUES ('task_a', ?1, 'Alpha Core Task', 0.95, 'active', datetime('now'), datetime('now'), datetime('now'), datetime('now'))",
+        rusqlite::params![ws_a.id],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO task_candidates (id, context_id, title, confidence, status, first_detected_at, last_active_at, created_at, updated_at)
+         VALUES ('task_b', ?1, 'Beta Side Task', 0.85, 'active', datetime('now'), datetime('now'), datetime('now'), datetime('now'))",
+        rusqlite::params![ws_b.id],
+    ).unwrap();
+
+    // 4 & 5 & 6: Generate Memories, Worksets, Snapshots
+    ContextImportantMemoryBuilder::build(&conn, &ws_a.id, None).unwrap();
+    ContextImportantMemoryBuilder::build(&conn, &ws_b.id, None).unwrap();
+    
+    ContextWorksetService::new().derive_for_workspace(&conn, &ws_a.id).unwrap();
+    ContextWorksetService::new().derive_for_workspace(&conn, &ws_b.id).unwrap();
+    
+    let snap_a = ContextSnapshotService::new().derive_for_context(&conn, &ws_a.id).unwrap();
+    let snap_b = ContextSnapshotService::new().derive_for_context(&conn, &ws_b.id).unwrap();
+    crate::db::operations::save_context_snapshot(&conn, &snap_a, 10).unwrap();
+    crate::db::operations::save_context_snapshot(&conn, &snap_b, 10).unwrap();
+
+    // 7. Add Feedback (Correction Defense)
+    ContextCorrectionService::record_context_correction(&conn, &item_c.id, &ws_a.id, Some("Never put Gamma in Alpha")).unwrap();
+
+    // 8. Close ContextSplit completely (simulate shutdown by destroying in-memory caches)
+    crate::context_engine::reconstruction::invalidate_reconstruction_cache(None);
+    crate::context_engine::workset::get_global_workset_cache().invalidate(None);
+    crate::context_engine::memory::get_global_memory_cache().invalidate(None);
+
+    // 9 & 10. Restart & Reconstruct
+    let rec_a = ContextReconstructionService::new().reconstruct_context(&conn, &ws_a.id).unwrap();
+    let rec_b = ContextReconstructionService::new().reconstruct_context(&conn, &ws_b.id).unwrap();
+    let rec_c = ContextReconstructionService::new().reconstruct_context(&conn, &ws_c.id).unwrap();
+
+    // Verify properties
+    assert_eq!(rec_a.context.name, "Context Alpha");
+    assert_eq!(rec_a.current_task.title.as_deref(), Some("Alpha Core Task"));
+    assert!(rec_a.workset.total_count >= 1, "Workset must be preserved");
+    let mut stmt = conn.prepare("SELECT id FROM context_snapshots WHERE context_id = ?1").unwrap();
+    assert!(stmt.exists(rusqlite::params![ws_a.id]).unwrap_or(false), "Snapshot must be preserved in DB");
+    assert!(rec_a.resume_readiness.can_resume, "Must be ready to resume");
+
+    assert_eq!(rec_b.context.name, "Context Beta");
+    assert_eq!(rec_b.current_task.title.as_deref(), Some("Beta Side Task"));
+    assert!(rec_b.workset.total_count >= 1);
+    let mut stmt = conn.prepare("SELECT id FROM context_snapshots WHERE context_id = ?1").unwrap();
+    assert!(stmt.exists(rusqlite::params![ws_b.id]).unwrap_or(false));
+    
+    assert_eq!(rec_c.context.name, "Context Gamma");
+
+    // Verify feedback survived restart
+    let defense = ContextCorrectionService::evaluate_correction_defense(&conn, &item_c, &ws_a.id, 0.40, false, false);
+    assert!(defense.is_blocked(), "Feedback must survive cold restart");
+
+    // Verify no cross-contamination after cold start
+    let alpha_titles: Vec<String> = rec_a.workset.items.iter().map(|i| i.title.clone().unwrap_or_default()).collect();
+    assert!(!alpha_titles.iter().any(|t| t.contains("Beta") || t.contains("Gamma")));
+}
