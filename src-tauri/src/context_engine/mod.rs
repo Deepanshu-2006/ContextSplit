@@ -62,6 +62,11 @@ pub mod performance_tracing;
 pub mod diagnostics_guard;
 pub mod real_world_test_mode;
 pub mod real_world_fixtures;
+pub mod real_world_baseline;
+
+pub use real_world_baseline::{
+    BaselineObservation, RealWorldBaselineEvaluator, RealWorldBaselineMetrics,
+};
 
 pub use real_world_fixtures::{
     RealisticFixturesDataset, RealisticContextFixture, RealisticContextSignals,
