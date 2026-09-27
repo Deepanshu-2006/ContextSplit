@@ -414,6 +414,8 @@ pub mod real_world_resume_readiness_tests;
 pub mod real_world_adaptation_tests;
 #[cfg(test)]
 pub mod real_world_performance_audit_tests;
+#[cfg(test)]
+pub mod mac_restart_and_recovery_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
