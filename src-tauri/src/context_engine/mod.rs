@@ -61,6 +61,13 @@ pub mod cross_system_consistency;
 pub mod performance_tracing;
 pub mod diagnostics_guard;
 pub mod real_world_test_mode;
+pub mod real_world_fixtures;
+
+pub use real_world_fixtures::{
+    RealisticFixturesDataset, RealisticContextFixture, RealisticContextSignals,
+    CombinationScenarioFixture, ScenarioInputs, ScenarioExpected,
+    REALISTIC_CONTEXTS_JSON,
+};
 
 pub use real_world_test_mode::{
     get_real_world_test_controller, CandidateContextDiagnostic, ContextDetectionDiagnostic,
