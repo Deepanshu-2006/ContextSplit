@@ -398,6 +398,8 @@ pub mod phase1_performance_tests;
 pub mod phase1_user_journey_tests;
 #[cfg(test)]
 pub mod multi_context_confusion_tests;
+#[cfg(test)]
+pub mod false_assignment_defense_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
