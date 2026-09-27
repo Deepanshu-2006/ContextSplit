@@ -14,6 +14,16 @@ pub fn init(app_data_dir: PathBuf) -> std::result::Result<Connection, Box<dyn st
     // Open a connection (creates the file if it doesn't exist)
     let conn = Connection::open(db_path)?;
 
+    // Configure high-performance, battery-friendly SQLite PRAGMAs for continuous background operation
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA cache_size = -2000;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA foreign_keys = ON;",
+    )?;
+
     // Run migrations (create tables)
     run_migrations(&conn)?;
 
