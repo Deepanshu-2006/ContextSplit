@@ -703,11 +703,23 @@ impl TaskEvidenceCollector {
 
         // 1. Fetch recent Items associated with this context (bounded with indexed query)
         let mut item_stmt = conn.prepare(
-            "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
-             FROM items i
-             WHERE (i.workspace_id = ?1 OR i.id IN (SELECT item_id FROM context_memberships WHERE workspace_id = ?1))
-               AND i.created_at >= ?2
-             ORDER BY i.created_at DESC
+            "SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at FROM (
+                SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
+                FROM items i
+                WHERE i.workspace_id = ?1 AND i.created_at >= ?2
+                ORDER BY i.created_at DESC
+                LIMIT ?3
+             )
+             UNION
+             SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at FROM (
+                SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at
+                FROM items i
+                JOIN context_memberships cm ON i.id = cm.item_id
+                WHERE cm.workspace_id = ?1 AND i.created_at >= ?2
+                ORDER BY i.created_at DESC
+                LIMIT ?3
+             )
+             ORDER BY created_at DESC
              LIMIT ?3",
         )?;
 

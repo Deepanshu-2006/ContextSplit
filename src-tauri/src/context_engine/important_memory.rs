@@ -857,13 +857,26 @@ impl ContextImportantMemoryBuilder {
         // 5. Evaluate Multi-Session Item Recurrence (Recurring References)
         {
             let stmt = conn.prepare(
-                "SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT s.id) as session_count,
-                        MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
-                 FROM items i
-                 JOIN sessions s ON i.session_id = s.id
-                 WHERE (i.workspace_id = ?1 OR EXISTS(SELECT 1 FROM context_memberships cm WHERE cm.item_id = i.id AND cm.workspace_id = ?1))
-                 GROUP BY i.id
-                 HAVING session_count >= ?2
+                "SELECT id, title, item_type, content, metadata, session_count, first_seen, last_seen FROM (
+                    SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT i.session_id) as session_count,
+                           MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
+                    FROM items i
+                    WHERE i.workspace_id = ?1 AND i.session_id IS NOT NULL
+                    GROUP BY i.id
+                    HAVING session_count >= ?2
+                    LIMIT 20
+                 )
+                 UNION
+                 SELECT id, title, item_type, content, metadata, session_count, first_seen, last_seen FROM (
+                    SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT i.session_id) as session_count,
+                           MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
+                    FROM items i
+                    JOIN context_memberships cm ON i.id = cm.item_id
+                    WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed' AND i.session_id IS NOT NULL
+                    GROUP BY i.id
+                    HAVING session_count >= ?2
+                    LIMIT 20
+                 )
                  LIMIT 20",
             );
 

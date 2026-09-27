@@ -370,6 +370,8 @@ pub mod feedback_overlearning_tests;
 pub mod decision_trace_scenario_tests;
 #[cfg(test)]
 pub mod phase1_observability_validation;
+#[cfg(test)]
+pub mod phase1_performance_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

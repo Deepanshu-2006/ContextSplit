@@ -799,11 +799,21 @@ impl ContextWorksetBuilder {
         // 2. Fetch all confirmed items for this workspace (direct or confirmed membership, bounded to recent 50)
         let mut items = Vec::new();
         if let Ok(mut item_stmt) = conn.prepare(
-            "SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
-             FROM items i
-             WHERE i.workspace_id = ?1
-                OR i.id IN (SELECT item_id FROM context_memberships WHERE workspace_id = ?1 AND membership_type = 'confirmed')
-             ORDER BY i.created_at DESC LIMIT 50",
+            "SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at FROM (
+                SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+                FROM items i
+                WHERE i.workspace_id = ?1
+                ORDER BY i.created_at DESC LIMIT 50
+             )
+             UNION
+             SELECT id, workspace_id, session_id, item_type, content, title, metadata, created_at, updated_at FROM (
+                SELECT i.id, i.workspace_id, i.session_id, i.item_type, i.content, i.title, i.metadata, i.created_at, i.updated_at
+                FROM items i
+                JOIN context_memberships cm ON i.id = cm.item_id
+                WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'
+                ORDER BY i.created_at DESC LIMIT 50
+             )
+             ORDER BY created_at DESC LIMIT 50",
         ) {
             if let Ok(rows) = item_stmt.query_map(params![workspace_id], |row| {
                 Ok(Item {
