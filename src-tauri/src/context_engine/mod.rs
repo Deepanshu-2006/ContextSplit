@@ -396,6 +396,8 @@ pub mod phase1_observability_validation;
 pub mod phase1_performance_tests;
 #[cfg(test)]
 pub mod phase1_user_journey_tests;
+#[cfg(test)]
+pub mod multi_context_confusion_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
