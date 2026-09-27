@@ -36,7 +36,7 @@ export class SurfaceCapturePipeline {
    * @param event The normalized interaction event (e.g., from a drag drop)
    * @param payload The raw item to capture
    */
-  async execute(event: ContextInteractionEvent, payload: any): Promise<boolean> {
+  async execute(_event: ContextInteractionEvent, payload: any): Promise<boolean> {
     try {
       this.surface.showAction('Processing...');
 
@@ -115,7 +115,7 @@ export class SurfaceCapturePipeline {
    * This delegates to the backend engine to ensure rules (e.g. no duplicates, 
    * no irrelevant items) are strictly enforced.
    */
-  private async enforceQualityGuard(itemId: string, targetContextId: string | null): Promise<QualityGuardResult> {
+  private async enforceQualityGuard(itemId: string, _targetContextId: string | null): Promise<QualityGuardResult> {
     // In Phase 1, we rely on the backend to enforce true quality.
     // Here we validate the fundamental requirement that we don't bypass the backend checks.
     if (!itemId) {

@@ -708,8 +708,8 @@ fn test_case_l_cold_start_reconstruction() {
     let sess = create_session(&conn).unwrap();
     
     // 2. Generate activity
-    let item_a = create_item(&conn, Some(&ws_a.id), Some(&sess.id), "window_focus", "Alpha File", Some("Alpha"), &json!({ "app_name": "Editor", "file_path": "/alpha.rs" }).to_string()).unwrap();
-    let item_b = create_item(&conn, Some(&ws_b.id), Some(&sess.id), "window_focus", "Beta File", Some("Beta"), &json!({ "app_name": "Editor", "file_path": "/beta.rs" }).to_string()).unwrap();
+    let _item_a = create_item(&conn, Some(&ws_a.id), Some(&sess.id), "window_focus", "Alpha File", Some("Alpha"), &json!({ "app_name": "Editor", "file_path": "/alpha.rs" }).to_string()).unwrap();
+    let _item_b = create_item(&conn, Some(&ws_b.id), Some(&sess.id), "window_focus", "Beta File", Some("Beta"), &json!({ "app_name": "Editor", "file_path": "/beta.rs" }).to_string()).unwrap();
     let item_c = create_item(&conn, Some(&ws_c.id), Some(&sess.id), "window_focus", "Gamma File", Some("Gamma"), &json!({ "app_name": "Editor", "file_path": "/gamma.rs" }).to_string()).unwrap();
 
     // 3. Generate tasks

@@ -1,45 +1,28 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::context_engine::ambiguity::{AmbiguityConfig, AmbiguityEvaluationInput, AmbiguityManager, CandidateContextAffinity};
-use crate::context_engine::contamination::{ContaminationCheckInput, ContaminationGuard};
-use crate::context_engine::context_state::{ContextState, ContextStateService};
 use crate::context_engine::feedback::{
-    ContextFeedbackEvent, ContextFeedbackService, FeedbackAction, FeedbackMetadata,
+    ContextFeedbackEvent, ContextFeedbackService, FeedbackAction,
     FeedbackScope, FeedbackSource, FeedbackTargetRef,
 };
 use crate::context_engine::important_memory::ContextImportantMemoryBuilder;
-use crate::context_engine::lifecycle::ContextLifecycleService;
-use crate::context_engine::memory::{invalidate_memory_cache, ContextMemory, ContextMemoryService};
-use crate::context_engine::pending_activity::{
-    ActivityEvidenceSignal, DelayedResolutionConfig, PendingActivityConfig,
-    PendingActivityManager, PendingContextualActivity,
-};
+use crate::context_engine::memory::invalidate_memory_cache;
 use crate::context_engine::performance_tracing::{
-    get_performance_tracer, start_span, OperationCategory, PerformanceSpan,
+    get_performance_tracer, start_span, OperationCategory,
 };
 use crate::context_engine::quality_guard::ContextQualityGuard;
 use crate::context_engine::reconstruction::{
-    invalidate_reconstruction_cache, ContextReconstruction, ContextReconstructionService,
+    invalidate_reconstruction_cache, ContextReconstructionService,
 };
 use crate::context_engine::scoring::evaluate_item_context;
-use crate::context_engine::session::ContextSessionEvaluator;
-use crate::context_engine::snapshot::{
-    get_global_snapshot_cache, invalidate_snapshot_cache, ContextSnapshotService,
-};
-use crate::context_engine::transitions::{
-    classify_transition_evidence, ContextReference, ContextTransition, ContextTransitionType,
-};
+use crate::context_engine::transitions::classify_transition_evidence;
 use crate::context_engine::workset::{
-    get_global_workset_cache, invalidate_workset_cache, ContextWorkset, ContextWorksetService,
+    invalidate_workset_cache, ContextWorksetService,
 };
 use crate::db::operations::{
-    create_item, create_session, create_workspace, get_workspace, list_workspaces,
+    create_item, create_session, create_workspace,
 };
 
 fn setup_perf_db() -> Connection {

@@ -16,6 +16,10 @@ export interface DragEvalResult {
   isApproaching: boolean;
   /** Inertial rotation tilt in degrees (subtle) */
   tiltAngle: number;
+  /** Magnetic pull horizontal offset */
+  pullX?: number;
+  /** Magnetic pull vertical offset */
+  pullY?: number;
 }
 
 // Activation radius (logical pixels from notch center)
