@@ -60,6 +60,16 @@ pub mod health_check;
 pub mod cross_system_consistency;
 pub mod performance_tracing;
 pub mod diagnostics_guard;
+pub mod real_world_test_mode;
+
+pub use real_world_test_mode::{
+    get_real_world_test_controller, CandidateContextDiagnostic, ContextDetectionDiagnostic,
+    ContextTransitionDiagnostic, FeedbackDiagnostic, LatencyDiagnostic, LifecycleChangeDiagnostic,
+    MemoryChangeDiagnostic, RealWorldDiagnosticEvent, RealWorldTestModeController,
+    RealWorldTestSession, RealWorldTestSessionSummary, ReconstructionDiagnostic,
+    RecordedDiagnosticEnvelope, ResumeReadinessDiagnostic, TaskChangeDiagnostic,
+    TestSessionStatus, WorksetChangeDiagnostic, sanitize_diagnostic_text,
+};
 
 pub use diagnostics_guard::{
     get_diagnostics_controller, DiagnosticsController, DiagnosticsMode, DiagnosticsPolicy,
