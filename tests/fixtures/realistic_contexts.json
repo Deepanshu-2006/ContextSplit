@@ -1,0 +1,264 @@
+{
+  "version": "1.0",
+  "description": "Realistic Mac developer multi-workspace context fixtures for ContextSplit",
+  "contexts": [
+    {
+      "id": "ws_contextsplit",
+      "name": "ContextSplit Development",
+      "description": "Active development on the ContextSplit desktop application, core context engine, and macOS notch UI",
+      "repository_root": "/Users/developer/Projects/ContextSplit",
+      "git_branches": ["main", "feature/context-reconstruction", "perf/lru-cache"],
+      "primary_languages": ["Rust", "TypeScript", "React"],
+      "identifying_signals": {
+        "file_paths": [
+          "src-tauri/src/context_engine/scoring.rs",
+          "src-tauri/src/context_engine/reconstruction.rs",
+          "src-tauri/src/db/models.rs",
+          "src/components/notch/NotchView.tsx",
+          "src/services/contextInteractionService.ts",
+          "src-tauri/Cargo.toml",
+          "package.json",
+          "docs/architecture.md"
+        ],
+        "window_title_patterns": [
+          "scoring.rs — ContextSplit",
+          "reconstruction.rs — ContextSplit",
+          "ContextSplit [Workspace]",
+          "zsh: cargo test --lib (ContextSplit)",
+          "npm run dev — ContextSplit"
+        ],
+        "browser_domains": [
+          "github.com/contextsplit",
+          "tauri.app",
+          "docs.rs/rusqlite",
+          "crates.io/crates/rusqlite"
+        ],
+        "browser_urls": [
+          "https://github.com/contextsplit/contextsplit/pull/42",
+          "https://tauri.app/v2/docs/guides/features/",
+          "https://docs.rs/rusqlite/0.31.0/rusqlite/struct.Connection.html"
+        ],
+        "task_patterns": [
+          "Implement Day 29 Real-World Mac Testing",
+          "Optimize Context Reconstruction Latency",
+          "Fix Notch Magnetic Drag Physics"
+        ]
+      }
+    },
+    {
+      "id": "ws_payx",
+      "name": "PayX Development",
+      "description": "Fintech payment processing SDK, Stripe integration, and iOS payment gateway development",
+      "repository_root": "/Users/developer/Projects/PayX",
+      "git_branches": ["main", "fix/webhook-signature", "feat/apple-pay-token"],
+      "primary_languages": ["Swift", "Objective-C"],
+      "identifying_signals": {
+        "file_paths": [
+          "Sources/PayX/PaymentGateway.swift",
+          "Sources/PayX/StripeWebhookHandler.swift",
+          "Tests/PayXTests/ReconciliationTests.swift",
+          "Package.swift",
+          "docs/api_spec_v2.md",
+          "invoices/september_reconciliation.csv"
+        ],
+        "window_title_patterns": [
+          "PayX.xcodeproj – PaymentGateway.swift",
+          "PayX — StripeWebhookHandler.swift",
+          "PayX Stripe Webhook Staging Collection",
+          "swift test (PayX)"
+        ],
+        "browser_domains": [
+          "dashboard.stripe.com",
+          "github.com/payx-fintech",
+          "developer.apple.com/documentation/storekit"
+        ],
+        "browser_urls": [
+          "https://dashboard.stripe.com/test/webhooks/we_123456",
+          "https://github.com/payx-fintech/payx-ios/issues/88",
+          "https://developer.apple.com/documentation/passkit/pkpaymentauthorizationcontroller"
+        ],
+        "task_patterns": [
+          "Fix Stripe Webhook Reconciliation",
+          "Implement Apple Pay Token Verification",
+          "Audit September Settlement Invoices"
+        ]
+      }
+    },
+    {
+      "id": "ws_university",
+      "name": "University",
+      "description": "CS4500 Operating Systems coursework, lab assignments, and lecture materials",
+      "repository_root": "/Users/developer/Academic/CS4500_Operating_Systems",
+      "git_branches": ["main", "lab3-vm-pagetable"],
+      "primary_languages": ["C", "LaTeX"],
+      "identifying_signals": {
+        "file_paths": [
+          "assignments/assignment_3/virtual_memory.c",
+          "assignments/assignment_3/page_table.h",
+          "lectures/lecture_08_concurrency_and_locks.pdf",
+          "lab_reports/report_memory_management.tex",
+          "notes/os_finals_study_guide.md"
+        ],
+        "window_title_patterns": [
+          "virtual_memory.c — CS4500",
+          "lecture_08_concurrency_and_locks.pdf (Page 14)",
+          "CS4500 Assignment 3 Submission — Gradescope",
+          "gcc -Wall virtual_memory.c"
+        ],
+        "browser_domains": [
+          "canvas.university.edu",
+          "piazza.com",
+          "gradescope.com",
+          "en.wikipedia.org/wiki/Page_table"
+        ],
+        "browser_urls": [
+          "https://canvas.university.edu/courses/4500/assignments/3",
+          "https://piazza.com/class/cs4500/post/142",
+          "https://gradescope.com/courses/4500/submissions/987654"
+        ],
+        "task_patterns": [
+          "Implement Virtual Memory Page Table",
+          "Complete Lab 3 Report in LaTeX",
+          "Review OS Concurrency Lecture 8"
+        ]
+      }
+    },
+    {
+      "id": "ws_personal_general",
+      "name": "Personal / General",
+      "description": "General browsing, personal entertainment, music, social messaging, and unassociated desktop activity",
+      "repository_root": null,
+      "git_branches": [],
+      "primary_languages": [],
+      "identifying_signals": {
+        "file_paths": [
+          "/Users/developer/Downloads/receipt_dinner.pdf",
+          "/Users/developer/Desktop/Screen Shot 2026-09-28.png",
+          "/Users/developer/Documents/vacation_packing_list.txt"
+        ],
+        "window_title_patterns": [
+          "Spotify - Daily Mix 1",
+          "Discord - #general",
+          "WhatsApp - Family Chat",
+          "Calculator",
+          "System Settings - Displays"
+        ],
+        "browser_domains": [
+          "reddit.com",
+          "youtube.com",
+          "amazon.com",
+          "weather.com"
+        ],
+        "browser_urls": [
+          "https://www.reddit.com/r/technology/",
+          "https://www.youtube.com/watch?v=lofi-coding-beats",
+          "https://www.amazon.com/dp/B08N5WRWNW",
+          "https://weather.com/forecast"
+        ],
+        "task_patterns": [
+          "Listen to music",
+          "Check weekend weather",
+          "Browse technology news"
+        ]
+      }
+    }
+  ],
+  "combination_scenarios": [
+    {
+      "id": "scenario_contextsplit_code_edit",
+      "description": "Editing Rust engine scoring code in ContextSplit workspace",
+      "inputs": {
+        "app_name": "Visual Studio Code",
+        "window_title": "scoring.rs — ContextSplit",
+        "file_path": "/Users/developer/Projects/ContextSplit/src-tauri/src/context_engine/scoring.rs",
+        "domain": null,
+        "url": null
+      },
+      "expected": {
+        "primary_context_id": "ws_contextsplit",
+        "min_confidence": 0.85,
+        "is_unambiguous": true
+      }
+    },
+    {
+      "id": "scenario_payx_xcode_edit",
+      "description": "Editing Swift webhook handler in PayX Xcode project",
+      "inputs": {
+        "app_name": "Xcode",
+        "window_title": "PayX.xcodeproj – StripeWebhookHandler.swift",
+        "file_path": "/Users/developer/Projects/PayX/Sources/PayX/StripeWebhookHandler.swift",
+        "domain": null,
+        "url": null
+      },
+      "expected": {
+        "primary_context_id": "ws_payx",
+        "min_confidence": 0.85,
+        "is_unambiguous": true
+      }
+    },
+    {
+      "id": "scenario_university_coursework_c_edit",
+      "description": "Writing virtual memory C simulation for University OS class",
+      "inputs": {
+        "app_name": "Visual Studio Code",
+        "window_title": "virtual_memory.c — CS4500",
+        "file_path": "/Users/developer/Academic/CS4500_Operating_Systems/assignments/assignment_3/virtual_memory.c",
+        "domain": null,
+        "url": null
+      },
+      "expected": {
+        "primary_context_id": "ws_university",
+        "min_confidence": 0.85,
+        "is_unambiguous": true
+      }
+    },
+    {
+      "id": "scenario_personal_unrelated_browsing",
+      "description": "Watching YouTube and browsing Reddit (Personal/General)",
+      "inputs": {
+        "app_name": "Google Chrome",
+        "window_title": "Lofi Coding Beats - YouTube",
+        "file_path": null,
+        "domain": "youtube.com",
+        "url": "https://www.youtube.com/watch?v=lofi-coding-beats"
+      },
+      "expected": {
+        "primary_context_id": null,
+        "max_confidence_for_professional_contexts": 0.20,
+        "is_general_noise": true
+      }
+    },
+    {
+      "id": "scenario_misleading_common_app_vscode_in_university",
+      "description": "VS Code opened on university OS assignment must NOT falsely map to ContextSplit",
+      "inputs": {
+        "app_name": "Visual Studio Code",
+        "window_title": "page_table.h — CS4500",
+        "file_path": "/Users/developer/Academic/CS4500_Operating_Systems/assignments/assignment_3/page_table.h",
+        "domain": null,
+        "url": null
+      },
+      "expected": {
+        "primary_context_id": "ws_university",
+        "rejected_context_id": "ws_contextsplit",
+        "min_confidence": 0.85
+      }
+    },
+    {
+      "id": "scenario_misleading_common_app_chrome_in_contextsplit",
+      "description": "Chrome opened on Tauri docs must map to ContextSplit, not University",
+      "inputs": {
+        "app_name": "Google Chrome",
+        "window_title": "Features | Tauri Guides",
+        "file_path": null,
+        "domain": "tauri.app",
+        "url": "https://tauri.app/v2/docs/guides/features/"
+      },
+      "expected": {
+        "primary_context_id": "ws_contextsplit",
+        "rejected_context_id": "ws_university",
+        "min_confidence": 0.80
+      }
+    }
+  ]
+}
