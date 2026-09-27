@@ -858,26 +858,15 @@ impl ContextImportantMemoryBuilder {
         {
             let stmt = conn.prepare(
                 "SELECT id, title, item_type, content, metadata, session_count, first_seen, last_seen FROM (
-                    SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT i.session_id) as session_count,
+                    SELECT MIN(i.id) as id, MAX(i.title) as title, i.item_type, i.content, MAX(i.metadata) as metadata, COUNT(DISTINCT i.session_id) as session_count,
                            MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
                     FROM items i
-                    WHERE i.workspace_id = ?1 AND i.session_id IS NOT NULL
-                    GROUP BY i.id
+                    WHERE (i.workspace_id = ?1 OR i.id IN (SELECT cm.item_id FROM context_memberships cm WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed'))
+                      AND i.session_id IS NOT NULL
+                    GROUP BY i.content
                     HAVING session_count >= ?2
                     LIMIT 20
-                 )
-                 UNION
-                 SELECT id, title, item_type, content, metadata, session_count, first_seen, last_seen FROM (
-                    SELECT i.id, i.title, i.item_type, i.content, i.metadata, COUNT(DISTINCT i.session_id) as session_count,
-                           MIN(i.created_at) as first_seen, MAX(i.created_at) as last_seen
-                    FROM items i
-                    JOIN context_memberships cm ON i.id = cm.item_id
-                    WHERE cm.workspace_id = ?1 AND cm.membership_type = 'confirmed' AND i.session_id IS NOT NULL
-                    GROUP BY i.id
-                    HAVING session_count >= ?2
-                    LIMIT 20
-                 )
-                 LIMIT 20",
+                 )",
             );
 
             if let Ok(mut stmt) = stmt {
@@ -902,8 +891,12 @@ impl ContextImportantMemoryBuilder {
                             continue;
                         }
 
-                        // Check if we already have a memory for this item
-                        let existing_idx = memories.iter().position(|m| m.source_id == item_id);
+                        // Check if we already have a memory for this item or content
+                        let existing_idx = memories.iter().position(|m| {
+                            m.source_id == item_id
+                                || m.detail.as_deref() == Some(&content)
+                                || (item_type == "url" && m.title.trim_end_matches('/') == content.trim_end_matches('/'))
+                        });
                         if let Some(idx) = existing_idx {
                             // Upgrade to recurring reference if not a confirmed fact
                             if memories[idx].memory_type != ImportantMemoryType::ConfirmedContextFact {

@@ -754,10 +754,51 @@ pub fn is_unrelated_popular_domain(content: &str, title: Option<&str>) -> bool {
         "https://netflix.com", "https://netflix.com/", "https://www.netflix.com", "https://www.netflix.com/",
         "https://spotify.com", "https://spotify.com/", "https://open.spotify.com", "https://open.spotify.com/",
         "https://wikipedia.org", "https://wikipedia.org/", "https://en.wikipedia.org", "https://en.wikipedia.org/",
+        "https://instagram.com", "https://instagram.com/", "https://facebook.com", "https://facebook.com/",
+        "https://tiktok.com", "https://tiktok.com/", "https://twitch.tv", "https://twitch.tv/",
     ];
 
     generic_domains.iter().any(|&d| c == d)
-        || (c.starts_with("https://www.google.com/search") && t.starts_with("google search"))
+        || c.starts_with("https://www.google.com/search")
+        || c.starts_with("https://google.com/search")
+        || c.starts_with("https://duckduckgo.com/?q=")
+        || c.starts_with("https://www.bing.com/search")
+        || (t.starts_with("google search") || t.starts_with("search - "))
+}
+
+/// Normalizes memory title and details into a canonical key to prevent duplicate memories.
+pub fn normalize_memory_key(title: &str, detail: Option<&str>) -> String {
+    let mut t = title.trim().to_lowercase();
+    if let Some(stripped) = t.strip_prefix("workspace: ") {
+        t = stripped.to_string();
+    } else if let Some(stripped) = t.strip_prefix("state: ") {
+        t = stripped.to_string();
+    } else if let Some(stripped) = t.strip_prefix("active task: ") {
+        t = stripped.to_string();
+    } else if let Some(stripped) = t.strip_prefix("recent task: ") {
+        t = stripped.to_string();
+    } else if let Some(stripped) = t.strip_prefix("task: ") {
+        t = stripped.to_string();
+    }
+
+    if t.starts_with("http://") || t.starts_with("https://") {
+        let clean = t.strip_prefix("https://").or_else(|| t.strip_prefix("http://")).unwrap_or(&t);
+        let clean_no_www = clean.strip_prefix("www.").unwrap_or(clean);
+        let base_url = clean_no_www.split('?').next().unwrap_or(clean_no_www);
+        return format!("url:{}", base_url.trim_end_matches('/'));
+    }
+
+    if let Some(d) = detail {
+        let d_trim = d.trim().to_lowercase();
+        if d_trim.starts_with("http://") || d_trim.starts_with("https://") {
+            let clean = d_trim.strip_prefix("https://").or_else(|| d_trim.strip_prefix("http://")).unwrap_or(&d_trim);
+            let clean_no_www = clean.strip_prefix("www.").unwrap_or(clean);
+            let base_url = clean_no_www.split('?').next().unwrap_or(clean_no_www);
+            return format!("url:{}", base_url.trim_end_matches('/'));
+        }
+    }
+
+    format!("title:{}", t)
 }
 
 /// Evaluation verdict produced by the `ContextMemoryQualityGuard`.
@@ -954,23 +995,35 @@ impl ContextMemoryQualityGuard {
     pub fn filter_memories(
         memories: Vec<crate::context_engine::important_memory::ContextImportantMemory>,
     ) -> Vec<crate::context_engine::important_memory::ContextImportantMemory> {
-        let mut seen_titles = HashSet::new();
+        let mut seen_keys = HashSet::new();
         let mut seen_source_ids = HashSet::new();
         let mut filtered = Vec::new();
 
         for mem in memories {
-            // 5. Check: Duplicate prevention
-            let title_key = mem.title.trim().to_lowercase();
-            if seen_titles.contains(&title_key) || seen_source_ids.contains(&mem.source_id) {
+            // 5. Check: Canonical duplicate prevention
+            let canonical_key = normalize_memory_key(&mem.title, mem.detail.as_deref());
+            if seen_keys.contains(&canonical_key) || seen_source_ids.contains(&mem.source_id) {
                 continue;
             }
 
             let verdict = Self::verify_memory(&mem);
             if verdict.is_accepted {
-                seen_titles.insert(title_key);
+                seen_keys.insert(canonical_key);
                 seen_source_ids.insert(mem.source_id.clone());
                 filtered.push(mem);
             }
+        }
+
+        // Budget capping: "FEWER BUT MORE USEFUL MEMORIES"
+        // Retain the top high-value contextual memories (max 12)
+        filtered.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if filtered.len() > 12 {
+            filtered.truncate(12);
         }
 
         filtered
