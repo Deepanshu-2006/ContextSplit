@@ -545,10 +545,19 @@ impl AmbiguityManager {
         // Boost affinity for candidates matching the new evidence
         for candidate in &mut record.candidates {
             let ws_name_lower = candidate.workspace_name.to_lowercase();
+            let ws_id_lower = candidate.workspace_id.to_lowercase();
+            let tokens: Vec<&str> = ws_name_lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| t.len() >= 3)
+                .collect();
             let mut matched_new = false;
 
             if let Some(ref u) = new_evidence.url {
-                if u.to_lowercase().contains(&ws_name_lower) {
+                let u_lower = u.to_lowercase();
+                if u_lower.contains(&ws_name_lower)
+                    || u_lower.contains(&ws_id_lower)
+                    || (!tokens.is_empty() && tokens.iter().any(|t| u_lower.contains(t)))
+                {
                     candidate.score = (candidate.score + 0.45).min(1.0);
                     candidate.confidence = (candidate.confidence + 0.40).min(1.0);
                     candidate.matching_signals.push(format!("corroborating_url:{}", u));
@@ -557,7 +566,11 @@ impl AmbiguityManager {
             }
 
             if let Some(ref p) = new_evidence.file_path {
-                if p.to_lowercase().contains(&ws_name_lower) {
+                let p_lower = p.to_lowercase();
+                if p_lower.contains(&ws_name_lower)
+                    || p_lower.contains(&ws_id_lower)
+                    || (!tokens.is_empty() && tokens.iter().any(|t| p_lower.contains(t)))
+                {
                     candidate.score = (candidate.score + 0.50).min(1.0);
                     candidate.confidence = (candidate.confidence + 0.45).min(1.0);
                     candidate.matching_signals.push(format!("corroborating_project_path:{}", p));
@@ -566,7 +579,11 @@ impl AmbiguityManager {
             }
 
             if let Some(ref task) = new_evidence.task_association {
-                if task.to_lowercase().contains(&ws_name_lower) {
+                let task_lower = task.to_lowercase();
+                if task_lower.contains(&ws_name_lower)
+                    || task_lower.contains(&ws_id_lower)
+                    || (!tokens.is_empty() && tokens.iter().any(|t| task_lower.contains(t)))
+                {
                     candidate.score = (candidate.score + 0.40).min(1.0);
                     candidate.confidence = (candidate.confidence + 0.35).min(1.0);
                     candidate.matching_signals.push(format!("corroborating_task:{}", task));

@@ -400,6 +400,8 @@ pub mod phase1_user_journey_tests;
 pub mod multi_context_confusion_tests;
 #[cfg(test)]
 pub mod false_assignment_defense_tests;
+#[cfg(test)]
+pub mod ambiguous_context_validation_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
