@@ -410,6 +410,8 @@ pub mod contextual_memory_quality_tests;
 pub mod task_reconstruction_quality_tests;
 #[cfg(test)]
 pub mod real_world_resume_readiness_tests;
+#[cfg(test)]
+pub mod real_world_adaptation_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
