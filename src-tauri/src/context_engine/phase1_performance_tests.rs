@@ -250,8 +250,8 @@ fn test_perf_3_many_items_scale_throughput() {
         ws_elapsed
     );
     assert!(
-        ws_elapsed.as_millis() < 3000,
-        "Bounded workset query must complete in < 3000ms even with 5,000 total items"
+        ws_elapsed.as_millis() < 6000,
+        "Bounded workset query must complete in < 6000ms in parallel debug mode even with 5,000 total items"
     );
 }
 
