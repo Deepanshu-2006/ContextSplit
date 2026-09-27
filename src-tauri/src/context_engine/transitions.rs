@@ -943,10 +943,13 @@ impl ContextTransitionDetector {
             false
         };
 
-        if is_resumed_after_inactivity && self.current_context.is_some() {
-            let prior = self.current_context.take().unwrap();
-            self.push_history(prior);
+        if is_resumed_after_inactivity {
+            if self.current_context.is_some() {
+                let prior = self.current_context.take().unwrap();
+                self.push_history(prior);
+            }
             self.pending_transition = None;
+            self.last_emitted_transition = None;
         }
 
         // Scenario 4: Context A -> Ambiguous

@@ -402,6 +402,8 @@ pub mod multi_context_confusion_tests;
 pub mod false_assignment_defense_tests;
 #[cfg(test)]
 pub mod ambiguous_context_validation_tests;
+#[cfg(test)]
+pub mod real_world_context_switching_tests;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
