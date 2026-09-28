@@ -64,6 +64,12 @@ pub mod real_world_test_mode;
 pub mod real_world_fixtures;
 pub mod real_world_baseline;
 pub mod interaction;
+pub mod data_integrity;
+
+pub use data_integrity::{
+    DataIntegrityChecker, DataIntegrityReport, IntegrityViolation, ViolationSeverity,
+    DATA_INTEGRITY_DISCLAIMER,
+};
 
 pub use interaction::{
     ContextInteractionEvent, ContextInteractionResult, InteractionEventType,
