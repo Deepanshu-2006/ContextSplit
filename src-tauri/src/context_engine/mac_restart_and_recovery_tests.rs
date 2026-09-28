@@ -310,4 +310,216 @@ mod tests {
         assert_eq!(recon.workset.status, ReconstructionSectionStatus::Available);
         assert!(!recon.workset.items.is_empty(), "Workset must recover from SQLite storage");
     }
+
+    // =========================================================================
+    // STEP 14.4 — COMPLETE 10-PHASE PERSISTENCE AND RECOVERY GATE
+    // =========================================================================
+    #[test]
+    fn test_phase1_persistence_and_recovery_complete_10_phase_gate() {
+        // ---------------------------------------------------------------------
+        // Phase 1: Fresh Application Launch (Clean Environment)
+        // ---------------------------------------------------------------------
+        let conn = setup_test_db();
+        let initial_workspaces = list_workspaces(&conn).unwrap();
+        assert_eq!(initial_workspaces.len(), 0, "Fresh launch must have 0 workspaces");
+        let initial_workset = ContextWorksetService::new().derive_active(&conn).unwrap();
+        assert!(initial_workset.is_none(), "Fresh launch must have no active workset");
+
+        // ---------------------------------------------------------------------
+        // Phase 2: Existing User Launch (Create initial workspace & restart)
+        // ---------------------------------------------------------------------
+        let ws_main = create_workspace(&conn, "ContextSplit Primary").unwrap();
+        let sess_1 = create_session(&conn).unwrap();
+        let item_init = create_item(
+            &conn,
+            Some(&ws_main.id),
+            Some(&sess_1.id),
+            "code",
+            "fn init() { ... }",
+            Some("init.rs"),
+            "{\"status\":\"confirmed\"}",
+        ).unwrap();
+        confirm_membership(&conn, &item_init.id, &ws_main.id).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Phase 3: Multiple Contexts (ContextSplit, PayX, University)
+        // ---------------------------------------------------------------------
+        let ws_payx = create_workspace(&conn, "PayX Payments").unwrap();
+        let ws_uni = create_workspace(&conn, "Distributed Systems CS642").unwrap();
+
+        let item_payx = create_item(
+            &conn,
+            Some(&ws_payx.id),
+            Some(&sess_1.id),
+            "code",
+            "struct PaymentGateway;",
+            Some("gateway.swift"),
+            "{\"status\":\"confirmed\"}",
+        ).unwrap();
+        confirm_membership(&conn, &item_payx.id, &ws_payx.id).unwrap();
+
+        let item_uni = create_item(
+            &conn,
+            Some(&ws_uni.id),
+            Some(&sess_1.id),
+            "document",
+            "# Raft Consensus Notes",
+            Some("raft.md"),
+            "{\"status\":\"confirmed\"}",
+        ).unwrap();
+        confirm_membership(&conn, &item_uni.id, &ws_uni.id).unwrap();
+
+        // Create tasks for all 3 contexts
+        let task_main = TaskCandidate {
+            id: format!("task_main_{}", ws_main.id),
+            context_id: Some(ws_main.id.clone()),
+            title: "Architect persistence engine".to_string(),
+            confidence: 0.95,
+            status: TaskCandidateStatus::Confirmed,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        create_task_candidate(&conn, &task_main).unwrap();
+
+        let task_payx = TaskCandidate {
+            id: format!("task_payx_{}", ws_payx.id),
+            context_id: Some(ws_payx.id.clone()),
+            title: "Integrate Stripe Webhooks".to_string(),
+            confidence: 0.90,
+            status: TaskCandidateStatus::Active,
+            first_detected_at: Utc::now().to_rfc3339(),
+            last_active_at: Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        create_task_candidate(&conn, &task_payx).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Phase 4: Context Switching (Main -> PayX -> Uni -> Main)
+        // ---------------------------------------------------------------------
+        record_context_transition(
+            &conn,
+            &ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 1.0)
+                .from_context(ws_main.id.clone())
+                .to_context(ws_payx.id.clone())
+                .build(),
+        ).unwrap();
+
+        record_context_transition(
+            &conn,
+            &ContextTransitionBuilder::new(ContextTransitionType::ContextSwitch, 1.0)
+                .from_context(ws_payx.id.clone())
+                .to_context(ws_uni.id.clone())
+                .build(),
+        ).unwrap();
+
+        record_context_transition(
+            &conn,
+            &ContextTransitionBuilder::new(ContextTransitionType::ContextReturn, 1.0)
+                .from_context(ws_uni.id.clone())
+                .to_context(ws_main.id.clone())
+                .build(),
+        ).unwrap();
+        conn.execute("UPDATE workspaces SET lifecycle_state = 'active' WHERE id = ?1", rusqlite::params![ws_main.id]).unwrap();
+
+        // Save Departure Snapshot for ws_main
+        let snap_service = ContextSnapshotService::new();
+        let snap_main = snap_service.derive_for_context(&conn, &ws_main.id).unwrap();
+        save_context_snapshot(&conn, &snap_main, 50).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Phase 5: Application Close (Graceful session end)
+        // ---------------------------------------------------------------------
+        crate::db::operations::end_session(&conn, &sess_1.id).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Phase 6: Application Restart (Cold boot from SQLite, zero in-memory caches)
+        // ---------------------------------------------------------------------
+        invalidate_all_in_memory_caches();
+
+        // Verify: No duplicate contexts
+        let workspaces_after_restart = list_workspaces(&conn).unwrap();
+        assert_eq!(workspaces_after_restart.len(), 3, "No duplicate contexts permitted");
+
+        // Verify: Active context correctly recovered
+        let recon_main = ContextReconstructionService::new().reconstruct_cold(&conn, &ws_main.id).unwrap();
+        assert_eq!(recon_main.context.name, "ContextSplit Primary");
+        assert_eq!(recon_main.current_task.title.as_deref(), Some("Architect persistence engine"));
+        assert!(recon_main.resume_readiness.can_resume, "Must have valid resume readiness");
+
+        // ---------------------------------------------------------------------
+        // Phase 7: Mac Sleep / Wake (3-hour hiatus detection)
+        // ---------------------------------------------------------------------
+        let t_sleep = Utc::now();
+        let pause_detector = ContextPauseDetector::default();
+        let pause_eval = pause_detector.evaluate(PauseEvaluationInput {
+            context_id: &ws_main.id,
+            context_name: Some(&ws_main.name),
+            workspace: Some(&ws_main),
+            last_telemetry_gap_seconds: Some(3 * 3600),
+            reference_time: Some(t_sleep + Duration::hours(3)),
+            ..Default::default()
+        });
+        assert!(pause_eval.is_paused);
+        assert_eq!(pause_eval.pause_cause, Some(PauseCause::SystemSleep));
+
+        // Wake: new activity resumes context
+        let sess_2 = create_session(&conn).unwrap();
+        let item_wake = create_item(
+            &conn,
+            Some(&ws_main.id),
+            Some(&sess_2.id),
+            "code",
+            "fn wake() { ... }",
+            Some("wake.rs"),
+            "{\"status\":\"confirmed\"}",
+        ).unwrap();
+        confirm_membership(&conn, &item_wake.id, &ws_main.id).unwrap();
+
+        // ---------------------------------------------------------------------
+        // Phase 8: Interrupted Processing (Abrupt crash during active session)
+        // ---------------------------------------------------------------------
+        // sess_2 was never closed with end_session -> simulate crash & cold boot startup reconciliation
+        invalidate_all_in_memory_caches();
+        let reconciled_count = crate::db::operations::reconcile_orphaned_sessions(&conn).unwrap();
+        assert_eq!(reconciled_count, 1, "Orphaned session 2 must be reconciled to ended");
+
+        // ---------------------------------------------------------------------
+        // Phase 9: Incomplete Activity (Transient / Noise Glances)
+        // ---------------------------------------------------------------------
+        let transient_item = create_item(
+            &conn,
+            None, // Unfiled in Inbox
+            Some(&sess_2.id),
+            "url",
+            "https://news.ycombinator.com",
+            Some("Hacker News"),
+            "{\"is_transient\":true,\"status\":\"observed\"}",
+        ).unwrap();
+        // Invariant: Transient unassigned items must not corrupt context workset
+        let ws_main_workset = ContextWorksetService::new().derive_for_workspace(&conn, &ws_main.id).unwrap();
+        assert!(!ws_main_workset.items.iter().any(|i| i.id == transient_item.id));
+
+        // ---------------------------------------------------------------------
+        // Phase 10: Recovery After an Error (Transaction Rollback & Invariant Check)
+        // ---------------------------------------------------------------------
+        let mut mut_conn = conn;
+        let invalid_assignment = crate::db::operations::bulk_assign_inbox_items_to_workspace(
+            &mut mut_conn,
+            &[transient_item.id.clone()],
+            "non_existent_workspace_id_999",
+        );
+        assert!(invalid_assignment.is_err(), "Invalid workspace assignment must fail safely");
+
+        // Verify Data Integrity Gate reports clean state
+        let integrity_report = crate::context_engine::DataIntegrityChecker::audit_all(&mut_conn).unwrap();
+        assert!(integrity_report.is_valid, "Database integrity must be 100% valid after error recovery");
+        assert_eq!(integrity_report.critical_count, 0);
+
+        // Final Verification Assertions
+        assert_eq!(list_workspaces(&mut_conn).unwrap().len(), 3, "No duplicate contexts");
+        assert_eq!(crate::db::operations::list_sessions(&mut_conn).unwrap().len(), 2, "No duplicate sessions");
+    }
 }
