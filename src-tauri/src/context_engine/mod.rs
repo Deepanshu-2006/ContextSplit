@@ -63,6 +63,12 @@ pub mod diagnostics_guard;
 pub mod real_world_test_mode;
 pub mod real_world_fixtures;
 pub mod real_world_baseline;
+pub mod interaction;
+
+pub use interaction::{
+    ContextInteractionEvent, ContextInteractionResult, InteractionEventType,
+    InteractionOutcome, InteractionSourceSurface,
+};
 
 pub use real_world_baseline::{
     BaselineObservation, RealWorldBaselineEvaluator, RealWorldBaselineMetrics,
