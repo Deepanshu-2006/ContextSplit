@@ -7,12 +7,40 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies & Build Outputs
 node_modules
 dist
 dist-ssr
 *.local
 
-# Editor directories and files
+# SQLite Databases & Storage Artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Environment Variables & Private Credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# Cache & Temporary Directories
+.fastembed_cache/
+.cache/
+*.cache
+tmp/
+temp/
+
+# Rust / Tauri Build Targets
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/.fastembed_cache/
+
+# Editor & OS Artifacts
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -22,3 +50,5 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+Thumbs.db
+

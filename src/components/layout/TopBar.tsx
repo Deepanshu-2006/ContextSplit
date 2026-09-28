@@ -22,7 +22,24 @@ export function TopBar() {
     <header 
       className="h-14 w-full flex items-center justify-between px-6 bg-[#FFFBF9]/80 backdrop-blur-md border-b border-orange-200/50 select-none sticky top-0 z-10"
     >
-      <div className="flex items-center gap-4 flex-1">
+      <div className="flex items-center gap-4 flex-1 min-w-0">
+        {currentWorkspace && (
+          <div className="flex items-center gap-2 min-w-0 pr-3 border-r border-orange-200/50 shrink-0">
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                currentWorkspace.lifecycle_state === "dormant"
+                  ? "bg-stone-300"
+                  : currentWorkspace.lifecycle_state === "archived"
+                  ? "bg-stone-400"
+                  : "bg-emerald-500"
+              }`}
+              title={`Context status: ${currentWorkspace.lifecycle_state || "active"}`}
+            />
+            <h2 className="text-[13.5px] font-semibold text-stone-900 truncate max-w-[200px]">
+              {currentWorkspace.name}
+            </h2>
+          </div>
+        )}
         <div className="relative group w-64">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
             <Search size={14} className="text-stone-400 group-hover:text-stone-600 transition-colors" />
