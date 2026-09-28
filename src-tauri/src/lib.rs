@@ -1457,6 +1457,14 @@ fn list_all_task_candidates(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn run_data_integrity_audit(
+    state: State<'_, AppState>,
+) -> Result<context_engine::DataIntegrityReport, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    context_engine::DataIntegrityChecker::audit_all(&conn).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1685,6 +1693,7 @@ pub fn run() {
             explain_workspace_feedback,
             run_context_health_checks,
             run_cross_system_consistency_checks,
+            run_data_integrity_audit,
             get_performance_traces_summary,
             get_recent_performance_spans,
             list_all_task_candidates
