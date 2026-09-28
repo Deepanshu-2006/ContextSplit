@@ -27,6 +27,9 @@ pub fn init(app_data_dir: PathBuf) -> std::result::Result<Connection, Box<dyn st
     // Run migrations (create tables)
     run_migrations(&conn)?;
 
+    // Reconcile any orphaned active sessions left after sudden crashes or abrupt process exits
+    let _ = operations::reconcile_orphaned_sessions(&conn);
+
     Ok(conn)
 }
 

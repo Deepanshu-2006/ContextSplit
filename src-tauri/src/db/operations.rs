@@ -559,6 +559,19 @@ pub fn end_session(conn: &Connection, id: &str) -> Result<Session> {
     get_session(conn, id)
 }
 
+/// Reconciles orphaned active sessions on startup after abrupt shutdown or crash.
+/// Any session with status = 'active' or where ended_at IS NULL is transitioned to
+/// 'ended' with ended_at set to last_activity_at without fabricating artificial timestamps.
+pub fn reconcile_orphaned_sessions(conn: &Connection) -> Result<usize> {
+    let updated = conn.execute(
+        "UPDATE sessions 
+         SET status = 'ended', ended_at = last_activity_at 
+         WHERE status = 'active' OR ended_at IS NULL",
+        [],
+    )?;
+    Ok(updated)
+}
+
 #[allow(dead_code)]
 pub fn list_sessions(conn: &Connection) -> Result<Vec<Session>> {
     let mut stmt = conn.prepare("SELECT id, started_at, last_activity_at, ended_at, status FROM sessions ORDER BY started_at DESC")?;
@@ -2290,6 +2303,36 @@ mod tests {
         // List sessions
         let sessions = list_sessions(&conn).unwrap();
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_orphaned_sessions_on_startup() {
+        let conn = setup_db();
+
+        // 1. Create two sessions that terminate abruptly without end_session (e.g. power loss or crash)
+        let sess1 = create_session(&conn).unwrap();
+        let sess2 = create_session(&conn).unwrap();
+        assert_eq!(sess1.status, "active");
+        assert_eq!(sess2.status, "active");
+        assert!(sess1.ended_at.is_none());
+        assert!(sess2.ended_at.is_none());
+
+        // 2. Run reconciliation routine (simulating cold boot)
+        let reconciled_count = reconcile_orphaned_sessions(&conn).unwrap();
+        assert_eq!(reconciled_count, 2);
+
+        // 3. Verify both sessions are now cleanly marked 'ended' with ended_at = last_activity_at
+        let s1 = get_session(&conn, &sess1.id).unwrap();
+        let s2 = get_session(&conn, &sess2.id).unwrap();
+
+        assert_eq!(s1.status, "ended");
+        assert_eq!(s2.status, "ended");
+        assert_eq!(s1.ended_at.as_deref(), Some(s1.last_activity_at.as_str()));
+        assert_eq!(s2.ended_at.as_deref(), Some(s2.last_activity_at.as_str()));
+
+        // 4. Running reconciliation again on clean state is idempotent
+        let second_run = reconcile_orphaned_sessions(&conn).unwrap();
+        assert_eq!(second_run, 0);
     }
 
     #[test]

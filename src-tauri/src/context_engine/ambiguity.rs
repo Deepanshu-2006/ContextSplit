@@ -407,6 +407,24 @@ impl AmbiguityManager {
 
         // 3. If single candidate with decisive score
         if sorted_candidates.len() == 1 {
+            // Require both adequate score and confidence threshold to prevent over-assignment on uncorroborated single candidate
+            if top.confidence < 0.35 {
+                let decision = AmbiguityDecision::HoldWeakEvidence {
+                    reason: format!(
+                        "Sole candidate '{}' has low confidence ({:.2} < 0.35); held quietly in Inbox awaiting stronger corroboration.",
+                        top.workspace_name, top.confidence
+                    ),
+                };
+                return AmbiguityResolutionResult {
+                    is_ambiguous: false,
+                    decision,
+                    competing_candidates_count: 1,
+                    score_margin: 0.0,
+                    record,
+                    explanation: format!("Confidence for sole candidate '{}' is too low for decisive assignment.", top.workspace_name),
+                };
+            }
+
             record.status = AmbiguityStatus::Resolved;
             record.resolved_workspace_id = Some(top.workspace_id.clone());
             record.resolution_reason = Some(format!(
@@ -790,5 +808,22 @@ mod tests {
         assert_eq!(res.score_margin, 0.60);
         assert_eq!(res.record.status, AmbiguityStatus::Resolved);
         assert_eq!(res.record.resolved_workspace_id, Some("ws_payx".to_string()));
+    }
+
+    #[test]
+    fn test_single_candidate_weak_confidence_held_in_inbox() {
+        let manager = AmbiguityManager::new();
+        // Single candidate with score above resolution threshold (0.50) but weak confidence (0.20)
+        let cand_cs = CandidateContextAffinity::new("ws_cs", "ContextSplit", 0.50, 0.20);
+
+        let input = AmbiguityEvaluationInput::new("act_7", "Bare config file without context")
+            .with_candidates(vec![cand_cs]);
+
+        let res = manager.evaluate(&input);
+
+        assert!(!res.is_ambiguous);
+        assert!(matches!(res.decision, AmbiguityDecision::HoldWeakEvidence { .. }));
+        assert_eq!(res.record.status, AmbiguityStatus::PendingMoreEvidence);
+        assert_eq!(res.record.resolved_workspace_id, None);
     }
 }
