@@ -3,10 +3,12 @@ import { Search, Sparkles, Settings, Clock, Layers, Cpu } from "lucide-react";
 import { SettingsModal } from "../settings/SettingsModal";
 import { useDiscoveryStore } from "../../store/discoveryStore";
 import { useWorkspaceStore } from "../../store/workspaceStore";
+import { useLauncherStore } from "../../store/launcherStore";
 
 export function TopBar() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const { candidates, runDiscoveryScan, isLoading } = useDiscoveryStore();
+  const { openLauncher } = useLauncherStore();
   const {
     activeWorkspaceId,
     workspaces,
@@ -40,16 +42,19 @@ export function TopBar() {
             </h2>
           </div>
         )}
-        <div className="relative group w-64">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+        <button
+          onClick={openLauncher}
+          className="relative group flex items-center justify-between w-64 bg-stone-100/70 hover:bg-stone-200/70 border border-stone-200/50 hover:border-stone-300/80 rounded-lg py-1.5 px-3 text-stone-400 hover:text-stone-600 transition-all shadow-sm cursor-pointer text-left"
+          title="Open Context Launcher (⌘K)"
+        >
+          <div className="flex items-center gap-2">
             <Search size={14} className="text-stone-400 group-hover:text-stone-600 transition-colors" />
+            <span className="text-[12.5px] text-stone-500 font-normal">Switch context...</span>
           </div>
-          <input
-            type="text"
-            placeholder="Search anything..."
-            className="w-full bg-stone-100/50 hover:bg-stone-200/50 border border-transparent rounded-md py-1.5 pl-9 pr-3 text-[13px] placeholder-stone-400 focus:outline-none transition-all shadow-sm"
-          />
-        </div>
+          <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono text-stone-500 bg-stone-200/60 group-hover:bg-stone-200 rounded border border-stone-300/60">
+            ⌘K
+          </kbd>
+        </button>
       </div>
 
       <div className="flex items-center gap-2.5">
