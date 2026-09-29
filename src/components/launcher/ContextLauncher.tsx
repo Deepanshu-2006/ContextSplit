@@ -349,11 +349,23 @@ export function ContextLauncher() {
             className="md:col-span-6 lg:col-span-5 overflow-y-auto p-3.5 space-y-3.5 focus:outline-none"
             tabIndex={-1}
           >
-            {/* Loading State */}
+            {/* Loading Skeleton State */}
             {isLoading && (
-              <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
-                <RefreshCw className="w-5 h-5 text-orange-400 animate-spin" />
-                <p className="text-xs text-stone-400">Loading context memory from engine...</p>
+              <div className="space-y-2 py-1 animate-pulse">
+                <div className="px-1 h-3 w-20 bg-stone-800 rounded text-[10px]" />
+                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
+                  <div className="h-4 w-32 bg-stone-800 rounded" />
+                  <div className="h-3 w-48 bg-stone-800/60 rounded" />
+                </div>
+                <div className="px-1 h-3 w-24 bg-stone-800 rounded text-[10px] mt-2" />
+                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
+                  <div className="h-4 w-28 bg-stone-800 rounded" />
+                  <div className="h-3 w-40 bg-stone-800/60 rounded" />
+                </div>
+                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
+                  <div className="h-4 w-36 bg-stone-800 rounded" />
+                  <div className="h-3 w-32 bg-stone-800/60 rounded" />
+                </div>
               </div>
             )}
 
