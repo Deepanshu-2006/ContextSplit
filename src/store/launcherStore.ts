@@ -3,6 +3,8 @@ import { contextInteractionService } from '../services/contextInteractionService
 import { useWorkspaceStore } from './workspaceStore';
 import { toast } from 'sonner';
 
+export type ResumeActionStatus = 'idle' | 'loading' | 'success' | 'error' | 'not_ready' | 'cancelled';
+
 export interface LauncherResumeReadiness {
   readiness: 'ready' | 'mostly_ready' | 'partial' | 'insufficient' | string;
   formattedExplanation?: string;
@@ -30,6 +32,7 @@ export interface LauncherPreviewItem {
   title: string;
   itemType: string;
   relevance?: string;
+  isImportant?: boolean;
   appName?: string | null;
   domain?: string | null;
   snippet?: string | null;
@@ -46,6 +49,7 @@ export interface LauncherPreviewModel {
   readinessSummary?: string;
   readinessExplanation?: string;
   reasons: string[];
+  importantItems: LauncherPreviewItem[];
   worksetItems: LauncherPreviewItem[];
   itemCount: number;
   activitySummary?: string | null;
@@ -61,6 +65,10 @@ interface LauncherState {
   activePreview: LauncherPreviewModel | null;
   isLoading: boolean;
   isLoadingPreview: boolean;
+  isResuming: boolean;
+  resumeStatus: ResumeActionStatus;
+  resumeError: string | null;
+  notReadyReason: string | null;
   error: string | null;
   previewError: string | null;
   activeContext: LauncherContextItem | null;
@@ -74,10 +82,11 @@ interface LauncherState {
   setSelectedIndex: (index: number) => void;
   selectContextById: (contextId: string) => Promise<void>;
   fetchLauncherData: () => Promise<void>;
-  resumeContextById: (contextId: string) => Promise<void>;
+  resumeContextById: (contextId: string, force?: boolean) => Promise<boolean>;
+  clearResumeState: () => void;
 }
 
-// Debounce timer for preview fetching to avoid network/IPC jitter
+// Debounce timer for preview fetching to avoid IPC jitter
 let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useLauncherStore = create<LauncherState>((set, get) => ({
@@ -88,6 +97,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   activePreview: null,
   isLoading: false,
   isLoadingPreview: false,
+  isResuming: false,
+  resumeStatus: 'idle',
+  resumeError: null,
+  notReadyReason: null,
   error: null,
   previewError: null,
   activeContext: null,
@@ -100,6 +113,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
+      isResuming: false,
+      resumeStatus: 'idle',
+      resumeError: null,
+      notReadyReason: null,
       error: null,
       previewError: null,
     });
@@ -117,6 +134,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
+      isResuming: false,
+      resumeStatus: 'idle',
+      resumeError: null,
+      notReadyReason: null,
       previewError: null,
     });
   },
@@ -137,9 +158,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     set({ selectedIndex: index });
   },
 
+  clearResumeState: () => {
+    set({
+      isResuming: false,
+      resumeStatus: 'idle',
+      resumeError: null,
+      notReadyReason: null,
+    });
+  },
+
   selectContextById: async (contextId: string) => {
     if (!contextId) return;
-    set({ selectedContextId: contextId, isLoadingPreview: true, previewError: null });
+    set({
+      selectedContextId: contextId,
+      isLoadingPreview: true,
+      previewError: null,
+      resumeStatus: 'idle',
+      resumeError: null,
+      notReadyReason: null,
+    });
 
     if (previewDebounceTimer) {
       clearTimeout(previewDebounceTimer);
@@ -172,19 +209,27 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const isAmbiguous = rawState === 'uncertain' || rawState === 'insufficient_evidence';
         const isStale = rawState === 'dormant' || rawState === 'archived' || rawState === 'very_stale';
 
-        // Extract workset items
+        // Extract and categorize workset items
         const previewItems: LauncherPreviewItem[] = [];
+        const importantItems: LauncherPreviewItem[] = [];
+
         if (worksetData && Array.isArray(worksetData.items)) {
-          for (const item of worksetData.items.slice(0, 5)) {
-            previewItems.push({
+          for (const item of worksetData.items.slice(0, 6)) {
+            const isImportant = item.relevance === 'primary';
+            const mapped: LauncherPreviewItem = {
               id: item.id,
               title: item.title || item.content_snippet || 'Captured Item',
               itemType: item.item_type || 'note',
               relevance: item.relevance,
+              isImportant,
               appName: item.app_name,
               domain: item.domain,
               snippet: item.content_snippet,
-            });
+            };
+            if (isImportant && importantItems.length < 2) {
+              importantItems.push(mapped);
+            }
+            previewItems.push(mapped);
           }
         }
 
@@ -226,6 +271,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           readinessSummary,
           readinessExplanation,
           reasons,
+          importantItems,
           worksetItems: previewItems,
           itemCount: worksetData?.items?.length || previewItems.length,
           activitySummary: stateData?.last_meaningful_activity || readinessData?.last_meaningful_activity || null,
@@ -380,17 +426,63 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     }
   },
 
-  resumeContextById: async (contextId: string) => {
+  resumeContextById: async (contextId: string, force: boolean = false): Promise<boolean> => {
+    if (!contextId) return false;
+
+    // Check resume readiness unless forced
+    if (!force) {
+      const preview = get().activePreview;
+      if (preview && preview.contextId === contextId && preview.readinessBand === 'insufficient') {
+        const reason =
+          preview.readinessExplanation ||
+          (preview.reasons.length > 0 ? preview.reasons.join('. ') : 'This context has insufficient recorded working state.');
+        set({
+          resumeStatus: 'not_ready',
+          notReadyReason: reason,
+          isResuming: false,
+        });
+        return false;
+      }
+    }
+
+    set({
+      isResuming: true,
+      resumeStatus: 'loading',
+      resumeError: null,
+      notReadyReason: null,
+    });
+
     try {
-      // Send resume signal to Context Engine (authoritative state transition)
+      // 1. Send resume signal to Context Engine (authoritative state transition)
       await contextInteractionService.resumeContext(contextId);
-      // Select workspace in local store for UI canvas alignment
+
+      // 2. Select workspace in local store for UI canvas alignment
       useWorkspaceStore.getState().selectWorkspace(contextId);
+
+      set({
+        resumeStatus: 'success',
+        isResuming: false,
+      });
+
+      // 3. Refresh launcher state so active context updates
+      await get().fetchLauncherData();
+
+      // 4. Close launcher smoothly and show feedback
+      const preview = get().activePreview;
+      const contextName = preview?.name || 'Context';
+      toast.success(`Resumed "${contextName}"`);
       get().closeLauncher();
-      toast.success('Context resumed');
+
+      return true;
     } catch (err) {
-      console.error('Failed to resume context:', err);
-      toast.error('Failed to resume context');
+      const msg = err instanceof Error ? err.message : 'Failed to resume context from engine';
+      set({
+        isResuming: false,
+        resumeStatus: 'error',
+        resumeError: msg,
+      });
+      toast.error(msg);
+      return false;
     }
   },
 }));

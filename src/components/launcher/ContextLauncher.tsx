@@ -21,12 +21,14 @@ import {
   FileCode,
   HelpCircle,
   Play,
+  Star,
 } from 'lucide-react';
 import {
   useLauncherStore,
   LauncherContextItem,
   LauncherPreviewModel,
   LauncherPreviewItem,
+  ResumeActionStatus,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 
@@ -67,6 +69,10 @@ export function ContextLauncher() {
     activePreview,
     isLoading,
     isLoadingPreview,
+    isResuming,
+    resumeStatus,
+    resumeError,
+    notReadyReason,
     error,
     previewError,
     activeContext,
@@ -77,6 +83,7 @@ export function ContextLauncher() {
     selectContextById,
     fetchLauncherData,
     resumeContextById,
+    clearResumeState,
   } = useLauncherStore();
 
   const { activeWorkspaceId } = useWorkspaceStore();
@@ -247,7 +254,7 @@ export function ContextLauncher() {
         </div>
 
         {/* 3. Main Split View: Left List | Right Preview */}
-        <div className="grid grid-cols-1 md:grid-cols-12 min-h-[380px] max-h-[460px] divide-y md:divide-y-0 md:divide-x divide-white/10">
+        <div className="grid grid-cols-1 md:grid-cols-12 min-h-[400px] max-h-[480px] divide-y md:divide-y-0 md:divide-x divide-white/10">
           {/* Left Column: Contexts List */}
           <div
             ref={listRef}
@@ -408,12 +415,18 @@ export function ContextLauncher() {
             <ContextPreviewPane
               preview={activePreview}
               isLoading={isLoadingPreview}
+              isResuming={isResuming}
+              resumeStatus={resumeStatus}
+              resumeError={resumeError}
+              notReadyReason={notReadyReason}
               error={previewError}
-              onResume={() => {
+              onResume={(force) => {
                 if (activePreview) {
-                  resumeContextById(activePreview.contextId);
+                  resumeContextById(activePreview.contextId, force);
                 }
               }}
+              onClearResumeState={clearResumeState}
+              onClose={closeLauncher}
             />
           </div>
         </div>
@@ -422,13 +435,16 @@ export function ContextLauncher() {
         <div className="px-5 py-2.5 bg-stone-950/80 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
-            <span>Select to preview • Context Engine single source of truth</span>
+            <span>Answers: What will I return to if I resume?</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
               <span>Press</span>
               <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
-              <span>to resume selected context</span>
+              <span>to resume</span>
+              <span className="mx-1 text-stone-600">•</span>
+              <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">Esc</kbd>
+              <span>to close</span>
             </div>
           </div>
         </div>
@@ -444,11 +460,27 @@ export function ContextLauncher() {
 interface ContextPreviewPaneProps {
   preview: LauncherPreviewModel | null;
   isLoading: boolean;
+  isResuming: boolean;
+  resumeStatus: ResumeActionStatus;
+  resumeError: string | null;
+  notReadyReason: string | null;
   error: string | null;
-  onResume: () => void;
+  onResume: (force?: boolean) => void;
+  onClearResumeState: () => void;
+  onClose: () => void;
 }
 
-function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPreviewPaneProps) {
+function ContextPreviewPane({
+  preview,
+  isLoading,
+  isResuming,
+  resumeError,
+  notReadyReason,
+  error,
+  onResume,
+  onClearResumeState,
+  onClose,
+}: ContextPreviewPaneProps) {
   if (isLoading) {
     return (
       <div className="space-y-4 animate-pulse p-1">
@@ -475,6 +507,12 @@ function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPrev
         </div>
         <p className="text-xs font-semibold text-stone-300">Context Preview Unavailable</p>
         <p className="text-[11px] text-stone-500 max-w-xs">{error}</p>
+        <button
+          onClick={onClose}
+          className="mt-2 px-3 py-1 text-xs text-stone-400 hover:text-white rounded bg-white/5 hover:bg-white/10 cursor-pointer"
+        >
+          Close
+        </button>
       </div>
     );
   }
@@ -498,7 +536,7 @@ function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPrev
   return (
     <div className="space-y-3.5 flex flex-col justify-between h-full">
       <div className="space-y-3">
-        {/* Preview Header */}
+        {/* Preview Header: Name, Last Active Time, and State/Readiness */}
         <div className="flex items-start justify-between gap-2 border-b border-white/5 pb-2.5">
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-stone-100 truncate">
@@ -561,6 +599,70 @@ function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPrev
           )}
         </div>
 
+        {/* Not Ready Explanation Notice */}
+        {notReadyReason && (
+          <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-semibold text-amber-300">Context Not Fully Ready</p>
+                <p className="text-[11px] text-amber-400/90 mt-0.5 leading-relaxed">
+                  {notReadyReason}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 pt-1 border-t border-amber-500/20">
+              <button
+                onClick={() => onResume(true)}
+                disabled={isResuming}
+                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-stone-950 font-semibold text-[11px] shadow-sm transition-colors cursor-pointer"
+              >
+                {isResuming ? 'Resuming...' : 'Resume Anyway'}
+              </button>
+              <button
+                onClick={onClearResumeState}
+                disabled={isResuming}
+                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] font-medium transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Resume Error Alert */}
+        {resumeError && (
+          <div className="p-3 rounded-xl bg-red-950/40 border border-red-500/30 text-red-200 flex items-start gap-2 text-xs">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="font-semibold text-red-300">Resume Failed</p>
+              <p className="text-[11px] text-red-400/90 mt-0.5">{resumeError}</p>
+            </div>
+            <button
+              onClick={onClearResumeState}
+              className="text-stone-400 hover:text-white p-0.5 cursor-pointer"
+              aria-label="Dismiss error"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
+
+        {/* Important Items Section */}
+        {preview.importantItems && preview.importantItems.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-amber-400 px-0.5">
+              <Star size={10} className="fill-amber-400" />
+              <span>Important Items</span>
+            </div>
+            <div className="space-y-1">
+              {preview.importantItems.map((item) => (
+                <WorksetPreviewRow key={`imp-${item.id}`} item={item} isImportant />
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Workset Items Preview */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-stone-400 px-0.5">
@@ -582,16 +684,37 @@ function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPrev
         </div>
       </div>
 
-      {/* Explicit Resume Action Button */}
-      <div className="pt-2 border-t border-white/5">
+      {/* Action Buttons: Primary (Resume) + Secondary (Close) */}
+      <div className="pt-3 border-t border-white/5 flex items-center gap-2">
         <button
-          onClick={onResume}
-          className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer"
+          onClick={() => onResume(false)}
+          disabled={isResuming}
+          className="flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer"
         >
-          <Play size={13} className="fill-current" />
-          <span>Resume Context</span>
-          <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded">
-            ↵ Enter
+          {isResuming ? (
+            <>
+              <RefreshCw size={13} className="animate-spin" />
+              <span>Resuming...</span>
+            </>
+          ) : (
+            <>
+              <Play size={13} className="fill-current" />
+              <span>Resume</span>
+              <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded">
+                ↵ Enter
+              </kbd>
+            </>
+          )}
+        </button>
+
+        <button
+          onClick={onClose}
+          disabled={isResuming}
+          className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-50 text-stone-400 hover:text-stone-200 text-xs font-medium transition-all border border-white/5 cursor-pointer"
+        >
+          <span>Close</span>
+          <kbd className="ml-1.5 px-1 py-0.5 text-[9px] font-mono bg-white/10 text-stone-400 rounded">
+            Esc
           </kbd>
         </button>
       </div>
@@ -602,7 +725,13 @@ function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPrev
 /**
  * Lightweight Workset Item Row
  */
-function WorksetPreviewRow({ item }: { item: LauncherPreviewItem }) {
+function WorksetPreviewRow({
+  item,
+  isImportant = false,
+}: {
+  item: LauncherPreviewItem;
+  isImportant?: boolean;
+}) {
   const getIcon = () => {
     switch (item.itemType) {
       case 'url':
@@ -619,7 +748,13 @@ function WorksetPreviewRow({ item }: { item: LauncherPreviewItem }) {
   };
 
   return (
-    <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-stone-850/40 border border-white/5 text-xs text-stone-300 gap-2">
+    <div
+      className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs gap-2 ${
+        isImportant
+          ? 'bg-amber-950/20 border-amber-500/30 text-amber-100'
+          : 'bg-stone-850/40 border-white/5 text-stone-300'
+      }`}
+    >
       <div className="flex items-center gap-2 min-w-0 flex-1">
         {getIcon()}
         <span className="truncate text-[11.5px] font-medium">{item.title}</span>

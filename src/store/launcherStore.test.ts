@@ -247,6 +247,8 @@ describe('useLauncherStore', () => {
     expect(state.activePreview?.readinessBand).toBe('ready');
     expect(state.activePreview?.worksetItems).toHaveLength(1);
     expect(state.activePreview?.worksetItems[0].title).toBe('api_client.rs');
+    expect(state.activePreview?.importantItems).toHaveLength(1);
+    expect(state.activePreview?.importantItems[0].title).toBe('api_client.rs');
     expect(state.activePreview?.isAmbiguous).toBe(false);
     expect(state.activePreview?.isStale).toBe(false);
   });
@@ -282,15 +284,149 @@ describe('useLauncherStore', () => {
     expect(state.activePreview?.readinessBand).toBe('insufficient');
   });
 
-  it('resumeContextById delegates to contextInteractionService.resumeContext and selectWorkspace', async () => {
+  it('resumeContextById delegates to contextInteractionService.resumeContext and selectWorkspace on success', async () => {
     vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({ status: 'ok' });
+    vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce({
+      context_id: 'ctx-target-1',
+      context: 'Target Context',
+      state: 'active',
+    });
+    vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([]);
+
     const selectSpy = vi.spyOn(useWorkspaceStore.getState(), 'selectWorkspace').mockImplementation(() => {});
 
-    useLauncherStore.setState({ isOpen: true });
-    await useLauncherStore.getState().resumeContextById('ctx-target-1');
+    useLauncherStore.setState({
+      isOpen: true,
+      activePreview: {
+        contextId: 'ctx-target-1',
+        name: 'Target Context',
+        state: 'recent',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 2,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
 
+    const result = await useLauncherStore.getState().resumeContextById('ctx-target-1');
+
+    expect(result).toBe(true);
     expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-target-1');
     expect(selectSpy).toHaveBeenCalledWith('ctx-target-1');
     expect(useLauncherStore.getState().isOpen).toBe(false);
+    expect(useLauncherStore.getState().isResuming).toBe(false);
+  });
+
+  it('resumeContextById intercepts insufficient readiness and explains reason instead of silently failing', async () => {
+    useLauncherStore.setState({
+      isOpen: true,
+      activePreview: {
+        contextId: 'ctx-not-ready',
+        name: 'Not Ready Project',
+        state: 'uncertain',
+        readinessBand: 'insufficient',
+        readinessExplanation: 'No active workset items captured yet',
+        reasons: ['No recent activity'],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: true,
+        isStale: false,
+      },
+    });
+
+    const result = await useLauncherStore.getState().resumeContextById('ctx-not-ready');
+
+    expect(result).toBe(false);
+    expect(contextInteractionService.resumeContext).not.toHaveBeenCalled();
+    expect(useLauncherStore.getState().resumeStatus).toBe('not_ready');
+    expect(useLauncherStore.getState().notReadyReason).toBe('No active workset items captured yet');
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+  });
+
+  it('resumeContextById allows forced resume override when readiness is insufficient', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({ status: 'ok' });
+    vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce({
+      context_id: 'ctx-not-ready',
+      context: 'Not Ready Project',
+      state: 'active',
+    });
+    vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([]);
+
+    const selectSpy = vi.spyOn(useWorkspaceStore.getState(), 'selectWorkspace').mockImplementation(() => {});
+
+    useLauncherStore.setState({
+      isOpen: true,
+      resumeStatus: 'not_ready',
+      notReadyReason: 'No active workset items captured yet',
+      activePreview: {
+        contextId: 'ctx-not-ready',
+        name: 'Not Ready Project',
+        state: 'uncertain',
+        readinessBand: 'insufficient',
+        readinessExplanation: 'No active workset items captured yet',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: true,
+        isStale: false,
+      },
+    });
+
+    const result = await useLauncherStore.getState().resumeContextById('ctx-not-ready', true);
+
+    expect(result).toBe(true);
+    expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-not-ready');
+    expect(selectSpy).toHaveBeenCalledWith('ctx-not-ready');
+    expect(useLauncherStore.getState().isOpen).toBe(false);
+  });
+
+  it('resumeContextById handles backend errors gracefully without closing launcher', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockRejectedValueOnce(new Error('Backend offline'));
+
+    useLauncherStore.setState({
+      isOpen: true,
+      activePreview: {
+        contextId: 'ctx-error',
+        name: 'Error Project',
+        state: 'active',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 1,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    const result = await useLauncherStore.getState().resumeContextById('ctx-error');
+
+    expect(result).toBe(false);
+    expect(useLauncherStore.getState().resumeStatus).toBe('error');
+    expect(useLauncherStore.getState().resumeError).toBe('Backend offline');
+    expect(useLauncherStore.getState().isResuming).toBe(false);
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+  });
+
+  it('clearResumeState resets resumeStatus, notReadyReason, and resumeError', () => {
+    useLauncherStore.setState({
+      isResuming: true,
+      resumeStatus: 'not_ready',
+      notReadyReason: 'Some reason',
+      resumeError: 'Some error',
+    });
+
+    useLauncherStore.getState().clearResumeState();
+
+    const state = useLauncherStore.getState();
+    expect(state.isResuming).toBe(false);
+    expect(state.resumeStatus).toBe('idle');
+    expect(state.notReadyReason).toBeNull();
+    expect(state.resumeError).toBeNull();
   });
 });
