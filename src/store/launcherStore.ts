@@ -3,6 +3,12 @@ import { contextInteractionService } from '../services/contextInteractionService
 import { useWorkspaceStore } from './workspaceStore';
 import { toast } from 'sonner';
 
+export interface LauncherResumeReadiness {
+  readiness: 'ready' | 'mostly_ready' | 'partial' | 'insufficient' | string;
+  formattedExplanation?: string;
+  summary?: string;
+}
+
 export interface LauncherContextItem {
   id: string;
   name: string;
@@ -13,6 +19,9 @@ export interface LauncherContextItem {
   taskTitle?: string | null;
   itemCount?: number;
   confidence?: string;
+  recentActivitySummary?: string | null;
+  memoryStatement?: string | null;
+  resumeReadiness?: LauncherResumeReadiness | null;
 }
 
 interface LauncherState {
@@ -78,6 +87,32 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         if (engineActive && (engineActive.context_id || engineActive.id)) {
           const id = engineActive.context_id || engineActive.id;
           const name = engineActive.context || engineActive.name || 'Active Context';
+
+          // Try retrieving resume readiness for active context
+          let readiness: LauncherResumeReadiness | null = null;
+          try {
+            const readinessRes = await contextInteractionService.getResumeReadiness(id);
+            if (readinessRes) {
+              readiness = {
+                readiness: readinessRes.readiness?.readiness || readinessRes.state || 'ready',
+                formattedExplanation: readinessRes.readiness?.formatted_explanation || readinessRes.formatted_resume_summary,
+                summary: readinessRes.formatted_resume_summary,
+              };
+            }
+          } catch (readinessErr) {
+            console.debug('Could not fetch resume readiness:', readinessErr);
+          }
+
+          // Build clean activity summary from natural language statements
+          let activitySummary: string | null = null;
+          if (engineActive.recent_activity) {
+            activitySummary = engineActive.recent_activity;
+          } else if (Array.isArray(engineActive.evidence) && engineActive.evidence.length > 0) {
+            activitySummary = engineActive.evidence[0];
+          } else if (engineActive.memory_statement) {
+            activitySummary = engineActive.memory_statement;
+          }
+
           activeItem = {
             id,
             name,
@@ -87,6 +122,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             taskTitle: engineActive.task || (engineActive.recent_task ? engineActive.recent_task.title : null),
             confidence: engineActive.context_confidence || undefined,
             itemCount: Array.isArray(engineActive.recent_items) ? engineActive.recent_items.length : undefined,
+            recentActivitySummary: activitySummary,
+            memoryStatement: engineActive.memory_statement || null,
+            resumeReadiness: readiness,
           };
         }
       } catch (err) {

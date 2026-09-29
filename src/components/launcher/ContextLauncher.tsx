@@ -11,8 +11,37 @@ import {
   CheckCircle2,
   FolderOpen,
   Compass,
+  Activity,
+  Sparkles,
+  Zap,
 } from 'lucide-react';
 import { useLauncherStore, LauncherContextItem } from '../../store/launcherStore';
+import { useWorkspaceStore } from '../../store/workspaceStore';
+
+/**
+ * Gentle relative time formatter without noisy raw timestamps.
+ */
+function formatGentleTime(isoString?: string | null, durationEstimate?: string | null): string {
+  if (durationEstimate) return durationEstimate;
+  if (!isoString) return 'Ready to resume';
+
+  try {
+    const timestamp = new Date(isoString).getTime();
+    if (isNaN(timestamp)) return 'Recently active';
+    const now = Date.now();
+    const diffMs = Math.max(0, now - timestamp);
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+
+    if (diffMin < 2) return 'Active just now';
+    if (diffMin < 60) return `Active ${diffMin}m ago`;
+    if (diffHour < 24) return `Active ${diffHour}h ago`;
+    return 'Active recently';
+  } catch {
+    return 'Recently active';
+  }
+}
 
 export function ContextLauncher() {
   const {
@@ -30,6 +59,8 @@ export function ContextLauncher() {
     resumeContextById,
   } = useLauncherStore();
 
+  const { activeWorkspaceId } = useWorkspaceStore();
+
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -41,6 +72,13 @@ export function ContextLauncher() {
       }, 50);
     }
   }, [isOpen]);
+
+  // Re-sync with engine when active workspace changes while launcher is open
+  useEffect(() => {
+    if (isOpen) {
+      fetchLauncherData();
+    }
+  }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
   // Filter contexts based on search query
   const filteredList = useMemo(() => {
@@ -59,7 +97,10 @@ export function ContextLauncher() {
     return all.filter((ctx) => {
       const nameMatch = ctx.name.toLowerCase().includes(query);
       const taskMatch = ctx.taskTitle ? ctx.taskTitle.toLowerCase().includes(query) : false;
-      return nameMatch || taskMatch;
+      const activityMatch = ctx.recentActivitySummary
+        ? ctx.recentActivitySummary.toLowerCase().includes(query)
+        : false;
+      return nameMatch || taskMatch || activityMatch;
     });
   }, [activeContext, recentContexts, searchQuery]);
 
@@ -142,7 +183,7 @@ export function ContextLauncher() {
             </div>
             <button
               onClick={closeLauncher}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors"
+              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
               aria-label="Close launcher"
             >
               <X size={15} />
@@ -165,7 +206,7 @@ export function ContextLauncher() {
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors"
+              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
               title="Clear search"
             >
               <X size={14} />
@@ -176,10 +217,10 @@ export function ContextLauncher() {
         {/* Content Body */}
         <div
           ref={listRef}
-          className="max-h-[380px] overflow-y-auto p-3 space-y-4 focus:outline-none"
+          className="max-h-[420px] overflow-y-auto p-4 space-y-4 focus:outline-none"
           tabIndex={-1}
         >
-          {/* 6. Loading State */}
+          {/* Loading State */}
           {isLoading && (
             <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
               <RefreshCw className="w-5 h-5 text-orange-400 animate-spin" />
@@ -187,7 +228,7 @@ export function ContextLauncher() {
             </div>
           )}
 
-          {/* 8. Error State */}
+          {/* Error State */}
           {!isLoading && error && (
             <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/20 text-red-200 flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
@@ -196,7 +237,7 @@ export function ContextLauncher() {
                 <p className="text-xs text-red-400/80 mt-0.5">{error}</p>
                 <button
                   onClick={fetchLauncherData}
-                  className="mt-2.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-900/50 hover:bg-red-900 text-xs font-medium text-red-200 border border-red-700/40 transition-colors"
+                  className="mt-2.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-900/50 hover:bg-red-900 text-xs font-medium text-red-200 border border-red-700/40 transition-colors cursor-pointer"
                 >
                   <RefreshCw size={12} />
                   Retry
@@ -205,60 +246,79 @@ export function ContextLauncher() {
             </div>
           )}
 
-          {/* 5. Empty State */}
-          {!isLoading && !error && filteredList.length === 0 && (
+          {/* 3. Active Context Section */}
+          {!isLoading && !error && !searchQuery && (
+            <div className="space-y-1.5">
+              <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Current Active Context</span>
+                </div>
+                {activeContext && (
+                  <span className="text-[10px] text-stone-400 font-normal lowercase">
+                    {formatGentleTime(activeContext.lastActiveAt, activeContext.durationEstimate)}
+                  </span>
+                )}
+              </div>
+
+              {activeContext ? (
+                <ActiveContextCard
+                  item={activeContext}
+                  isSelected={selectedIndex === 0}
+                  dataIndex={0}
+                  onSelect={() => setSelectedIndex(0)}
+                  onResume={() => resumeContextById(activeContext.id)}
+                />
+              ) : (
+                <div className="p-3.5 rounded-xl bg-stone-850/40 border border-white/5 flex items-start gap-3 text-stone-300">
+                  <div className="w-7 h-7 rounded-lg bg-stone-800 flex items-center justify-center text-stone-400 shrink-0 mt-0.5">
+                    <Sparkles size={14} className="text-stone-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-stone-200">No active context</span>
+                      <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800 text-stone-400 border border-white/5">
+                        Idle
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-400 mt-1 leading-relaxed">
+                      Start working and ContextSplit will build your context.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Search No Matches State */}
+          {!isLoading && !error && searchQuery && filteredList.length === 0 && (
             <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
               <div className="w-10 h-10 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
                 <Layers size={18} />
               </div>
               <p className="text-sm font-medium text-stone-300">
-                {searchQuery ? `No contexts matching "${searchQuery}"` : 'No contexts available'}
+                No contexts matching "{searchQuery}"
               </p>
               <p className="text-xs text-stone-500 max-w-xs">
-                {searchQuery
-                  ? 'Try searching with a different keyword or create a new context from the sidebar.'
-                  : 'Contexts will appear here as you work in ContextSplit.'}
+                Try searching with a different keyword or create a new context from the sidebar.
               </p>
             </div>
           )}
 
-          {/* Contexts List */}
-          {!isLoading && !error && filteredList.length > 0 && (
-            <div className="space-y-1">
-              {/* 3. Active Context Section */}
-              {activeContext && (!searchQuery || filteredList.some((c) => c.id === activeContext.id)) && (
-                <div className="mb-2">
-                  <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    Active Context
-                  </div>
-                  {(() => {
-                    const idx = filteredList.findIndex((c) => c.id === activeContext.id);
-                    if (idx === -1) return null;
-                    const isSelected = selectedIndex === idx;
-                    return (
-                      <ContextLauncherItem
-                        key={activeContext.id}
-                        item={activeContext}
-                        isSelected={isSelected}
-                        dataIndex={idx}
-                        onSelect={() => setSelectedIndex(idx)}
-                        onResume={() => resumeContextById(activeContext.id)}
-                      />
-                    );
-                  })()}
+          {/* 4. Recent Contexts Section */}
+          {!isLoading &&
+            !error &&
+            filteredList.filter((c) => !activeContext || c.id !== activeContext.id || !!searchQuery).length > 0 && (
+              <div className="space-y-1 pt-1">
+                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+                  <Clock size={11} className="text-stone-400" />
+                  <span>{searchQuery ? 'Matching Contexts' : 'Recent Contexts'}</span>
                 </div>
-              )}
 
-              {/* 4. Recent Contexts Section */}
-              {filteredList.filter((c) => !activeContext || c.id !== activeContext.id).length > 0 && (
-                <div>
-                  <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
-                    <Clock size={11} className="text-stone-400" />
-                    Recent Contexts
-                  </div>
+                <div className="space-y-1">
                   {filteredList.map((item, idx) => {
-                    if (activeContext && item.id === activeContext.id) return null;
+                    // Avoid duplicating activeContext in recent list unless searching
+                    if (!searchQuery && activeContext && item.id === activeContext.id) return null;
                     const isSelected = selectedIndex === idx;
                     return (
                       <ContextLauncherItem
@@ -272,16 +332,15 @@ export function ContextLauncher() {
                     );
                   })}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            )}
         </div>
 
         {/* Footer / Status Bar */}
         <div className="px-5 py-2.5 bg-stone-950/60 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
-            <span>Context Engine Single Source of Truth</span>
+            <span>Context Engine Authoritative</span>
           </div>
           <div className="flex items-center gap-1">
             <span>Press</span>
@@ -295,6 +354,112 @@ export function ContextLauncher() {
   );
 }
 
+/**
+ * Dedicated Active Context Card
+ */
+interface ActiveContextCardProps {
+  item: LauncherContextItem;
+  isSelected: boolean;
+  dataIndex: number;
+  onSelect: () => void;
+  onResume: () => void;
+}
+
+function ActiveContextCard({
+  item,
+  isSelected,
+  dataIndex,
+  onSelect,
+  onResume,
+}: ActiveContextCardProps) {
+  const readiness = item.resumeReadiness;
+  const isReady = readiness?.readiness === 'ready' || readiness?.readiness === 'mostly_ready';
+
+  return (
+    <div
+      data-index={dataIndex}
+      onClick={onResume}
+      onMouseEnter={onSelect}
+      className={`group relative p-3.5 rounded-xl cursor-pointer transition-all border ${
+        isSelected
+          ? 'bg-emerald-950/30 border-emerald-500/50 shadow-md ring-1 ring-emerald-500/30'
+          : 'bg-emerald-950/20 hover:bg-emerald-950/30 border-emerald-500/20'
+      }`}
+      role="option"
+      aria-selected={isSelected}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0 flex-1">
+          <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+            <CheckCircle2 size={16} />
+          </div>
+
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-stone-100 truncate">
+                {item.name}
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Active
+              </span>
+              {readiness && (
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+                    isReady
+                      ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
+                      : 'bg-amber-900/40 text-amber-300 border-amber-700/40'
+                  }`}
+                  title={readiness.formattedExplanation || readiness.summary}
+                >
+                  <Zap size={10} />
+                  <span className="capitalize">{readiness.readiness.replace('_', ' ')}</span>
+                </span>
+              )}
+            </div>
+
+            {/* Recent Activity / Task Statement */}
+            <div className="flex items-center gap-1.5 text-xs text-stone-300">
+              {item.taskTitle ? (
+                <span className="truncate">
+                  Task: <span className="font-medium text-emerald-200">{item.taskTitle}</span>
+                </span>
+              ) : item.recentActivitySummary ? (
+                <span className="truncate flex items-center gap-1 text-stone-300">
+                  <Activity size={12} className="text-emerald-400 shrink-0" />
+                  <span className="truncate">{item.recentActivitySummary}</span>
+                </span>
+              ) : (
+                <span className="text-stone-400">Context active and tracking working state</span>
+              )}
+              {item.itemCount !== undefined && (
+                <span className="text-stone-400 text-[11px] shrink-0">• {item.itemCount} items</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Action Button */}
+        <div className="flex items-center gap-2 shrink-0 pt-0.5">
+          <span
+            className={`text-xs font-medium px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all ${
+              isSelected
+                ? 'bg-emerald-500 text-stone-950 shadow-sm font-semibold'
+                : 'bg-emerald-500/20 text-emerald-300 group-hover:bg-emerald-500/30'
+            }`}
+          >
+            <span>Resume</span>
+            <CornerDownLeft size={12} />
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Recent Context List Item
+ */
 interface ContextLauncherItemProps {
   item: LauncherContextItem;
   isSelected: boolean;
@@ -315,10 +480,10 @@ function ContextLauncherItem({
       data-index={dataIndex}
       onClick={onResume}
       onMouseEnter={onSelect}
-      className={`group relative flex items-center justify-between px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
+      className={`group relative flex items-center justify-between px-3.5 py-2.5 rounded-xl cursor-pointer transition-all border ${
         isSelected
-          ? 'bg-orange-500/20 text-white border border-orange-500/40 shadow-sm'
-          : 'hover:bg-white/5 text-stone-200 border border-transparent'
+          ? 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm'
+          : 'hover:bg-white/5 text-stone-200 border-transparent'
       }`}
       role="option"
       aria-selected={isSelected}
@@ -329,8 +494,8 @@ function ContextLauncherItem({
             item.isActive
               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
               : isSelected
-              ? 'bg-orange-500/30 text-orange-200'
-              : 'bg-stone-800 text-stone-400'
+              ? 'bg-orange-500/30 text-orange-200 border border-orange-500/40'
+              : 'bg-stone-800 text-stone-400 border border-white/5'
           }`}
         >
           {item.isActive ? <CheckCircle2 size={16} /> : <FolderOpen size={16} />}
@@ -341,14 +506,9 @@ function ContextLauncherItem({
             <span className="text-xs font-semibold truncate text-stone-100">
               {item.name}
             </span>
-            {item.isActive && (
-              <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                Active
-              </span>
-            )}
             {item.confidence && (
               <span className="text-[10px] text-stone-400 capitalize">
-                • {item.confidence} confidence
+                • {item.confidence}
               </span>
             )}
           </div>
@@ -361,10 +521,10 @@ function ContextLauncherItem({
             ) : item.durationEstimate ? (
               <span>{item.durationEstimate}</span>
             ) : (
-              <span>Ready to resume</span>
+              <span>{formatGentleTime(item.lastActiveAt)}</span>
             )}
             {item.itemCount !== undefined && (
-              <span className="text-stone-500">• {item.itemCount} items</span>
+              <span className="text-stone-400">• {item.itemCount} items</span>
             )}
           </div>
         </div>

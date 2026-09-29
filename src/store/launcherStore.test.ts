@@ -7,6 +7,7 @@ vi.mock('../services/contextInteractionService', () => ({
   contextInteractionService: {
     getActiveContext: vi.fn(),
     getRecentContexts: vi.fn(),
+    getResumeReadiness: vi.fn(),
     resumeContext: vi.fn(),
   },
 }));
@@ -105,6 +106,14 @@ describe('useLauncherStore', () => {
       },
     ]);
 
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValueOnce({
+      readiness: {
+        readiness: 'ready',
+        formatted_explanation: 'Ready with 3 active workset items',
+      },
+      formatted_resume_summary: 'Continue hero animation',
+    } as any);
+
     await useLauncherStore.getState().fetchLauncherData();
 
     const state = useLauncherStore.getState();
@@ -119,10 +128,27 @@ describe('useLauncherStore', () => {
       taskTitle: 'Hero animation',
       confidence: 'high',
       itemCount: 1,
+      memoryStatement: null,
+      recentActivitySummary: null,
+      resumeReadiness: {
+        readiness: 'ready',
+        formattedExplanation: 'Ready with 3 active workset items',
+        summary: 'Continue hero animation',
+      },
     });
     expect(state.recentContexts).toHaveLength(1);
     expect(state.recentContexts[0].id).toBe('ctx-recent-1');
     expect(state.recentContexts[0].name).toBe('Tokyo Trip');
+  });
+
+  it('fetchLauncherData sets activeContext to null when no context is active', async () => {
+    vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce(null);
+    vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([]);
+
+    await useLauncherStore.getState().fetchLauncherData();
+
+    const state = useLauncherStore.getState();
+    expect(state.activeContext).toBeNull();
   });
 
   it('fetchLauncherData falls back to workspaceStore if engine recents are empty', async () => {
