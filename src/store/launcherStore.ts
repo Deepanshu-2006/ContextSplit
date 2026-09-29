@@ -25,12 +25,44 @@ export interface LauncherContextItem {
   resumeReadiness?: LauncherResumeReadiness | null;
 }
 
+export interface LauncherPreviewItem {
+  id: string;
+  title: string;
+  itemType: string;
+  relevance?: string;
+  appName?: string | null;
+  domain?: string | null;
+  snippet?: string | null;
+}
+
+export interface LauncherPreviewModel {
+  contextId: string;
+  name: string;
+  state: string;
+  taskTitle?: string | null;
+  lastActiveAt?: string | null;
+  durationEstimate?: string | null;
+  readinessBand: string;
+  readinessSummary?: string;
+  readinessExplanation?: string;
+  reasons: string[];
+  worksetItems: LauncherPreviewItem[];
+  itemCount: number;
+  activitySummary?: string | null;
+  isAmbiguous: boolean;
+  isStale: boolean;
+}
+
 interface LauncherState {
   isOpen: boolean;
   searchQuery: string;
   selectedIndex: number;
+  selectedContextId: string | null;
+  activePreview: LauncherPreviewModel | null;
   isLoading: boolean;
+  isLoadingPreview: boolean;
   error: string | null;
+  previewError: string | null;
   activeContext: LauncherContextItem | null;
   recentContexts: LauncherContextItem[];
   
@@ -40,26 +72,53 @@ interface LauncherState {
   toggleLauncher: () => void;
   setSearchQuery: (query: string) => void;
   setSelectedIndex: (index: number) => void;
+  selectContextById: (contextId: string) => Promise<void>;
   fetchLauncherData: () => Promise<void>;
   resumeContextById: (contextId: string) => Promise<void>;
 }
+
+// Debounce timer for preview fetching to avoid network/IPC jitter
+let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useLauncherStore = create<LauncherState>((set, get) => ({
   isOpen: false,
   searchQuery: '',
   selectedIndex: 0,
+  selectedContextId: null,
+  activePreview: null,
   isLoading: false,
+  isLoadingPreview: false,
   error: null,
+  previewError: null,
   activeContext: null,
   recentContexts: [],
 
   openLauncher: () => {
-    set({ isOpen: true, searchQuery: '', selectedIndex: 0, error: null });
+    set({
+      isOpen: true,
+      searchQuery: '',
+      selectedIndex: 0,
+      selectedContextId: null,
+      activePreview: null,
+      error: null,
+      previewError: null,
+    });
     get().fetchLauncherData();
   },
 
   closeLauncher: () => {
-    set({ isOpen: false, searchQuery: '', selectedIndex: 0 });
+    if (previewDebounceTimer) {
+      clearTimeout(previewDebounceTimer);
+      previewDebounceTimer = null;
+    }
+    set({
+      isOpen: false,
+      searchQuery: '',
+      selectedIndex: 0,
+      selectedContextId: null,
+      activePreview: null,
+      previewError: null,
+    });
   },
 
   toggleLauncher: () => {
@@ -78,6 +137,121 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     set({ selectedIndex: index });
   },
 
+  selectContextById: async (contextId: string) => {
+    if (!contextId) return;
+    set({ selectedContextId: contextId, isLoadingPreview: true, previewError: null });
+
+    if (previewDebounceTimer) {
+      clearTimeout(previewDebounceTimer);
+    }
+
+    previewDebounceTimer = setTimeout(async () => {
+      try {
+        const existingWorkspaces = useWorkspaceStore.getState().workspaces;
+        const wsMeta = existingWorkspaces.find((w) => w.id === contextId);
+
+        // Fetch state, workset, and readiness concurrently from authoritative engine APIs
+        const [stateRes, worksetRes, readinessRes] = await Promise.allSettled([
+          contextInteractionService.getContextState(contextId),
+          contextInteractionService.getContextWorkset(contextId),
+          contextInteractionService.getResumeReadiness(contextId),
+        ]);
+
+        const stateData = stateRes.status === 'fulfilled' ? stateRes.value : null;
+        const worksetData = worksetRes.status === 'fulfilled' ? worksetRes.value : null;
+        const readinessData = readinessRes.status === 'fulfilled' ? readinessRes.value : null;
+
+        const name =
+          wsMeta?.name ||
+          stateData?.context_name ||
+          worksetData?.context_name ||
+          readinessData?.context_name ||
+          'Context';
+
+        const rawState = (stateData?.state || wsMeta?.lifecycle_state || 'recent').toLowerCase();
+        const isAmbiguous = rawState === 'uncertain' || rawState === 'insufficient_evidence';
+        const isStale = rawState === 'dormant' || rawState === 'archived' || rawState === 'very_stale';
+
+        // Extract workset items
+        const previewItems: LauncherPreviewItem[] = [];
+        if (worksetData && Array.isArray(worksetData.items)) {
+          for (const item of worksetData.items.slice(0, 5)) {
+            previewItems.push({
+              id: item.id,
+              title: item.title || item.content_snippet || 'Captured Item',
+              itemType: item.item_type || 'note',
+              relevance: item.relevance,
+              appName: item.app_name,
+              domain: item.domain,
+              snippet: item.content_snippet,
+            });
+          }
+        }
+
+        // Extract readiness
+        const readinessBand =
+          readinessData?.readiness?.readiness ||
+          stateData?.readiness?.readiness ||
+          (isStale ? 'partial' : 'ready');
+
+        const readinessSummary =
+          readinessData?.formatted_resume_summary ||
+          stateData?.resume_state?.formatted_resume_summary ||
+          'Ready to continue working in this context.';
+
+        const readinessExplanation =
+          readinessData?.readiness?.formatted_explanation ||
+          stateData?.readiness?.formatted_explanation ||
+          undefined;
+
+        const reasons =
+          readinessData?.readiness?.reasons ||
+          stateData?.readiness?.reasons ||
+          [];
+
+        const taskTitle =
+          stateData?.task_title ||
+          worksetData?.task_title ||
+          readinessData?.left_off_on ||
+          null;
+
+        const previewModel: LauncherPreviewModel = {
+          contextId,
+          name,
+          state: rawState,
+          taskTitle,
+          lastActiveAt: stateData?.last_active_at || wsMeta?.updated_at || null,
+          durationEstimate: stateData?.freshness_display || null,
+          readinessBand,
+          readinessSummary,
+          readinessExplanation,
+          reasons,
+          worksetItems: previewItems,
+          itemCount: worksetData?.items?.length || previewItems.length,
+          activitySummary: stateData?.last_meaningful_activity || readinessData?.last_meaningful_activity || null,
+          isAmbiguous,
+          isStale,
+        };
+
+        // Only update if this context is still selected
+        if (get().selectedContextId === contextId) {
+          set({
+            activePreview: previewModel,
+            isLoadingPreview: false,
+            previewError: null,
+          });
+        }
+      } catch (err) {
+        if (get().selectedContextId === contextId) {
+          set({
+            isLoadingPreview: false,
+            previewError: err instanceof Error ? err.message : 'Context unavailable or failed to load preview',
+          });
+        }
+      }
+    }, 40);
+  },
+
   fetchLauncherData: async () => {
     set({ isLoading: true, error: null });
     try {
@@ -92,7 +266,6 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           const id = engineActive.context_id || engineActive.id;
           const name = engineActive.context || engineActive.name || workspaceMap.get(id)?.name || 'Active Context';
 
-          // Try retrieving resume readiness for active context
           let readiness: LauncherResumeReadiness | null = null;
           try {
             const readinessRes = await contextInteractionService.getResumeReadiness(id);
@@ -107,7 +280,6 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             console.debug('Could not fetch resume readiness:', readinessErr);
           }
 
-          // Build clean activity summary from natural language statements
           let activitySummary: string | null = null;
           if (engineActive.recent_activity) {
             activitySummary = engineActive.recent_activity;
@@ -194,6 +366,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         isLoading: false,
         selectedIndex: 0,
       });
+
+      // Auto-preview top item if available
+      const firstId = activeItem?.id || (recents.length > 0 ? recents[0].id : null);
+      if (firstId) {
+        get().selectContextById(firstId);
+      }
     } catch (err) {
       set({
         isLoading: false,
@@ -204,9 +382,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
   resumeContextById: async (contextId: string) => {
     try {
-      // Send resume signal to Context Engine
+      // Send resume signal to Context Engine (authoritative state transition)
       await contextInteractionService.resumeContext(contextId);
-      // Select workspace in local store for immediate UI canvas alignment
+      // Select workspace in local store for UI canvas alignment
       useWorkspaceStore.getState().selectWorkspace(contextId);
       get().closeLauncher();
       toast.success('Context resumed');

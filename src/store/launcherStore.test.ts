@@ -8,6 +8,8 @@ vi.mock('../services/contextInteractionService', () => ({
     getActiveContext: vi.fn(),
     getRecentContexts: vi.fn(),
     getResumeReadiness: vi.fn(),
+    getContextState: vi.fn(),
+    getContextWorkset: vi.fn(),
     resumeContext: vi.fn(),
   },
 }));
@@ -27,8 +29,12 @@ describe('useLauncherStore', () => {
       isOpen: false,
       searchQuery: '',
       selectedIndex: 0,
+      selectedContextId: null,
+      activePreview: null,
       isLoading: false,
+      isLoadingPreview: false,
       error: null,
+      previewError: null,
       activeContext: null,
       recentContexts: [],
     });
@@ -39,6 +45,8 @@ describe('useLauncherStore', () => {
     expect(state.isOpen).toBe(false);
     expect(state.searchQuery).toBe('');
     expect(state.selectedIndex).toBe(0);
+    expect(state.selectedContextId).toBeNull();
+    expect(state.activePreview).toBeNull();
     expect(state.isLoading).toBe(false);
     expect(state.error).toBeNull();
     expect(state.activeContext).toBeNull();
@@ -62,6 +70,7 @@ describe('useLauncherStore', () => {
     expect(state.isOpen).toBe(false);
     expect(state.searchQuery).toBe('');
     expect(state.selectedIndex).toBe(0);
+    expect(state.selectedContextId).toBeNull();
   });
 
   it('toggleLauncher toggles open and closed states', () => {
@@ -159,10 +168,10 @@ describe('useLauncherStore', () => {
     });
 
     vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([
-      { context_id: 'ctx-1', context_name: 'Active Context Duplicate' }, // should be skipped because it is active
+      { context_id: 'ctx-1', context_name: 'Active Context Duplicate' },
       { context_id: 'ctx-2', context_name: 'Alpha Project', duration_estimate: 'Active for about 10m' },
       { context_id: 'ctx-3', context_name: 'Beta Project', session_count: 3 },
-      { context_id: 'ctx-2', context_name: 'Alpha Duplicate' }, // duplicate in recents, should be skipped
+      { context_id: 'ctx-2', context_name: 'Alpha Duplicate' },
       { context_id: 'ctx-4', context_name: 'Gamma Project' },
     ]);
 
@@ -183,34 +192,94 @@ describe('useLauncherStore', () => {
     const state = useLauncherStore.getState();
     expect(state.activeContext?.id).toBe('ctx-1');
     expect(state.recentContexts).toHaveLength(3);
-    // Preserves order [ctx-2, ctx-3, ctx-4]
     expect(state.recentContexts.map((c) => c.id)).toEqual(['ctx-2', 'ctx-3', 'ctx-4']);
     expect(state.recentContexts[1].state).toBe('dormant');
     expect(state.recentContexts[1].sessionCount).toBe(3);
   });
 
-  it('fetchLauncherData falls back to workspaceStore if engine recents are empty', async () => {
-    vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce(null);
-    vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([]);
+  it('selectContextById loads preview model from state, workset, and readiness APIs', async () => {
+    vi.mocked(contextInteractionService.getContextState).mockResolvedValueOnce({
+      context_id: 'ctx-alpha',
+      context_name: 'Alpha Project',
+      state: 'active',
+      task_title: 'API Integration',
+      last_meaningful_activity: 'Refactored auth endpoint',
+      freshness_display: 'Active 5m ago',
+    } as any);
 
-    useWorkspaceStore.setState({
-      workspaces: [
+    vi.mocked(contextInteractionService.getContextWorkset).mockResolvedValueOnce({
+      context_id: 'ctx-alpha',
+      context_name: 'Alpha Project',
+      items: [
         {
-          id: 'ws-1',
-          name: 'Personal Project',
-          created_at: '2026-09-30T00:00:00Z',
-          updated_at: '2026-09-30T00:00:00Z',
-          lifecycle_state: 'active',
-        },
+          id: 'item-1',
+          title: 'api_client.rs',
+          item_type: 'code',
+          app_name: 'VS Code',
+          relevance: 'primary',
+          content_snippet: 'pub struct ApiClient',
+        } as any,
       ],
-    });
+    } as any);
 
-    await useLauncherStore.getState().fetchLauncherData();
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValueOnce({
+      context_id: 'ctx-alpha',
+      context_name: 'Alpha Project',
+      readiness: {
+        readiness: 'ready',
+        formatted_explanation: 'Ready with active API code workset',
+        reasons: ['Recent code edits in VS Code'],
+      },
+      formatted_resume_summary: 'Continue API integration',
+    } as any);
+
+    useLauncherStore.getState().selectContextById('ctx-alpha');
+
+    // Wait for 50ms debounce
+    await new Promise((resolve) => setTimeout(resolve, 60));
 
     const state = useLauncherStore.getState();
-    expect(state.recentContexts).toHaveLength(1);
-    expect(state.recentContexts[0].id).toBe('ws-1');
-    expect(state.recentContexts[0].name).toBe('Personal Project');
+    expect(state.selectedContextId).toBe('ctx-alpha');
+    expect(state.isLoadingPreview).toBe(false);
+    expect(state.activePreview).not.toBeNull();
+    expect(state.activePreview?.name).toBe('Alpha Project');
+    expect(state.activePreview?.taskTitle).toBe('API Integration');
+    expect(state.activePreview?.readinessBand).toBe('ready');
+    expect(state.activePreview?.worksetItems).toHaveLength(1);
+    expect(state.activePreview?.worksetItems[0].title).toBe('api_client.rs');
+    expect(state.activePreview?.isAmbiguous).toBe(false);
+    expect(state.activePreview?.isStale).toBe(false);
+  });
+
+  it('selectContextById handles ambiguous and dormant context states', async () => {
+    vi.mocked(contextInteractionService.getContextState).mockResolvedValueOnce({
+      context_id: 'ctx-dormant',
+      context_name: 'Archived Project',
+      state: 'uncertain',
+    } as any);
+
+    vi.mocked(contextInteractionService.getContextWorkset).mockResolvedValueOnce({
+      context_id: 'ctx-dormant',
+      context_name: 'Archived Project',
+      items: [],
+    } as any);
+
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValueOnce({
+      context_id: 'ctx-dormant',
+      context_name: 'Archived Project',
+      readiness: {
+        readiness: 'insufficient',
+        formatted_explanation: 'Insufficient recent evidence',
+        reasons: [],
+      },
+    } as any);
+
+    useLauncherStore.getState().selectContextById('ctx-dormant');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const state = useLauncherStore.getState();
+    expect(state.activePreview?.isAmbiguous).toBe(true);
+    expect(state.activePreview?.readinessBand).toBe('insufficient');
   });
 
   it('resumeContextById delegates to contextInteractionService.resumeContext and selectWorkspace', async () => {
