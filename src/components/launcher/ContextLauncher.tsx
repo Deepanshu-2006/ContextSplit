@@ -15,8 +15,19 @@ import {
   Sparkles,
   Zap,
   Archive,
+  FileText,
+  Link2,
+  Globe,
+  FileCode,
+  HelpCircle,
+  Play,
 } from 'lucide-react';
-import { useLauncherStore, LauncherContextItem } from '../../store/launcherStore';
+import {
+  useLauncherStore,
+  LauncherContextItem,
+  LauncherPreviewModel,
+  LauncherPreviewItem,
+} from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 
 /**
@@ -52,13 +63,18 @@ export function ContextLauncher() {
     isOpen,
     searchQuery,
     selectedIndex,
+    selectedContextId,
+    activePreview,
     isLoading,
+    isLoadingPreview,
     error,
+    previewError,
     activeContext,
     recentContexts,
     closeLauncher,
     setSearchQuery,
     setSelectedIndex,
+    selectContextById,
     fetchLauncherData,
     resumeContextById,
   } = useLauncherStore();
@@ -108,6 +124,16 @@ export function ContextLauncher() {
     });
   }, [activeContext, recentContexts, searchQuery]);
 
+  // When selection index changes, fetch preview for that selected context
+  useEffect(() => {
+    if (filteredList.length > 0 && selectedIndex >= 0 && selectedIndex < filteredList.length) {
+      const current = filteredList[selectedIndex];
+      if (current && current.id !== selectedContextId) {
+        selectContextById(current.id);
+      }
+    }
+  }, [selectedIndex, filteredList, selectedContextId, selectContextById]);
+
   // Keyboard navigation
   useEffect(() => {
     if (!isOpen) return;
@@ -119,12 +145,14 @@ export function ContextLauncher() {
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         if (filteredList.length > 0) {
-          setSelectedIndex((selectedIndex + 1) % filteredList.length);
+          const nextIndex = (selectedIndex + 1) % filteredList.length;
+          setSelectedIndex(nextIndex);
         }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         if (filteredList.length > 0) {
-          setSelectedIndex((selectedIndex - 1 + filteredList.length) % filteredList.length);
+          const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
+          setSelectedIndex(prevIndex);
         }
       } else if (e.key === 'Enter') {
         e.preventDefault();
@@ -153,7 +181,7 @@ export function ContextLauncher() {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-24 pb-12 px-4 bg-black/60 backdrop-blur-sm transition-all"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-16 pb-12 px-4 bg-black/60 backdrop-blur-sm transition-all"
       onClick={(e) => {
         if (e.target === e.currentTarget) closeLauncher();
       }}
@@ -162,7 +190,7 @@ export function ContextLauncher() {
       aria-label="Context Launcher"
     >
       <div
-        className="w-full max-w-2xl bg-stone-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in zoom-in-95 duration-150"
+        className="w-full max-w-4xl bg-stone-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 1. Header */}
@@ -218,176 +246,190 @@ export function ContextLauncher() {
           )}
         </div>
 
-        {/* Content Body */}
-        <div
-          ref={listRef}
-          className="max-h-[420px] overflow-y-auto p-4 space-y-4 focus:outline-none"
-          tabIndex={-1}
-        >
-          {/* Loading State */}
-          {isLoading && (
-            <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
-              <RefreshCw className="w-5 h-5 text-orange-400 animate-spin" />
-              <p className="text-xs text-stone-400">Loading context memory from engine...</p>
-            </div>
-          )}
-
-          {/* Error State */}
-          {!isLoading && error && (
-            <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/20 text-red-200 flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-red-300">Failed to connect to Context Engine</p>
-                <p className="text-xs text-red-400/80 mt-0.5">{error}</p>
-                <button
-                  onClick={fetchLauncherData}
-                  className="mt-2.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-900/50 hover:bg-red-900 text-xs font-medium text-red-200 border border-red-700/40 transition-colors cursor-pointer"
-                >
-                  <RefreshCw size={12} />
-                  Retry
-                </button>
+        {/* 3. Main Split View: Left List | Right Preview */}
+        <div className="grid grid-cols-1 md:grid-cols-12 min-h-[380px] max-h-[460px] divide-y md:divide-y-0 md:divide-x divide-white/10">
+          {/* Left Column: Contexts List */}
+          <div
+            ref={listRef}
+            className="md:col-span-6 lg:col-span-5 overflow-y-auto p-3.5 space-y-3.5 focus:outline-none"
+            tabIndex={-1}
+          >
+            {/* Loading State */}
+            {isLoading && (
+              <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
+                <RefreshCw className="w-5 h-5 text-orange-400 animate-spin" />
+                <p className="text-xs text-stone-400">Loading context memory from engine...</p>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* 3. Active Context Section */}
-          {!isLoading && !error && !searchQuery && (
-            <div className="space-y-1.5">
-              <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>Current Active Context</span>
+            {/* Error State */}
+            {!isLoading && error && (
+              <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/20 text-red-200 flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-red-300">Connection Error</p>
+                  <p className="text-xs text-red-400/80 mt-0.5">{error}</p>
+                  <button
+                    onClick={fetchLauncherData}
+                    className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-red-900/50 hover:bg-red-900 text-[11px] font-medium text-red-200 border border-red-700/40 transition-colors cursor-pointer"
+                  >
+                    <RefreshCw size={11} />
+                    Retry
+                  </button>
                 </div>
-                {activeContext && (
-                  <span className="text-[10px] text-stone-400 font-normal lowercase">
-                    {formatGentleTime(activeContext.lastActiveAt, activeContext.durationEstimate)}
-                  </span>
+              </div>
+            )}
+
+            {/* Active Context Section */}
+            {!isLoading && !error && !searchQuery && (
+              <div className="space-y-1">
+                <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Current Active</span>
+                  </div>
+                  {activeContext && (
+                    <span className="text-[10px] text-stone-400 font-normal">
+                      {formatGentleTime(activeContext.lastActiveAt, activeContext.durationEstimate)}
+                    </span>
+                  )}
+                </div>
+
+                {activeContext ? (
+                  <ContextLauncherItem
+                    item={activeContext}
+                    isSelected={selectedIndex === 0}
+                    dataIndex={0}
+                    onSelect={() => setSelectedIndex(0)}
+                    onResume={() => resumeContextById(activeContext.id)}
+                  />
+                ) : (
+                  <div className="p-3 rounded-xl bg-stone-850/40 border border-white/5 flex items-start gap-2.5 text-stone-300">
+                    <div className="w-6 h-6 rounded-lg bg-stone-800 flex items-center justify-center text-stone-400 shrink-0 mt-0.5">
+                      <Sparkles size={13} className="text-stone-400" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-xs font-semibold text-stone-200">No active context</span>
+                      <p className="text-[11px] text-stone-400 mt-0.5 leading-relaxed">
+                        Start working and ContextSplit will build your context.
+                      </p>
+                    </div>
+                  </div>
                 )}
               </div>
+            )}
 
-              {activeContext ? (
-                <ActiveContextCard
-                  item={activeContext}
-                  isSelected={selectedIndex === 0}
-                  dataIndex={0}
-                  onSelect={() => setSelectedIndex(0)}
-                  onResume={() => resumeContextById(activeContext.id)}
-                />
-              ) : (
-                <div className="p-3.5 rounded-xl bg-stone-850/40 border border-white/5 flex items-start gap-3 text-stone-300">
-                  <div className="w-7 h-7 rounded-lg bg-stone-800 flex items-center justify-center text-stone-400 shrink-0 mt-0.5">
-                    <Sparkles size={14} className="text-stone-400" />
+            {/* Empty Search State */}
+            {!isLoading && !error && searchQuery && filteredList.length === 0 && (
+              <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
+                <div className="w-9 h-9 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
+                  <Layers size={16} />
+                </div>
+                <p className="text-xs font-medium text-stone-300">
+                  No contexts matching "{searchQuery}"
+                </p>
+                <p className="text-[11px] text-stone-500 max-w-xs">
+                  Try searching with a different keyword or create a new context.
+                </p>
+              </div>
+            )}
+
+            {/* Recent Contexts Section */}
+            {!isLoading && !error && !searchQuery && (
+              <div className="space-y-1 pt-1">
+                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={11} className="text-stone-400" />
+                    <span>Recent Contexts</span>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-stone-200">No active context</span>
-                      <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800 text-stone-400 border border-white/5">
-                        Idle
-                      </span>
-                    </div>
-                    <p className="text-xs text-stone-400 mt-1 leading-relaxed">
-                      Start working and ContextSplit will build your context.
+                  {recentContexts.length > 0 && (
+                    <span className="text-[10px] text-stone-400 font-normal">
+                      {recentContexts.length}
+                    </span>
+                  )}
+                </div>
+
+                {recentContexts.length === 0 ? (
+                  <div className="p-3.5 rounded-xl bg-stone-850/30 border border-white/5 text-center text-stone-400 space-y-0.5">
+                    <p className="text-xs font-medium text-stone-300">No recent contexts</p>
+                    <p className="text-[11px] text-stone-500">
+                      Recently active projects will appear here.
                     </p>
                   </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Search No Matches State */}
-          {!isLoading && !error && searchQuery && filteredList.length === 0 && (
-            <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
-              <div className="w-10 h-10 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
-                <Layers size={18} />
-              </div>
-              <p className="text-sm font-medium text-stone-300">
-                No contexts matching "{searchQuery}"
-              </p>
-              <p className="text-xs text-stone-500 max-w-xs">
-                Try searching with a different keyword or create a new context from the sidebar.
-              </p>
-            </div>
-          )}
-
-          {/* 4. Recent Contexts Section */}
-          {!isLoading && !error && !searchQuery && (
-            <div className="space-y-1.5 pt-1">
-              <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <Clock size={11} className="text-stone-400" />
-                  <span>Recent Contexts</span>
-                </div>
-                {recentContexts.length > 0 && (
-                  <span className="text-[10px] text-stone-400 font-normal">
-                    {recentContexts.length} {recentContexts.length === 1 ? 'context' : 'contexts'}
-                  </span>
+                ) : (
+                  <div className="space-y-1">
+                    {recentContexts.map((item, relIdx) => {
+                      const globalIdx = activeContext ? relIdx + 1 : relIdx;
+                      const isSelected = selectedIndex === globalIdx;
+                      return (
+                        <ContextLauncherItem
+                          key={item.id}
+                          item={item}
+                          isSelected={isSelected}
+                          dataIndex={globalIdx}
+                          onSelect={() => setSelectedIndex(globalIdx)}
+                          onResume={() => resumeContextById(item.id)}
+                        />
+                      );
+                    })}
+                  </div>
                 )}
               </div>
+            )}
 
-              {recentContexts.length === 0 ? (
-                <div className="p-4 rounded-xl bg-stone-850/30 border border-white/5 text-center text-stone-400 space-y-1">
-                  <p className="text-xs font-medium text-stone-300">No recent contexts</p>
-                  <p className="text-[11px] text-stone-500">
-                    Recently active projects and work sessions will appear here.
-                  </p>
+            {/* Search Results List */}
+            {!isLoading && !error && searchQuery && filteredList.length > 0 && (
+              <div className="space-y-1">
+                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+                  <Search size={11} className="text-stone-400" />
+                  <span>Matching Contexts ({filteredList.length})</span>
                 </div>
-              ) : (
                 <div className="space-y-1">
-                  {recentContexts.map((item, relIdx) => {
-                    const globalIdx = activeContext ? relIdx + 1 : relIdx;
-                    const isSelected = selectedIndex === globalIdx;
+                  {filteredList.map((item, idx) => {
+                    const isSelected = selectedIndex === idx;
                     return (
                       <ContextLauncherItem
                         key={item.id}
                         item={item}
                         isSelected={isSelected}
-                        dataIndex={globalIdx}
-                        onSelect={() => setSelectedIndex(globalIdx)}
+                        dataIndex={idx}
+                        onSelect={() => setSelectedIndex(idx)}
                         onResume={() => resumeContextById(item.id)}
                       />
                     );
                   })}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            )}
+          </div>
 
-          {/* Search Results List */}
-          {!isLoading && !error && searchQuery && filteredList.length > 0 && (
-            <div className="space-y-1">
-              <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
-                <Search size={11} className="text-stone-400" />
-                <span>Matching Contexts ({filteredList.length})</span>
-              </div>
-              <div className="space-y-1">
-                {filteredList.map((item, idx) => {
-                  const isSelected = selectedIndex === idx;
-                  return (
-                    <ContextLauncherItem
-                      key={item.id}
-                      item={item}
-                      isSelected={isSelected}
-                      dataIndex={idx}
-                      onSelect={() => setSelectedIndex(idx)}
-                      onResume={() => resumeContextById(item.id)}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          {/* Right Column: Context Preview Pane */}
+          <div className="md:col-span-6 lg:col-span-7 bg-stone-950/40 p-4 overflow-y-auto flex flex-col justify-between">
+            <ContextPreviewPane
+              preview={activePreview}
+              isLoading={isLoadingPreview}
+              error={previewError}
+              onResume={() => {
+                if (activePreview) {
+                  resumeContextById(activePreview.contextId);
+                }
+              }}
+            />
+          </div>
         </div>
 
         {/* Footer / Status Bar */}
-        <div className="px-5 py-2.5 bg-stone-950/60 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
-          <div className="flex items-center gap-1.5">
+        <div className="px-5 py-2.5 bg-stone-950/80 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
+          <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
-            <span>Context Engine Recency Semantics</span>
+            <span>Select to preview • Context Engine single source of truth</span>
           </div>
-          <div className="flex items-center gap-1">
-            <span>Press</span>
-            <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
-            <span>to resume</span>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <span>Press</span>
+              <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
+              <span>to resume selected context</span>
+            </div>
           </div>
         </div>
       </div>
@@ -397,110 +439,202 @@ export function ContextLauncher() {
 }
 
 /**
- * Dedicated Active Context Card
+ * Context Preview Pane
  */
-interface ActiveContextCardProps {
-  item: LauncherContextItem;
-  isSelected: boolean;
-  dataIndex: number;
-  onSelect: () => void;
+interface ContextPreviewPaneProps {
+  preview: LauncherPreviewModel | null;
+  isLoading: boolean;
+  error: string | null;
   onResume: () => void;
 }
 
-function ActiveContextCard({
-  item,
-  isSelected,
-  dataIndex,
-  onSelect,
-  onResume,
-}: ActiveContextCardProps) {
-  const readiness = item.resumeReadiness;
-  const isReady = readiness?.readiness === 'ready' || readiness?.readiness === 'mostly_ready';
+function ContextPreviewPane({ preview, isLoading, error, onResume }: ContextPreviewPaneProps) {
+  if (isLoading) {
+    return (
+      <div className="space-y-4 animate-pulse p-1">
+        <div className="flex items-center justify-between">
+          <div className="h-5 w-40 bg-stone-800 rounded-md" />
+          <div className="h-5 w-16 bg-stone-800 rounded-full" />
+        </div>
+        <div className="h-20 bg-stone-850/60 border border-white/5 rounded-xl" />
+        <div className="space-y-2">
+          <div className="h-3 w-28 bg-stone-800 rounded" />
+          <div className="h-10 bg-stone-850/60 border border-white/5 rounded-lg" />
+          <div className="h-10 bg-stone-850/60 border border-white/5 rounded-lg" />
+        </div>
+        <div className="h-9 w-full bg-stone-800 rounded-xl mt-4" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2.5">
+        <div className="w-10 h-10 rounded-full bg-red-950/50 border border-red-500/30 flex items-center justify-center text-red-400">
+          <AlertCircle size={18} />
+        </div>
+        <p className="text-xs font-semibold text-stone-300">Context Preview Unavailable</p>
+        <p className="text-[11px] text-stone-500 max-w-xs">{error}</p>
+      </div>
+    );
+  }
+
+  if (!preview) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2 text-stone-500">
+        <div className="w-10 h-10 rounded-full bg-stone-850 border border-white/5 flex items-center justify-center text-stone-400">
+          <Compass size={18} />
+        </div>
+        <p className="text-xs font-medium text-stone-300">No context selected</p>
+        <p className="text-[11px] text-stone-500 max-w-xs">
+          Select a context from the list to preview where you left off, active workset, and resume readiness.
+        </p>
+      </div>
+    );
+  }
+
+  const isReady = preview.readinessBand === 'ready' || preview.readinessBand === 'mostly_ready';
 
   return (
-    <div
-      data-index={dataIndex}
-      onClick={onResume}
-      onMouseEnter={onSelect}
-      className={`group relative p-3.5 rounded-xl cursor-pointer transition-all border ${
-        isSelected
-          ? 'bg-emerald-950/30 border-emerald-500/50 shadow-md ring-1 ring-emerald-500/30'
-          : 'bg-emerald-950/20 hover:bg-emerald-950/30 border-emerald-500/20'
-      }`}
-      role="option"
-      aria-selected={isSelected}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3 min-w-0 flex-1">
-          <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
-            <CheckCircle2 size={16} />
+    <div className="space-y-3.5 flex flex-col justify-between h-full">
+      <div className="space-y-3">
+        {/* Preview Header */}
+        <div className="flex items-start justify-between gap-2 border-b border-white/5 pb-2.5">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-stone-100 truncate">
+              {preview.name}
+            </h3>
+            <p className="text-[11px] text-stone-400 mt-0.5">
+              {formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}
+            </p>
           </div>
 
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-semibold text-stone-100 truncate">
-                {item.name}
+          <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+            {preview.isAmbiguous && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-950/60 text-amber-300 border border-amber-500/30">
+                <HelpCircle size={10} />
+                <span>Clarifying State</span>
               </span>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Active
-              </span>
-              {readiness && (
-                <span
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-                    isReady
-                      ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700/40'
-                      : 'bg-amber-900/40 text-amber-300 border-amber-700/40'
-                  }`}
-                  title={readiness.formattedExplanation || readiness.summary}
-                >
-                  <Zap size={10} />
-                  <span className="capitalize">{readiness.readiness.replace('_', ' ')}</span>
-                </span>
-              )}
-            </div>
+            )}
 
-            {/* Recent Activity / Task Statement */}
-            <div className="flex items-center gap-1.5 text-xs text-stone-300">
-              {item.taskTitle ? (
-                <span className="truncate">
-                  Task: <span className="font-medium text-emerald-200">{item.taskTitle}</span>
-                </span>
-              ) : item.recentActivitySummary ? (
-                <span className="truncate flex items-center gap-1 text-stone-300">
-                  <Activity size={12} className="text-emerald-400 shrink-0" />
-                  <span className="truncate">{item.recentActivitySummary}</span>
-                </span>
-              ) : (
-                <span className="text-stone-400">Context active and tracking working state</span>
-              )}
-              {item.itemCount !== undefined && (
-                <span className="text-stone-400 text-[11px] shrink-0">• {item.itemCount} items</span>
-              )}
-            </div>
+            {preview.isStale && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-stone-800 text-stone-400 border border-white/5">
+                <Archive size={10} />
+                <span>Dormant</span>
+              </span>
+            )}
+
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+                isReady
+                  ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/30'
+                  : 'bg-amber-950/60 text-amber-300 border-amber-500/30'
+              }`}
+            >
+              <Zap size={10} />
+              <span className="capitalize">{preview.readinessBand.replace('_', ' ')}</span>
+            </span>
           </div>
         </div>
 
-        {/* Quick Action Button */}
-        <div className="flex items-center gap-2 shrink-0 pt-0.5">
-          <span
-            className={`text-xs font-medium px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all ${
-              isSelected
-                ? 'bg-emerald-500 text-stone-950 shadow-sm font-semibold'
-                : 'bg-emerald-500/20 text-emerald-300 group-hover:bg-emerald-500/30'
-            }`}
-          >
-            <span>Resume</span>
-            <CornerDownLeft size={12} />
-          </span>
+        {/* Where You Left Off / Active Task Card */}
+        <div className="p-3 rounded-xl bg-stone-850/60 border border-white/5 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-stone-400">
+            <Activity size={11} className="text-orange-400" />
+            <span>Where you left off</span>
+          </div>
+
+          {preview.taskTitle ? (
+            <p className="text-xs font-medium text-stone-200 leading-snug">
+              Working on <span className="text-orange-300 font-semibold">{preview.taskTitle}</span>
+            </p>
+          ) : preview.activitySummary ? (
+            <p className="text-xs text-stone-300 leading-snug">{preview.activitySummary}</p>
+          ) : (
+            <p className="text-xs text-stone-400 italic">No specific task recorded yet.</p>
+          )}
+
+          {preview.readinessExplanation && (
+            <p className="text-[11px] text-stone-400 pt-0.5 border-t border-white/5 mt-1">
+              {preview.readinessExplanation}
+            </p>
+          )}
         </div>
+
+        {/* Workset Items Preview */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-stone-400 px-0.5">
+            <span>Working Set Summary</span>
+            <span>{preview.itemCount} items</span>
+          </div>
+
+          {preview.worksetItems.length === 0 ? (
+            <div className="p-2.5 rounded-lg bg-stone-850/30 border border-white/5 text-[11px] text-stone-500 text-center">
+              No items in active workset
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {preview.worksetItems.map((item) => (
+                <WorksetPreviewRow key={item.id} item={item} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Explicit Resume Action Button */}
+      <div className="pt-2 border-t border-white/5">
+        <button
+          onClick={onResume}
+          className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer"
+        >
+          <Play size={13} className="fill-current" />
+          <span>Resume Context</span>
+          <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded">
+            ↵ Enter
+          </kbd>
+        </button>
       </div>
     </div>
   );
 }
 
 /**
- * Recent Context List Item
+ * Lightweight Workset Item Row
+ */
+function WorksetPreviewRow({ item }: { item: LauncherPreviewItem }) {
+  const getIcon = () => {
+    switch (item.itemType) {
+      case 'url':
+      case 'link':
+        return <Globe size={12} className="text-blue-400 shrink-0" />;
+      case 'code':
+      case 'snippet':
+        return <FileCode size={12} className="text-amber-400 shrink-0" />;
+      case 'file':
+        return <FileText size={12} className="text-emerald-400 shrink-0" />;
+      default:
+        return <Link2 size={12} className="text-stone-400 shrink-0" />;
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-stone-850/40 border border-white/5 text-xs text-stone-300 gap-2">
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        {getIcon()}
+        <span className="truncate text-[11.5px] font-medium">{item.title}</span>
+      </div>
+      {item.appName && (
+        <span className="text-[10px] text-stone-500 shrink-0 font-mono bg-stone-800/80 px-1.5 py-0.5 rounded">
+          {item.appName}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Context Launcher List Item
  */
 interface ContextLauncherItemProps {
   item: LauncherContextItem;
@@ -523,19 +657,20 @@ function ContextLauncherItem({
   return (
     <div
       data-index={dataIndex}
-      onClick={onResume}
+      onClick={onSelect}
+      onDoubleClick={onResume}
       onMouseEnter={onSelect}
-      className={`group relative flex items-center justify-between px-3.5 py-2.5 rounded-xl cursor-pointer transition-all border ${
+      className={`group relative flex items-center justify-between px-3 py-2.5 rounded-xl cursor-pointer transition-all border ${
         isSelected
-          ? 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm'
+          ? 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm ring-1 ring-orange-500/30'
           : 'hover:bg-white/5 text-stone-200 border-transparent'
       }`}
       role="option"
       aria-selected={isSelected}
     >
-      <div className="flex items-center gap-3 min-w-0 flex-1 mr-3">
+      <div className="flex items-center gap-2.5 min-w-0 flex-1 mr-2">
         <div
-          className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
             item.isActive
               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
               : isSelected
@@ -546,16 +681,16 @@ function ContextLauncherItem({
           }`}
         >
           {item.isActive ? (
-            <CheckCircle2 size={16} />
+            <CheckCircle2 size={15} />
           ) : isArchived ? (
-            <Archive size={15} />
+            <Archive size={14} />
           ) : (
-            <FolderOpen size={16} />
+            <FolderOpen size={14} />
           )}
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span
               className={`text-xs font-semibold truncate ${
                 isDormant || isArchived ? 'text-stone-300' : 'text-stone-100'
@@ -563,24 +698,19 @@ function ContextLauncherItem({
             >
               {item.name}
             </span>
+            {item.isActive && (
+              <span className="px-1.5 py-0.2 rounded text-[8.5px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Active
+              </span>
+            )}
             {isDormant && (
-              <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800 text-stone-400 border border-white/5">
+              <span className="px-1.5 py-0.2 rounded text-[8.5px] font-medium bg-stone-800 text-stone-400 border border-white/5">
                 Dormant
-              </span>
-            )}
-            {isArchived && (
-              <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800/80 text-stone-500 border border-white/5">
-                Archived
-              </span>
-            )}
-            {item.confidence && (
-              <span className="text-[10px] text-stone-400 capitalize">
-                • {item.confidence}
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-2 mt-0.5 text-[11px] text-stone-400 truncate">
+          <div className="flex items-center gap-1.5 mt-0.5 text-[10.5px] text-stone-400 truncate">
             {item.taskTitle ? (
               <span className="truncate text-stone-300">
                 Task: <span className="text-stone-200">{item.taskTitle}</span>
@@ -590,26 +720,20 @@ function ContextLauncherItem({
             ) : (
               <span>{formatGentleTime(item.lastActiveAt)}</span>
             )}
-            {item.itemCount !== undefined && (
-              <span className="text-stone-400">• {item.itemCount} items</span>
-            )}
-            {item.sessionCount !== undefined && item.sessionCount > 1 && (
-              <span className="text-stone-400">• {item.sessionCount} sessions</span>
-            )}
           </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         <span
-          className={`text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
+          className={`text-[9px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
             isSelected
               ? 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
-              : 'opacity-0 group-hover:opacity-100 text-stone-400 bg-white/5'
+              : 'opacity-0 text-stone-400'
           }`}
         >
-          <span>Resume</span>
-          <CornerDownLeft size={10} />
+          <span>Select</span>
+          <CornerDownLeft size={9} />
         </span>
       </div>
     </div>
