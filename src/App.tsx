@@ -16,6 +16,8 @@ import { CaptureOrb } from "./components/workspace/CaptureOrb";
 import { useDragAndDrop } from "./hooks/useDragAndDrop";
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+import { useLauncherStore } from "./store/launcherStore";
+import { ContextLauncher } from "./components/launcher/ContextLauncher";
 import { Terminal } from "lucide-react";
 import "./App.css";
 
@@ -33,6 +35,7 @@ function App() {
     closeDiagnostics,
   } = useWorkspaceStore();
   const { checkForCandidates } = useDiscoveryStore();
+  const { toggleLauncher } = useLauncherStore();
   
   const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
   const isNotchTarget = windowLabel === "macos-notch-target";
@@ -42,17 +45,23 @@ function App() {
   useDragAndDrop();
 
   useEffect(() => {
-    // Global shortcut for developer diagnostics: Cmd+Shift+D or Ctrl+Shift+D
+    // Global keyboard shortcuts
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Cmd+Shift+D or Ctrl+Shift+D: Dev Diagnostics
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
         e.preventDefault();
         toggleDiagnostics();
+      }
+      // Cmd+K or Ctrl+K or Alt+Space: Context Launcher
+      if (((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) || (e.altKey && (e.code === 'Space' || e.key === ' '))) {
+        e.preventDefault();
+        toggleLauncher();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleDiagnostics]);
+  }, [toggleDiagnostics, toggleLauncher]);
 
   useEffect(() => {
     // Only main window loads workspaces and clipboard monitor
@@ -127,6 +136,7 @@ function App() {
       <CandidateReviewModal />
       <ContextTimelineDrawer />
       <ContextOverviewPanel />
+      <ContextLauncher />
       {import.meta.env.DEV && isReconstructionInspectorOpen && reconstructionInspectorWorkspaceId && (
         <ContextReconstructionInspector
           workspaceId={reconstructionInspectorWorkspaceId}
