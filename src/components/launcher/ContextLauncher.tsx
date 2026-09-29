@@ -141,38 +141,113 @@ export function ContextLauncher() {
     }
   }, [selectedIndex, filteredList, selectedContextId, selectContextById]);
 
-  // Keyboard navigation
+  // Mac-native Keyboard Navigation
   useEffect(() => {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // 1. Escape: dismiss prompt -> clear search -> close launcher
       if (e.key === 'Escape') {
         e.preventDefault();
-        closeLauncher();
-      } else if (e.key === 'ArrowDown') {
+        if (notReadyReason || resumeError) {
+          clearResumeState();
+        } else if (searchQuery) {
+          setSearchQuery('');
+          inputRef.current?.focus();
+        } else {
+          closeLauncher();
+        }
+        return;
+      }
+
+      // 2. Focus Search: Cmd+F, Ctrl+F, or '/' (when not typing in an input)
+      if (
+        ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') ||
+        (e.key === '/' && document.activeElement !== inputRef.current)
+      ) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+        return;
+      }
+
+      // 3. Jump to First / Last: Home / End or Cmd+ArrowUp / Cmd+ArrowDown
+      if (
+        e.key === 'Home' ||
+        ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp')
+      ) {
+        e.preventDefault();
+        if (filteredList.length > 0) {
+          setSelectedIndex(0);
+        }
+        return;
+      }
+
+      if (
+        e.key === 'End' ||
+        ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown')
+      ) {
+        e.preventDefault();
+        if (filteredList.length > 0) {
+          setSelectedIndex(filteredList.length - 1);
+        }
+        return;
+      }
+
+      // 4. Sequential Navigation: ArrowDown / Ctrl+N / ArrowUp / Ctrl+P
+      const isNext = e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n');
+      const isPrev = e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p');
+
+      if (isNext) {
         e.preventDefault();
         if (filteredList.length > 0) {
           const nextIndex = (selectedIndex + 1) % filteredList.length;
           setSelectedIndex(nextIndex);
         }
-      } else if (e.key === 'ArrowUp') {
+        return;
+      }
+
+      if (isPrev) {
         e.preventDefault();
         if (filteredList.length > 0) {
           const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
           setSelectedIndex(prevIndex);
         }
-      } else if (e.key === 'Enter') {
+        return;
+      }
+
+      // 5. Resume Action: Enter / Return
+      if (e.key === 'Enter') {
         e.preventDefault();
-        if (filteredList.length > 0 && selectedIndex >= 0 && selectedIndex < filteredList.length) {
+        if (notReadyReason) {
+          // If prompt was already showing, Enter triggers forced resume
+          if (selectedContextId) {
+            resumeContextById(selectedContextId, true);
+          }
+        } else if (filteredList.length > 0 && selectedIndex >= 0 && selectedIndex < filteredList.length) {
           const target = filteredList[selectedIndex];
           resumeContextById(target.id);
         }
+        return;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, filteredList, selectedIndex, closeLauncher, setSelectedIndex, resumeContextById]);
+  }, [
+    isOpen,
+    filteredList,
+    selectedIndex,
+    selectedContextId,
+    notReadyReason,
+    resumeError,
+    searchQuery,
+    closeLauncher,
+    setSearchQuery,
+    setSelectedIndex,
+    resumeContextById,
+    clearResumeState,
+  ]);
 
   // Scroll active item into view
   useEffect(() => {
@@ -197,7 +272,7 @@ export function ContextLauncher() {
       aria-label="Context Launcher"
     >
       <div
-        className="w-full max-w-4xl bg-stone-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in zoom-in-95 duration-150"
+        className="w-full max-w-4xl bg-stone-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in zoom-in-95 duration-150 focus-within:ring-1 focus-within:ring-white/15"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 1. Header */}
@@ -213,7 +288,7 @@ export function ContextLauncher() {
 
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-stone-400">
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↑↓</span>
+              <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↑↓ / ⌃N⌃P</span>
               <span>Navigate</span>
               <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px] ml-1">↵</span>
               <span>Resume</span>
@@ -222,7 +297,7 @@ export function ContextLauncher() {
             </div>
             <button
               onClick={closeLauncher}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:outline-none transition-colors cursor-pointer"
               aria-label="Close launcher"
             >
               <X size={15} />
@@ -231,22 +306,31 @@ export function ContextLauncher() {
         </div>
 
         {/* 2. Search Input */}
-        <div className="relative flex items-center px-5 py-3.5 border-b border-white/10 bg-black/20">
+        <div className="relative flex items-center px-5 py-3.5 border-b border-white/10 bg-black/20 focus-within:bg-black/40 transition-colors">
           <Search size={18} className="text-stone-400 shrink-0 mr-3" />
           <input
             ref={inputRef}
             type="text"
+            role="combobox"
+            aria-expanded="true"
+            aria-autocomplete="list"
+            aria-controls="launcher-context-list"
+            aria-activedescendant={selectedContextId ? `launcher-item-${selectedContextId}` : undefined}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search or switch contexts..."
+            placeholder="Search or switch contexts... (Press ↑↓ to navigate)"
             className="w-full bg-transparent text-sm text-stone-100 placeholder-stone-500 focus:outline-none"
             aria-label="Search contexts"
           />
           {searchQuery && (
             <button
-              onClick={() => setSearchQuery('')}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              onClick={() => {
+                setSearchQuery('');
+                inputRef.current?.focus();
+              }}
+              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:outline-none transition-colors cursor-pointer"
               title="Clear search"
+              aria-label="Clear search query"
             >
               <X size={14} />
             </button>
@@ -257,6 +341,10 @@ export function ContextLauncher() {
         <div className="grid grid-cols-1 md:grid-cols-12 min-h-[400px] max-h-[480px] divide-y md:divide-y-0 md:divide-x divide-white/10">
           {/* Left Column: Contexts List */}
           <div
+            id="launcher-context-list"
+            role="listbox"
+            aria-label="Context List"
+            aria-activedescendant={selectedContextId ? `launcher-item-${selectedContextId}` : undefined}
             ref={listRef}
             className="md:col-span-6 lg:col-span-5 overflow-y-auto p-3.5 space-y-3.5 focus:outline-none"
             tabIndex={-1}
@@ -791,6 +879,7 @@ function ContextLauncherItem({
 
   return (
     <div
+      id={`launcher-item-${item.id}`}
       data-index={dataIndex}
       onClick={onSelect}
       onDoubleClick={onResume}
