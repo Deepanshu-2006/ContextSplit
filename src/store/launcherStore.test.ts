@@ -151,6 +151,44 @@ describe('useLauncherStore', () => {
     expect(state.activeContext).toBeNull();
   });
 
+  it('fetchLauncherData preserves exact engine recency ordering and prevents duplicate IDs', async () => {
+    vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce({
+      context_id: 'ctx-1',
+      context: 'Active Context',
+      state: 'active',
+    });
+
+    vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([
+      { context_id: 'ctx-1', context_name: 'Active Context Duplicate' }, // should be skipped because it is active
+      { context_id: 'ctx-2', context_name: 'Alpha Project', duration_estimate: 'Active for about 10m' },
+      { context_id: 'ctx-3', context_name: 'Beta Project', session_count: 3 },
+      { context_id: 'ctx-2', context_name: 'Alpha Duplicate' }, // duplicate in recents, should be skipped
+      { context_id: 'ctx-4', context_name: 'Gamma Project' },
+    ]);
+
+    useWorkspaceStore.setState({
+      workspaces: [
+        {
+          id: 'ctx-3',
+          name: 'Beta Project',
+          created_at: '2026-09-30T00:00:00Z',
+          updated_at: '2026-09-30T00:00:00Z',
+          lifecycle_state: 'dormant',
+        },
+      ],
+    });
+
+    await useLauncherStore.getState().fetchLauncherData();
+
+    const state = useLauncherStore.getState();
+    expect(state.activeContext?.id).toBe('ctx-1');
+    expect(state.recentContexts).toHaveLength(3);
+    // Preserves order [ctx-2, ctx-3, ctx-4]
+    expect(state.recentContexts.map((c) => c.id)).toEqual(['ctx-2', 'ctx-3', 'ctx-4']);
+    expect(state.recentContexts[1].state).toBe('dormant');
+    expect(state.recentContexts[1].sessionCount).toBe(3);
+  });
+
   it('fetchLauncherData falls back to workspaceStore if engine recents are empty', async () => {
     vi.mocked(contextInteractionService.getActiveContext).mockResolvedValueOnce(null);
     vi.mocked(contextInteractionService.getRecentContexts).mockResolvedValueOnce([]);

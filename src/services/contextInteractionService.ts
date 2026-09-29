@@ -25,7 +25,10 @@ export const contextInteractionService = {
   getRecentContexts: async (limitDays: number = 7): Promise<any[]> => {
     const response = await invoke<any>('get_recent_work_sequence', { limitDays });
     // The engine returns a RecentWorkSequenceResponse envelope; unwrap the sequence for UI surfaces.
-    return (response && Array.isArray(response.entries)) ? response.entries : (Array.isArray(response) ? response : []);
+    if (response && Array.isArray(response.entries)) return response.entries;
+    if (response && Array.isArray(response.recent_contexts)) return response.recent_contexts;
+    if (response && Array.isArray(response.all_entries)) return response.all_entries;
+    return Array.isArray(response) ? response : [];
   },
 
   /**

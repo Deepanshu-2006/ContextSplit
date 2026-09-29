@@ -18,6 +18,7 @@ export interface LauncherContextItem {
   durationEstimate?: string | null;
   taskTitle?: string | null;
   itemCount?: number;
+  sessionCount?: number;
   confidence?: string;
   recentActivitySummary?: string | null;
   memoryStatement?: string | null;
@@ -80,13 +81,16 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   fetchLauncherData: async () => {
     set({ isLoading: true, error: null });
     try {
+      const existingWorkspaces = useWorkspaceStore.getState().workspaces;
+      const workspaceMap = new Map(existingWorkspaces.map((w) => [w.id, w]));
+
       // 1. Fetch active context from the single source of truth (Context Engine)
       let activeItem: LauncherContextItem | null = null;
       try {
         const engineActive = await contextInteractionService.getActiveContext();
         if (engineActive && (engineActive.context_id || engineActive.id)) {
           const id = engineActive.context_id || engineActive.id;
-          const name = engineActive.context || engineActive.name || 'Active Context';
+          const name = engineActive.context || engineActive.name || workspaceMap.get(id)?.name || 'Active Context';
 
           // Try retrieving resume readiness for active context
           let readiness: LauncherResumeReadiness | null = null;
@@ -113,12 +117,14 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             activitySummary = engineActive.memory_statement;
           }
 
+          const wsMeta = workspaceMap.get(id);
+
           activeItem = {
             id,
             name,
             isActive: true,
-            state: engineActive.state || 'active',
-            lastActiveAt: engineActive.last_active_at || null,
+            state: wsMeta?.lifecycle_state || engineActive.state || 'active',
+            lastActiveAt: engineActive.last_active_at || wsMeta?.updated_at || null,
             taskTitle: engineActive.task || (engineActive.recent_task ? engineActive.recent_task.title : null),
             confidence: engineActive.context_confidence || undefined,
             itemCount: Array.isArray(engineActive.recent_items) ? engineActive.recent_items.length : undefined,
@@ -131,7 +137,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         console.warn('Could not fetch active context from engine:', err);
       }
 
-      // 2. Fetch recent contexts from engine
+      // 2. Fetch recent contexts strictly preserving engine's recency order
       const recents: LauncherContextItem[] = [];
       const seenIds = new Set<string>();
       if (activeItem) {
@@ -146,15 +152,19 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             if (!id || seenIds.has(id)) continue;
             seenIds.add(id);
 
+            const wsMeta = workspaceMap.get(id);
+            const contextName = entry.context_name || entry.name || wsMeta?.name || 'Unnamed Context';
+
             recents.push({
               id,
-              name: entry.context_name || entry.name || 'Unnamed Context',
+              name: contextName,
               isActive: false,
-              state: entry.transition_type || 'recent',
-              lastActiveAt: entry.ended_at || entry.last_active_at || null,
+              state: wsMeta?.lifecycle_state || entry.transition_type || 'recent',
+              lastActiveAt: entry.last_active_at || entry.ended_at || wsMeta?.updated_at || null,
               durationEstimate: entry.duration_estimate || null,
               taskTitle: entry.task_title || entry.title || null,
               itemCount: entry.item_count ?? (Array.isArray(entry.recent_items) ? entry.recent_items.length : undefined),
+              sessionCount: entry.session_count,
               confidence: entry.task_confidence_band || undefined,
             });
           }
@@ -163,8 +173,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         console.warn('Could not fetch recent contexts from engine:', err);
       }
 
-      // 3. Complement with workspaces from workspaceStore if engine returned empty recents
-      const existingWorkspaces = useWorkspaceStore.getState().workspaces;
+      // 3. Fallback: Complement with stored workspaces if engine returned empty recents
       if (recents.length === 0 && existingWorkspaces.length > 0) {
         for (const ws of existingWorkspaces) {
           if (seenIds.has(ws.id)) continue;
@@ -173,7 +182,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             id: ws.id,
             name: ws.name,
             isActive: ws.id === activeItem?.id,
-            state: ws.lifecycle_state || 'active',
+            state: ws.lifecycle_state || 'dormant',
             lastActiveAt: ws.updated_at || ws.created_at,
           });
         }

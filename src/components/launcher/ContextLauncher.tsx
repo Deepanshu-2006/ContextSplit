@@ -14,6 +14,7 @@ import {
   Activity,
   Sparkles,
   Zap,
+  Archive,
 } from 'lucide-react';
 import { useLauncherStore, LauncherContextItem } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
@@ -33,10 +34,13 @@ function formatGentleTime(isoString?: string | null, durationEstimate?: string |
     const diffSec = Math.floor(diffMs / 1000);
     const diffMin = Math.floor(diffSec / 60);
     const diffHour = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHour / 24);
 
     if (diffMin < 2) return 'Active just now';
     if (diffMin < 60) return `Active ${diffMin}m ago`;
     if (diffHour < 24) return `Active ${diffHour}h ago`;
+    if (diffDays === 1) return 'Active yesterday';
+    if (diffDays < 7) return `Active ${diffDays}d ago`;
     return 'Active recently';
   } catch {
     return 'Recently active';
@@ -80,7 +84,7 @@ export function ContextLauncher() {
     }
   }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
-  // Filter contexts based on search query
+  // Filter contexts based on search query strictly preserving engine ordering
   const filteredList = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const all: LauncherContextItem[] = [];
@@ -306,41 +310,79 @@ export function ContextLauncher() {
           )}
 
           {/* 4. Recent Contexts Section */}
-          {!isLoading &&
-            !error &&
-            filteredList.filter((c) => !activeContext || c.id !== activeContext.id || !!searchQuery).length > 0 && (
-              <div className="space-y-1 pt-1">
-                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+          {!isLoading && !error && !searchQuery && (
+            <div className="space-y-1.5 pt-1">
+              <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
                   <Clock size={11} className="text-stone-400" />
-                  <span>{searchQuery ? 'Matching Contexts' : 'Recent Contexts'}</span>
+                  <span>Recent Contexts</span>
                 </div>
+                {recentContexts.length > 0 && (
+                  <span className="text-[10px] text-stone-400 font-normal">
+                    {recentContexts.length} {recentContexts.length === 1 ? 'context' : 'contexts'}
+                  </span>
+                )}
+              </div>
 
+              {recentContexts.length === 0 ? (
+                <div className="p-4 rounded-xl bg-stone-850/30 border border-white/5 text-center text-stone-400 space-y-1">
+                  <p className="text-xs font-medium text-stone-300">No recent contexts</p>
+                  <p className="text-[11px] text-stone-500">
+                    Recently active projects and work sessions will appear here.
+                  </p>
+                </div>
+              ) : (
                 <div className="space-y-1">
-                  {filteredList.map((item, idx) => {
-                    // Avoid duplicating activeContext in recent list unless searching
-                    if (!searchQuery && activeContext && item.id === activeContext.id) return null;
-                    const isSelected = selectedIndex === idx;
+                  {recentContexts.map((item, relIdx) => {
+                    const globalIdx = activeContext ? relIdx + 1 : relIdx;
+                    const isSelected = selectedIndex === globalIdx;
                     return (
                       <ContextLauncherItem
                         key={item.id}
                         item={item}
                         isSelected={isSelected}
-                        dataIndex={idx}
-                        onSelect={() => setSelectedIndex(idx)}
+                        dataIndex={globalIdx}
+                        onSelect={() => setSelectedIndex(globalIdx)}
                         onResume={() => resumeContextById(item.id)}
                       />
                     );
                   })}
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* Search Results List */}
+          {!isLoading && !error && searchQuery && filteredList.length > 0 && (
+            <div className="space-y-1">
+              <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
+                <Search size={11} className="text-stone-400" />
+                <span>Matching Contexts ({filteredList.length})</span>
               </div>
-            )}
+              <div className="space-y-1">
+                {filteredList.map((item, idx) => {
+                  const isSelected = selectedIndex === idx;
+                  return (
+                    <ContextLauncherItem
+                      key={item.id}
+                      item={item}
+                      isSelected={isSelected}
+                      dataIndex={idx}
+                      onSelect={() => setSelectedIndex(idx)}
+                      onResume={() => resumeContextById(item.id)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer / Status Bar */}
         <div className="px-5 py-2.5 bg-stone-950/60 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
-            <span>Context Engine Authoritative</span>
+            <span>Context Engine Recency Semantics</span>
           </div>
           <div className="flex items-center gap-1">
             <span>Press</span>
@@ -475,6 +517,9 @@ function ContextLauncherItem({
   onSelect,
   onResume,
 }: ContextLauncherItemProps) {
+  const isDormant = item.state === 'dormant';
+  const isArchived = item.state === 'archived';
+
   return (
     <div
       data-index={dataIndex}
@@ -495,17 +540,39 @@ function ContextLauncherItem({
               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
               : isSelected
               ? 'bg-orange-500/30 text-orange-200 border border-orange-500/40'
+              : isDormant || isArchived
+              ? 'bg-stone-850 text-stone-500 border border-white/5'
               : 'bg-stone-800 text-stone-400 border border-white/5'
           }`}
         >
-          {item.isActive ? <CheckCircle2 size={16} /> : <FolderOpen size={16} />}
+          {item.isActive ? (
+            <CheckCircle2 size={16} />
+          ) : isArchived ? (
+            <Archive size={15} />
+          ) : (
+            <FolderOpen size={16} />
+          )}
         </div>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold truncate text-stone-100">
+            <span
+              className={`text-xs font-semibold truncate ${
+                isDormant || isArchived ? 'text-stone-300' : 'text-stone-100'
+              }`}
+            >
               {item.name}
             </span>
+            {isDormant && (
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800 text-stone-400 border border-white/5">
+                Dormant
+              </span>
+            )}
+            {isArchived && (
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-medium bg-stone-800/80 text-stone-500 border border-white/5">
+                Archived
+              </span>
+            )}
             {item.confidence && (
               <span className="text-[10px] text-stone-400 capitalize">
                 • {item.confidence}
@@ -525,6 +592,9 @@ function ContextLauncherItem({
             )}
             {item.itemCount !== undefined && (
               <span className="text-stone-400">• {item.itemCount} items</span>
+            )}
+            {item.sessionCount !== undefined && item.sessionCount > 1 && (
+              <span className="text-stone-400">• {item.sessionCount} sessions</span>
             )}
           </div>
         </div>
