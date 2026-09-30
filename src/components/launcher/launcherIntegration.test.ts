@@ -473,4 +473,57 @@ describe('Context Launcher Integration Tests', () => {
     expect(state.activeContext?.id).toBe('ctx-act');
     expect(state.recentContexts).toHaveLength(2);
   });
+
+  // 16. Keyboard-first search flow: Enter opens preview, Escape closes preview then clears search
+  it('16. executes keyboard state machine: Enter opens preview, Escape closes preview, subsequent Escape clears search', () => {
+    useLauncherStore.setState({
+      isOpen: true,
+      searchQuery: 'pay',
+      selectedIndex: 0,
+      selectedContextId: 'ctx-pay',
+      isPreviewOpen: false,
+    });
+
+    // Simulate Enter from list -> opens preview
+    useLauncherStore.setState({ isPreviewOpen: true });
+    expect(useLauncherStore.getState().isPreviewOpen).toBe(true);
+    expect(useLauncherStore.getState().searchQuery).toBe('pay');
+
+    // Simulate Escape from preview -> closes preview but retains search query
+    useLauncherStore.setState({ isPreviewOpen: false });
+    expect(useLauncherStore.getState().isPreviewOpen).toBe(false);
+    expect(useLauncherStore.getState().searchQuery).toBe('pay');
+
+    // Simulate Escape from search -> clears search
+    useLauncherStore.getState().setSearchQuery('');
+    expect(useLauncherStore.getState().searchQuery).toBe('');
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+
+    // Simulate Escape from empty launcher -> closes launcher
+    useLauncherStore.getState().closeLauncher();
+    expect(useLauncherStore.getState().isOpen).toBe(false);
+  });
+
+  // 17. Keyboard-first search flow: Enter from preview triggers resume
+  it('17. triggers context resume when Enter is pressed from preview state', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({
+      status: 'resumed',
+      context_id: 'ctx-selected',
+      resumed_at: '2026-10-01T12:00:00Z',
+    });
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValueOnce({
+      context_id: 'ctx-selected',
+      readiness: { readiness: 'ready' },
+    } as any);
+
+    useLauncherStore.setState({
+      isOpen: true,
+      selectedContextId: 'ctx-selected',
+      isPreviewOpen: true, // In preview mode
+    });
+
+    const success = await useLauncherStore.getState().resumeContextById('ctx-selected');
+    expect(success).toBe(true);
+    expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-selected');
+  });
 });

@@ -80,6 +80,8 @@ export function ContextLauncher() {
     previewError,
     activeContext,
     recentContexts,
+    isPreviewOpen,
+    setIsPreviewOpen,
     closeLauncher,
     setSearchQuery,
     setSelectedIndex,
@@ -137,20 +139,26 @@ export function ContextLauncher() {
     }
   }, [selectedIndex, filteredList, selectedContextId, selectContextById]);
 
-  // Mac-native Keyboard Navigation
+  // Mac-native Keyboard Navigation with two-stage inspection & resume
   useEffect(() => {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. Escape: dismiss prompt -> clear search -> close launcher
+      // 1. Escape: dismiss prompt -> close preview -> clear search -> close launcher
       if (e.key === 'Escape') {
         e.preventDefault();
         if (notReadyReason || resumeError) {
           clearResumeState();
+        } else if (isPreviewOpen) {
+          // Close preview and return to search/list
+          setIsPreviewOpen(false);
+          inputRef.current?.focus();
         } else if (searchQuery) {
+          // Clear search query and return to active + recent contexts
           setSearchQuery('');
           inputRef.current?.focus();
         } else {
+          // Close launcher
           closeLauncher();
         }
         return;
@@ -162,6 +170,7 @@ export function ContextLauncher() {
         (e.key === '/' && document.activeElement !== inputRef.current)
       ) {
         e.preventDefault();
+        setIsPreviewOpen(false);
         inputRef.current?.focus();
         inputRef.current?.select();
         return;
@@ -212,7 +221,7 @@ export function ContextLauncher() {
         return;
       }
 
-      // 5. Resume Action: Enter / Return
+      // 5. Enter Action: Open preview from list, or resume from preview
       if (e.key === 'Enter') {
         e.preventDefault();
         if (notReadyReason) {
@@ -220,9 +229,22 @@ export function ContextLauncher() {
           if (selectedContextId) {
             resumeContextById(selectedContextId, true);
           }
-        } else if (filteredList.length > 0 && selectedIndex >= 0 && selectedIndex < filteredList.length) {
+          return;
+        }
+
+        if (filteredList.length === 0 || selectedIndex < 0 || selectedIndex >= filteredList.length) {
+          return;
+        }
+
+        if (!isPreviewOpen) {
+          // Enter: Open selected context preview
+          setIsPreviewOpen(true);
+        } else {
+          // Enter from preview: Resume selected context
           const target = filteredList[selectedIndex];
-          resumeContextById(target.id);
+          if (target) {
+            resumeContextById(target.id);
+          }
         }
         return;
       }
@@ -235,12 +257,14 @@ export function ContextLauncher() {
     filteredList,
     selectedIndex,
     selectedContextId,
+    isPreviewOpen,
     notReadyReason,
     resumeError,
     searchQuery,
     closeLauncher,
     setSearchQuery,
     setSelectedIndex,
+    setIsPreviewOpen,
     resumeContextById,
     clearResumeState,
   ]);
@@ -409,8 +433,12 @@ export function ContextLauncher() {
                   <ContextLauncherItem
                     item={activeContext}
                     isSelected={selectedIndex === 0}
+                    isPreviewOpen={selectedIndex === 0 && isPreviewOpen}
                     dataIndex={0}
-                    onSelect={() => setSelectedIndex(0)}
+                    onSelect={() => {
+                      setSelectedIndex(0);
+                      setIsPreviewOpen(true);
+                    }}
                     onResume={() => resumeContextById(activeContext.id)}
                   />
                 ) : (
@@ -476,8 +504,12 @@ export function ContextLauncher() {
                           key={item.id}
                           item={item}
                           isSelected={isSelected}
+                          isPreviewOpen={isSelected && isPreviewOpen}
                           dataIndex={globalIdx}
-                          onSelect={() => setSelectedIndex(globalIdx)}
+                          onSelect={() => {
+                            setSelectedIndex(globalIdx);
+                            setIsPreviewOpen(true);
+                          }}
                           onResume={() => resumeContextById(item.id)}
                         />
                       );
@@ -510,8 +542,12 @@ export function ContextLauncher() {
                         key={item.id}
                         item={item}
                         isSelected={isSelected}
+                        isPreviewOpen={isSelected && isPreviewOpen}
                         dataIndex={idx}
-                        onSelect={() => setSelectedIndex(idx)}
+                        onSelect={() => {
+                          setSelectedIndex(idx);
+                          setIsPreviewOpen(true);
+                        }}
                         onResume={() => resumeContextById(item.id)}
                       />
                     );
@@ -522,11 +558,20 @@ export function ContextLauncher() {
           </div>
 
           {/* Right Column: Context Preview Pane */}
-          <div className="md:col-span-6 lg:col-span-7 bg-stone-950/40 p-4 overflow-y-auto flex flex-col justify-between">
+          <div
+            className={`md:col-span-6 lg:col-span-7 p-4 overflow-y-auto flex flex-col justify-between transition-all ${
+              isPreviewOpen
+                ? 'bg-stone-900/60 ring-1 ring-orange-500/30 border-l border-orange-500/20'
+                : 'bg-stone-950/40'
+            }`}
+            role="region"
+            aria-label="Selected Context Preview"
+          >
             <ContextPreviewPane
               preview={activePreview}
               isLoading={isLoadingPreview}
               isResuming={isResuming}
+              isPreviewOpen={isPreviewOpen}
               resumeStatus={resumeStatus}
               resumeError={resumeError}
               notReadyReason={notReadyReason}
@@ -537,7 +582,10 @@ export function ContextLauncher() {
                 }
               }}
               onClearResumeState={clearResumeState}
-              onClose={closeLauncher}
+              onClose={() => {
+                setIsPreviewOpen(false);
+                inputRef.current?.focus();
+              }}
             />
           </div>
         </div>
@@ -548,15 +596,19 @@ export function ContextLauncher() {
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
             <span>Answers: What will I return to if I resume?</span>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1">
-              <span>Press</span>
-              <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
-              <span>to resume</span>
-              <span className="mx-1 text-stone-600">•</span>
-              <kbd className="px-1 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">Esc</kbd>
-              <span>to close</span>
-            </div>
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↑↓</kbd>
+              <span>Navigate</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
+              <span>{isPreviewOpen ? 'Resume' : 'Preview'}</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">Esc</kbd>
+              <span>{isPreviewOpen ? 'Back to list' : searchQuery ? 'Clear query' : 'Close'}</span>
+            </span>
           </div>
         </div>
       </div>
@@ -572,6 +624,7 @@ interface ContextPreviewPaneProps {
   preview: LauncherPreviewModel | null;
   isLoading: boolean;
   isResuming: boolean;
+  isPreviewOpen?: boolean;
   resumeStatus: ResumeActionStatus;
   resumeError: string | null;
   notReadyReason: string | null;
@@ -585,6 +638,7 @@ function ContextPreviewPane({
   preview,
   isLoading,
   isResuming,
+  isPreviewOpen = false,
   resumeError,
   notReadyReason,
   error,
@@ -800,7 +854,10 @@ function ContextPreviewPane({
         <button
           onClick={() => onResume(false)}
           disabled={isResuming}
-          className="flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer"
+          className={`flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer ${
+            isPreviewOpen ? 'ring-2 ring-orange-300 ring-offset-2 ring-offset-stone-950 shadow-orange-500/40' : ''
+          }`}
+          aria-label="Resume context"
         >
           {isResuming ? (
             <>
@@ -885,6 +942,7 @@ function WorksetPreviewRow({
 interface ContextLauncherItemProps {
   item: LauncherContextItem;
   isSelected: boolean;
+  isPreviewOpen?: boolean;
   dataIndex: number;
   onSelect: () => void;
   onResume: () => void;
@@ -893,6 +951,7 @@ interface ContextLauncherItemProps {
 function ContextLauncherItem({
   item,
   isSelected,
+  isPreviewOpen = false,
   dataIndex,
   onSelect,
   onResume,
@@ -909,7 +968,9 @@ function ContextLauncherItem({
       onMouseEnter={onSelect}
       className={`group relative flex items-center justify-between px-3 py-2.5 rounded-xl cursor-pointer transition-all border ${
         isSelected
-          ? 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm ring-1 ring-orange-500/30'
+          ? isPreviewOpen
+            ? 'bg-orange-500/25 text-white border-orange-500/50 shadow-sm ring-2 ring-orange-500/40'
+            : 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm ring-1 ring-orange-500/30'
           : 'hover:bg-white/5 text-stone-200 border-transparent'
       }`}
       role="option"
@@ -996,11 +1057,13 @@ function ContextLauncherItem({
         <span
           className={`text-[9px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
             isSelected
-              ? 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
+              ? isPreviewOpen
+                ? 'opacity-100 bg-orange-500 text-stone-950 font-semibold shadow-sm'
+                : 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
               : 'opacity-0 text-stone-400'
           }`}
         >
-          <span>Select</span>
+          <span>{isPreviewOpen ? 'Previewing' : 'Inspect'}</span>
           <CornerDownLeft size={9} />
         </span>
       </div>

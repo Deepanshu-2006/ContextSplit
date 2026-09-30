@@ -627,4 +627,28 @@ describe('useLauncherStore', () => {
       expect(sorted1[1].name).toBe('Beta Payment');
     });
   });
+
+  describe('Keyboard-First Flow State Transitions', () => {
+    it('manages isPreviewOpen transitions cleanly', () => {
+      const store = useLauncherStore.getState();
+      expect(store.isPreviewOpen).toBe(false);
+
+      useLauncherStore.getState().setIsPreviewOpen(true);
+      expect(useLauncherStore.getState().isPreviewOpen).toBe(true);
+
+      // Typing a query resets preview open state
+      useLauncherStore.getState().setSearchQuery('pay');
+      expect(useLauncherStore.getState().isPreviewOpen).toBe(false);
+      expect(useLauncherStore.getState().searchQuery).toBe('pay');
+
+      // Re-opening preview
+      useLauncherStore.getState().setIsPreviewOpen(true);
+      expect(useLauncherStore.getState().isPreviewOpen).toBe(true);
+
+      // Closing launcher resets isPreviewOpen
+      useLauncherStore.getState().closeLauncher();
+      expect(useLauncherStore.getState().isPreviewOpen).toBe(false);
+      expect(useLauncherStore.getState().isOpen).toBe(false);
+    });
+  });
 });

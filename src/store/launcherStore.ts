@@ -228,6 +228,7 @@ interface LauncherState {
   previewError: string | null;
   activeContext: LauncherContextItem | null;
   recentContexts: LauncherContextItem[];
+  isPreviewOpen: boolean;
   
   // Actions
   openLauncher: () => void;
@@ -235,6 +236,7 @@ interface LauncherState {
   toggleLauncher: () => void;
   setSearchQuery: (query: string) => void;
   setSelectedIndex: (index: number) => void;
+  setIsPreviewOpen: (open: boolean) => void;
   selectContextById: (contextId: string) => Promise<void>;
   fetchLauncherData: () => Promise<void>;
   resumeContextById: (contextId: string, force?: boolean) => Promise<boolean>;
@@ -260,6 +262,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   previewError: null,
   activeContext: null,
   recentContexts: [],
+  isPreviewOpen: false,
 
   openLauncher: () => {
     set({
@@ -274,6 +277,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       notReadyReason: null,
       error: null,
       previewError: null,
+      isPreviewOpen: false,
     });
     get().fetchLauncherData();
   },
@@ -294,6 +298,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       resumeError: null,
       notReadyReason: null,
       previewError: null,
+      isPreviewOpen: false,
     });
   },
 
@@ -306,11 +311,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   },
 
   setSearchQuery: (query: string) => {
-    set({ searchQuery: query, selectedIndex: 0 });
+    set({ searchQuery: query, selectedIndex: 0, isPreviewOpen: false });
   },
 
   setSelectedIndex: (index: number) => {
     set({ selectedIndex: index });
+  },
+
+  setIsPreviewOpen: (open: boolean) => {
+    set({ isPreviewOpen: open });
   },
 
   clearResumeState: () => {
