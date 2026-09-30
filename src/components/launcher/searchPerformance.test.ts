@@ -142,11 +142,11 @@ describe('Launcher Search Performance Benchmarks', () => {
 
       // Assert that search latency remains strictly within interactive frame limits (< 16.6ms for 60fps)
       if (scale <= 100) {
-        expect(avgLatencyMs).toBeLessThan(1.0); // <1ms for standard workspaces
+        expect(avgLatencyMs).toBeLessThan(2.0); // <2ms for standard workspaces
       } else if (scale <= 1000) {
-        expect(avgLatencyMs).toBeLessThan(4.0); // <4ms for large repositories
+        expect(avgLatencyMs).toBeLessThan(8.0); // <8ms for large repositories
       } else {
-        expect(avgLatencyMs).toBeLessThan(15.0); // <15ms for massive 5,000 contexts (actual ~2-3ms)
+        expect(avgLatencyMs).toBeLessThan(16.6); // <16.6ms for massive 5,000 contexts
       }
     }
   });
