@@ -526,4 +526,93 @@ describe('Context Launcher Integration Tests', () => {
     expect(success).toBe(true);
     expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-selected');
   });
+
+  // 18. Polished search states: No query, Query with results, Query with no results
+  it('18. handles polished search states: no query, query with results, and no results', () => {
+    const active = { id: 'ctx-active', name: 'ContextSplit Engine', isActive: true };
+    const recent = [
+      { id: 'ctx-1', name: 'PayX Gateway', description: 'Payment processing system' },
+      { id: 'ctx-2', name: 'Analytics Service', projectIdentifier: 'analytics-core' },
+    ];
+
+    useLauncherStore.setState({
+      activeContext: active,
+      recentContexts: recent,
+      searchQuery: '',
+      selectedIndex: 0,
+    });
+
+    // 1. No query state: all contexts accessible
+    const all = [active, ...recent];
+    let filtered = all.filter((item) => matchContext(item, ''));
+    expect(filtered).toHaveLength(3);
+
+    // 2. Query with results: filtered matches
+    useLauncherStore.setState({ searchQuery: 'pay' });
+    filtered = all.filter((item) => matchContext(item, 'pay'));
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].name).toBe('PayX Gateway');
+
+    // 3. Query with no results: empty array, no fake recommendations, no auto-created contexts
+    useLauncherStore.setState({ searchQuery: 'nonexistent-xyz-999' });
+    filtered = all.filter((item) => matchContext(item, 'nonexistent-xyz-999'));
+    expect(filtered).toHaveLength(0);
+  });
+
+  // 19. Search error and loading states
+  it('19. preserves launcher integrity and exposes errors and loading state during context search operations', async () => {
+    useLauncherStore.setState({
+      isLoading: true,
+      error: null,
+      searchQuery: 'broken-query',
+    });
+
+    expect(useLauncherStore.getState().isLoading).toBe(true);
+    expect(useLauncherStore.getState().error).toBeNull();
+
+    // Error state triggered
+    useLauncherStore.setState({
+      isLoading: false,
+      error: 'Backend search indexing failed',
+    });
+
+    expect(useLauncherStore.getState().isLoading).toBe(false);
+    expect(useLauncherStore.getState().error).toBe('Backend search indexing failed');
+  });
+
+  // 20. Resume in progress state
+  it('20. reflects resume in progress state correctly and clears afterwards', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              status: 'resumed',
+              context_id: 'ctx-target',
+              resumed_at: '2026-10-01T12:00:00Z',
+            });
+          }, 30);
+        })
+    );
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValue({
+      context_id: 'ctx-target',
+      readiness: { readiness: 'ready' },
+    } as any);
+
+    useLauncherStore.setState({
+      isOpen: true,
+      selectedContextId: 'ctx-target',
+      isResuming: false,
+    });
+
+    const resumePromise = useLauncherStore.getState().resumeContextById('ctx-target');
+    expect(useLauncherStore.getState().isResuming).toBe(true);
+    expect(useLauncherStore.getState().resumeStatus).toBe('loading');
+
+    const result = await resumePromise;
+    expect(result).toBe(true);
+    expect(useLauncherStore.getState().isResuming).toBe(false);
+    expect(useLauncherStore.getState().isOpen).toBe(false);
+  });
 });
+

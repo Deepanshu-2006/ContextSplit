@@ -129,9 +129,13 @@ export function ContextLauncher() {
     return sortContextMatches(matched, searchQuery);
   }, [activeContext, recentContexts, searchQuery]);
 
-  // When selection index changes, fetch preview for that selected context
+  // When selection index changes or filteredList updates, fetch preview or clear if empty
   useEffect(() => {
-    if (filteredList.length > 0 && selectedIndex >= 0 && selectedIndex < filteredList.length) {
+    if (filteredList.length === 0) {
+      if (selectedContextId !== null) {
+        useLauncherStore.setState({ selectedContextId: null, activePreview: null });
+      }
+    } else if (selectedIndex >= 0 && selectedIndex < filteredList.length) {
       const current = filteredList[selectedIndex];
       if (current && current.id !== selectedContextId) {
         selectContextById(current.id);
@@ -348,6 +352,9 @@ export function ContextLauncher() {
             className="w-full bg-transparent text-sm text-stone-100 placeholder-stone-500 focus:outline-none"
             aria-label="Search contexts"
           />
+          {isLoading && (
+            <RefreshCw size={14} className="text-orange-400/80 animate-spin shrink-0 mr-2" aria-label="Loading contexts..." />
+          )}
           {searchQuery && (
             <button
               type="button"
@@ -401,7 +408,9 @@ export function ContextLauncher() {
               <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/20 text-red-200 flex items-start gap-2.5">
                 <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold text-red-300">Connection Error</p>
+                  <p className="text-xs font-semibold text-red-300">
+                    {searchQuery ? 'Search Error' : 'Connection Error'}
+                  </p>
                   <p className="text-xs text-red-400/80 mt-0.5">{error}</p>
                   <button
                     onClick={fetchLauncherData}
@@ -434,6 +443,7 @@ export function ContextLauncher() {
                     item={activeContext}
                     isSelected={selectedIndex === 0}
                     isPreviewOpen={selectedIndex === 0 && isPreviewOpen}
+                    isResuming={isResuming && selectedContextId === activeContext.id}
                     dataIndex={0}
                     onSelect={() => {
                       setSelectedIndex(0);
@@ -463,11 +473,11 @@ export function ContextLauncher() {
                 <div className="w-9 h-9 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
                   <Layers size={16} />
                 </div>
-                <p className="text-xs font-medium text-stone-300">
-                  No contexts matching "{searchQuery}"
+                <p className="text-xs font-semibold text-stone-300">
+                  No matching contexts
                 </p>
                 <p className="text-[11px] text-stone-500 max-w-xs">
-                  Try searching with a different keyword or create a new context.
+                  Try a different name or keyword.
                 </p>
               </div>
             )}
@@ -505,6 +515,7 @@ export function ContextLauncher() {
                           item={item}
                           isSelected={isSelected}
                           isPreviewOpen={isSelected && isPreviewOpen}
+                          isResuming={isResuming && selectedContextId === item.id}
                           dataIndex={globalIdx}
                           onSelect={() => {
                             setSelectedIndex(globalIdx);
@@ -543,6 +554,7 @@ export function ContextLauncher() {
                         item={item}
                         isSelected={isSelected}
                         isPreviewOpen={isSelected && isPreviewOpen}
+                        isResuming={isResuming && selectedContextId === item.id}
                         dataIndex={idx}
                         onSelect={() => {
                           setSelectedIndex(idx);
@@ -943,6 +955,7 @@ interface ContextLauncherItemProps {
   item: LauncherContextItem;
   isSelected: boolean;
   isPreviewOpen?: boolean;
+  isResuming?: boolean;
   dataIndex: number;
   onSelect: () => void;
   onResume: () => void;
@@ -952,6 +965,7 @@ function ContextLauncherItem({
   item,
   isSelected,
   isPreviewOpen = false,
+  isResuming = false,
   dataIndex,
   onSelect,
   onResume,
@@ -1054,18 +1068,25 @@ function ContextLauncherItem({
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
-        <span
-          className={`text-[9px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
-            isSelected
-              ? isPreviewOpen
-                ? 'opacity-100 bg-orange-500 text-stone-950 font-semibold shadow-sm'
-                : 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
-              : 'opacity-0 text-stone-400'
-          }`}
-        >
-          <span>{isPreviewOpen ? 'Previewing' : 'Inspect'}</span>
-          <CornerDownLeft size={9} />
-        </span>
+        {isSelected && isResuming ? (
+          <span className="text-[9px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1.5 bg-orange-500/20 text-orange-300 border border-orange-500/30">
+            <RefreshCw size={9} className="animate-spin text-orange-400" />
+            <span>Resuming...</span>
+          </span>
+        ) : (
+          <span
+            className={`text-[9px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
+              isSelected
+                ? isPreviewOpen
+                  ? 'opacity-100 bg-orange-500 text-stone-950 font-semibold shadow-sm'
+                  : 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
+                : 'opacity-0 text-stone-400'
+            }`}
+          >
+            <span>{isPreviewOpen ? 'Previewing' : 'Inspect'}</span>
+            <CornerDownLeft size={9} />
+          </span>
+        )}
       </div>
     </div>
   );
