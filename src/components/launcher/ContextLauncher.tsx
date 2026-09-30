@@ -896,9 +896,24 @@ function ContextPreviewPane({
             <h3 className="text-sm font-semibold text-stone-100 truncate">
               {preview.name}
             </h3>
-            <p className="text-[11px] text-stone-400 mt-0.5">
-              {formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}
-            </p>
+            <div className="flex items-center gap-2 mt-1 flex-wrap text-[11px] text-stone-400">
+              <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
+              {preview.projectIdentifier && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-500/10 text-[9.5px] font-mono text-blue-300 border border-blue-500/20">
+                  <FolderOpen size={9} className="text-blue-400" />
+                  {preview.projectIdentifier}
+                </span>
+              )}
+              {preview.repository && preview.repository !== preview.projectIdentifier && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-[9.5px] font-mono text-stone-300 border border-white/5">
+                  <GitBranch size={9} className="text-stone-400" />
+                  {preview.repository}
+                </span>
+              )}
+              <span className="font-mono text-[9px] text-stone-500">
+                #{preview.contextId.slice(0, 10)}
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
@@ -1230,7 +1245,13 @@ function ContextLauncherItem({
                 Archived
               </span>
             )}
-            {item.repository && (
+            {item.projectIdentifier && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-500/10 text-[9px] font-mono text-blue-300 border border-blue-500/20 shrink-0">
+                <FolderOpen size={9} className="text-blue-400" />
+                {item.projectIdentifier}
+              </span>
+            )}
+            {item.repository && item.repository !== item.projectIdentifier && (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-[9px] font-mono text-stone-300 border border-white/5 shrink-0">
                 <GitBranch size={9} className="text-stone-400" />
                 {item.repository}
@@ -1251,7 +1272,7 @@ function ContextLauncherItem({
             ) : (
               <span>{formatGentleTime(item.lastActiveAt)}</span>
             )}
-            {item.lastActiveAt && (item.taskTitle || item.description || item.repository) && (
+            {item.lastActiveAt && (item.taskTitle || item.description || item.repository || item.projectIdentifier) && (
               <>
                 <span className="text-stone-600">•</span>
                 <span className="text-stone-500 shrink-0">{formatGentleTime(item.lastActiveAt)}</span>

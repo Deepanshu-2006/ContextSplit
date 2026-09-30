@@ -28,6 +28,7 @@ export interface LauncherContextItem {
   recentActivitySummary?: string | null;
   memoryStatement?: string | null;
   resumeReadiness?: LauncherResumeReadiness | null;
+  workspacePath?: string | null;
 }
 
 export type ContextFilterType = 'all' | 'active' | 'recent' | 'paused' | 'archived';
@@ -227,6 +228,9 @@ export interface LauncherPreviewModel {
   contextId: string;
   name: string;
   state: string;
+  projectIdentifier?: string | null;
+  repository?: string | null;
+  workspacePath?: string | null;
   taskTitle?: string | null;
   lastActiveAt?: string | null;
   durationEstimate?: string | null;
@@ -463,10 +467,35 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           readinessData?.left_off_on ||
           null;
 
+        const targetContextItem =
+          (get().activeContext?.id === contextId ? get().activeContext : null) ||
+          get().recentContexts.find((c) => c.id === contextId);
+
+        const projectIdentifier =
+          targetContextItem?.projectIdentifier ||
+          (wsMeta as any)?.project_identifier ||
+          (stateData as any)?.project_identifier ||
+          null;
+
+        const repository =
+          targetContextItem?.repository ||
+          (wsMeta as any)?.repository ||
+          (wsMeta as any)?.repo_name ||
+          (stateData as any)?.repository ||
+          null;
+
+        const workspacePath =
+          targetContextItem?.workspacePath ||
+          (wsMeta as any)?.path ||
+          null;
+
         const previewModel: LauncherPreviewModel = {
           contextId,
           name,
           state: rawState,
+          projectIdentifier,
+          repository,
+          workspacePath,
           taskTitle,
           lastActiveAt: stateData?.last_active_at || wsMeta?.updated_at || null,
           durationEstimate: stateData?.freshness_display || null,

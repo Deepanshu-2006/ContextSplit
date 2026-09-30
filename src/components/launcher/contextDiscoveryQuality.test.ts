@@ -385,4 +385,66 @@ describe('Context Discovery Quality Tests', () => {
     expect(success).toBe(true);
     expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-doc-team');
   });
+
+  // 17. Disambiguation: contexts with identical names provide rich secondary metadata without renaming or merging
+  it('17. preserves identical context names without automatic renaming or merging, offering rich secondary metadata', () => {
+    const docContexts = testDatabase.filter((c) => c.name === 'Documentation');
+    expect(docContexts).toHaveLength(2);
+
+    // Verify neither context was automatically renamed
+    expect(docContexts[0].name).toBe('Documentation');
+    expect(docContexts[1].name).toBe('Documentation');
+
+    // Verify distinct secondary metadata is present to disambiguate them
+    expect(docContexts[0].projectIdentifier).toBe('docs-internal');
+    expect(docContexts[0].repository).toBe('internal-docs');
+    expect(docContexts[0].taskTitle).toBe('API migration guide');
+
+    expect(docContexts[1].projectIdentifier).toBe('docs-public');
+    expect(docContexts[1].repository).toBe('public-api-docs');
+    expect(docContexts[1].taskTitle).toBe('Release notes v2.4');
+
+    // Verify neither was merged or duplicated
+    const uniqueIds = new Set(docContexts.map((c) => c.id));
+    expect(uniqueIds.size).toBe(2);
+  });
+
+  // 18. Disambiguation: preview model populates secondary metadata and maintains strict ID resolution
+  it('18. populates disambiguating secondary metadata in preview model and guarantees strict ID resolution', async () => {
+    vi.mocked(contextInteractionService.getContextState).mockResolvedValue({
+      context_id: 'ctx-doc-public',
+      context_name: 'Documentation',
+      state: 'recent',
+      task_title: 'Release notes v2.4',
+    });
+    vi.mocked(contextInteractionService.getContextWorkset).mockResolvedValue({
+      context_id: 'ctx-doc-public',
+      items: [],
+    });
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValue({
+      context_id: 'ctx-doc-public',
+      readiness: { readiness: 'ready' },
+    } as any);
+
+    useLauncherStore.setState({
+      isOpen: true,
+      activeContext: null,
+      recentContexts: testDatabase,
+      selectedContextId: null,
+      activePreview: null,
+    });
+
+    // Select the public doc context
+    await useLauncherStore.getState().selectContextById('ctx-doc-public');
+
+    // Allow debounce timer (40ms) to resolve
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const state = useLauncherStore.getState();
+    expect(state.selectedContextId).toBe('ctx-doc-public');
+    expect(state.activePreview?.contextId).toBe('ctx-doc-public');
+    expect(state.activePreview?.name).toBe('Documentation');
+    expect(state.activePreview?.projectIdentifier).toBe('docs-public');
+    expect(state.activePreview?.repository).toBe('public-api-docs');
+  });
 });
