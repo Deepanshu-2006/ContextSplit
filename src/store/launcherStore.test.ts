@@ -493,10 +493,138 @@ describe('useLauncherStore', () => {
 
       const sorted = sortContextMatches(candidates, 'pay');
       expect(sorted.map((c) => c.name)).toEqual([
-        'Pay',                // Exact match
-        'PayX Development',   // Prefix match
-        'Other Project',      // Substring/description match
+        'Pay',                // Exact match (Tier 1)
+        'PayX Development',   // Prefix match (Tier 2)
+        'Other Project',      // Substring/description match (Tier 4)
       ]);
+    });
+  });
+
+  describe('Deterministic Search Ranking (5-Level Specification)', () => {
+    it('ranks PayX Development higher than Payment Research and University Payment Assignment for query "pay"', () => {
+      const candidates: LauncherContextItem[] = [
+        {
+          id: 'ctx-univ',
+          name: 'University Payment Assignment',
+          lastActiveAt: '2026-10-01T15:00:00Z',
+        },
+        {
+          id: 'ctx-payment-res',
+          name: 'Payment Research',
+          lastActiveAt: '2026-09-30T10:00:00Z',
+        },
+        {
+          id: 'ctx-payx',
+          name: 'PayX Development',
+          lastActiveAt: '2026-10-01T12:00:00Z',
+        },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+
+      // PayX Development ranks highest because query directly matches context name prefix
+      expect(sorted[0].name).toBe('PayX Development');
+      expect(sorted[1].name).toBe('Payment Research');
+      // University Payment Assignment ranks lower because name only contains query as secondary word
+      expect(sorted[2].name).toBe('University Payment Assignment');
+    });
+
+    it('ranks exact context name match first (Order 1)', () => {
+      const candidates: LauncherContextItem[] = [
+        { id: '1', name: 'PayX Development', lastActiveAt: '2026-10-01T15:00:00Z' },
+        { id: '2', name: 'Pay', lastActiveAt: '2026-09-01T10:00:00Z' }, // Older, but exact name match
+        { id: '3', name: 'University Payment Assignment', lastActiveAt: '2026-10-01T16:00:00Z' },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+      expect(sorted[0].name).toBe('Pay');
+      expect(sorted[1].name).toBe('PayX Development');
+      expect(sorted[2].name).toBe('University Payment Assignment');
+    });
+
+    it('ranks context name starts with query above name contains query (Order 2 vs 3)', () => {
+      const candidates: LauncherContextItem[] = [
+        { id: '1', name: 'University Payment Assignment' },
+        { id: '2', name: 'PayX Development' },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+      expect(sorted[0].name).toBe('PayX Development');
+      expect(sorted[1].name).toBe('University Payment Assignment');
+    });
+
+    it('ranks context name contains query above description/metadata match (Order 3 vs 4)', () => {
+      const candidates: LauncherContextItem[] = [
+        {
+          id: '1',
+          name: 'Student Finance Portal',
+          description: 'Payment terminal for tuition',
+        },
+        {
+          id: '2',
+          name: 'University Payment Assignment',
+          description: 'Coursework project',
+        },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+      expect(sorted[0].name).toBe('University Payment Assignment');
+      expect(sorted[1].name).toBe('Student Finance Portal');
+    });
+
+    it('uses recency as a tie-breaker within the same match tier (Order 5)', () => {
+      const candidates: LauncherContextItem[] = [
+        {
+          id: '1',
+          name: 'Global Payment Service',
+          lastActiveAt: '2026-09-28T10:00:00Z', // Older
+        },
+        {
+          id: '2',
+          name: 'Local Payment Service',
+          lastActiveAt: '2026-10-01T14:00:00Z', // Newer
+        },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'payment');
+      expect(sorted[0].name).toBe('Local Payment Service');
+      expect(sorted[1].name).toBe('Global Payment Service');
+    });
+
+    it('prioritizes active context recency in tie-breaking', () => {
+      const candidates: LauncherContextItem[] = [
+        {
+          id: '1',
+          name: 'Context A',
+          description: 'pay system',
+          lastActiveAt: '2026-09-20T10:00:00Z',
+          isActive: false,
+        },
+        {
+          id: '2',
+          name: 'Context B',
+          description: 'pay system',
+          isActive: true, // Currently active context
+        },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+      expect(sorted[0].name).toBe('Context B');
+      expect(sorted[1].name).toBe('Context A');
+    });
+
+    it('maintains deterministic output without exposing arbitrary numerical scores', () => {
+      const candidates: LauncherContextItem[] = [
+        { id: '1', name: 'Alpha Payment' },
+        { id: '2', name: 'Beta Payment' },
+      ];
+
+      const sorted1 = sortContextMatches(candidates, 'payment');
+      const sorted2 = sortContextMatches(candidates, 'payment');
+
+      expect(sorted1.map((c) => c.id)).toEqual(sorted2.map((c) => c.id));
+      expect(sorted1[0].name).toBe('Alpha Payment');
+      expect(sorted1[1].name).toBe('Beta Payment');
     });
   });
 });
