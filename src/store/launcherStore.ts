@@ -62,35 +62,123 @@ export function matchContext(item: LauncherContextItem, query: string): boolean 
 }
 
 /**
- * Sort matching contexts deterministically giving precedence to exact and prefix name matches
- * while preserving engine recency order.
+ * Deterministic search ranking tier for a context item:
+ * 1. Exact context name match
+ * 2. Context name starts with query
+ * 3. Context name contains query
+ * 4. Description/project metadata match
+ * 5. Non-matching fallback
+ */
+export type ContextSearchTier = 1 | 2 | 3 | 4 | 5;
+
+/**
+ * Computes deterministic search ranking tier for a context item.
+ */
+export function getContextSearchTier(item: LauncherContextItem, query: string): ContextSearchTier {
+  const q = query.trim().toLowerCase();
+  if (!q) return 1;
+
+  const name = item.name.trim().toLowerCase();
+
+  // 1. Exact context name match
+  if (name === q) {
+    return 1;
+  }
+
+  // 2. Context name starts with query
+  if (name.startsWith(q)) {
+    return 2;
+  }
+
+  const terms = q.split(/\s+/).filter(Boolean);
+
+  // 3. Context name contains query or contains all query terms
+  if (name.includes(q) || (terms.length > 0 && terms.every((t) => name.includes(t)))) {
+    return 3;
+  }
+
+  // 4. Description or project/repo/task metadata match
+  const metadataText = [
+    item.description,
+    item.projectIdentifier,
+    item.repository,
+    item.taskTitle,
+    item.recentActivitySummary,
+    item.memoryStatement,
+    item.state,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (terms.length > 0 && terms.every((t) => (name + ' ' + metadataText).includes(t))) {
+    return 4;
+  }
+
+  return 5;
+}
+
+/**
+ * Extracts a deterministic numeric timestamp for recency tie-breaking.
+ */
+export function getContextRecencyTimestamp(item: LauncherContextItem): number {
+  if (item.isActive) {
+    if (item.lastActiveAt) {
+      const parsed = new Date(item.lastActiveAt).getTime();
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+    return Date.now();
+  }
+
+  if (!item.lastActiveAt) return 0;
+  const parsed = new Date(item.lastActiveAt).getTime();
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * Sorts matching contexts deterministically based on:
+ * 1. Exact context name match
+ * 2. Context name starts with query
+ * 3. Context name contains query
+ * 4. Description/project metadata match
+ * 5. Recency as a tie-breaker
+ *
+ * Secondary tie-breakers for equal recency:
+ * - Shorter matching prefix token (e.g. PayX before Payment for query "pay")
+ * - Shorter overall name length
+ * - Deterministic alphabetical order by name
  */
 export function sortContextMatches(items: LauncherContextItem[], query: string): LauncherContextItem[] {
   const q = query.trim().toLowerCase();
   if (!q) return items;
 
   return [...items].sort((a, b) => {
-    const aName = a.name.toLowerCase();
-    const bName = b.name.toLowerCase();
+    // 1-4: Ranking tier
+    const tierA = getContextSearchTier(a, q);
+    const tierB = getContextSearchTier(b, q);
 
-    // 1. Exact match on name
-    if (aName === q && bName !== q) return -1;
-    if (bName === q && aName !== q) return 1;
+    if (tierA !== tierB) {
+      return tierA - tierB;
+    }
 
-    // 2. Starts with query in name
-    const aStarts = aName.startsWith(q);
-    const bStarts = bName.startsWith(q);
-    if (aStarts && !bStarts) return -1;
-    if (bStarts && !aStarts) return 1;
+    // 5. Recency as a tie-breaker
+    const recencyA = getContextRecencyTimestamp(a);
+    const recencyB = getContextRecencyTimestamp(b);
+    if (recencyA !== recencyB) {
+      return recencyB - recencyA; // Most recent first
+    }
 
-    // 3. Name contains query
-    const aNameIncludes = aName.includes(q);
-    const bNameIncludes = bName.includes(q);
-    if (aNameIncludes && !bNameIncludes) return -1;
-    if (bNameIncludes && !aNameIncludes) return 1;
+    // Secondary deterministic tie-breaker for Tier 2: shorter matching prefix token (e.g. "PayX" vs "Payment")
+    if (tierA === 2 && tierB === 2) {
+      const wordA = a.name.split(/\s+/)[0] || a.name;
+      const wordB = b.name.split(/\s+/)[0] || b.name;
+      if (wordA.length !== wordB.length) {
+        return wordA.length - wordB.length;
+      }
+    }
 
-    // 4. Default to preserving incoming engine recency ordering
-    return 0;
+    // Final deterministic tie-breaker: alphabetical order
+    return a.name.localeCompare(b.name);
   });
 }
 
