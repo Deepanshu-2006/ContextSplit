@@ -23,6 +23,7 @@ import {
   Play,
   Star,
   GitBranch,
+  Pause,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -30,10 +31,20 @@ import {
   LauncherPreviewModel,
   LauncherPreviewItem,
   ResumeActionStatus,
+  ContextFilterType,
+  matchesContextFilter,
   matchContext,
   sortContextMatches,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
+
+const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'active', label: 'Active' },
+  { id: 'recent', label: 'Recent' },
+  { id: 'paused', label: 'Paused' },
+  { id: 'archived', label: 'Archived' },
+];
 
 /**
  * Gentle relative time formatter without noisy raw timestamps.
@@ -81,9 +92,11 @@ export function ContextLauncher() {
     activeContext,
     recentContexts,
     isPreviewOpen,
+    activeFilter,
     setIsPreviewOpen,
     closeLauncher,
     setSearchQuery,
+    setActiveFilter,
     setSelectedIndex,
     selectContextById,
     fetchLauncherData,
@@ -112,7 +125,24 @@ export function ContextLauncher() {
     }
   }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
-  // Filter contexts based on search query using deterministic structured matching
+  // Calculate quick count badges for each filter option
+  const filterCounts = useMemo(() => {
+    const all: LauncherContextItem[] = [];
+    if (activeContext) all.push(activeContext);
+    for (const ctx of recentContexts) {
+      if (activeContext && ctx.id === activeContext.id) continue;
+      all.push(ctx);
+    }
+    return {
+      all: all.length,
+      active: all.filter((c) => matchesContextFilter(c, 'active')).length,
+      recent: all.filter((c) => matchesContextFilter(c, 'recent')).length,
+      paused: all.filter((c) => matchesContextFilter(c, 'paused')).length,
+      archived: all.filter((c) => matchesContextFilter(c, 'archived')).length,
+    };
+  }, [activeContext, recentContexts]);
+
+  // Filter and rank contexts based on search query and active lifecycle filter
   const filteredList = useMemo(() => {
     const all: LauncherContextItem[] = [];
     if (activeContext) {
@@ -123,11 +153,16 @@ export function ContextLauncher() {
       all.push(ctx);
     }
 
-    if (!searchQuery.trim()) return all;
+    // 1. Compose with lifecycle filter
+    const stateFiltered = all.filter((item) => matchesContextFilter(item, activeFilter));
 
-    const matched = all.filter((ctx) => matchContext(ctx, searchQuery));
+    // 2. If no search query, return state-filtered list
+    if (!searchQuery.trim()) return stateFiltered;
+
+    // 3. Match search query terms against structured metadata within state-filtered contexts
+    const matched = stateFiltered.filter((ctx) => matchContext(ctx, searchQuery));
     return sortContextMatches(matched, searchQuery);
-  }, [activeContext, recentContexts, searchQuery]);
+  }, [activeContext, recentContexts, activeFilter, searchQuery]);
 
   // When selection index changes or filteredList updates, fetch preview or clear if empty
   useEffect(() => {
@@ -148,7 +183,7 @@ export function ContextLauncher() {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. Escape: dismiss prompt -> close preview -> clear search -> close launcher
+      // 1. Escape: dismiss prompt -> close preview -> clear search -> clear filter -> close launcher
       if (e.key === 'Escape') {
         e.preventDefault();
         if (notReadyReason || resumeError) {
@@ -161,6 +196,10 @@ export function ContextLauncher() {
           // Clear search query and return to active + recent contexts
           setSearchQuery('');
           inputRef.current?.focus();
+        } else if (activeFilter !== 'all') {
+          // Reset lifecycle filter
+          setActiveFilter('all');
+          inputRef.current?.focus();
         } else {
           // Close launcher
           closeLauncher();
@@ -168,7 +207,36 @@ export function ContextLauncher() {
         return;
       }
 
-      // 2. Focus Search: Cmd+F, Ctrl+F, or '/' (when not typing in an input)
+      // 2. Quick Filter Shortcuts: Cmd+1..5 / Ctrl+1..5
+      if (e.metaKey || e.ctrlKey) {
+        if (e.key === '1') {
+          e.preventDefault();
+          setActiveFilter('all');
+          return;
+        }
+        if (e.key === '2') {
+          e.preventDefault();
+          setActiveFilter('active');
+          return;
+        }
+        if (e.key === '3') {
+          e.preventDefault();
+          setActiveFilter('recent');
+          return;
+        }
+        if (e.key === '4') {
+          e.preventDefault();
+          setActiveFilter('paused');
+          return;
+        }
+        if (e.key === '5') {
+          e.preventDefault();
+          setActiveFilter('archived');
+          return;
+        }
+      }
+
+      // 3. Focus Search: Cmd+F, Ctrl+F, or '/' (when not typing in an input)
       if (
         ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') ||
         (e.key === '/' && document.activeElement !== inputRef.current)
@@ -265,8 +333,10 @@ export function ContextLauncher() {
     notReadyReason,
     resumeError,
     searchQuery,
+    activeFilter,
     closeLauncher,
     setSearchQuery,
+    setActiveFilter,
     setSelectedIndex,
     setIsPreviewOpen,
     resumeContextById,
@@ -371,6 +441,55 @@ export function ContextLauncher() {
           )}
         </div>
 
+        {/* 2.5. Lightweight Context Filter Chips */}
+        <div
+          role="tablist"
+          aria-label="Filter contexts by lifecycle state"
+          className="flex items-center gap-1.5 px-5 py-2 border-b border-white/5 bg-stone-950/40 overflow-x-auto text-[11px]"
+        >
+          <span className="text-[10px] uppercase font-semibold text-stone-400 mr-1 tracking-wider shrink-0">
+            Filter:
+          </span>
+          {FILTER_OPTIONS.map((f, idx) => {
+            const isSelected = activeFilter === f.id;
+            const count = filterCounts[f.id];
+            return (
+              <button
+                key={f.id}
+                role="tab"
+                id={`launcher-filter-tab-${f.id}`}
+                aria-selected={isSelected}
+                tabIndex={0}
+                onClick={() => {
+                  setActiveFilter(f.id);
+                  inputRef.current?.focus();
+                }}
+                className={`px-2.5 py-0.5 rounded-lg font-medium transition-all shrink-0 flex items-center gap-1.5 cursor-pointer border ${
+                  isSelected
+                    ? 'bg-orange-500/20 text-orange-200 border-orange-500/40 ring-1 ring-orange-500/30'
+                    : 'text-stone-400 hover:text-stone-200 hover:bg-white/5 border-transparent'
+                }`}
+              >
+                <span>{f.label}</span>
+                {count !== undefined && count > 0 && (
+                  <span
+                    className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                      isSelected
+                        ? 'bg-orange-500/30 text-orange-100'
+                        : 'bg-white/10 text-stone-400'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                )}
+                <kbd className="hidden sm:inline text-[8.5px] opacity-40 font-mono">
+                  ⌘{idx + 1}
+                </kbd>
+              </button>
+            );
+          })}
+        </div>
+
         {/* 3. Main Split View: Left List | Right Preview */}
         <div className="grid grid-cols-1 md:grid-cols-12 min-h-[400px] max-h-[480px] divide-y md:divide-y-0 md:divide-x divide-white/10">
           {/* Left Column: Contexts List */}
@@ -423,8 +542,8 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Active Context Section */}
-            {!isLoading && !error && !searchQuery && (
+            {/* Active Context Section (When no search query and All filter) */}
+            {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
               <div className="space-y-1">
                 <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
@@ -467,6 +586,60 @@ export function ContextLauncher() {
               </div>
             )}
 
+            {/* Filtered Contexts List (When filter is specific and no search query) */}
+            {!isLoading && !error && !searchQuery && activeFilter !== 'all' && (
+              <div className="space-y-1">
+                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span>
+                      {FILTER_OPTIONS.find((f) => f.id === activeFilter)?.label || activeFilter} Contexts ({filteredList.length})
+                    </span>
+                  </div>
+                  {filteredList.some((c) => c.isActive) && (
+                    <span className="text-[9.5px] text-emerald-400 font-medium flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      Active context included
+                    </span>
+                  )}
+                </div>
+
+                {filteredList.length === 0 ? (
+                  <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
+                    <div className="w-9 h-9 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
+                      <Layers size={16} />
+                    </div>
+                    <p className="text-xs font-semibold text-stone-300">
+                      No matching contexts
+                    </p>
+                    <p className="text-[11px] text-stone-500 max-w-xs">
+                      Try a different name or keyword.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {filteredList.map((item, idx) => {
+                      const isSelected = selectedIndex === idx;
+                      return (
+                        <ContextLauncherItem
+                          key={item.id}
+                          item={item}
+                          isSelected={isSelected}
+                          isPreviewOpen={isSelected && isPreviewOpen}
+                          isResuming={isResuming && selectedContextId === item.id}
+                          dataIndex={idx}
+                          onSelect={() => {
+                            setSelectedIndex(idx);
+                            setIsPreviewOpen(true);
+                          }}
+                          onResume={() => resumeContextById(item.id)}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Empty Search State */}
             {!isLoading && !error && searchQuery && filteredList.length === 0 && (
               <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
@@ -482,8 +655,8 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Recent Contexts Section */}
-            {!isLoading && !error && !searchQuery && (
+            {/* Recent Contexts Section (When no search query and All filter) */}
+            {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
               <div className="space-y-1 pt-1">
                 <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
@@ -614,12 +787,16 @@ export function ContextLauncher() {
               <span>Navigate</span>
             </span>
             <span className="flex items-center gap-1.5">
+              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">⌘1-5</kbd>
+              <span>Filter</span>
+            </span>
+            <span className="flex items-center gap-1.5">
               <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
               <span>{isPreviewOpen ? 'Resume' : 'Preview'}</span>
             </span>
             <span className="flex items-center gap-1.5">
               <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">Esc</kbd>
-              <span>{isPreviewOpen ? 'Back to list' : searchQuery ? 'Clear query' : 'Close'}</span>
+              <span>{isPreviewOpen ? 'Back to list' : searchQuery ? 'Clear query' : activeFilter !== 'all' ? 'Clear filter' : 'Close'}</span>
             </span>
           </div>
         </div>
@@ -736,6 +913,13 @@ function ContextPreviewPane({
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-stone-800 text-stone-400 border border-white/5">
                 <Archive size={10} />
                 <span>Dormant</span>
+              </span>
+            )}
+
+            {preview.state === 'paused' && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-950/60 text-amber-300 border border-amber-500/30">
+                <Pause size={10} />
+                <span>Paused</span>
               </span>
             )}
 
@@ -972,6 +1156,7 @@ function ContextLauncherItem({
 }: ContextLauncherItemProps) {
   const isDormant = item.state === 'dormant';
   const isArchived = item.state === 'archived';
+  const isPaused = item.state === 'paused';
 
   return (
     <div
@@ -997,6 +1182,8 @@ function ContextLauncherItem({
               ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
               : isSelected
               ? 'bg-orange-500/30 text-orange-200 border border-orange-500/40'
+              : isPaused
+              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
               : isDormant || isArchived
               ? 'bg-stone-850 text-stone-500 border border-white/5'
               : 'bg-stone-800 text-stone-400 border border-white/5'
@@ -1004,6 +1191,8 @@ function ContextLauncherItem({
         >
           {item.isActive ? (
             <CheckCircle2 size={15} />
+          ) : isPaused ? (
+            <Pause size={14} />
           ) : isArchived ? (
             <Archive size={14} />
           ) : (
@@ -1024,6 +1213,11 @@ function ContextLauncherItem({
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 Active
+              </span>
+            )}
+            {isPaused && (
+              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0">
+                Paused
               </span>
             )}
             {isDormant && (

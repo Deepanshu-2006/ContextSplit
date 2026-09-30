@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useLauncherStore, matchContext, sortContextMatches } from '../../store/launcherStore';
+import { useLauncherStore, matchContext, sortContextMatches, matchesContextFilter } from '../../store/launcherStore';
 import { contextInteractionService } from '../../services/contextInteractionService';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 
@@ -612,6 +612,70 @@ describe('Context Launcher Integration Tests', () => {
     const result = await resumePromise;
     expect(result).toBe(true);
     expect(useLauncherStore.getState().isResuming).toBe(false);
+    expect(useLauncherStore.getState().isOpen).toBe(false);
+  });
+
+  // 21. Search and filtering composition: Search: "pay", Filter: "paused" -> PayX Development
+  it('21. composes search and filtering correctly where Search: "pay" and Filter: "paused" yields PayX Development (Paused)', () => {
+    const active = { id: 'ctx-active', name: 'Payment Research', state: 'active', isActive: true };
+    const recents = [
+      { id: 'ctx-1', name: 'PayX Development', state: 'paused', isActive: false },
+      { id: 'ctx-2', name: 'University Payment Assignment', state: 'recent', isActive: false },
+      { id: 'ctx-3', name: 'Legacy Pay System', state: 'dormant', isActive: false },
+      { id: 'ctx-4', name: 'Frontend Refactor', state: 'paused', isActive: false },
+    ];
+
+    useLauncherStore.setState({
+      activeContext: active,
+      recentContexts: recents,
+      searchQuery: 'pay',
+      activeFilter: 'paused',
+    });
+
+    const all = [active, ...recents];
+
+    // Filter by 'paused'
+    const stateFiltered = all.filter((item) => matchesContextFilter(item, useLauncherStore.getState().activeFilter));
+    expect(stateFiltered.map((i) => i.name)).toEqual(['PayX Development', 'Legacy Pay System', 'Frontend Refactor']);
+
+    // Match query 'pay'
+    const searchMatched = stateFiltered.filter((item) => matchContext(item, useLauncherStore.getState().searchQuery));
+    expect(searchMatched.map((i) => i.name)).toEqual(['PayX Development', 'Legacy Pay System']);
+
+    // Ranked deterministically
+    const ranked = sortContextMatches(searchMatched, 'pay');
+    expect(ranked[0].name).toBe('PayX Development');
+    expect(ranked[0].state).toBe('paused');
+  });
+
+  // 22. Keyboard controls for filtering
+  it('22. provides keyboard-accessible filter transitions and Escape hierarchy', () => {
+    useLauncherStore.setState({
+      isOpen: true,
+      activeFilter: 'all',
+      searchQuery: '',
+    });
+
+    // Simulate Cmd+4 -> activates 'paused' filter
+    useLauncherStore.getState().setActiveFilter('paused');
+    expect(useLauncherStore.getState().activeFilter).toBe('paused');
+
+    // Simulate typing search query while filter is active
+    useLauncherStore.getState().setSearchQuery('pay');
+    expect(useLauncherStore.getState().searchQuery).toBe('pay');
+    expect(useLauncherStore.getState().activeFilter).toBe('paused');
+
+    // Escape 1: Clears search query
+    useLauncherStore.getState().setSearchQuery('');
+    expect(useLauncherStore.getState().searchQuery).toBe('');
+    expect(useLauncherStore.getState().activeFilter).toBe('paused');
+
+    // Escape 2: Clears filter back to 'all'
+    useLauncherStore.getState().setActiveFilter('all');
+    expect(useLauncherStore.getState().activeFilter).toBe('all');
+
+    // Escape 3: Closes launcher
+    useLauncherStore.getState().closeLauncher();
     expect(useLauncherStore.getState().isOpen).toBe(false);
   });
 });

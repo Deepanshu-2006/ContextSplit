@@ -30,6 +30,34 @@ export interface LauncherContextItem {
   resumeReadiness?: LauncherResumeReadiness | null;
 }
 
+export type ContextFilterType = 'all' | 'active' | 'recent' | 'paused' | 'archived';
+
+/**
+ * Matches a context item against the active lifecycle filter.
+ * Composes with search queries to enable refined discovery.
+ */
+export function matchesContextFilter(item: LauncherContextItem, filter: ContextFilterType): boolean {
+  if (filter === 'all') return true;
+
+  const state = (item.state || '').toLowerCase();
+
+  switch (filter) {
+    case 'active':
+      return Boolean(item.isActive || state === 'active');
+    case 'recent':
+      return Boolean(
+        state === 'recent' ||
+        (!item.isActive && state !== 'paused' && state !== 'dormant' && state !== 'archived' && state !== 'inactive')
+      );
+    case 'paused':
+      return Boolean(state === 'paused' || state === 'dormant');
+    case 'archived':
+      return Boolean(state === 'archived' || state === 'inactive');
+    default:
+      return true;
+  }
+}
+
 /**
  * Deterministic, whitespace-tolerant, case-insensitive context search matcher.
  * Matches against structured context metadata without searching arbitrary raw user files.
@@ -229,12 +257,14 @@ interface LauncherState {
   activeContext: LauncherContextItem | null;
   recentContexts: LauncherContextItem[];
   isPreviewOpen: boolean;
+  activeFilter: ContextFilterType;
   
   // Actions
   openLauncher: () => void;
   closeLauncher: () => void;
   toggleLauncher: () => void;
   setSearchQuery: (query: string) => void;
+  setActiveFilter: (filter: ContextFilterType) => void;
   setSelectedIndex: (index: number) => void;
   setIsPreviewOpen: (open: boolean) => void;
   selectContextById: (contextId: string) => Promise<void>;
@@ -263,11 +293,13 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   activeContext: null,
   recentContexts: [],
   isPreviewOpen: false,
+  activeFilter: 'all',
 
   openLauncher: () => {
     set({
       isOpen: true,
       searchQuery: '',
+      activeFilter: 'all',
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
@@ -290,6 +322,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     set({
       isOpen: false,
       searchQuery: '',
+      activeFilter: 'all',
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
@@ -312,6 +345,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
   setSearchQuery: (query: string) => {
     set({ searchQuery: query, selectedIndex: 0, isPreviewOpen: false });
+  },
+
+  setActiveFilter: (filter: ContextFilterType) => {
+    set({ activeFilter: filter, selectedIndex: 0, isPreviewOpen: false });
   },
 
   setSelectedIndex: (index: number) => {

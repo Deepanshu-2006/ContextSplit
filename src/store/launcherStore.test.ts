@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useLauncherStore, matchContext, sortContextMatches, LauncherContextItem } from './launcherStore';
+import {
+  useLauncherStore,
+  matchContext,
+  sortContextMatches,
+  matchesContextFilter,
+  ContextFilterType,
+  LauncherContextItem,
+} from './launcherStore';
 import { contextInteractionService } from '../services/contextInteractionService';
 import { useWorkspaceStore } from './workspaceStore';
 
@@ -649,6 +656,104 @@ describe('useLauncherStore', () => {
       useLauncherStore.getState().closeLauncher();
       expect(useLauncherStore.getState().isPreviewOpen).toBe(false);
       expect(useLauncherStore.getState().isOpen).toBe(false);
+    });
+  });
+
+  describe('Lightweight Context Filtering', () => {
+    const contexts: LauncherContextItem[] = [
+      {
+        id: 'ctx-active',
+        name: 'Payment Research',
+        isActive: true,
+        state: 'active',
+      },
+      {
+        id: 'ctx-paused',
+        name: 'PayX Development',
+        isActive: false,
+        state: 'paused',
+      },
+      {
+        id: 'ctx-recent',
+        name: 'University Payment Assignment',
+        isActive: false,
+        state: 'recent',
+      },
+      {
+        id: 'ctx-dormant',
+        name: 'Legacy Pay System',
+        isActive: false,
+        state: 'dormant',
+      },
+      {
+        id: 'ctx-archived',
+        name: 'Archived Payroll',
+        isActive: false,
+        state: 'archived',
+      },
+    ];
+
+    it('matches all items when filter is "all"', () => {
+      for (const ctx of contexts) {
+        expect(matchesContextFilter(ctx, 'all')).toBe(true);
+      }
+    });
+
+    it('matches only active contexts when filter is "active"', () => {
+      const activeMatches = contexts.filter((c) => matchesContextFilter(c, 'active'));
+      expect(activeMatches).toHaveLength(1);
+      expect(activeMatches[0].name).toBe('Payment Research');
+    });
+
+    it('matches paused and dormant contexts when filter is "paused"', () => {
+      const pausedMatches = contexts.filter((c) => matchesContextFilter(c, 'paused'));
+      expect(pausedMatches).toHaveLength(2);
+      expect(pausedMatches.map((c) => c.name)).toContain('PayX Development');
+      expect(pausedMatches.map((c) => c.name)).toContain('Legacy Pay System');
+    });
+
+    it('matches recent contexts when filter is "recent"', () => {
+      const recentMatches = contexts.filter((c) => matchesContextFilter(c, 'recent'));
+      expect(recentMatches.map((c) => c.name)).toContain('University Payment Assignment');
+      expect(recentMatches.map((c) => c.name)).not.toContain('Payment Research');
+      expect(recentMatches.map((c) => c.name)).not.toContain('PayX Development');
+    });
+
+    it('matches archived and inactive contexts when filter is "archived"', () => {
+      const archivedMatches = contexts.filter((c) => matchesContextFilter(c, 'archived'));
+      expect(archivedMatches).toHaveLength(1);
+      expect(archivedMatches[0].name).toBe('Archived Payroll');
+    });
+
+    it('composes search and filtering correctly (Search: "pay", Filter: "paused" -> PayX Development)', () => {
+      const query = 'pay';
+      const filter: ContextFilterType = 'paused';
+
+      // 1. Filter by lifecycle state
+      const stateFiltered = contexts.filter((c) => matchesContextFilter(c, filter));
+      expect(stateFiltered).toHaveLength(2); // PayX Development (paused) and Legacy Pay System (dormant)
+
+      // 2. Filter by search query
+      const searchMatched = stateFiltered.filter((c) => matchContext(c, query));
+      expect(searchMatched).toHaveLength(2);
+
+      // 3. Rank deterministically
+      const ranked = sortContextMatches(searchMatched, query);
+      expect(ranked[0].name).toBe('PayX Development');
+      expect(ranked[0].state).toBe('paused');
+    });
+
+    it('manages filter state in useLauncherStore cleanly', () => {
+      useLauncherStore.setState({ activeFilter: 'all', selectedIndex: 3 });
+      expect(useLauncherStore.getState().activeFilter).toBe('all');
+
+      useLauncherStore.getState().setActiveFilter('paused');
+      expect(useLauncherStore.getState().activeFilter).toBe('paused');
+      expect(useLauncherStore.getState().selectedIndex).toBe(0);
+
+      // Closing launcher resets filter to 'all'
+      useLauncherStore.getState().closeLauncher();
+      expect(useLauncherStore.getState().activeFilter).toBe('all');
     });
   });
 });
