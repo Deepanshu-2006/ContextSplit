@@ -205,8 +205,10 @@ export function sortContextMatches(items: LauncherContextItem[], query: string):
       }
     }
 
-    // Final deterministic tie-breaker: alphabetical order
-    return a.name.localeCompare(b.name);
+    // Final deterministic tie-breaker: alphabetical order by name, then deterministic ID order
+    const nameDiff = a.name.localeCompare(b.name);
+    if (nameDiff !== 0) return nameDiff;
+    return a.id.localeCompare(b.id);
   });
 }
 
