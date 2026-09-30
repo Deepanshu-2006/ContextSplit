@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useLauncherStore } from '../../store/launcherStore';
+import { useLauncherStore, matchContext, sortContextMatches } from '../../store/launcherStore';
 import { contextInteractionService } from '../../services/contextInteractionService';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 
@@ -378,5 +378,99 @@ describe('Context Launcher Integration Tests', () => {
     expect(useLauncherStore.getState().activePreview?.contextId).toBe('ctx-b');
     expect(useLauncherStore.getState().activePreview?.name).toBe('Context B');
     expect(useLauncherStore.getState().activePreview?.worksetItems[0].id).toBe('item-for-ctx-b');
+  });
+
+  // 13. Search integration: empty search shows active and recent contexts
+  it('13. provides active context and recent contexts when search is empty', () => {
+    const active = {
+      id: 'ctx-act',
+      name: 'PayX Development',
+      isActive: true,
+      repository: 'payx-repo',
+      taskTitle: 'Webhook handler',
+    };
+    const recents = [
+      { id: 'ctx-rec-1', name: 'University ML', lastActiveAt: '2026-10-01T12:00:00Z' },
+      { id: 'ctx-rec-2', name: 'ContextSplit Development', lastActiveAt: '2026-10-01T10:00:00Z' },
+    ];
+
+    useLauncherStore.setState({
+      activeContext: active,
+      recentContexts: recents,
+      searchQuery: '',
+      selectedIndex: 0,
+    });
+
+    const state = useLauncherStore.getState();
+    expect(state.searchQuery).toBe('');
+    expect(state.activeContext).toEqual(active);
+    expect(state.recentContexts).toHaveLength(2);
+    expect(state.activeContext?.isActive).toBe(true);
+  });
+
+  // 14. Search integration: search contains text, shows matches with state and metadata, active context identifiable
+  it('14. filters and ranks matching contexts with metadata while keeping active context identifiable', () => {
+    const active = {
+      id: 'ctx-act',
+      name: 'PayX Development',
+      isActive: true,
+      repository: 'payx-repo',
+      taskTitle: 'Stripe Webhook',
+    };
+    const recents = [
+      { id: 'ctx-rec-1', name: 'Payment Research', lastActiveAt: '2026-09-30T10:00:00Z' },
+      { id: 'ctx-rec-2', name: 'University Coursework', description: 'ML project' },
+    ];
+
+    useLauncherStore.setState({
+      activeContext: active,
+      recentContexts: recents,
+      searchQuery: 'pay',
+      selectedIndex: 0,
+    });
+
+    // Derive list as launcher component does
+    const all = [active, ...recents];
+    const matched = all.filter((c) => matchContext(c, 'pay'));
+    const sorted = sortContextMatches(matched, 'pay');
+
+    expect(sorted).toHaveLength(2);
+    // Active context ranks highest and has isActive: true
+    expect(sorted[0].id).toBe('ctx-act');
+    expect(sorted[0].isActive).toBe(true);
+    expect(sorted[0].repository).toBe('payx-repo');
+    expect(sorted[0].taskTitle).toBe('Stripe Webhook');
+
+    // Recent match has its own metadata
+    expect(sorted[1].id).toBe('ctx-rec-1');
+    expect(sorted[1].isActive).toBeUndefined();
+  });
+
+  // 15. Search integration: clearing search returns to active context and recents and resets selection
+  it('15. returns to active context and recent contexts upon clearing search query', () => {
+    const active = { id: 'ctx-act', name: 'Active Project', isActive: true };
+    const recents = [
+      { id: 'ctx-rec-1', name: 'Other Project A' },
+      { id: 'ctx-rec-2', name: 'Other Project B' },
+    ];
+
+    useLauncherStore.setState({
+      activeContext: active,
+      recentContexts: recents,
+      searchQuery: 'other',
+      selectedIndex: 1,
+    });
+
+    expect(useLauncherStore.getState().searchQuery).toBe('other');
+    expect(useLauncherStore.getState().selectedIndex).toBe(1);
+
+    // Clear search
+    useLauncherStore.getState().setSearchQuery('');
+
+    const state = useLauncherStore.getState();
+    expect(state.searchQuery).toBe('');
+    expect(state.selectedIndex).toBe(0); // Automatically reset to active context index
+    expect(state.activeContext?.id).toBe('ctx-act');
+    expect(state.recentContexts).toHaveLength(2);
   });
 });

@@ -22,6 +22,7 @@ import {
   HelpCircle,
   Play,
   Star,
+  GitBranch,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -489,9 +490,17 @@ export function ContextLauncher() {
             {/* Search Results List */}
             {!isLoading && !error && searchQuery && filteredList.length > 0 && (
               <div className="space-y-1">
-                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
-                  <Search size={11} className="text-stone-400" />
-                  <span>Matching Contexts ({filteredList.length})</span>
+                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Search size={11} className="text-stone-400" />
+                    <span>Matching Contexts ({filteredList.length})</span>
+                  </div>
+                  {filteredList.some((c) => c.isActive) && (
+                    <span className="text-[9.5px] text-emerald-400 font-medium flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      Active context included
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-1">
                   {filteredList.map((item, idx) => {
@@ -928,7 +937,7 @@ function ContextLauncherItem({
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <span
               className={`text-xs font-semibold truncate ${
                 isDormant || isArchived ? 'text-stone-300' : 'text-stone-100'
@@ -937,13 +946,25 @@ function ContextLauncherItem({
               {item.name}
             </span>
             {item.isActive && (
-              <span className="px-1.5 py-0.2 rounded text-[8.5px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 Active
               </span>
             )}
             {isDormant && (
-              <span className="px-1.5 py-0.2 rounded text-[8.5px] font-medium bg-stone-800 text-stone-400 border border-white/5">
+              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-stone-800 text-stone-400 border border-white/5 shrink-0">
                 Dormant
+              </span>
+            )}
+            {isArchived && (
+              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-stone-800/80 text-stone-400 border border-white/5 shrink-0">
+                Archived
+              </span>
+            )}
+            {item.repository && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-[9px] font-mono text-stone-300 border border-white/5 shrink-0">
+                <GitBranch size={9} className="text-stone-400" />
+                {item.repository}
               </span>
             )}
           </div>
@@ -951,12 +972,21 @@ function ContextLauncherItem({
           <div className="flex items-center gap-1.5 mt-0.5 text-[10.5px] text-stone-400 truncate">
             {item.taskTitle ? (
               <span className="truncate text-stone-300">
-                Task: <span className="text-stone-200">{item.taskTitle}</span>
+                <span className="text-stone-500 mr-1">Task:</span>
+                <span className="text-stone-200">{item.taskTitle}</span>
               </span>
+            ) : item.description ? (
+              <span className="truncate text-stone-400">{item.description}</span>
             ) : item.durationEstimate ? (
               <span>{item.durationEstimate}</span>
             ) : (
               <span>{formatGentleTime(item.lastActiveAt)}</span>
+            )}
+            {item.lastActiveAt && (item.taskTitle || item.description || item.repository) && (
+              <>
+                <span className="text-stone-600">•</span>
+                <span className="text-stone-500 shrink-0">{formatGentleTime(item.lastActiveAt)}</span>
+              </>
             )}
           </div>
         </div>
