@@ -414,13 +414,13 @@ describe('Context Discovery Quality Tests', () => {
     vi.mocked(contextInteractionService.getContextState).mockResolvedValue({
       context_id: 'ctx-doc-public',
       context_name: 'Documentation',
-      state: 'recent',
+      state: 'paused',
       task_title: 'Release notes v2.4',
-    });
+    } as any);
     vi.mocked(contextInteractionService.getContextWorkset).mockResolvedValue({
       context_id: 'ctx-doc-public',
       items: [],
-    });
+    } as any);
     vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValue({
       context_id: 'ctx-doc-public',
       readiness: { readiness: 'ready' },

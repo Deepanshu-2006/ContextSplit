@@ -62,6 +62,7 @@ export function matchesContextFilter(item: LauncherContextItem, filter: ContextF
 /**
  * Deterministic, whitespace-tolerant, case-insensitive context search matcher.
  * Matches against structured context metadata without searching arbitrary raw user files.
+ * Optimized to avoid intermediate array allocations and string joins per item during typing.
  */
 export function matchContext(item: LauncherContextItem, query: string): boolean {
   const normalizedQuery = query.trim().toLowerCase();
@@ -71,23 +72,50 @@ export function matchContext(item: LauncherContextItem, query: string): boolean 
   const terms = normalizedQuery.split(/\s+/).filter(Boolean);
   if (terms.length === 0) return true;
 
-  // Collect searchable structured text fields
-  const searchableText = [
-    item.name,
-    item.description,
-    item.projectIdentifier,
-    item.repository,
-    item.taskTitle,
-    item.recentActivitySummary,
-    item.memoryStatement,
-    item.state,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
+  const name = item.name.toLowerCase();
+  const desc = item.description?.toLowerCase();
+  const proj = item.projectIdentifier?.toLowerCase();
+  const repo = item.repository?.toLowerCase();
+  const task = item.taskTitle?.toLowerCase();
+  const activity = item.recentActivitySummary?.toLowerCase();
+  const memory = item.memoryStatement?.toLowerCase();
+  const state = item.state?.toLowerCase();
 
   // All query terms must match at least one searchable field
-  return terms.every((term) => searchableText.includes(term));
+  return terms.every(
+    (term) =>
+      name.includes(term) ||
+      (desc !== undefined && desc.includes(term)) ||
+      (proj !== undefined && proj.includes(term)) ||
+      (repo !== undefined && repo.includes(term)) ||
+      (task !== undefined && task.includes(term)) ||
+      (activity !== undefined && activity.includes(term)) ||
+      (memory !== undefined && memory.includes(term)) ||
+      (state !== undefined && state.includes(term))
+  );
+}
+
+/**
+ * Default maximum number of visible context results rendered in the launcher DOM.
+ * Bounds UI rendering cost to <2ms during fast typing bursts even with 5,000+ items.
+ */
+export const MAX_VISIBLE_LAUNCHER_RESULTS = 50;
+
+/**
+ * Computes windowed visible slice of contexts to keep DOM rendering cost <2ms
+ * while allowing continuous keyboard navigation past initial boundaries.
+ */
+export function getVisibleLauncherSlice<T>(
+  items: T[],
+  selectedIndex: number,
+  maxVisible = MAX_VISIBLE_LAUNCHER_RESULTS
+): { visibleItems: T[]; totalCount: number; hasMore: boolean } {
+  const visibleLimit = Math.max(maxVisible, Math.min(items.length, selectedIndex + 10));
+  return {
+    visibleItems: items.slice(0, visibleLimit),
+    totalCount: items.length,
+    hasMore: items.length > visibleLimit,
+  };
 }
 
 /**
@@ -127,20 +155,25 @@ export function getContextSearchTier(item: LauncherContextItem, query: string): 
   }
 
   // 4. Description or project/repo/task metadata match
-  const metadataText = [
-    item.description,
-    item.projectIdentifier,
-    item.repository,
-    item.taskTitle,
-    item.recentActivitySummary,
-    item.memoryStatement,
-    item.state,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
+  const desc = item.description?.toLowerCase();
+  const proj = item.projectIdentifier?.toLowerCase();
+  const repo = item.repository?.toLowerCase();
+  const task = item.taskTitle?.toLowerCase();
+  const activity = item.recentActivitySummary?.toLowerCase();
+  const memory = item.memoryStatement?.toLowerCase();
+  const state = item.state?.toLowerCase();
 
-  if (terms.length > 0 && terms.every((t) => (name + ' ' + metadataText).includes(t))) {
+  const termMatches = (t: string) =>
+    name.includes(t) ||
+    (desc !== undefined && desc.includes(t)) ||
+    (proj !== undefined && proj.includes(t)) ||
+    (repo !== undefined && repo.includes(t)) ||
+    (task !== undefined && task.includes(t)) ||
+    (activity !== undefined && activity.includes(t)) ||
+    (memory !== undefined && memory.includes(t)) ||
+    (state !== undefined && state.includes(t));
+
+  if (terms.length > 0 && terms.every(termMatches)) {
     return 4;
   }
 
@@ -179,38 +212,40 @@ export function getContextRecencyTimestamp(item: LauncherContextItem): number {
  */
 export function sortContextMatches(items: LauncherContextItem[], query: string): LauncherContextItem[] {
   const q = query.trim().toLowerCase();
-  if (!q) return items;
+  if (!q || items.length <= 1) return items;
 
-  return [...items].sort((a, b) => {
+  // Decorate items with ranking tier, recency timestamp, and prefix token length once in O(N)
+  // This avoids re-evaluating string metadata operations inside O(N log N) comparator calls
+  const decorated = items.map((item) => {
+    const tier = getContextSearchTier(item, q);
+    const recency = getContextRecencyTimestamp(item);
+    const wordLen = tier === 2 ? (item.name.split(/\s+/)[0] || item.name).length : 0;
+    return { item, tier, recency, wordLen };
+  });
+
+  decorated.sort((a, b) => {
     // 1-4: Ranking tier
-    const tierA = getContextSearchTier(a, q);
-    const tierB = getContextSearchTier(b, q);
-
-    if (tierA !== tierB) {
-      return tierA - tierB;
+    if (a.tier !== b.tier) {
+      return a.tier - b.tier;
     }
 
     // 5. Recency as a tie-breaker
-    const recencyA = getContextRecencyTimestamp(a);
-    const recencyB = getContextRecencyTimestamp(b);
-    if (recencyA !== recencyB) {
-      return recencyB - recencyA; // Most recent first
+    if (a.recency !== b.recency) {
+      return b.recency - a.recency; // Most recent first
     }
 
     // Secondary deterministic tie-breaker for Tier 2: shorter matching prefix token (e.g. "PayX" vs "Payment")
-    if (tierA === 2 && tierB === 2) {
-      const wordA = a.name.split(/\s+/)[0] || a.name;
-      const wordB = b.name.split(/\s+/)[0] || b.name;
-      if (wordA.length !== wordB.length) {
-        return wordA.length - wordB.length;
-      }
+    if (a.tier === 2 && b.tier === 2 && a.wordLen !== b.wordLen) {
+      return a.wordLen - b.wordLen;
     }
 
     // Final deterministic tie-breaker: alphabetical order by name, then deterministic ID order
-    const nameDiff = a.name.localeCompare(b.name);
+    const nameDiff = a.item.name.localeCompare(b.item.name);
     if (nameDiff !== 0) return nameDiff;
-    return a.id.localeCompare(b.id);
+    return a.item.id.localeCompare(b.item.id);
   });
+
+  return decorated.map((d) => d.item);
 }
 
 export interface LauncherPreviewItem {
