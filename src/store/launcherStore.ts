@@ -650,7 +650,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               projectIdentifier: (wsMeta as any)?.project_identifier || (entry as any)?.project_identifier || null,
               repository: (wsMeta as any)?.repository || (entry as any)?.repository || (wsMeta as any)?.repo_name || null,
               isActive: false,
-              state: wsMeta?.lifecycle_state || entry.transition_type || 'recent',
+              state: entry.state || entry.transition_type || wsMeta?.lifecycle_state || 'recent',
               lastActiveAt: entry.last_active_at || entry.ended_at || wsMeta?.updated_at || null,
               durationEstimate: entry.duration_estimate || null,
               taskTitle: entry.task_title || entry.title || null,
