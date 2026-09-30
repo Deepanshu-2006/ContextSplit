@@ -2,28 +2,12 @@ import { useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
-  Clock,
-  Layers,
   X,
   AlertCircle,
   RefreshCw,
-  CornerDownLeft,
-  CheckCircle2,
-  FolderOpen,
-  Compass,
-  Activity,
-  Sparkles,
-  Zap,
-  Archive,
+  Play,
   FileText,
   Link2,
-  Globe,
-  FileCode,
-  HelpCircle,
-  Play,
-  Star,
-  GitBranch,
-  Pause,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -126,22 +110,6 @@ export function ContextLauncher() {
     }
   }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
-  // Calculate quick count badges for each filter option
-  const filterCounts = useMemo(() => {
-    const all: LauncherContextItem[] = [];
-    if (activeContext) all.push(activeContext);
-    for (const ctx of recentContexts) {
-      if (activeContext && ctx.id === activeContext.id) continue;
-      all.push(ctx);
-    }
-    return {
-      all: all.length,
-      active: all.filter((c) => matchesContextFilter(c, 'active')).length,
-      recent: all.filter((c) => matchesContextFilter(c, 'recent')).length,
-      paused: all.filter((c) => matchesContextFilter(c, 'paused')).length,
-      archived: all.filter((c) => matchesContextFilter(c, 'archived')).length,
-    };
-  }, [activeContext, recentContexts]);
 
   // Filter and rank contexts based on search query and active lifecycle filter
   const filteredList = useMemo(() => {
@@ -378,42 +346,12 @@ export function ContextLauncher() {
       aria-label="Context Launcher"
     >
       <div
-        className="w-full max-w-4xl bg-stone-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in zoom-in-95 duration-150 focus-within:ring-1 focus-within:ring-white/15"
+        className="w-full max-w-4xl bg-stone-900 border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in duration-100"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 1. Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/10 bg-white/[0.02]">
-          <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-lg bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400">
-              <Compass size={14} />
-            </div>
-            <span className="text-xs font-semibold tracking-wide uppercase text-stone-300">
-              Context Launcher
-            </span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-stone-400">
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↑↓ / ⌃N⌃P</span>
-              <span>Navigate</span>
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px] ml-1">↵</span>
-              <span>Resume</span>
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px] ml-1">Esc</span>
-              <span>Close</span>
-            </div>
-            <button
-              onClick={closeLauncher}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:outline-none transition-colors cursor-pointer"
-              aria-label="Close launcher"
-            >
-              <X size={15} />
-            </button>
-          </div>
-        </div>
-
-        {/* 2. Search Input */}
-        <div className="relative flex items-center px-5 py-3.5 border-b border-white/10 bg-black/20 focus-within:bg-black/40 transition-colors">
-          <Search size={18} className="text-stone-400 shrink-0 mr-3" aria-hidden="true" />
+        {/* 1. Search */}
+        <div className="relative flex items-center px-4 py-3.5 border-b border-white/10 bg-stone-950/40">
+          <Search size={16} className="text-stone-400 shrink-0 mr-3" aria-hidden="true" />
           <input
             id="launcher-search-input"
             name="search"
@@ -435,7 +373,7 @@ export function ContextLauncher() {
             aria-label="Search contexts"
           />
           {isLoading && (
-            <RefreshCw size={14} className="text-orange-400/80 animate-spin shrink-0 mr-2" aria-label="Loading contexts..." />
+            <RefreshCw size={14} className="text-stone-400 animate-spin shrink-0 mr-2" aria-label="Loading contexts..." />
           )}
           {searchQuery && (
             <button
@@ -444,27 +382,26 @@ export function ContextLauncher() {
                 setSearchQuery('');
                 inputRef.current?.focus();
               }}
-              className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:outline-none transition-colors cursor-pointer"
+              className="p-1 rounded text-stone-400 hover:text-white transition-colors cursor-pointer mr-1.5"
               title="Clear search"
               aria-label="Clear search"
             >
               <X size={14} />
             </button>
           )}
+          <span className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-mono text-stone-500 bg-white/5 rounded">
+            Esc
+          </span>
         </div>
 
-        {/* 2.5. Lightweight Context Filter Chips */}
+        {/* Filter Tabs */}
         <div
           role="tablist"
           aria-label="Filter contexts by lifecycle state"
-          className="flex items-center gap-1.5 px-5 py-2 border-b border-white/5 bg-stone-950/40 overflow-x-auto text-[11px]"
+          className="flex items-center gap-1 px-4 py-1.5 border-b border-white/5 bg-stone-950/20 text-xs"
         >
-          <span className="text-[10px] uppercase font-semibold text-stone-400 mr-1 tracking-wider shrink-0">
-            Filter:
-          </span>
-          {FILTER_OPTIONS.map((f, idx) => {
+          {FILTER_OPTIONS.map((f) => {
             const isSelected = activeFilter === f.id;
-            const count = filterCounts[f.id];
             return (
               <button
                 key={f.id}
@@ -476,34 +413,20 @@ export function ContextLauncher() {
                   setActiveFilter(f.id);
                   inputRef.current?.focus();
                 }}
-                className={`px-2.5 py-0.5 rounded-lg font-medium transition-all shrink-0 flex items-center gap-1.5 cursor-pointer border ${
+                className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
                   isSelected
-                    ? 'bg-orange-500/20 text-orange-200 border-orange-500/40 ring-1 ring-orange-500/30'
-                    : 'text-stone-400 hover:text-stone-200 hover:bg-white/5 border-transparent'
+                    ? 'bg-white/10 text-stone-100 font-medium'
+                    : 'text-stone-400 hover:text-stone-200'
                 }`}
               >
-                <span>{f.label}</span>
-                {count !== undefined && count > 0 && (
-                  <span
-                    className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                      isSelected
-                        ? 'bg-orange-500/30 text-orange-100'
-                        : 'bg-white/10 text-stone-400'
-                    }`}
-                  >
-                    {count}
-                  </span>
-                )}
-                <kbd className="hidden sm:inline text-[8.5px] opacity-40 font-mono">
-                  ⌘{idx + 1}
-                </kbd>
+                {f.label}
               </button>
             );
           })}
         </div>
 
-        {/* 3. Main Split View: Left List | Right Preview */}
-        <div className="grid grid-cols-1 md:grid-cols-12 min-h-[400px] max-h-[480px] divide-y md:divide-y-0 md:divide-x divide-white/10">
+        {/* Main Split View: Left List | Right Preview & Resume */}
+        <div className="grid grid-cols-1 md:grid-cols-12 min-h-[380px] max-h-[460px] divide-y md:divide-y-0 md:divide-x divide-white/10">
           {/* Left Column: Contexts List */}
           <div
             id="launcher-context-list"
@@ -511,64 +434,47 @@ export function ContextLauncher() {
             aria-label="Context List"
             aria-activedescendant={selectedContextId ? `launcher-item-${selectedContextId}` : undefined}
             ref={listRef}
-            className="md:col-span-6 lg:col-span-5 overflow-y-auto p-3.5 space-y-3.5 focus:outline-none"
+            className="md:col-span-6 lg:col-span-5 overflow-y-auto p-2.5 space-y-3 focus:outline-none"
             tabIndex={-1}
           >
-            {/* Loading Skeleton State */}
+            {/* Loading state */}
             {isLoading && (
-              <div className="space-y-2 py-1 animate-pulse">
-                <div className="px-1 h-3 w-20 bg-stone-800 rounded text-[10px]" />
-                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
-                  <div className="h-4 w-32 bg-stone-800 rounded" />
-                  <div className="h-3 w-48 bg-stone-800/60 rounded" />
-                </div>
-                <div className="px-1 h-3 w-24 bg-stone-800 rounded text-[10px] mt-2" />
-                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
-                  <div className="h-4 w-28 bg-stone-800 rounded" />
-                  <div className="h-3 w-40 bg-stone-800/60 rounded" />
-                </div>
-                <div className="p-3 rounded-xl bg-stone-850/50 border border-white/5 space-y-2">
-                  <div className="h-4 w-36 bg-stone-800 rounded" />
-                  <div className="h-3 w-32 bg-stone-800/60 rounded" />
-                </div>
+              <div className="space-y-2 p-1 animate-pulse">
+                <div className="h-2.5 w-16 bg-stone-800 rounded" />
+                <div className="h-10 bg-stone-800/40 rounded-lg" />
+                <div className="h-2.5 w-20 bg-stone-800 rounded mt-3" />
+                <div className="h-10 bg-stone-800/40 rounded-lg" />
+                <div className="h-10 bg-stone-800/40 rounded-lg" />
               </div>
             )}
 
-            {/* Error State */}
+            {/* Error state */}
             {!isLoading && error && (
-              <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-500/20 text-red-200 flex items-start gap-2.5">
+              <div className="p-3 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs">
                 <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold text-red-300">
+                  <p className="font-medium text-red-300">
                     {searchQuery ? 'Search Error' : 'Connection Error'}
                   </p>
-                  <p className="text-xs text-red-400/80 mt-0.5">{error}</p>
+                  <p className="text-red-400/80 mt-0.5">{error}</p>
                   <button
                     onClick={fetchLauncherData}
-                    className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-red-900/50 hover:bg-red-900 text-[11px] font-medium text-red-200 border border-red-700/40 transition-colors cursor-pointer"
+                    className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900 text-[11px] text-red-200 transition-colors cursor-pointer"
                   >
-                    <RefreshCw size={11} />
+                    <RefreshCw size={10} />
                     Retry
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Active Context Section (When no search query and All filter) */}
+            {/* 2. Active Context Section (When no search query and All filter) */}
             {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
               <div className="space-y-1">
-                <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Current Active</span>
-                  </div>
-                  {activeContext && (
-                    <span className="text-[10px] text-stone-400 font-normal">
-                      {formatGentleTime(activeContext.lastActiveAt, activeContext.durationEstimate)}
-                    </span>
-                  )}
+                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>Active Context</span>
                 </div>
-
                 {activeContext ? (
                   <ContextLauncherItem
                     item={activeContext}
@@ -583,52 +489,25 @@ export function ContextLauncher() {
                     onResume={() => resumeContextById(activeContext.id)}
                   />
                 ) : (
-                  <div className="p-3 rounded-xl bg-stone-850/40 border border-white/5 flex items-start gap-2.5 text-stone-300">
-                    <div className="w-6 h-6 rounded-lg bg-stone-800 flex items-center justify-center text-stone-400 shrink-0 mt-0.5">
-                      <Sparkles size={13} className="text-stone-400" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <span className="text-xs font-semibold text-stone-200">No active context</span>
-                      <p className="text-[11px] text-stone-400 mt-0.5 leading-relaxed">
-                        Start working and ContextSplit will build your context.
-                      </p>
-                    </div>
-                  </div>
+                  <p className="text-xs text-stone-500 px-2 py-1">No active context</p>
                 )}
               </div>
             )}
 
-            {/* Filtered Contexts List (When filter is specific and no search query) */}
+            {/* 3. Results / Recent Contexts */}
+            {/* Filtered view when specific filter is selected and no search query */}
             {!isLoading && !error && !searchQuery && activeFilter !== 'all' && (
               <div className="space-y-1">
-                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <span>
-                      {FILTER_OPTIONS.find((f) => f.id === activeFilter)?.label || activeFilter} Contexts ({filteredList.length})
-                    </span>
-                  </div>
-                  {filteredList.some((c) => c.isActive) && (
-                    <span className="text-[9.5px] text-emerald-400 font-medium flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Active context included
-                    </span>
-                  )}
+                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
+                  {FILTER_OPTIONS.find((f) => f.id === activeFilter)?.label || activeFilter} Contexts ({filteredList.length})
                 </div>
-
                 {filteredList.length === 0 ? (
-                  <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
-                    <div className="w-9 h-9 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
-                      <Layers size={16} />
-                    </div>
-                    <p className="text-xs font-semibold text-stone-300">
-                      No matching contexts
-                    </p>
-                    <p className="text-[11px] text-stone-500 max-w-xs">
-                      Try a different name or keyword.
-                    </p>
+                  <div className="py-8 text-center space-y-1">
+                    <p className="text-xs font-medium text-stone-300">No matching contexts</p>
+                    <p className="text-xs text-stone-500">Try a different name or keyword.</p>
                   </div>
                 ) : (
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {visibleFilteredList.map((item, idx) => {
                       const isSelected = selectedIndex === idx;
                       return (
@@ -648,8 +527,8 @@ export function ContextLauncher() {
                       );
                     })}
                     {hasMoreFiltered && (
-                      <div className="px-3 py-2 text-center text-[10.5px] text-stone-500 border-t border-white/5">
-                        Showing top {visibleFilteredList.length} of {filteredList.length} matching contexts. Refine your query to narrow down.
+                      <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
+                        Showing top {visibleFilteredList.length} of {filteredList.length} contexts
                       </div>
                     )}
                   </div>
@@ -657,45 +536,24 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Empty Search State */}
+            {/* Empty search results state */}
             {!isLoading && !error && searchQuery && filteredList.length === 0 && (
-              <div className="py-12 flex flex-col items-center justify-center text-center space-y-2">
-                <div className="w-9 h-9 rounded-full bg-stone-800 flex items-center justify-center text-stone-400">
-                  <Layers size={16} />
-                </div>
-                <p className="text-xs font-semibold text-stone-300">
-                  No matching contexts
-                </p>
-                <p className="text-[11px] text-stone-500 max-w-xs">
-                  Try a different name or keyword.
-                </p>
+              <div className="py-8 text-center space-y-1">
+                <p className="text-xs font-medium text-stone-300">No matching contexts</p>
+                <p className="text-xs text-stone-500">Try a different name or keyword.</p>
               </div>
             )}
 
-            {/* Recent Contexts Section (When no search query and All filter) */}
+            {/* Recent Contexts list (When no search query and All filter) */}
             {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
-              <div className="space-y-1 pt-1">
-                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Clock size={11} className="text-stone-400" />
-                    <span>Recent Contexts</span>
-                  </div>
-                  {recentContexts.length > 0 && (
-                    <span className="text-[10px] text-stone-400 font-normal">
-                      {recentContexts.length}
-                    </span>
-                  )}
+              <div className="space-y-1">
+                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
+                  Recent Contexts
                 </div>
-
                 {recentContexts.length === 0 ? (
-                  <div className="p-3.5 rounded-xl bg-stone-850/30 border border-white/5 text-center text-stone-400 space-y-0.5">
-                    <p className="text-xs font-medium text-stone-300">No recent contexts</p>
-                    <p className="text-[11px] text-stone-500">
-                      Recently active projects will appear here.
-                    </p>
-                  </div>
+                  <p className="text-xs text-stone-500 px-2 py-1">No recent contexts</p>
                 ) : (
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {visibleRecentList.map((item, relIdx) => {
                       const globalIdx = activeContext ? relIdx + 1 : relIdx;
                       const isSelected = selectedIndex === globalIdx;
@@ -716,8 +574,8 @@ export function ContextLauncher() {
                       );
                     })}
                     {hasMoreRecent && (
-                      <div className="px-3 py-1.5 text-center text-[10px] text-stone-500 border-t border-white/5">
-                        Showing top {visibleRecentList.length} of {recentContexts.length} recent contexts
+                      <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
+                        Showing top {visibleRecentList.length} of {recentContexts.length} contexts
                       </div>
                     )}
                   </div>
@@ -725,22 +583,13 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Search Results List */}
+            {/* Search Results list (When search query is active) */}
             {!isLoading && !error && searchQuery && filteredList.length > 0 && (
               <div className="space-y-1">
-                <div className="px-1 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <Search size={11} className="text-stone-400" />
-                    <span>Matching Contexts ({filteredList.length})</span>
-                  </div>
-                  {filteredList.some((c) => c.isActive) && (
-                    <span className="text-[9.5px] text-emerald-400 font-medium flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Active context included
-                    </span>
-                  )}
+                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
+                  Results ({filteredList.length})
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-0.5">
                   {visibleFilteredList.map((item, idx) => {
                     const isSelected = selectedIndex === idx;
                     return (
@@ -760,8 +609,8 @@ export function ContextLauncher() {
                     );
                   })}
                   {hasMoreFiltered && (
-                    <div className="px-3 py-2 text-center text-[10.5px] text-stone-500 border-t border-white/5">
-                      Showing top {visibleFilteredList.length} of {filteredList.length} matching contexts. Refine your query to narrow down.
+                    <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
+                      Showing top {visibleFilteredList.length} of {filteredList.length} contexts
                     </div>
                   )}
                 </div>
@@ -769,13 +618,9 @@ export function ContextLauncher() {
             )}
           </div>
 
-          {/* Right Column: Context Preview Pane */}
+          {/* Right Column: 4. Selected Context Preview & 5. Resume */}
           <div
-            className={`md:col-span-6 lg:col-span-7 p-4 overflow-y-auto flex flex-col justify-between transition-all ${
-              isPreviewOpen
-                ? 'bg-stone-900/60 ring-1 ring-orange-500/30 border-l border-orange-500/20'
-                : 'bg-stone-950/40'
-            }`}
+            className="md:col-span-6 lg:col-span-7 p-4 overflow-y-auto flex flex-col justify-between bg-stone-950/20"
             role="region"
             aria-label="Selected Context Preview"
           >
@@ -802,29 +647,13 @@ export function ContextLauncher() {
           </div>
         </div>
 
-        {/* Footer / Status Bar */}
-        <div className="px-5 py-2.5 bg-stone-950/80 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
-          <div className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/80" />
-            <span>Answers: What will I return to if I resume?</span>
-          </div>
+        {/* Footer: Minimal 1-line shortcuts */}
+        <div className="px-4 py-2 bg-stone-950/60 border-t border-white/5 flex items-center justify-between text-[11px] text-stone-500">
+          <span>ContextSplit</span>
           <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1.5">
-              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↑↓</kbd>
-              <span>Navigate</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">⌘1-5</kbd>
-              <span>Filter</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">↵</kbd>
-              <span>{isPreviewOpen ? 'Resume' : 'Preview'}</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-stone-300 font-mono text-[10px]">Esc</kbd>
-              <span>{isPreviewOpen ? 'Back to list' : searchQuery ? 'Clear query' : activeFilter !== 'all' ? 'Clear filter' : 'Close'}</span>
-            </span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">Esc</kbd> Close</span>
           </div>
         </div>
       </div>
@@ -854,59 +683,40 @@ function ContextPreviewPane({
   preview,
   isLoading,
   isResuming,
-  isPreviewOpen = false,
   resumeError,
   notReadyReason,
   error,
   onResume,
   onClearResumeState,
-  onClose,
 }: ContextPreviewPaneProps) {
   if (isLoading) {
     return (
-      <div className="space-y-4 animate-pulse p-1">
-        <div className="flex items-center justify-between">
-          <div className="h-5 w-40 bg-stone-800 rounded-md" />
-          <div className="h-5 w-16 bg-stone-800 rounded-full" />
-        </div>
-        <div className="h-20 bg-stone-850/60 border border-white/5 rounded-xl" />
-        <div className="space-y-2">
-          <div className="h-3 w-28 bg-stone-800 rounded" />
-          <div className="h-10 bg-stone-850/60 border border-white/5 rounded-lg" />
-          <div className="h-10 bg-stone-850/60 border border-white/5 rounded-lg" />
-        </div>
-        <div className="h-9 w-full bg-stone-800 rounded-xl mt-4" />
+      <div className="space-y-3 animate-pulse p-1">
+        <div className="h-5 w-40 bg-stone-800 rounded" />
+        <div className="h-3 w-28 bg-stone-800/60 rounded" />
+        <div className="h-16 bg-stone-800/30 rounded-lg mt-4" />
+        <div className="h-24 bg-stone-800/30 rounded-lg mt-3" />
+        <div className="h-9 w-full bg-stone-800 rounded-lg mt-6" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2.5">
-        <div className="w-10 h-10 rounded-full bg-red-950/50 border border-red-500/30 flex items-center justify-center text-red-400">
-          <AlertCircle size={18} />
-        </div>
-        <p className="text-xs font-semibold text-stone-300">Context Preview Unavailable</p>
-        <p className="text-[11px] text-stone-500 max-w-xs">{error}</p>
-        <button
-          onClick={onClose}
-          className="mt-2 px-3 py-1 text-xs text-stone-400 hover:text-white rounded bg-white/5 hover:bg-white/10 cursor-pointer"
-        >
-          Close
-        </button>
+      <div className="h-full flex flex-col items-center justify-center text-center p-4 space-y-2">
+        <AlertCircle size={20} className="text-red-400" />
+        <p className="text-xs font-semibold text-stone-200">Context Preview Unavailable</p>
+        <p className="text-[11px] text-stone-400 max-w-xs">{error}</p>
       </div>
     );
   }
 
   if (!preview) {
     return (
-      <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2 text-stone-500">
-        <div className="w-10 h-10 rounded-full bg-stone-850 border border-white/5 flex items-center justify-center text-stone-400">
-          <Compass size={18} />
-        </div>
-        <p className="text-xs font-medium text-stone-300">No context selected</p>
+      <div className="h-full flex flex-col items-center justify-center text-center p-4 text-stone-500 space-y-1">
+        <p className="text-xs font-medium text-stone-400">No context selected</p>
         <p className="text-[11px] text-stone-500 max-w-xs">
-          Select a context from the list to preview where you left off, active workset, and resume readiness.
+          Select a context to preview its workset and resume.
         </p>
       </div>
     );
@@ -915,117 +725,86 @@ function ContextPreviewPane({
   const isReady = preview.readinessBand === 'ready' || preview.readinessBand === 'mostly_ready';
 
   return (
-    <div className="space-y-3.5 flex flex-col justify-between h-full">
-      <div className="space-y-3">
-        {/* Preview Header: Name, Last Active Time, and State/Readiness */}
-        <div className="flex items-start justify-between gap-2 border-b border-white/5 pb-2.5">
-          <div className="min-w-0">
+    <div className="space-y-4 flex flex-col justify-between h-full">
+      <div className="space-y-4">
+        {/* 4. Selected Context: Header */}
+        <div className="border-b border-white/5 pb-3">
+          <div className="flex items-start justify-between gap-2">
             <h3 className="text-sm font-semibold text-stone-100 truncate">
               {preview.name}
             </h3>
-            <div className="flex items-center gap-2 mt-1 flex-wrap text-[11px] text-stone-400">
-              <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
-              {preview.projectIdentifier && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-500/10 text-[9.5px] font-mono text-blue-300 border border-blue-500/20">
-                  <FolderOpen size={9} className="text-blue-400" />
-                  {preview.projectIdentifier}
-                </span>
-              )}
-              {preview.repository && preview.repository !== preview.projectIdentifier && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-[9.5px] font-mono text-stone-300 border border-white/5">
-                  <GitBranch size={9} className="text-stone-400" />
-                  {preview.repository}
-                </span>
-              )}
-              <span className="font-mono text-[9px] text-stone-500">
-                #{preview.contextId.slice(0, 10)}
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
-            {preview.isAmbiguous && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-950/60 text-amber-300 border border-amber-500/30">
-                <HelpCircle size={10} />
-                <span>Clarifying State</span>
-              </span>
-            )}
-
-            {preview.isStale && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-stone-800 text-stone-400 border border-white/5">
-                <Archive size={10} />
-                <span>Dormant</span>
-              </span>
-            )}
-
-            {preview.state === 'paused' && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-950/60 text-amber-300 border border-amber-500/30">
-                <Pause size={10} />
-                <span>Paused</span>
-              </span>
-            )}
-
             <span
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+              className={`text-[10px] font-medium px-2 py-0.5 rounded capitalize shrink-0 ${
                 isReady
-                  ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/30'
-                  : 'bg-amber-950/60 text-amber-300 border-amber-500/30'
+                  ? 'bg-emerald-500/10 text-emerald-400'
+                  : 'bg-amber-500/10 text-amber-400'
               }`}
             >
-              <Zap size={10} />
-              <span className="capitalize">{preview.readinessBand.replace('_', ' ')}</span>
+              {preview.readinessBand.replace('_', ' ')}
             </span>
+          </div>
+
+          <div className="flex items-center gap-2 mt-1 text-[11px] text-stone-400 flex-wrap">
+            {preview.projectIdentifier && (
+              <span className="font-mono text-stone-300">
+                {preview.projectIdentifier}
+              </span>
+            )}
+            {preview.projectIdentifier && <span className="text-stone-600">•</span>}
+            <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
+            {preview.state === 'paused' && (
+              <>
+                <span className="text-stone-600">•</span>
+                <span className="text-amber-400 font-medium">Paused</span>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Where You Left Off / Active Task Card */}
-        <div className="p-3 rounded-xl bg-stone-850/60 border border-white/5 space-y-1.5">
-          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-stone-400">
-            <Activity size={11} className="text-orange-400" />
-            <span>Where you left off</span>
+        {/* Where You Left Off / Active Task */}
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-stone-400">
+            Where you left off
           </div>
-
           {preview.taskTitle ? (
-            <p className="text-xs font-medium text-stone-200 leading-snug">
-              Working on <span className="text-orange-300 font-semibold">{preview.taskTitle}</span>
+            <p className="text-xs font-medium text-stone-200">
+              {preview.taskTitle}
             </p>
           ) : preview.activitySummary ? (
             <p className="text-xs text-stone-300 leading-snug">{preview.activitySummary}</p>
           ) : (
-            <p className="text-xs text-stone-400 italic">No specific task recorded yet.</p>
+            <p className="text-xs text-stone-500 italic">No specific task recorded.</p>
           )}
 
           {preview.readinessExplanation && (
-            <p className="text-[11px] text-stone-400 pt-0.5 border-t border-white/5 mt-1">
+            <p className="text-[11px] text-stone-400 pt-1">
               {preview.readinessExplanation}
             </p>
           )}
         </div>
 
-        {/* Not Ready Explanation Notice */}
+        {/* Warnings / Errors */}
         {notReadyReason && (
-          <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-200 space-y-2">
+          <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/20 text-amber-200 space-y-2 text-xs">
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-amber-300">Context Not Fully Ready</p>
-                <p className="text-[11px] text-amber-400/90 mt-0.5 leading-relaxed">
-                  {notReadyReason}
-                </p>
+                <p className="font-medium text-amber-300">Context Not Fully Ready</p>
+                <p className="text-[11px] text-amber-400/90 mt-0.5">{notReadyReason}</p>
               </div>
             </div>
-            <div className="flex items-center gap-2 pt-1 border-t border-amber-500/20">
+            <div className="flex items-center gap-2 pt-1">
               <button
                 onClick={() => onResume(true)}
                 disabled={isResuming}
-                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-stone-950 font-semibold text-[11px] shadow-sm transition-colors cursor-pointer"
+                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-stone-950 font-medium text-[11px] transition-colors cursor-pointer"
               >
                 {isResuming ? 'Resuming...' : 'Resume Anyway'}
               </button>
               <button
                 onClick={onClearResumeState}
                 disabled={isResuming}
-                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] font-medium transition-colors cursor-pointer"
+                className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -1033,17 +812,16 @@ function ContextPreviewPane({
           </div>
         )}
 
-        {/* Resume Error Alert */}
         {resumeError && (
-          <div className="p-3 rounded-xl bg-red-950/40 border border-red-500/30 text-red-200 flex items-start gap-2 text-xs">
+          <div className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs">
             <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
-              <p className="font-semibold text-red-300">Resume Failed</p>
+              <p className="font-medium text-red-300">Resume Failed</p>
               <p className="text-[11px] text-red-400/90 mt-0.5">{resumeError}</p>
             </div>
             <button
               onClick={onClearResumeState}
-              className="text-stone-400 hover:text-white p-0.5 cursor-pointer"
+              className="text-stone-400 hover:text-white cursor-pointer"
               aria-label="Dismiss error"
             >
               <X size={12} />
@@ -1051,34 +829,17 @@ function ContextPreviewPane({
           </div>
         )}
 
-        {/* Important Items Section */}
-        {preview.importantItems && preview.importantItems.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-amber-400 px-0.5">
-              <Star size={10} className="fill-amber-400" />
-              <span>Important Items</span>
-            </div>
-            <div className="space-y-1">
-              {preview.importantItems.map((item) => (
-                <WorksetPreviewRow key={`imp-${item.id}`} item={item} isImportant />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Workset Items Preview */}
+        {/* Working Set Items */}
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-stone-400 px-0.5">
-            <span>Working Set Summary</span>
+          <div className="flex items-center justify-between text-[11px] font-medium text-stone-400">
+            <span>Working Set</span>
             <span>{preview.itemCount} items</span>
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <div className="p-2.5 rounded-lg bg-stone-850/30 border border-white/5 text-[11px] text-stone-500 text-center">
-              No items in active workset
-            </div>
+            <p className="text-xs text-stone-500 py-1">No items in active workset</p>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-1 max-h-[140px] overflow-y-auto">
               {preview.worksetItems.map((item) => (
                 <WorksetPreviewRow key={item.id} item={item} />
               ))}
@@ -1087,14 +848,12 @@ function ContextPreviewPane({
         </div>
       </div>
 
-      {/* Action Buttons: Primary (Resume) + Secondary (Close) */}
-      <div className="pt-3 border-t border-white/5 flex items-center gap-2">
+      {/* 5. Resume Action (Clear single primary button, no duplicate close button) */}
+      <div className="pt-3 border-t border-white/5">
         <button
           onClick={() => onResume(false)}
           disabled={isResuming}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-xl bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer ${
-            isPreviewOpen ? 'ring-2 ring-orange-300 ring-offset-2 ring-offset-stone-950 shadow-orange-500/40' : ''
-          }`}
+          className="w-full py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
           aria-label="Resume context"
         >
           {isResuming ? (
@@ -1112,17 +871,6 @@ function ContextPreviewPane({
             </>
           )}
         </button>
-
-        <button
-          onClick={onClose}
-          disabled={isResuming}
-          className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 disabled:opacity-50 text-stone-400 hover:text-stone-200 text-xs font-medium transition-all border border-white/5 cursor-pointer"
-        >
-          <span>Close</span>
-          <kbd className="ml-1.5 px-1 py-0.5 text-[9px] font-mono bg-white/10 text-stone-400 rounded">
-            Esc
-          </kbd>
-        </button>
       </div>
     </div>
   );
@@ -1133,40 +881,23 @@ function ContextPreviewPane({
  */
 function WorksetPreviewRow({
   item,
-  isImportant = false,
 }: {
   item: LauncherPreviewItem;
-  isImportant?: boolean;
 }) {
-  const getIcon = () => {
-    switch (item.itemType) {
-      case 'url':
-      case 'link':
-        return <Globe size={12} className="text-blue-400 shrink-0" />;
-      case 'code':
-      case 'snippet':
-        return <FileCode size={12} className="text-amber-400 shrink-0" />;
-      case 'file':
-        return <FileText size={12} className="text-emerald-400 shrink-0" />;
-      default:
-        return <Link2 size={12} className="text-stone-400 shrink-0" />;
-    }
-  };
+  const isLink = item.itemType === 'url' || item.itemType === 'link';
 
   return (
-    <div
-      className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs gap-2 ${
-        isImportant
-          ? 'bg-amber-950/20 border-amber-500/30 text-amber-100'
-          : 'bg-stone-850/40 border-white/5 text-stone-300'
-      }`}
-    >
-      <div className="flex items-center gap-2 min-w-0 flex-1">
-        {getIcon()}
-        <span className="truncate text-[11.5px] font-medium">{item.title}</span>
+    <div className="flex items-center justify-between py-1 text-xs gap-2 text-stone-300">
+      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+        {isLink ? (
+          <Link2 size={12} className="text-stone-400 shrink-0" />
+        ) : (
+          <FileText size={12} className="text-stone-400 shrink-0" />
+        )}
+        <span className="truncate text-[11px]">{item.title}</span>
       </div>
       {item.appName && (
-        <span className="text-[10px] text-stone-500 shrink-0 font-mono bg-stone-800/80 px-1.5 py-0.5 rounded">
+        <span className="text-[10px] text-stone-500 shrink-0 font-mono">
           {item.appName}
         </span>
       )}
@@ -1190,15 +921,17 @@ interface ContextLauncherItemProps {
 function ContextLauncherItem({
   item,
   isSelected,
-  isPreviewOpen = false,
   isResuming = false,
   dataIndex,
   onSelect,
   onResume,
 }: ContextLauncherItemProps) {
-  const isDormant = item.state === 'dormant';
-  const isArchived = item.state === 'archived';
   const isPaused = item.state === 'paused';
+  const isArchived = item.state === 'archived';
+
+  // Clean subtitle without redundant labels
+  const subtitle = item.taskTitle || item.description || (item.projectIdentifier ? `${item.projectIdentifier}` : null);
+  const timeStr = formatGentleTime(item.lastActiveAt, item.durationEstimate);
 
   return (
     <div
@@ -1207,128 +940,60 @@ function ContextLauncherItem({
       onClick={onSelect}
       onDoubleClick={onResume}
       onMouseEnter={onSelect}
-      className={`group relative flex items-center justify-between px-3 py-2.5 rounded-xl cursor-pointer transition-all border ${
+      className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${
         isSelected
-          ? isPreviewOpen
-            ? 'bg-orange-500/25 text-white border-orange-500/50 shadow-sm ring-2 ring-orange-500/40'
-            : 'bg-orange-500/20 text-white border-orange-500/40 shadow-sm ring-1 ring-orange-500/30'
-          : 'hover:bg-white/5 text-stone-200 border-transparent'
+          ? 'bg-stone-800 text-stone-100 ring-1 ring-white/10'
+          : 'hover:bg-white/[0.04] text-stone-300'
       }`}
       role="option"
       aria-selected={isSelected}
     >
-      <div className="flex items-center gap-2.5 min-w-0 flex-1 mr-2">
-        <div
-          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
-            item.isActive
-              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-              : isSelected
-              ? 'bg-orange-500/30 text-orange-200 border border-orange-500/40'
-              : isPaused
-              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
-              : isDormant || isArchived
-              ? 'bg-stone-850 text-stone-500 border border-white/5'
-              : 'bg-stone-800 text-stone-400 border border-white/5'
-          }`}
-        >
-          {item.isActive ? (
-            <CheckCircle2 size={15} />
-          ) : isPaused ? (
-            <Pause size={14} />
-          ) : isArchived ? (
-            <Archive size={14} />
-          ) : (
-            <FolderOpen size={14} />
-          )}
-        </div>
+      <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
+        {/* Minimal status indicator */}
+        {item.isActive ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Active" />
+        ) : isPaused ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Paused" />
+        ) : (
+          <span className="w-1.5 h-1.5 rounded-full bg-transparent shrink-0" />
+        )}
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span
-              className={`text-xs font-semibold truncate ${
-                isDormant || isArchived ? 'text-stone-300' : 'text-stone-100'
-              }`}
-            >
+          <div className="flex items-center gap-1.5">
+            <span className={`text-xs font-medium truncate ${isArchived ? 'text-stone-400' : 'text-stone-100'}`}>
               {item.name}
             </span>
-            {item.isActive && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[8.5px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Active
-              </span>
-            )}
-            {isPaused && (
-              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0">
-                Paused
-              </span>
-            )}
-            {isDormant && (
-              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-stone-800 text-stone-400 border border-white/5 shrink-0">
-                Dormant
-              </span>
-            )}
-            {isArchived && (
-              <span className="px-1.5 py-0.5 rounded text-[8.5px] font-medium bg-stone-800/80 text-stone-400 border border-white/5 shrink-0">
-                Archived
-              </span>
-            )}
             {item.projectIdentifier && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-500/10 text-[9px] font-mono text-blue-300 border border-blue-500/20 shrink-0">
-                <FolderOpen size={9} className="text-blue-400" />
+              <span className="text-[10px] text-stone-500 font-mono shrink-0">
                 {item.projectIdentifier}
               </span>
             )}
-            {item.repository && item.repository !== item.projectIdentifier && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white/5 text-[9px] font-mono text-stone-300 border border-white/5 shrink-0">
-                <GitBranch size={9} className="text-stone-400" />
-                {item.repository}
+            {isPaused && (
+              <span className="text-[10px] text-amber-400/90 shrink-0 font-medium">
+                Paused
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-1.5 mt-0.5 text-[10.5px] text-stone-400 truncate">
-            {item.taskTitle ? (
-              <span className="truncate text-stone-300">
-                <span className="text-stone-500 mr-1">Task:</span>
-                <span className="text-stone-200">{item.taskTitle}</span>
-              </span>
-            ) : item.description ? (
-              <span className="truncate text-stone-400">{item.description}</span>
-            ) : item.durationEstimate ? (
-              <span>{item.durationEstimate}</span>
-            ) : (
-              <span>{formatGentleTime(item.lastActiveAt)}</span>
+          <div className="flex items-center gap-1.5 text-[11px] text-stone-400 truncate mt-0.5">
+            {subtitle && (
+              <span className="truncate">{subtitle}</span>
             )}
-            {item.lastActiveAt && (item.taskTitle || item.description || item.repository || item.projectIdentifier) && (
-              <>
-                <span className="text-stone-600">•</span>
-                <span className="text-stone-500 shrink-0">{formatGentleTime(item.lastActiveAt)}</span>
-              </>
-            )}
+            {subtitle && <span className="text-stone-600">•</span>}
+            <span className="shrink-0">{timeStr}</span>
           </div>
         </div>
       </div>
 
-      <div className="flex items-center gap-1 shrink-0">
+      {/* Selected Action Cue */}
+      <div className="flex items-center shrink-0">
         {isSelected && isResuming ? (
-          <span className="text-[9px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1.5 bg-orange-500/20 text-orange-300 border border-orange-500/30">
-            <RefreshCw size={9} className="animate-spin text-orange-400" />
-            <span>Resuming...</span>
+          <RefreshCw size={12} className="animate-spin text-orange-400" />
+        ) : isSelected ? (
+          <span className="text-[11px] font-mono text-stone-400 px-1.5 py-0.5 rounded bg-white/5">
+            ↵
           </span>
-        ) : (
-          <span
-            className={`text-[9px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${
-              isSelected
-                ? isPreviewOpen
-                  ? 'opacity-100 bg-orange-500 text-stone-950 font-semibold shadow-sm'
-                  : 'opacity-100 bg-orange-500/30 text-orange-200 border border-orange-400/30'
-                : 'opacity-0 text-stone-400'
-            }`}
-          >
-            <span>{isPreviewOpen ? 'Previewing' : 'Inspect'}</span>
-            <CornerDownLeft size={9} />
-          </span>
-        )}
+        ) : null}
       </div>
     </div>
   );
