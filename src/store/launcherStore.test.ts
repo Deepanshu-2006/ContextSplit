@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useLauncherStore } from './launcherStore';
+import { useLauncherStore, matchContext, sortContextMatches, LauncherContextItem } from './launcherStore';
 import { contextInteractionService } from '../services/contextInteractionService';
 import { useWorkspaceStore } from './workspaceStore';
 
@@ -131,6 +131,9 @@ describe('useLauncherStore', () => {
     expect(state.activeContext).toEqual({
       id: 'ctx-active-1',
       name: 'Aurora Website',
+      description: null,
+      projectIdentifier: null,
+      repository: null,
       isActive: true,
       state: 'active',
       lastActiveAt: null,
@@ -428,5 +431,72 @@ describe('useLauncherStore', () => {
     expect(state.resumeStatus).toBe('idle');
     expect(state.notReadyReason).toBeNull();
     expect(state.resumeError).toBeNull();
+  });
+
+  describe('Deterministic Context Search', () => {
+    const sampleContexts: LauncherContextItem[] = [
+      {
+        id: 'ctx-1',
+        name: 'PayX Development',
+        description: 'Payment gateway integration',
+        taskTitle: 'Stripe webhook',
+        repository: 'payx-backend',
+      },
+      {
+        id: 'ctx-2',
+        name: 'University',
+        description: 'Machine learning coursework',
+        taskTitle: 'Assignment 3 submission',
+      },
+      {
+        id: 'ctx-3',
+        name: 'ContextSplit Development',
+        description: 'Context management application',
+        taskTitle: 'Launcher search',
+        repository: 'ContextSplit',
+      },
+    ];
+
+    it('matches context name case-insensitively and with whitespace tolerance ("pay" -> PayX Development)', () => {
+      expect(matchContext(sampleContexts[0], 'pay')).toBe(true);
+      expect(matchContext(sampleContexts[0], '   PAY   ')).toBe(true);
+      expect(matchContext(sampleContexts[1], 'pay')).toBe(false);
+    });
+
+    it('matches "univ" -> University', () => {
+      expect(matchContext(sampleContexts[1], 'univ')).toBe(true);
+      expect(matchContext(sampleContexts[1], 'UNIV')).toBe(true);
+      expect(matchContext(sampleContexts[0], 'univ')).toBe(false);
+    });
+
+    it('matches "context" -> ContextSplit Development', () => {
+      expect(matchContext(sampleContexts[2], 'context')).toBe(true);
+      expect(matchContext(sampleContexts[2], '  CONTEXT  ')).toBe(true);
+      expect(matchContext(sampleContexts[1], 'context')).toBe(false);
+    });
+
+    it('matches on description, repository, and task metadata', () => {
+      // Repository match
+      expect(matchContext(sampleContexts[0], 'payx-backend')).toBe(true);
+      // Description match
+      expect(matchContext(sampleContexts[1], 'coursework')).toBe(true);
+      // Task title match
+      expect(matchContext(sampleContexts[0], 'webhook')).toBe(true);
+    });
+
+    it('sorts matches giving precedence to exact and prefix name matches', () => {
+      const candidates: LauncherContextItem[] = [
+        { id: '1', name: 'Other Project', description: 'Related to pay' },
+        { id: '2', name: 'PayX Development' },
+        { id: '3', name: 'Pay' },
+      ];
+
+      const sorted = sortContextMatches(candidates, 'pay');
+      expect(sorted.map((c) => c.name)).toEqual([
+        'Pay',                // Exact match
+        'PayX Development',   // Prefix match
+        'Other Project',      // Substring/description match
+      ]);
+    });
   });
 });

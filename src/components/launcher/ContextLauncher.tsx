@@ -29,6 +29,8 @@ import {
   LauncherPreviewModel,
   LauncherPreviewItem,
   ResumeActionStatus,
+  matchContext,
+  sortContextMatches,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 
@@ -107,9 +109,8 @@ export function ContextLauncher() {
     }
   }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
-  // Filter contexts based on search query strictly preserving engine ordering
+  // Filter contexts based on search query using deterministic structured matching
   const filteredList = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
     const all: LauncherContextItem[] = [];
     if (activeContext) {
       all.push(activeContext);
@@ -119,16 +120,10 @@ export function ContextLauncher() {
       all.push(ctx);
     }
 
-    if (!query) return all;
+    if (!searchQuery.trim()) return all;
 
-    return all.filter((ctx) => {
-      const nameMatch = ctx.name.toLowerCase().includes(query);
-      const taskMatch = ctx.taskTitle ? ctx.taskTitle.toLowerCase().includes(query) : false;
-      const activityMatch = ctx.recentActivitySummary
-        ? ctx.recentActivitySummary.toLowerCase().includes(query)
-        : false;
-      return nameMatch || taskMatch || activityMatch;
-    });
+    const matched = all.filter((ctx) => matchContext(ctx, searchQuery));
+    return sortContextMatches(matched, searchQuery);
   }, [activeContext, recentContexts, searchQuery]);
 
   // When selection index changes, fetch preview for that selected context
@@ -307,30 +302,37 @@ export function ContextLauncher() {
 
         {/* 2. Search Input */}
         <div className="relative flex items-center px-5 py-3.5 border-b border-white/10 bg-black/20 focus-within:bg-black/40 transition-colors">
-          <Search size={18} className="text-stone-400 shrink-0 mr-3" />
+          <Search size={18} className="text-stone-400 shrink-0 mr-3" aria-hidden="true" />
           <input
+            id="launcher-search-input"
+            name="search"
             ref={inputRef}
             type="text"
             role="combobox"
+            autoFocus
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck="false"
             aria-expanded="true"
             aria-autocomplete="list"
             aria-controls="launcher-context-list"
             aria-activedescendant={selectedContextId ? `launcher-item-${selectedContextId}` : undefined}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search or switch contexts... (Press ↑↓ to navigate)"
+            placeholder="Search contexts..."
             className="w-full bg-transparent text-sm text-stone-100 placeholder-stone-500 focus:outline-none"
             aria-label="Search contexts"
           />
           {searchQuery && (
             <button
+              type="button"
               onClick={() => {
                 setSearchQuery('');
                 inputRef.current?.focus();
               }}
               className="p-1 rounded-md text-stone-400 hover:text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:outline-none transition-colors cursor-pointer"
               title="Clear search"
-              aria-label="Clear search query"
+              aria-label="Clear search"
             >
               <X size={14} />
             </button>

@@ -14,6 +14,9 @@ export interface LauncherResumeReadiness {
 export interface LauncherContextItem {
   id: string;
   name: string;
+  description?: string | null;
+  projectIdentifier?: string | null;
+  repository?: string | null;
   isActive?: boolean;
   state?: string;
   lastActiveAt?: string | null;
@@ -25,6 +28,70 @@ export interface LauncherContextItem {
   recentActivitySummary?: string | null;
   memoryStatement?: string | null;
   resumeReadiness?: LauncherResumeReadiness | null;
+}
+
+/**
+ * Deterministic, whitespace-tolerant, case-insensitive context search matcher.
+ * Matches against structured context metadata without searching arbitrary raw user files.
+ */
+export function matchContext(item: LauncherContextItem, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+
+  // Split query into terms to support whitespace-tolerant multi-word matching
+  const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+
+  // Collect searchable structured text fields
+  const searchableText = [
+    item.name,
+    item.description,
+    item.projectIdentifier,
+    item.repository,
+    item.taskTitle,
+    item.recentActivitySummary,
+    item.memoryStatement,
+    item.state,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  // All query terms must match at least one searchable field
+  return terms.every((term) => searchableText.includes(term));
+}
+
+/**
+ * Sort matching contexts deterministically giving precedence to exact and prefix name matches
+ * while preserving engine recency order.
+ */
+export function sortContextMatches(items: LauncherContextItem[], query: string): LauncherContextItem[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return items;
+
+  return [...items].sort((a, b) => {
+    const aName = a.name.toLowerCase();
+    const bName = b.name.toLowerCase();
+
+    // 1. Exact match on name
+    if (aName === q && bName !== q) return -1;
+    if (bName === q && aName !== q) return 1;
+
+    // 2. Starts with query in name
+    const aStarts = aName.startsWith(q);
+    const bStarts = bName.startsWith(q);
+    if (aStarts && !bStarts) return -1;
+    if (bStarts && !aStarts) return 1;
+
+    // 3. Name contains query
+    const aNameIncludes = aName.includes(q);
+    const bNameIncludes = bName.includes(q);
+    if (aNameIncludes && !bNameIncludes) return -1;
+    if (bNameIncludes && !aNameIncludes) return 1;
+
+    // 4. Default to preserving incoming engine recency ordering
+    return 0;
+  });
 }
 
 export interface LauncherPreviewItem {
@@ -340,6 +407,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           activeItem = {
             id,
             name,
+            description: (wsMeta as any)?.description || (engineActive as any)?.description || null,
+            projectIdentifier: (wsMeta as any)?.project_identifier || (engineActive as any)?.project_identifier || null,
+            repository: (wsMeta as any)?.repository || (engineActive as any)?.repository || (wsMeta as any)?.repo_name || null,
             isActive: true,
             state: wsMeta?.lifecycle_state || engineActive.state || 'active',
             lastActiveAt: engineActive.last_active_at || wsMeta?.updated_at || null,
@@ -376,6 +446,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             recents.push({
               id,
               name: contextName,
+              description: (wsMeta as any)?.description || (entry as any)?.description || null,
+              projectIdentifier: (wsMeta as any)?.project_identifier || (entry as any)?.project_identifier || null,
+              repository: (wsMeta as any)?.repository || (entry as any)?.repository || (wsMeta as any)?.repo_name || null,
               isActive: false,
               state: wsMeta?.lifecycle_state || entry.transition_type || 'recent',
               lastActiveAt: entry.last_active_at || entry.ended_at || wsMeta?.updated_at || null,
