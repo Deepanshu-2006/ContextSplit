@@ -658,4 +658,229 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
     expect(toast.error).toHaveBeenCalledWith('Failed to remove item from context: Disk write locked by another process');
     expect(useLauncherStore.getState().isActionExecuting).toBe(false);
   });
+
+  // 24. Valid transitions across all operational lifecycle states
+  it('24. executes valid transitions correctly across active, paused, dormant, and archived states', async () => {
+    // 24a. Active: pause and archive are valid
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-test-active', name: 'Active Workspace', lifecycle_state: 'active', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'ctx-test-active',
+    });
+    vi.mocked(contextInteractionService.pauseContext).mockResolvedValueOnce({ status: 'paused' });
+    const pauseRes = await useLauncherStore.getState().executeContextAction('context.pause', 'ctx-test-active');
+    expect(pauseRes.success).toBe(true);
+    expect(pauseRes.outcome).toBe('SUCCESS');
+
+    // 24b. Paused: resume and archive are valid
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-test-paused', name: 'Paused Workspace', lifecycle_state: 'active', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'other-workspace',
+    });
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({ status: 'active' });
+    const resumePausedRes = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-test-paused');
+    expect(resumePausedRes.success).toBe(true);
+    expect(resumePausedRes.outcome).toBe('SUCCESS');
+
+    // 24c. Dormant: resume and archive are valid
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-test-dormant', name: 'Dormant Workspace', lifecycle_state: 'dormant', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'other-workspace',
+    });
+    const archiveDormantRes = await useLauncherStore.getState().executeContextAction('context.archive', 'ctx-test-dormant');
+    expect(archiveDormantRes.success).toBe(true);
+    expect(archiveDormantRes.outcome).toBe('SUCCESS');
+
+    // 24d. Archived: resume (Restore & Resume) is valid
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-test-archived', name: 'Archived Workspace', lifecycle_state: 'archived', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'other-workspace',
+    });
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({ status: 'active' });
+    const resumeArchivedRes = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-test-archived');
+    expect(resumeArchivedRes.success).toBe(true);
+    expect(db.unarchiveWorkspace).toHaveBeenCalledWith('ctx-test-archived');
+  });
+
+  // 25. Invalid transitions are blocked with clear structured explanations
+  it('25. blocks invalid transitions with clear explanations according to Context Engine lifecycle rules', async () => {
+    // 25a. Pause on already paused context
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-paused', name: 'Paused', lifecycle_state: 'active', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'different-workspace',
+    });
+    const pauseOnPausedRes = await useLauncherStore.getState().executeContextAction('context.pause', 'ctx-paused', {
+      lifecycleState: 'paused',
+    });
+    expect(pauseOnPausedRes.success).toBe(false);
+    expect(pauseOnPausedRes.outcome).toBe('BLOCKED');
+    expect(pauseOnPausedRes.message).toContain('already paused');
+
+    // 25b. Pause on dormant context
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-dormant', name: 'Dormant', lifecycle_state: 'dormant', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'different-workspace',
+    });
+    const pauseOnDormantRes = await useLauncherStore.getState().executeContextAction('context.pause', 'ctx-dormant', {
+      lifecycleState: 'dormant',
+    });
+    expect(pauseOnDormantRes.success).toBe(false);
+    expect(pauseOnDormantRes.outcome).toBe('BLOCKED');
+    expect(pauseOnDormantRes.message).toContain('Cannot pause a dormant context');
+
+    // 25c. Pause on archived context
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-archived', name: 'Archived', lifecycle_state: 'archived', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'different-workspace',
+    });
+    const pauseOnArchivedRes = await useLauncherStore.getState().executeContextAction('context.pause', 'ctx-archived', {
+      lifecycleState: 'archived',
+    });
+    expect(pauseOnArchivedRes.success).toBe(false);
+    expect(pauseOnArchivedRes.outcome).toBe('BLOCKED');
+    expect(pauseOnArchivedRes.message).toContain('Cannot pause an archived context');
+
+    // 25d. Archive on already archived context
+    const archiveOnArchivedRes = await useLauncherStore.getState().executeContextAction('context.archive', 'ctx-archived', {
+      lifecycleState: 'archived',
+    });
+    expect(archiveOnArchivedRes.success).toBe(false);
+    expect(archiveOnArchivedRes.outcome).toBe('BLOCKED');
+    expect(archiveOnArchivedRes.message).toContain('already archived');
+  });
+
+  // 26. Handles stale launcher data when context transitions in background during interaction
+  it('26. detects stale state when context transitions to paused in background and blocks invalid action', async () => {
+    // Context was selected and previewed while active:
+    useLauncherStore.setState({
+      selectedContextId: 'ctx-mutated',
+      activePreview: {
+        contextId: 'ctx-mutated',
+        name: 'Mutated Workspace',
+        state: 'active',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    // While launcher remained open, the user switched to another workspace in the main window
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-mutated', name: 'Mutated Workspace', lifecycle_state: 'active', created_at: '', updated_at: '' },
+        { id: 'ctx-other', name: 'Other Workspace', lifecycle_state: 'active', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'ctx-other', // No longer active!
+    });
+
+    const fetchLauncherDataSpy = vi.spyOn(useLauncherStore.getState(), 'fetchLauncherData');
+
+    // User attempts to trigger "Pause Context" based on stale "active" preview
+    const result = await useLauncherStore.getState().executeContextAction('context.pause', 'ctx-mutated');
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe('BLOCKED');
+    expect(result.message).toContain('Action is no longer valid: Context is already paused');
+
+    // Verifies clear user feedback is shown via toast.info
+    expect(toast.info).toHaveBeenCalledWith(expect.stringContaining('Action is no longer valid'));
+
+    // Verifies launcher automatically re-fetches data to resync with actual state
+    expect(fetchLauncherDataSpy).toHaveBeenCalled();
+  });
+
+  // 27. Handles context archived in background: adapts resume to Restore & Resume
+  it('27. detects context archived in background and safely restores it before resuming', async () => {
+    // Preview initially recorded state as 'active':
+    useLauncherStore.setState({
+      selectedContextId: 'ctx-background-archived',
+      activePreview: {
+        contextId: 'ctx-background-archived',
+        name: 'Background Archived',
+        state: 'active',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    // In the background, workspace was archived in database:
+    useWorkspaceStore.setState({
+      workspaces: [
+        { id: 'ctx-background-archived', name: 'Background Archived', lifecycle_state: 'archived', created_at: '', updated_at: '' },
+      ],
+      activeWorkspaceId: 'other',
+    });
+
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({
+      context_id: 'ctx-background-archived',
+      status: 'active',
+    });
+
+    // When resume is triggered, live revalidation notices it is archived and unarchives before resume
+    const result = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-background-archived');
+
+    expect(result.success).toBe(true);
+    expect(db.unarchiveWorkspace).toHaveBeenCalledWith('ctx-background-archived');
+    expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-background-archived');
+    expect(result.message).toContain('Unarchived and resumed');
+  });
+
+  // 28. Shows clear feedback and cleans up when context is closed/deleted during interaction
+  it('28. provides clear feedback and cleans up preview when context is deleted during interaction', async () => {
+    useLauncherStore.setState({
+      isOpen: true,
+      selectedContextId: 'ctx-to-be-deleted',
+      activePreview: {
+        contextId: 'ctx-to-be-deleted',
+        name: 'To Be Deleted',
+        state: 'active',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    // Context is deleted from backend/database:
+    vi.mocked(contextInteractionService.resumeContext).mockRejectedValueOnce(
+      new Error("Context 'ctx-to-be-deleted' does not exist")
+    );
+
+    const result = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-to-be-deleted');
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe('ERROR');
+    expect(result.message).toContain('no longer available');
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('no longer available'));
+
+    // Deleted context is removed from selection and preview
+    expect(useLauncherStore.getState().activePreview?.contextId).not.toBe('ctx-to-be-deleted');
+    expect(useLauncherStore.getState().selectedContextId).not.toBe('ctx-to-be-deleted');
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+  });
 });
