@@ -2,6 +2,12 @@ import { create } from 'zustand';
 import { contextInteractionService } from '../services/contextInteractionService';
 import { useWorkspaceStore } from './workspaceStore';
 import { toast } from 'sonner';
+import {
+  ContextActionId,
+  ItemActionId,
+  QuickActionResult,
+} from '../models/quickActions';
+import { quickActionsService } from '../services/quickActionsService';
 
 export type ResumeActionStatus = 'idle' | 'loading' | 'success' | 'error' | 'not_ready' | 'cancelled';
 
@@ -312,6 +318,16 @@ interface LauncherState {
   fetchLauncherData: () => Promise<void>;
   resumeContextById: (contextId: string, force?: boolean) => Promise<boolean>;
   clearResumeState: () => void;
+  executeContextAction: (
+    actionId: ContextActionId,
+    contextId?: string,
+    options?: { force?: boolean }
+  ) => Promise<QuickActionResult<ContextActionId>>;
+  executeItemAction: (
+    actionId: ItemActionId,
+    contextId: string,
+    itemId: string
+  ) => Promise<QuickActionResult<ItemActionId>>;
 }
 
 // Debounce timer for preview fetching to avoid IPC jitter
@@ -757,5 +773,65 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       toast.error(msg);
       return false;
     }
+  },
+
+  executeContextAction: async (actionId: ContextActionId, contextId?: string, options?: { force?: boolean }) => {
+    const targetId = contextId || get().selectedContextId;
+    if (!targetId) {
+      return {
+        actionId,
+        success: false,
+        outcome: 'ERROR',
+        error: 'No context selected',
+        message: 'No context selected',
+      };
+    }
+
+    const preview = get().activePreview;
+    const result = await quickActionsService.executeContextAction(actionId, targetId, {
+      force: options?.force,
+      lifecycleState: preview?.state,
+      readinessBand: preview?.readinessBand,
+      readinessExplanation: preview?.readinessExplanation,
+    });
+
+    if (result.success) {
+      if (actionId === 'context.resume') {
+        await get().fetchLauncherData();
+        toast.success(result.message || 'Context resumed');
+        get().closeLauncher();
+      } else if (actionId === 'context.pause' || actionId === 'context.archive') {
+        await get().fetchLauncherData();
+        toast.success(result.message || 'Action completed');
+      } else if (actionId === 'context.open_details') {
+        get().closeLauncher();
+      }
+    } else if (result.outcome === 'BLOCKED') {
+      if (actionId === 'context.resume') {
+        set({
+          resumeStatus: 'not_ready',
+          notReadyReason: result.message || 'Context not ready',
+        });
+      } else {
+        toast.info(result.message || 'Action blocked');
+      }
+    } else if (result.outcome === 'ERROR') {
+      toast.error(result.message || result.error || 'Action failed');
+    }
+
+    return result;
+  },
+
+  executeItemAction: async (actionId: ItemActionId, contextId: string, itemId: string) => {
+    const result = await quickActionsService.executeItemAction(actionId, contextId, itemId);
+    if (result.success) {
+      toast.success(result.message || 'Item updated');
+      if (get().selectedContextId === contextId) {
+        get().selectContextById(contextId);
+      }
+    } else {
+      toast.error(result.message || result.error || 'Item action failed');
+    }
+    return result;
   },
 }));
