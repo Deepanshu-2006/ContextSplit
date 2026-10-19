@@ -1023,64 +1023,66 @@ function ContextPreviewPane({
 
   return (
     <div className="space-y-4 flex flex-col justify-between h-full">
-      <div className="space-y-4">
+      <div className="space-y-3.5">
         {/* 4. Selected Context: Header */}
         <div className="border-b border-white/5 pb-3">
           <div className="flex items-start justify-between gap-2">
             <h3 className="text-sm font-semibold text-stone-100 truncate">
               {preview.name}
             </h3>
-            <span
-              className={`text-[10px] font-medium px-2 py-0.5 rounded capitalize shrink-0 ${
-                isReady
-                  ? 'bg-emerald-500/10 text-emerald-400'
-                  : 'bg-amber-500/10 text-amber-400'
-              }`}
-            >
-              {preview.readinessBand.replace('_', ' ')}
-            </span>
+            {isArchived ? (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-stone-800 text-stone-400 border border-white/5 shrink-0">
+                Archived
+              </span>
+            ) : preview.state === 'paused' ? (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 shrink-0">
+                Paused
+              </span>
+            ) : (
+              <span
+                className={`text-[10px] font-medium px-2 py-0.5 rounded capitalize shrink-0 border ${
+                  isReady
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                }`}
+              >
+                {preview.readinessBand.replace('_', ' ')}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2 mt-1 text-[11px] text-stone-400 flex-wrap">
             {preview.projectIdentifier && (
-              <span className="font-mono text-stone-300">
-                {preview.projectIdentifier}
-              </span>
+              <>
+                <span className="font-mono text-stone-300">
+                  {preview.projectIdentifier}
+                </span>
+                <span className="text-stone-600">•</span>
+              </>
             )}
-            {preview.projectIdentifier && <span className="text-stone-600">•</span>}
             <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
-            {preview.state === 'paused' && (
-              <>
-                <span className="text-stone-600">•</span>
-                <span className="text-amber-400 font-medium">Paused</span>
-              </>
-            )}
-            {isArchived && (
-              <>
-                <span className="text-stone-600">•</span>
-                <span className="text-stone-500 font-medium">Archived</span>
-              </>
-            )}
           </div>
         </div>
 
         {/* Where You Left Off / Active Task */}
-        <div className="space-y-1">
-          <div className="text-[11px] font-medium text-stone-400">
+        <div className="bg-stone-900/40 border border-white/5 rounded-lg p-2.5 space-y-1">
+          <div className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
             Where you left off
           </div>
           {preview.taskTitle ? (
-            <p className="text-xs font-medium text-stone-200">
+            <p className="text-xs font-medium text-stone-200 line-clamp-2">
               {preview.taskTitle}
             </p>
           ) : preview.activitySummary ? (
-            <p className="text-xs text-stone-300 leading-snug">{preview.activitySummary}</p>
+            <p className="text-xs text-stone-300 line-clamp-2 leading-snug">
+              {preview.activitySummary}
+            </p>
           ) : (
-            <p className="text-xs text-stone-500 italic">No specific task recorded.</p>
+            <p className="text-xs text-stone-500 italic">No specific task recorded</p>
           )}
 
           {preview.readinessExplanation && (
-            <p className="text-[11px] text-stone-400 pt-1">
+            <p className="text-[11px] text-stone-400/90 pt-1 border-t border-white/5 mt-1.5">
               {preview.readinessExplanation}
             </p>
           )}
@@ -1197,13 +1199,13 @@ function ContextPreviewPane({
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-[11px] font-medium text-stone-400">
             <span>Working Set</span>
-            <span>{preview.itemCount} items</span>
+            <span className="text-[10px] text-stone-500">{preview.itemCount} items</span>
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <p className="text-xs text-stone-500 py-1">No items in active workset</p>
+            <p className="text-xs text-stone-500 py-1.5 text-center italic">No items in active workset</p>
           ) : (
-            <div className="space-y-1 max-h-[140px] overflow-y-auto">
+            <div className="space-y-0.5 max-h-[140px] overflow-y-auto pr-0.5">
               {preview.worksetItems.map((item) => (
                 <WorksetPreviewRow
                   key={item.id}
@@ -1239,7 +1241,7 @@ function ContextPreviewPane({
             }
           }}
           disabled={isResuming || isActionExecuting}
-          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:ring-offset-2 focus:ring-offset-stone-900"
+          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 active:bg-orange-600/90 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:ring-offset-2 focus:ring-offset-stone-900"
           aria-label={primaryButtonLabel}
         >
           {isPrimaryExecuting ? (
@@ -1251,8 +1253,8 @@ function ContextPreviewPane({
             <>
               <Play size={13} className="fill-current" />
               <span>{primaryButtonLabel}</span>
-              <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded">
-                ↵ Enter
+              <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded leading-none font-semibold">
+                ↵
               </kbd>
             </>
           )}
@@ -1280,7 +1282,7 @@ function ContextPreviewPane({
             className={`p-2.5 rounded-lg border border-white/10 transition-colors cursor-pointer flex items-center justify-center focus:outline-none focus:ring-2 focus:ring-orange-400/70 focus:ring-offset-1 focus:ring-offset-stone-900 ${
               isMenuOpen
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
-                : 'bg-stone-950/40 hover:bg-stone-800/80 text-stone-400 hover:text-stone-200'
+                : 'bg-stone-900/60 hover:bg-stone-800 text-stone-400 hover:text-stone-200'
             }`}
             title={isContextSecondaryExecuting ? 'Executing action...' : 'More context actions (⌥M)'}
             aria-label={isContextSecondaryExecuting ? 'Executing action' : 'More actions for selected context'}
@@ -1303,7 +1305,7 @@ function ContextPreviewPane({
               aria-label="Context secondary actions"
               onKeyDown={handleMenuKeyDown}
               tabIndex={-1}
-              className="absolute bottom-full mb-1.5 right-0 w-64 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1.5 z-30 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
+              className="absolute bottom-full mb-1.5 right-0 w-60 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-30 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
             >
               <div className="px-2.5 py-1 text-[10px] font-medium text-stone-500 uppercase tracking-wider">
                 Context Actions
@@ -1339,51 +1341,51 @@ function ContextPreviewPane({
                           triggerRef.current?.focus();
                         }}
                         title={!isEnabled ? action.unsupportedReason : action.description}
-                        className={`w-full flex items-start gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
+                        className={`w-full flex items-center justify-between gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
                           !isEnabled
                             ? isFocused
-                              ? 'opacity-50 cursor-not-allowed text-stone-400 bg-white/5 ring-1 ring-white/10'
+                              ? 'opacity-40 cursor-not-allowed text-stone-500 bg-white/5 ring-1 ring-white/10'
                               : 'opacity-40 cursor-not-allowed text-stone-500'
                             : isFocused
                             ? 'bg-white/10 text-stone-100 cursor-pointer ring-1 ring-white/20'
                             : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
                         }`}
                       >
-                        <div className="mt-0.5 shrink-0">
-                          {isThisActionExecuting ? (
-                            <RefreshCw size={13} className="animate-spin text-stone-200" />
-                          ) : (
-                            <>
-                              {action.id === 'context.open_details' && (
-                                <ExternalLink size={13} />
-                              )}
-                              {action.id === 'context.pause' && (
-                                <Pause size={13} />
-                              )}
-                              {action.id === 'context.archive' && (
-                                <Archive size={13} />
-                              )}
-                              {action.id === 'context.delete' && (
-                                <Trash2 size={13} />
-                              )}
-                            </>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-1">
-                            <span className="truncate font-medium">{action.label}</span>
-                            {action.shortcut && (
-                              <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
-                                {action.shortcut}
-                              </kbd>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="shrink-0 text-stone-400">
+                            {isThisActionExecuting ? (
+                              <RefreshCw size={13} className="animate-spin text-stone-200" />
+                            ) : (
+                              <>
+                                {action.id === 'context.open_details' && (
+                                  <ExternalLink size={13} />
+                                )}
+                                {action.id === 'context.pause' && (
+                                  <Pause size={13} />
+                                )}
+                                {action.id === 'context.archive' && (
+                                  <Archive size={13} />
+                                )}
+                                {action.id === 'context.delete' && (
+                                  <Trash2 size={13} />
+                                )}
+                              </>
+                            )}
+                          </span>
+                          <div className="min-w-0">
+                            <span className="truncate font-medium block">{action.label}</span>
+                            {!isEnabled && action.unsupportedReason && (
+                              <span className="text-[10px] text-stone-500 block truncate leading-tight">
+                                {action.unsupportedReason}
+                              </span>
                             )}
                           </div>
-                          <p className="text-[10.5px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
-                            {!isEnabled && action.unsupportedReason
-                              ? action.unsupportedReason
-                              : action.description}
-                          </p>
                         </div>
+                        {action.shortcut && (
+                          <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
+                            {action.shortcut}
+                          </kbd>
+                        )}
                       </button>
                     );
                   })}
@@ -1544,18 +1546,10 @@ function WorksetPreviewRow({
         ) : (
           <FileText size={12} className="text-stone-400 shrink-0" />
         )}
-        <span className="truncate text-[11px]">{item.title}</span>
-        {isImportant && (
-          <span
-            className="text-[9.5px] px-1 py-0.2 rounded bg-amber-500/10 text-amber-400 font-medium shrink-0"
-            title="Working set memory retention in this context. Does not affect parent context status."
-          >
-            Pinned Memory
-          </span>
-        )}
+        <span className="truncate text-[11px] text-stone-200">{item.title}</span>
       </div>
 
-      <div className="flex items-center gap-1 shrink-0 relative" ref={menuRef}>
+      <div className="flex items-center gap-0.5 shrink-0 relative" ref={menuRef}>
         {item.appName && (
           <span className="text-[10px] text-stone-500 font-mono mr-1">
             {item.appName}
@@ -1586,8 +1580,8 @@ function WorksetPreviewRow({
               isPinExecuting
                 ? 'Updating memory retention...'
                 : isImportant
-                ? 'Pinned in context working set memory. Click to unpin. (Does not affect context status)'
-                : 'Pin as important working set memory in this context. (Does not affect context status)'
+                ? 'Pinned in context memory. Click to unpin.'
+                : 'Pin item in context memory.'
             }
             aria-label={
               isPinExecuting
@@ -1622,7 +1616,7 @@ function WorksetPreviewRow({
             title={
               isRemoveExecuting
                 ? 'Removing item...'
-                : 'Remove item from this context workset without deleting the item'
+                : 'Remove item from this context'
             }
             aria-label={isRemoveExecuting ? 'Removing item' : 'Remove item from context'}
           >
@@ -1682,20 +1676,12 @@ function WorksetPreviewRow({
             aria-label={`Item actions for ${item.title}`}
             onKeyDown={handleMenuKeyDown}
             tabIndex={-1}
-            className="absolute right-0 bottom-full mb-1 w-64 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1.5 z-40 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
+            className="absolute right-0 bottom-full mb-1 w-56 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-40 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
           >
             <div className="px-2 py-1 border-b border-white/5 mb-1">
-              <div className="flex items-center justify-between gap-1">
-                <span className="text-[10.5px] font-medium text-stone-300 truncate">
-                  {item.title}
-                </span>
-                <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-white/5 text-stone-400">
-                  {isImportant ? 'Pinned Memory' : 'Context Item'}
-                </span>
-              </div>
-              <p className="text-[9.5px] text-stone-500 mt-0.5">
-                Item memory status does not affect parent context status ({contextState || 'active'}).
-              </p>
+              <span className="text-[10.5px] font-medium text-stone-300 truncate block">
+                {item.title}
+              </span>
             </div>
 
             {itemActions.length === 0 ? (
@@ -1728,7 +1714,7 @@ function WorksetPreviewRow({
                         triggerRef.current?.focus();
                       }}
                       title={!isEnabled ? action.unsupportedReason : action.description}
-                      className={`w-full flex items-start gap-2.5 px-2 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
+                      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
                         !isEnabled
                           ? isFocused
                             ? 'opacity-40 cursor-not-allowed text-stone-500 bg-white/5 ring-1 ring-white/10'
@@ -1738,7 +1724,7 @@ function WorksetPreviewRow({
                           : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
                       }`}
                     >
-                      <div className="mt-0.5 shrink-0">
+                      <span className="shrink-0 text-stone-400">
                         {isThisItemActionExecuting ? (
                           <RefreshCw size={12} className="animate-spin text-stone-300" />
                         ) : (
@@ -1757,14 +1743,14 @@ function WorksetPreviewRow({
                             )}
                           </>
                         )}
-                      </div>
+                      </span>
                       <div className="flex-1 min-w-0">
                         <span className="truncate font-medium block">{action.label}</span>
-                        <p className="text-[10px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
-                          {!isEnabled && action.unsupportedReason
-                            ? action.unsupportedReason
-                            : action.description}
-                        </p>
+                        {!isEnabled && action.unsupportedReason && (
+                          <span className="text-[10px] text-stone-500 block truncate leading-tight">
+                            {action.unsupportedReason}
+                          </span>
+                        )}
                       </div>
                     </button>
                   );

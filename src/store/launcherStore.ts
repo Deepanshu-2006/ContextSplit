@@ -782,13 +782,14 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       };
     }
 
-    const targetId = contextId || get().selectedContextId;
-    if (!targetId) {
+    const targetId = contextId !== undefined ? contextId : get().selectedContextId;
+    if (!targetId || (typeof targetId === 'string' && targetId.trim().length === 0)) {
+      const isExplicitEmpty = typeof contextId === 'string' && contextId.trim().length === 0;
       return {
         actionId,
         success: false,
         outcome: 'ERROR',
-        error: 'No context selected',
+        error: isExplicitEmpty ? 'Context ID cannot be empty' : 'No context selected',
         message: 'No context selected',
       };
     }
