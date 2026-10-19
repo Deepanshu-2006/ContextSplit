@@ -13,6 +13,7 @@ import {
   Archive,
   Star,
   ExternalLink,
+  Trash2,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -31,6 +32,7 @@ import {
   ContextActionId,
   ItemActionId,
   getAvailableContextActions,
+  getAvailableItemActions,
 } from '../../models/quickActions';
 
 const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
@@ -176,6 +178,15 @@ export function ContextLauncher() {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // If focus is currently inside an open menu or active menu trigger, let the menu manage keyboard navigation
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (
+        activeEl?.closest('[role="menu"]') ||
+        (activeEl?.getAttribute('aria-expanded') === 'true' && activeEl?.closest('[data-menu-trigger="true"]'))
+      ) {
+        return;
+      }
+
       // 1. Escape: dismiss prompt -> close preview -> clear search -> clear filter -> close launcher
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -750,14 +761,18 @@ function ContextPreviewPane({
   onClearResumeState,
 }: ContextPreviewPaneProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
   const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   // Close menu when selected context changes
   useEffect(() => {
     setIsMenuOpen(false);
+    setFocusedMenuIndex(-1);
   }, [preview?.contextId]);
 
-  // Click outside and escape handling for menu
+  // Click outside handling for context secondary menu
   useEffect(() => {
     if (!isMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -765,16 +780,9 @@ function ContextPreviewPane({
         setIsMenuOpen(false);
       }
     };
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setIsMenuOpen(false);
-      }
-    };
     document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('keydown', handleEscape);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('keydown', handleEscape);
     };
   }, [isMenuOpen]);
 
@@ -800,10 +808,62 @@ function ContextPreviewPane({
     shortcut: '↵',
   };
 
-  // Supported secondary actions: all context actions except resume and unsupported delete
-  const secondaryActions = availableActions.filter(
-    (a) => a.id !== 'context.resume' && a.id !== 'context.delete'
-  );
+  // Secondary actions: all context actions except primary resume
+  const secondaryActions = useMemo(() => {
+    return availableActions.filter((a) => a.id !== 'context.resume');
+  }, [availableActions]);
+
+  // Focus management when menu opens
+  useEffect(() => {
+    if (isMenuOpen) {
+      const firstEnabledIdx = secondaryActions.findIndex((a) => a.isSupported);
+      const targetIdx = firstEnabledIdx >= 0 ? firstEnabledIdx : 0;
+      setFocusedMenuIndex(targetIdx);
+      setTimeout(() => {
+        menuItemRefs.current[targetIdx]?.focus();
+      }, 30);
+    } else {
+      setFocusedMenuIndex(-1);
+    }
+  }, [isMenuOpen, secondaryActions]);
+
+  const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex((prev) => {
+        const next = (prev + 1) % secondaryActions.length;
+        menuItemRefs.current[next]?.focus();
+        return next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex((prev) => {
+        const next = (prev - 1 + secondaryActions.length) % secondaryActions.length;
+        menuItemRefs.current[next]?.focus();
+        return next;
+      });
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex(0);
+      menuItemRefs.current[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      const last = secondaryActions.length - 1;
+      setFocusedMenuIndex(last);
+      menuItemRefs.current[last]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsMenuOpen(false);
+      triggerRef.current?.focus();
+    } else if (e.key === 'Tab') {
+      setIsMenuOpen(false);
+    }
+  };
 
   const primaryButtonLabel = isResuming
     ? isCurrentActive
@@ -983,6 +1043,7 @@ function ContextPreviewPane({
                   key={item.id}
                   item={item}
                   contextId={preview.contextId}
+                  contextState={preview.state}
                   isExecuting={isActionExecuting}
                   onExecuteItemAction={onExecuteItemAction}
                 />
@@ -1027,6 +1088,8 @@ function ContextPreviewPane({
         <div className="relative shrink-0" ref={menuRef}>
           <button
             id="launcher-more-actions-btn"
+            ref={triggerRef}
+            data-menu-trigger="true"
             type="button"
             onClick={() => setIsMenuOpen((prev) => !prev)}
             disabled={isResuming || isActionExecuting}
@@ -1035,10 +1098,11 @@ function ContextPreviewPane({
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
                 : 'bg-stone-950/40 hover:bg-stone-800/80 text-stone-400 hover:text-stone-200'
             }`}
-            title="More actions"
+            title="More context actions"
             aria-label="More actions for selected context"
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
+            aria-controls="launcher-context-secondary-menu"
           >
             <MoreHorizontal size={14} />
           </button>
@@ -1046,22 +1110,31 @@ function ContextPreviewPane({
           {/* Compact Popover Menu */}
           {isMenuOpen && (
             <div
+              id="launcher-context-secondary-menu"
               role="menu"
               aria-label="Context secondary actions"
-              className="absolute bottom-full mb-1.5 right-0 w-52 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1 z-30 animate-in fade-in zoom-in-95 duration-100"
+              onKeyDown={handleMenuKeyDown}
+              tabIndex={-1}
+              className="absolute bottom-full mb-1.5 right-0 w-64 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1.5 z-30 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
             >
               <div className="px-2.5 py-1 text-[10px] font-medium text-stone-500 uppercase tracking-wider">
-                Quick Actions
+                Context Actions
               </div>
               <div className="space-y-0.5">
-                {secondaryActions.map((action) => {
+                {secondaryActions.map((action, idx) => {
                   const isEnabled = action.isSupported;
+                  const isFocused = focusedMenuIndex === idx;
                   return (
                     <button
                       key={action.id}
+                      ref={(el) => {
+                        menuItemRefs.current[idx] = el;
+                      }}
                       role="menuitem"
                       type="button"
+                      tabIndex={isFocused ? 0 : -1}
                       disabled={!isEnabled || isResuming || isActionExecuting}
+                      aria-disabled={!isEnabled || isResuming || isActionExecuting}
                       onClick={() => {
                         if (!isEnabled || isResuming || isActionExecuting) return;
                         setIsMenuOpen(false);
@@ -1070,27 +1143,43 @@ function ContextPreviewPane({
                         }
                       }}
                       title={!isEnabled ? action.unsupportedReason : action.description}
-                      className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors ${
+                      className={`w-full flex items-start gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors ${
                         !isEnabled
                           ? 'opacity-40 cursor-not-allowed text-stone-500'
+                          : isFocused
+                          ? 'bg-white/10 text-stone-100 cursor-pointer'
                           : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
                       }`}
                     >
-                      {action.id === 'context.open_details' && (
-                        <ExternalLink size={13} className="shrink-0" />
-                      )}
-                      {action.id === 'context.pause' && (
-                        <Pause size={13} className="shrink-0" />
-                      )}
-                      {action.id === 'context.archive' && (
-                        <Archive size={13} className="shrink-0" />
-                      )}
-                      <span className="flex-1 truncate">{action.label}</span>
-                      {action.shortcut && (
-                        <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
-                          {action.shortcut}
-                        </kbd>
-                      )}
+                      <div className="mt-0.5 shrink-0">
+                        {action.id === 'context.open_details' && (
+                          <ExternalLink size={13} />
+                        )}
+                        {action.id === 'context.pause' && (
+                          <Pause size={13} />
+                        )}
+                        {action.id === 'context.archive' && (
+                          <Archive size={13} />
+                        )}
+                        {action.id === 'context.delete' && (
+                          <Trash2 size={13} />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="truncate font-medium">{action.label}</span>
+                          {action.shortcut && (
+                            <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
+                              {action.shortcut}
+                            </kbd>
+                          )}
+                        </div>
+                        <p className="text-[10.5px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
+                          {!isEnabled && action.unsupportedReason
+                            ? action.unsupportedReason
+                            : action.description}
+                        </p>
+                      </div>
                     </button>
                   );
                 })}
@@ -1104,11 +1193,12 @@ function ContextPreviewPane({
 }
 
 /**
- * Lightweight Workset Item Row with quick item actions
+ * Lightweight Workset Item Row with quick item actions and secondary menu
  */
 interface WorksetPreviewRowProps {
   item: LauncherPreviewItem;
   contextId: string;
+  contextState?: string;
   isExecuting?: boolean;
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
 }
@@ -1116,14 +1206,101 @@ interface WorksetPreviewRowProps {
 function WorksetPreviewRow({
   item,
   contextId,
+  contextState,
   isExecuting = false,
   onExecuteItemAction,
 }: WorksetPreviewRowProps) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemMenuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
   const isLink = item.itemType === 'url' || item.itemType === 'link';
   const isImportant = Boolean(item.isImportant);
 
+  const itemActions = useMemo(() => {
+    return getAvailableItemActions({
+      contextId,
+      itemId: item.id,
+      isImportant,
+    });
+  }, [contextId, item.id, isImportant]);
+
+  // Close item menu when contextId changes
+  useEffect(() => {
+    setIsMenuOpen(false);
+    setFocusedMenuIndex(-1);
+  }, [contextId]);
+
+  // Click outside handling for item menu
+  useEffect(() => {
+    if (!isMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isMenuOpen]);
+
+  // Focus management when item menu opens
+  useEffect(() => {
+    if (isMenuOpen) {
+      const firstEnabledIdx = itemActions.findIndex((a) => a.isSupported);
+      const targetIdx = firstEnabledIdx >= 0 ? firstEnabledIdx : 0;
+      setFocusedMenuIndex(targetIdx);
+      setTimeout(() => {
+        itemMenuItemRefs.current[targetIdx]?.focus();
+      }, 30);
+    } else {
+      setFocusedMenuIndex(-1);
+    }
+  }, [isMenuOpen, itemActions]);
+
+  const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex((prev) => {
+        const next = (prev + 1) % itemActions.length;
+        itemMenuItemRefs.current[next]?.focus();
+        return next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex((prev) => {
+        const next = (prev - 1 + itemActions.length) % itemActions.length;
+        itemMenuItemRefs.current[next]?.focus();
+        return next;
+      });
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusedMenuIndex(0);
+      itemMenuItemRefs.current[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      const last = itemActions.length - 1;
+      setFocusedMenuIndex(last);
+      itemMenuItemRefs.current[last]?.focus();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsMenuOpen(false);
+      triggerRef.current?.focus();
+    } else if (e.key === 'Tab') {
+      setIsMenuOpen(false);
+    }
+  };
+
   return (
-    <div className="group flex items-center justify-between py-1 px-1.5 rounded hover:bg-white/[0.04] text-xs gap-2 text-stone-300 transition-colors">
+    <div className="group relative flex items-center justify-between py-1 px-1.5 rounded hover:bg-white/[0.04] text-xs gap-2 text-stone-300 transition-colors">
       <div className="flex items-center gap-1.5 min-w-0 flex-1">
         {isLink ? (
           <Link2 size={12} className="text-stone-400 shrink-0" />
@@ -1131,16 +1308,24 @@ function WorksetPreviewRow({
           <FileText size={12} className="text-stone-400 shrink-0" />
         )}
         <span className="truncate text-[11px]">{item.title}</span>
+        {isImportant && (
+          <span
+            className="text-[9.5px] px-1 py-0.2 rounded bg-amber-500/10 text-amber-400 font-medium shrink-0"
+            title="Working set memory retention in this context. Does not affect parent context status."
+          >
+            Pinned Memory
+          </span>
+        )}
       </div>
 
-      <div className="flex items-center gap-1 shrink-0">
+      <div className="flex items-center gap-1 shrink-0 relative" ref={menuRef}>
         {item.appName && (
           <span className="text-[10px] text-stone-500 font-mono mr-1">
             {item.appName}
           </span>
         )}
 
-        {/* Toggle Importance */}
+        {/* Quick Shortcut: Toggle Importance */}
         {onExecuteItemAction && (
           <button
             type="button"
@@ -1158,14 +1343,22 @@ function WorksetPreviewRow({
                 ? 'opacity-100 text-amber-400'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-amber-400'
             }`}
-            title={isImportant ? 'Unmark important' : 'Mark as important'}
-            aria-label={isImportant ? 'Unmark important' : 'Mark as important'}
+            title={
+              isImportant
+                ? 'Pinned in context working set memory. Click to unpin. (Does not affect context status)'
+                : 'Pin as important working set memory in this context. (Does not affect context status)'
+            }
+            aria-label={
+              isImportant
+                ? 'Unpin item from context memory'
+                : 'Pin item in context memory'
+            }
           >
             <Star size={11} className={isImportant ? 'fill-current' : ''} />
           </button>
         )}
 
-        {/* Remove from Context */}
+        {/* Quick Shortcut: Remove from Context */}
         {onExecuteItemAction && (
           <button
             type="button"
@@ -1175,11 +1368,121 @@ function WorksetPreviewRow({
               onExecuteItemAction('item.remove_from_context', contextId, item.id);
             }}
             className="p-1 rounded hover:bg-white/10 opacity-0 group-hover:opacity-100 text-stone-500 hover:text-red-400 transition-all cursor-pointer"
-            title="Remove from context"
+            title="Remove item from this context workset without deleting the item"
             aria-label="Remove item from context"
           >
             <X size={11} />
           </button>
+        )}
+
+        {/* Item Secondary Actions Menu Trigger */}
+        {onExecuteItemAction && (
+          <button
+            id={`launcher-item-menu-btn-${item.id}`}
+            ref={triggerRef}
+            data-menu-trigger="true"
+            type="button"
+            disabled={isExecuting}
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsMenuOpen((prev) => !prev);
+            }}
+            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer ${
+              isMenuOpen
+                ? 'opacity-100 bg-white/10 text-stone-100'
+                : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-stone-200'
+            }`}
+            title="More item actions"
+            aria-label={`More actions for item ${item.title}`}
+            aria-haspopup="menu"
+            aria-expanded={isMenuOpen}
+            aria-controls={`launcher-item-menu-${item.id}`}
+          >
+            <MoreHorizontal size={11} />
+          </button>
+        )}
+
+        {/* Compact Item Secondary Actions Popover */}
+        {isMenuOpen && onExecuteItemAction && (
+          <div
+            id={`launcher-item-menu-${item.id}`}
+            role="menu"
+            aria-label={`Item actions for ${item.title}`}
+            onKeyDown={handleMenuKeyDown}
+            tabIndex={-1}
+            className="absolute right-0 bottom-full mb-1 w-64 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1.5 z-40 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
+          >
+            <div className="px-2 py-1 border-b border-white/5 mb-1">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[10.5px] font-medium text-stone-300 truncate">
+                  {item.title}
+                </span>
+                <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-white/5 text-stone-400">
+                  {isImportant ? 'Pinned Memory' : 'Context Item'}
+                </span>
+              </div>
+              <p className="text-[9.5px] text-stone-500 mt-0.5">
+                Item memory status does not affect parent context status ({contextState || 'active'}).
+              </p>
+            </div>
+
+            <div className="space-y-0.5">
+              {itemActions.map((action, idx) => {
+                const isEnabled = action.isSupported;
+                const isFocused = focusedMenuIndex === idx;
+                return (
+                  <button
+                    key={action.id}
+                    ref={(el) => {
+                      itemMenuItemRefs.current[idx] = el;
+                    }}
+                    role="menuitem"
+                    type="button"
+                    tabIndex={isFocused ? 0 : -1}
+                    disabled={!isEnabled || isExecuting}
+                    aria-disabled={!isEnabled || isExecuting}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!isEnabled || isExecuting) return;
+                      setIsMenuOpen(false);
+                      onExecuteItemAction(action.id, contextId, item.id);
+                    }}
+                    title={!isEnabled ? action.unsupportedReason : action.description}
+                    className={`w-full flex items-start gap-2.5 px-2 py-1.5 rounded-md text-xs text-left transition-colors ${
+                      !isEnabled
+                        ? 'opacity-40 cursor-not-allowed text-stone-500'
+                        : isFocused
+                        ? 'bg-white/10 text-stone-100 cursor-pointer'
+                        : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
+                    }`}
+                  >
+                    <div className="mt-0.5 shrink-0">
+                      {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
+                        <Star
+                          size={12}
+                          className={action.id === 'item.unmark_important' ? 'fill-amber-400 text-amber-400' : ''}
+                        />
+                      )}
+                      {action.id === 'item.remove_from_context' && (
+                        <X size={12} />
+                      )}
+                      {action.id === 'item.delete' && (
+                        <Trash2 size={12} />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <span className="truncate font-medium block">{action.label}</span>
+                      <p className="text-[10px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
+                        {!isEnabled && action.unsupportedReason
+                          ? action.unsupportedReason
+                          : action.description}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         )}
       </div>
     </div>

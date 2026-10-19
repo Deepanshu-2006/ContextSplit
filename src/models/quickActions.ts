@@ -254,7 +254,7 @@ export function getAvailableItemActions(input: ItemActionEvaluationInput): ItemQ
     actions.push({
       id: 'item.unmark_important',
       label: 'Unmark Important',
-      description: 'Remove item from pinned important contextual memories.',
+      description: 'Remove item from pinned working-set memories for this context. Does not affect parent context lifecycle or status.',
       targetType: 'item',
       isSupported: true,
     });
@@ -262,7 +262,7 @@ export function getAvailableItemActions(input: ItemActionEvaluationInput): ItemQ
     actions.push({
       id: 'item.mark_important',
       label: 'Mark as Important',
-      description: 'Pin item as permanent important contextual memory.',
+      description: 'Pin item as important working-set memory for this context. Does not affect parent context lifecycle or status.',
       targetType: 'item',
       isSupported: true,
     });
