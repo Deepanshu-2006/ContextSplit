@@ -287,6 +287,34 @@ export interface LauncherPreviewModel {
   isStale: boolean;
 }
 
+export interface ActionErrorInfo {
+  actionId: string;
+  title: string;
+  message: string;
+  targetId?: string;
+  isRetryable?: boolean;
+}
+
+export function getActionErrorTitle(actionId: string): string {
+  switch (actionId) {
+    case 'context.resume':
+      return 'Resume Failed';
+    case 'context.pause':
+      return 'Pause Failed';
+    case 'context.archive':
+      return 'Archive Failed';
+    case 'context.open_details':
+      return 'Could Not Open Details';
+    case 'item.mark_important':
+    case 'item.unmark_important':
+      return 'Memory Update Failed';
+    case 'item.remove_from_context':
+      return 'Remove Item Failed';
+    default:
+      return 'Action Failed';
+  }
+}
+
 interface LauncherState {
   isOpen: boolean;
   searchQuery: string;
@@ -297,8 +325,11 @@ interface LauncherState {
   isLoadingPreview: boolean;
   isResuming: boolean;
   isActionExecuting: boolean;
+  executingActionId: ContextActionId | ItemActionId | null;
+  executingTargetId: string | null;
   resumeStatus: ResumeActionStatus;
   resumeError: string | null;
+  actionError: ActionErrorInfo | null;
   notReadyReason: string | null;
   error: string | null;
   previewError: string | null;
@@ -319,6 +350,7 @@ interface LauncherState {
   fetchLauncherData: () => Promise<void>;
   resumeContextById: (contextId: string, force?: boolean) => Promise<boolean>;
   clearResumeState: () => void;
+  clearActionError: () => void;
   executeContextAction: (
     actionId: ContextActionId,
     contextId?: string,
@@ -344,8 +376,11 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   isLoadingPreview: false,
   isResuming: false,
   isActionExecuting: false,
+  executingActionId: null,
+  executingTargetId: null,
   resumeStatus: 'idle',
   resumeError: null,
+  actionError: null,
   notReadyReason: null,
   error: null,
   previewError: null,
@@ -363,8 +398,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       selectedContextId: null,
       activePreview: null,
       isResuming: false,
+      isActionExecuting: false,
+      executingActionId: null,
+      executingTargetId: null,
       resumeStatus: 'idle',
       resumeError: null,
+      actionError: null,
       notReadyReason: null,
       error: null,
       previewError: null,
@@ -424,6 +463,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       resumeStatus: 'idle',
       resumeError: null,
       notReadyReason: null,
+      actionError: null,
+    });
+  },
+
+  clearActionError: () => {
+    set({
+      actionError: null,
+      resumeError: null,
+      notReadyReason: null,
     });
   },
 
@@ -435,6 +483,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       previewError: null,
       resumeStatus: 'idle',
       resumeError: null,
+      actionError: null,
       notReadyReason: null,
     });
 
@@ -704,9 +753,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         selectedIndex: 0,
       });
 
-      // Auto-preview top item if available
+      // Auto-preview top item if available and not currently displaying an action error
       const firstId = activeItem?.id || (recents.length > 0 ? recents[0].id : null);
-      if (firstId) {
+      if (firstId && !get().actionError) {
         get().selectContextById(firstId);
       }
     } catch (err) {
@@ -752,7 +801,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         notReadyReason: null,
       });
     }
-    set({ isActionExecuting: true });
+    set({
+      isActionExecuting: true,
+      executingActionId: actionId,
+      executingTargetId: targetId,
+      actionError: null,
+    });
 
     try {
       const preview = get().activePreview;
@@ -798,6 +852,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           });
         } else {
           toast.info(result.message || 'Action is no longer valid');
+          set({
+            actionError: {
+              actionId,
+              title: getActionErrorTitle(actionId),
+              message: result.message || 'Action is no longer valid in current state',
+              targetId,
+              isRetryable: false,
+            },
+          });
         }
 
         // When an action is blocked due to lifecycle transition invalidation or state change during interaction,
@@ -810,16 +873,28 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         }
       } else if (result.outcome === 'ERROR') {
         const errorMsg = result.error || result.message || 'Action failed';
+        const fullMsg = (result.message || '') + ' ' + (result.error || '');
+        const isUnavailable =
+          fullMsg.includes('no longer available') ||
+          fullMsg.includes('not found') ||
+          fullMsg.includes('does not exist');
+
         set({
           isResuming: false,
           resumeStatus: 'error',
-          resumeError: errorMsg,
+          resumeError: actionId === 'context.resume' ? errorMsg : null,
+          actionError: {
+            actionId,
+            title: isUnavailable ? 'Context Unavailable' : getActionErrorTitle(actionId),
+            message: errorMsg,
+            targetId,
+            isRetryable: !isUnavailable,
+          },
         });
         toast.error(result.message || errorMsg);
 
         // Handle contexts that become unavailable between selection and execution
-        const fullMsg = (result.message || '') + ' ' + (result.error || '');
-        if (fullMsg.includes('no longer available') || fullMsg.includes('not found') || fullMsg.includes('does not exist')) {
+        if (isUnavailable) {
           if (get().activePreview?.contextId === targetId) {
             set({ activePreview: null });
           }
@@ -832,12 +907,31 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
       return result;
     } finally {
-      set({ isActionExecuting: false });
+      set({
+        isActionExecuting: false,
+        executingActionId: null,
+        executingTargetId: null,
+      });
     }
   },
 
   executeItemAction: async (actionId: ItemActionId, contextId: string, itemId: string) => {
-    set({ isActionExecuting: true });
+    // Concurrency guard: Prevent duplicate submissions while an action is in progress
+    if (get().isActionExecuting) {
+      return {
+        actionId,
+        success: false,
+        outcome: 'BLOCKED',
+        message: 'An action is already in progress.',
+      };
+    }
+
+    set({
+      isActionExecuting: true,
+      executingActionId: actionId,
+      executingTargetId: itemId,
+      actionError: null,
+    });
     try {
       const result = await quickActionsService.executeItemAction(actionId, contextId, itemId);
       if (result.success) {
@@ -846,11 +940,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           await get().selectContextById(contextId);
         }
       } else {
-        toast.error(result.message || result.error || 'Item action failed');
+        const errorMsg = result.message || result.error || 'Item action failed';
+        set({
+          actionError: {
+            actionId,
+            title: getActionErrorTitle(actionId),
+            message: errorMsg,
+            targetId: itemId,
+            isRetryable: true,
+          },
+        });
+        toast.error(errorMsg);
       }
       return result;
     } finally {
-      set({ isActionExecuting: false });
+      set({
+        isActionExecuting: false,
+        executingActionId: null,
+        executingTargetId: null,
+      });
     }
   },
 }));

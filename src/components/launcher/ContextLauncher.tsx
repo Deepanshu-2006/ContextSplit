@@ -26,6 +26,7 @@ import {
   matchContext,
   sortContextMatches,
   getVisibleLauncherSlice,
+  ActionErrorInfo,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import {
@@ -84,8 +85,11 @@ export function ContextLauncher() {
     isLoadingPreview,
     isResuming,
     isActionExecuting,
+    executingActionId,
+    executingTargetId,
     resumeStatus,
     resumeError,
+    actionError,
     notReadyReason,
     error,
     previewError,
@@ -102,6 +106,7 @@ export function ContextLauncher() {
     fetchLauncherData,
     resumeContextById,
     clearResumeState,
+    clearActionError,
     executeContextAction,
     executeItemAction,
   } = useLauncherStore();
@@ -187,10 +192,11 @@ export function ContextLauncher() {
         return;
       }
 
-      // 1. Escape: dismiss prompt -> close preview -> clear search -> clear filter -> close launcher
+      // 1. Escape: dismiss error/prompt -> close preview -> clear search -> clear filter -> close launcher
       if (e.key === 'Escape') {
         e.preventDefault();
-        if (notReadyReason || resumeError) {
+        if (actionError || notReadyReason || resumeError) {
+          clearActionError();
           clearResumeState();
         } else if (isPreviewOpen) {
           // Close preview and return to search/list
@@ -401,6 +407,7 @@ export function ContextLauncher() {
     isActionExecuting,
     notReadyReason,
     resumeError,
+    actionError,
     searchQuery,
     activeFilter,
     closeLauncher,
@@ -410,6 +417,7 @@ export function ContextLauncher() {
     setIsPreviewOpen,
     resumeContextById,
     clearResumeState,
+    clearActionError,
     executeContextAction,
   ]);
 
@@ -719,9 +727,12 @@ export function ContextLauncher() {
               isLoading={isLoadingPreview}
               isResuming={isResuming}
               isActionExecuting={isActionExecuting}
+              executingActionId={executingActionId}
+              executingTargetId={executingTargetId}
               isPreviewOpen={isPreviewOpen}
               resumeStatus={resumeStatus}
               resumeError={resumeError}
+              actionError={actionError}
               notReadyReason={notReadyReason}
               error={previewError}
               isActiveContext={Boolean(
@@ -741,6 +752,7 @@ export function ContextLauncher() {
                 executeItemAction(actionId, contextId, itemId);
               }}
               onClearResumeState={clearResumeState}
+              onClearActionError={clearActionError}
               onClose={() => {
                 setIsPreviewOpen(false);
                 inputRef.current?.focus();
@@ -774,9 +786,12 @@ interface ContextPreviewPaneProps {
   isLoading: boolean;
   isResuming: boolean;
   isActionExecuting?: boolean;
+  executingActionId?: ContextActionId | ItemActionId | null;
+  executingTargetId?: string | null;
   isPreviewOpen?: boolean;
   resumeStatus: ResumeActionStatus;
   resumeError: string | null;
+  actionError?: ActionErrorInfo | null;
   notReadyReason: string | null;
   error: string | null;
   isActiveContext?: boolean;
@@ -784,6 +799,7 @@ interface ContextPreviewPaneProps {
   onExecuteContextAction?: (actionId: ContextActionId, options?: { force?: boolean }) => void;
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
   onClearResumeState: () => void;
+  onClearActionError?: () => void;
   onClose: () => void;
 }
 
@@ -792,7 +808,10 @@ function ContextPreviewPane({
   isLoading,
   isResuming,
   isActionExecuting = false,
+  executingActionId,
+  executingTargetId,
   resumeError,
+  actionError,
   notReadyReason,
   error,
   isActiveContext = false,
@@ -800,6 +819,7 @@ function ContextPreviewPane({
   onExecuteContextAction,
   onExecuteItemAction,
   onClearResumeState,
+  onClearActionError,
 }: ContextPreviewPaneProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
@@ -930,11 +950,23 @@ function ContextPreviewPane({
     }
   };
 
-  const primaryButtonLabel = isResuming
+  const isPrimaryExecuting = Boolean(
+    isResuming || (isActionExecuting && executingActionId === 'context.resume')
+  );
+
+  const primaryButtonLabel = isPrimaryExecuting
     ? primaryActionDescriptor.inProgressLabel
     : primaryActionDescriptor.label === 'Resume Context'
     ? 'Resume'
     : primaryActionDescriptor.label;
+
+  const isContextSecondaryExecuting = Boolean(
+    isActionExecuting &&
+      preview &&
+      executingTargetId === preview.contextId &&
+      executingActionId &&
+      executingActionId !== 'context.resume'
+  );
 
   if (isLoading) {
     return (
@@ -959,6 +991,24 @@ function ContextPreviewPane({
   }
 
   if (!preview) {
+    if (actionError) {
+      return (
+        <div className="h-full flex flex-col items-center justify-center text-center p-4 space-y-2">
+          <AlertCircle size={20} className="text-red-400" />
+          <p className="text-xs font-semibold text-stone-200">{actionError.title}</p>
+          <p className="text-[11px] text-stone-400 max-w-xs">{actionError.message}</p>
+          <button
+            onClick={() => {
+              onClearActionError?.();
+              onClearResumeState();
+            }}
+            className="mt-2 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="h-full flex flex-col items-center justify-center text-center p-4 text-stone-500 space-y-1">
         <p className="text-xs font-medium text-stone-400">No context selected</p>
@@ -1071,7 +1121,62 @@ function ContextPreviewPane({
           </div>
         )}
 
-        {resumeError && (
+        {actionError ? (
+          <div
+            id="launcher-action-error-banner"
+            role="alert"
+            className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 space-y-2 text-xs"
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-red-300">{actionError.title}</p>
+                <p className="text-[11px] text-red-400/90 mt-0.5">{actionError.message}</p>
+              </div>
+              <button
+                onClick={() => {
+                  onClearActionError?.();
+                  onClearResumeState();
+                }}
+                className="text-stone-400 hover:text-white cursor-pointer"
+                aria-label="Dismiss error"
+              >
+                <X size={12} />
+              </button>
+            </div>
+            {actionError.isRetryable && (
+              <div className="flex items-center gap-2 pt-0.5">
+                <button
+                  onClick={() => {
+                    const actionId = actionError.actionId;
+                    const targetId = actionError.targetId;
+                    onClearActionError?.();
+                    onClearResumeState();
+                    if (actionId.startsWith('item.') && targetId && preview) {
+                      onExecuteItemAction?.(actionId as ItemActionId, preview.contextId, targetId);
+                    } else if (actionId.startsWith('context.') && preview) {
+                      onExecuteContextAction?.(actionId as ContextActionId);
+                    }
+                  }}
+                  disabled={isResuming || isActionExecuting}
+                  className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 font-medium text-[11px] transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <RefreshCw size={10} />
+                  <span>Retry</span>
+                </button>
+                <button
+                  onClick={() => {
+                    onClearActionError?.();
+                    onClearResumeState();
+                  }}
+                  className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] transition-colors cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+          </div>
+        ) : resumeError ? (
           <div className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs">
             <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
             <div className="flex-1 min-w-0">
@@ -1086,7 +1191,7 @@ function ContextPreviewPane({
               <X size={12} />
             </button>
           </div>
-        )}
+        ) : null}
 
         {/* Working Set Items */}
         <div className="space-y-1.5">
@@ -1106,6 +1211,8 @@ function ContextPreviewPane({
                   contextId={preview.contextId}
                   contextState={preview.state}
                   isExecuting={isActionExecuting}
+                  executingActionId={executingActionId}
+                  executingTargetId={executingTargetId}
                   onExecuteItemAction={onExecuteItemAction}
                 />
               ))}
@@ -1135,7 +1242,7 @@ function ContextPreviewPane({
           className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:ring-offset-2 focus:ring-offset-stone-900"
           aria-label={primaryButtonLabel}
         >
-          {isResuming ? (
+          {isPrimaryExecuting ? (
             <>
               <RefreshCw size={13} className="animate-spin" />
               <span>{primaryButtonLabel}</span>
@@ -1175,13 +1282,17 @@ function ContextPreviewPane({
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
                 : 'bg-stone-950/40 hover:bg-stone-800/80 text-stone-400 hover:text-stone-200'
             }`}
-            title="More context actions (⌥M)"
-            aria-label="More actions for selected context"
+            title={isContextSecondaryExecuting ? 'Executing action...' : 'More context actions (⌥M)'}
+            aria-label={isContextSecondaryExecuting ? 'Executing action' : 'More actions for selected context'}
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
             aria-controls="launcher-context-secondary-menu"
           >
-            <MoreHorizontal size={14} />
+            {isContextSecondaryExecuting ? (
+              <RefreshCw size={14} className="animate-spin text-stone-200" />
+            ) : (
+              <MoreHorizontal size={14} />
+            )}
           </button>
 
           {/* Compact Popover Menu */}
@@ -1206,6 +1317,8 @@ function ContextPreviewPane({
                   {secondaryActions.map((action, idx) => {
                     const isEnabled = action.isSupported;
                     const isFocused = focusedMenuIndex === idx;
+                    const isThisActionExecuting =
+                      isActionExecuting && executingActionId === action.id;
                     return (
                       <button
                         key={action.id}
@@ -1237,17 +1350,23 @@ function ContextPreviewPane({
                         }`}
                       >
                         <div className="mt-0.5 shrink-0">
-                          {action.id === 'context.open_details' && (
-                            <ExternalLink size={13} />
-                          )}
-                          {action.id === 'context.pause' && (
-                            <Pause size={13} />
-                          )}
-                          {action.id === 'context.archive' && (
-                            <Archive size={13} />
-                          )}
-                          {action.id === 'context.delete' && (
-                            <Trash2 size={13} />
+                          {isThisActionExecuting ? (
+                            <RefreshCw size={13} className="animate-spin text-stone-200" />
+                          ) : (
+                            <>
+                              {action.id === 'context.open_details' && (
+                                <ExternalLink size={13} />
+                              )}
+                              {action.id === 'context.pause' && (
+                                <Pause size={13} />
+                              )}
+                              {action.id === 'context.archive' && (
+                                <Archive size={13} />
+                              )}
+                              {action.id === 'context.delete' && (
+                                <Trash2 size={13} />
+                              )}
+                            </>
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
@@ -1286,6 +1405,8 @@ interface WorksetPreviewRowProps {
   contextId: string;
   contextState?: string;
   isExecuting?: boolean;
+  executingActionId?: ContextActionId | ItemActionId | null;
+  executingTargetId?: string | null;
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
 }
 
@@ -1294,6 +1415,8 @@ function WorksetPreviewRow({
   contextId,
   contextState,
   isExecuting = false,
+  executingActionId,
+  executingTargetId,
   onExecuteItemAction,
 }: WorksetPreviewRowProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -1304,6 +1427,13 @@ function WorksetPreviewRow({
 
   const isLink = item.itemType === 'url' || item.itemType === 'link';
   const isImportant = Boolean(item.isImportant);
+
+  const isItemExecuting = Boolean(isExecuting && executingTargetId === item.id);
+  const isPinExecuting =
+    isItemExecuting &&
+    (executingActionId === 'item.mark_important' || executingActionId === 'item.unmark_important');
+  const isRemoveExecuting =
+    isItemExecuting && executingActionId === 'item.remove_from_context';
 
   const itemActions = useMemo(() => {
     return getAvailableItemActions({
@@ -1446,22 +1576,32 @@ function WorksetPreviewRow({
               );
             }}
             className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 ${
-              isImportant
+              isPinExecuting
+                ? 'opacity-100 text-amber-400'
+                : isImportant
                 ? 'opacity-100 text-amber-400'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-amber-400'
             }`}
             title={
-              isImportant
+              isPinExecuting
+                ? 'Updating memory retention...'
+                : isImportant
                 ? 'Pinned in context working set memory. Click to unpin. (Does not affect context status)'
                 : 'Pin as important working set memory in this context. (Does not affect context status)'
             }
             aria-label={
-              isImportant
+              isPinExecuting
+                ? 'Updating memory retention'
+                : isImportant
                 ? 'Unpin item from context memory'
                 : 'Pin item in context memory'
             }
           >
-            <Star size={11} className={isImportant ? 'fill-current' : ''} />
+            {isPinExecuting ? (
+              <RefreshCw size={11} className="animate-spin text-amber-400" />
+            ) : (
+              <Star size={11} className={isImportant ? 'fill-current' : ''} />
+            )}
           </button>
         )}
 
@@ -1474,11 +1614,23 @@ function WorksetPreviewRow({
               e.stopPropagation();
               onExecuteItemAction('item.remove_from_context', contextId, item.id);
             }}
-            className="p-1 rounded hover:bg-white/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 text-stone-500 hover:text-red-400 transition-all cursor-pointer"
-            title="Remove item from this context workset without deleting the item"
-            aria-label="Remove item from context"
+            className={`p-1 rounded hover:bg-white/10 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 transition-all cursor-pointer ${
+              isRemoveExecuting
+                ? 'opacity-100 text-red-400'
+                : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-red-400'
+            }`}
+            title={
+              isRemoveExecuting
+                ? 'Removing item...'
+                : 'Remove item from this context workset without deleting the item'
+            }
+            aria-label={isRemoveExecuting ? 'Removing item' : 'Remove item from context'}
           >
-            <X size={11} />
+            {isRemoveExecuting ? (
+              <RefreshCw size={11} className="animate-spin text-red-400" />
+            ) : (
+              <X size={11} />
+            )}
           </button>
         )}
 
@@ -1504,15 +1656,21 @@ function WorksetPreviewRow({
             className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 ${
               isMenuOpen
                 ? 'opacity-100 bg-white/10 text-stone-100 ring-1 ring-white/20'
+                : isItemExecuting && !isPinExecuting && !isRemoveExecuting
+                ? 'opacity-100 text-stone-200'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-stone-200'
             }`}
-            title="More item actions"
+            title={isItemExecuting ? 'Action executing...' : 'More item actions'}
             aria-label={`More actions for item ${item.title}`}
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
             aria-controls={`launcher-item-menu-${item.id}`}
           >
-            <MoreHorizontal size={11} />
+            {isItemExecuting && !isPinExecuting && !isRemoveExecuting ? (
+              <RefreshCw size={11} className="animate-spin text-stone-300" />
+            ) : (
+              <MoreHorizontal size={11} />
+            )}
           </button>
         )}
 
@@ -1549,6 +1707,8 @@ function WorksetPreviewRow({
                 {itemActions.map((action, idx) => {
                   const isEnabled = action.isSupported;
                   const isFocused = focusedMenuIndex === idx;
+                  const isThisItemActionExecuting =
+                    isItemExecuting && executingActionId === action.id;
                   return (
                     <button
                       key={action.id}
@@ -1579,17 +1739,23 @@ function WorksetPreviewRow({
                       }`}
                     >
                       <div className="mt-0.5 shrink-0">
-                        {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
-                          <Star
-                            size={12}
-                            className={action.id === 'item.unmark_important' ? 'fill-amber-400 text-amber-400' : ''}
-                          />
-                        )}
-                        {action.id === 'item.remove_from_context' && (
-                          <X size={12} />
-                        )}
-                        {action.id === 'item.delete' && (
-                          <Trash2 size={12} />
+                        {isThisItemActionExecuting ? (
+                          <RefreshCw size={12} className="animate-spin text-stone-300" />
+                        ) : (
+                          <>
+                            {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
+                              <Star
+                                size={12}
+                                className={action.id === 'item.unmark_important' ? 'fill-amber-400 text-amber-400' : ''}
+                              />
+                            )}
+                            {action.id === 'item.remove_from_context' && (
+                              <X size={12} />
+                            )}
+                            {action.id === 'item.delete' && (
+                              <Trash2 size={12} />
+                            )}
+                          </>
                         )}
                       </div>
                       <div className="flex-1 min-w-0">
