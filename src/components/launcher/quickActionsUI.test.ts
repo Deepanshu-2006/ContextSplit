@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useLauncherStore } from '../../store/launcherStore';
+import { useLauncherStore, getActionErrorTitle } from '../../store/launcherStore';
 import { contextInteractionService } from '../../services/contextInteractionService';
 import { contextWorksetService } from '../../services/contextWorkset';
 import { db } from '../../services/db';
@@ -1317,6 +1317,215 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
       expect(disabledItemProps['aria-disabled']).toBe(true);
       expect(disabledItemProps.tabIndex).toBe(0);
       expect(disabledItemProps.title).toContain('unsupported');
+    });
+  });
+
+  describe('Context Launcher Quick Actions Feedback System (Loading, Success, Failure, State Recovery)', () => {
+    // 40. Loading state tracking and execution flags
+    it('40. accurately tracks in-flight loading state (isActionExecuting, executingActionId, executingTargetId) during actions', async () => {
+      let resolvePause: (value: any) => void;
+      const pausePromise = new Promise((resolve) => {
+        resolvePause = resolve;
+      });
+      vi.mocked(contextInteractionService.pauseContext).mockImplementationOnce(() => pausePromise as any);
+
+      // Trigger context action
+      const executionPromise = useLauncherStore
+        .getState()
+        .executeContextAction('context.pause', 'ctx-active-1');
+
+      // Verify immediate in-flight feedback flags
+      expect(useLauncherStore.getState().isActionExecuting).toBe(true);
+      expect(useLauncherStore.getState().executingActionId).toBe('context.pause');
+      expect(useLauncherStore.getState().executingTargetId).toBe('ctx-active-1');
+
+      // Resolve the underlying operation
+      resolvePause!({
+        context_id: 'ctx-active-1',
+        status: 'paused',
+        paused_at: new Date().toISOString(),
+      });
+      await executionPromise;
+
+      // Verify complete state reset after execution
+      expect(useLauncherStore.getState().isActionExecuting).toBe(false);
+      expect(useLauncherStore.getState().executingActionId).toBeNull();
+      expect(useLauncherStore.getState().executingTargetId).toBeNull();
+    });
+
+    // 41. Concurrency guards: prevent duplicate submissions while in-flight
+    it('41. prevents repeated execution of in-flight actions (guards context and item actions)', async () => {
+      // Simulate an ongoing operation
+      useLauncherStore.setState({
+        isActionExecuting: true,
+        executingActionId: 'context.pause',
+        executingTargetId: 'ctx-active-1',
+      });
+
+      // Attempt to execute duplicate context action
+      const duplicateContextAction = await useLauncherStore
+        .getState()
+        .executeContextAction('context.pause', 'ctx-active-1');
+      expect(duplicateContextAction.outcome).toBe('BLOCKED');
+      expect(duplicateContextAction.message).toContain('already in progress');
+
+      // Attempt to execute item action while an action is in flight
+      const blockedItemAction = await useLauncherStore
+        .getState()
+        .executeItemAction('item.mark_important', 'ctx-active-1', 'item-1');
+      expect(blockedItemAction.outcome).toBe('BLOCKED');
+      expect(blockedItemAction.message).toContain('already in progress');
+
+      // Verify no underlying service methods were called
+      expect(contextInteractionService.pauseContext).not.toHaveBeenCalled();
+      expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
+    });
+
+    // 42. Success feedback confirmation: no optimistic UI falsehoods
+    it('42. displays success feedback and refreshes state only after the operation confirms success', async () => {
+      const fetchLauncherDataSpy = vi.spyOn(useLauncherStore.getState(), 'fetchLauncherData');
+      vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({
+        context_id: 'ctx-active-1',
+        status: 'active',
+        switched_at: new Date().toISOString(),
+      });
+
+      // Before execution
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(useLauncherStore.getState().isOpen).toBe(true);
+
+      const result = await useLauncherStore
+        .getState()
+        .executeContextAction('context.resume', 'ctx-active-1');
+
+      expect(result.success).toBe(true);
+      expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('ctx-active-1'));
+      expect(fetchLauncherDataSpy).toHaveBeenCalled();
+      expect(useLauncherStore.getState().isOpen).toBe(false);
+    });
+
+    // 43. Actionable error feedback with specific titles and retryability
+    it('43. displays actionable error feedback with action-specific titles and retryability when operations fail', async () => {
+      // 43a. Verify title mapping for all supported quick actions
+      expect(getActionErrorTitle('context.resume')).toBe('Resume Failed');
+      expect(getActionErrorTitle('context.pause')).toBe('Pause Failed');
+      expect(getActionErrorTitle('context.archive')).toBe('Archive Failed');
+      expect(getActionErrorTitle('context.open_details')).toBe('Could Not Open Details');
+      expect(getActionErrorTitle('item.mark_important')).toBe('Memory Update Failed');
+      expect(getActionErrorTitle('item.unmark_important')).toBe('Memory Update Failed');
+      expect(getActionErrorTitle('item.remove_from_context')).toBe('Remove Item Failed');
+      expect(getActionErrorTitle('unknown.action')).toBe('Action Failed');
+
+      // 43b. Context action failure (e.g. pause failure must NOT show 'Resume Failed')
+      vi.mocked(contextInteractionService.pauseContext).mockRejectedValueOnce(
+        new Error('Engine process terminated unexpectedly')
+      );
+
+      const pauseResult = await useLauncherStore
+        .getState()
+        .executeContextAction('context.pause', 'ctx-active-1');
+
+      expect(pauseResult.outcome).toBe('ERROR');
+      const actionError = useLauncherStore.getState().actionError;
+      expect(actionError).toBeDefined();
+      expect(actionError?.actionId).toBe('context.pause');
+      expect(actionError?.title).toBe('Pause Failed');
+      expect(actionError?.message).toContain('Engine process terminated');
+      expect(actionError?.isRetryable).toBe(true);
+      // resumeError must stay null so preview pane doesn't display misleading 'Resume Failed'
+      expect(useLauncherStore.getState().resumeError).toBeNull();
+
+      // 43c. Item action failure
+      vi.mocked(contextWorksetService.controlContextMemory).mockRejectedValueOnce(
+        new Error('Working set item memory is locked')
+      );
+
+      const itemResult = await useLauncherStore
+        .getState()
+        .executeItemAction('item.remove_from_context', 'ctx-active-1', 'item-1');
+
+      expect(itemResult.success).toBe(false);
+      const itemActionError = useLauncherStore.getState().actionError;
+      expect(itemActionError).toBeDefined();
+      expect(itemActionError?.actionId).toBe('item.remove_from_context');
+      expect(itemActionError?.title).toBe('Remove Item Failed');
+      expect(itemActionError?.message).toContain('Working set item memory is locked');
+      expect(itemActionError?.targetId).toBe('item-1');
+      expect(itemActionError?.isRetryable).toBe(true);
+    });
+
+    // 44. Error dismissal and state clearing
+    it('44. clears action errors cleanly via clearActionError and restores preview state', () => {
+      useLauncherStore.setState({
+        actionError: {
+          actionId: 'context.pause',
+          title: 'Pause Failed',
+          message: 'Process timeout',
+          isRetryable: true,
+        },
+        resumeError: 'Previous resume error',
+        notReadyReason: 'Not ready reason',
+      });
+
+      useLauncherStore.getState().clearActionError();
+
+      expect(useLauncherStore.getState().actionError).toBeNull();
+      expect(useLauncherStore.getState().resumeError).toBeNull();
+      expect(useLauncherStore.getState().notReadyReason).toBeNull();
+    });
+
+    // 45. State recovery after failure in finally block
+    it('45. guarantees UI state recovery after an operation failure', async () => {
+      vi.mocked(contextInteractionService.pauseContext).mockRejectedValueOnce(
+        new Error('Network failure')
+      );
+
+      await useLauncherStore
+        .getState()
+        .executeContextAction('context.pause', 'ctx-active-1');
+
+      // State recovery: all executing flags must be false / null
+      expect(useLauncherStore.getState().isActionExecuting).toBe(false);
+      expect(useLauncherStore.getState().executingActionId).toBeNull();
+      expect(useLauncherStore.getState().executingTargetId).toBeNull();
+      expect(useLauncherStore.getState().isResuming).toBe(false);
+    });
+
+    // 46. Stale and invalid operation handling
+    it('46. handles stale and invalid state transitions with actionable explanation and backend refresh', async () => {
+      const fetchLauncherDataSpy = vi.spyOn(useLauncherStore.getState(), 'fetchLauncherData');
+
+      // Context ctx-archived-1 is archived, but user triggers pause action on it
+      const result = await useLauncherStore
+        .getState()
+        .executeContextAction('context.pause', 'ctx-archived-1');
+
+      expect(result.outcome).toBe('BLOCKED');
+      expect(useLauncherStore.getState().actionError).toBeDefined();
+      expect(useLauncherStore.getState().actionError?.title).toBe('Pause Failed');
+      expect(useLauncherStore.getState().actionError?.message).toContain('Cannot pause an archived context');
+      expect(useLauncherStore.getState().actionError?.isRetryable).toBe(false);
+      // Auto-refreshes launcher data to resync with backend state
+      expect(fetchLauncherDataSpy).toHaveBeenCalled();
+    });
+
+    // 47. Unavailable or deleted context handling
+    it('47. handles contexts that became unavailable or deleted by clearing active preview and refreshing list', async () => {
+      const fetchLauncherDataSpy = vi.spyOn(useLauncherStore.getState(), 'fetchLauncherData');
+      vi.mocked(contextInteractionService.resumeContext).mockRejectedValueOnce(
+        new Error('Context ctx-active-1 is no longer available or does not exist')
+      );
+
+      const result = await useLauncherStore
+        .getState()
+        .executeContextAction('context.resume', 'ctx-active-1');
+
+      expect(result.outcome).toBe('ERROR');
+      expect(useLauncherStore.getState().actionError?.title).toBe('Context Unavailable');
+      expect(useLauncherStore.getState().actionError?.isRetryable).toBe(false);
+      // Clears deleted context from preview so phantom data is not displayed
+      expect(useLauncherStore.getState().activePreview).toBeNull();
+      expect(fetchLauncherDataSpy).toHaveBeenCalled();
     });
   });
 });
