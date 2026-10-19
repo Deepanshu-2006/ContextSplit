@@ -342,4 +342,157 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
     expect(invalidItemResult.success).toBe(false);
     expect(invalidItemResult.outcome).toBe('ERROR');
   });
+
+  // 12. Ensures actual context ID is used (not display name or list index)
+  it('12. ensures action uses actual context ID and connects to real resumeContext API', async () => {
+    const rawUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+    vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({
+      context_id: rawUuid,
+      status: 'active',
+      switched_at: new Date().toISOString(),
+    });
+
+    useLauncherStore.setState({
+      selectedContextId: rawUuid,
+      activePreview: {
+        contextId: rawUuid,
+        name: 'Display Name With Spaces & Emoji 🚀',
+        state: 'recent',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    const result = await useLauncherStore.getState().executeContextAction('context.resume', rawUuid);
+    expect(result.success).toBe(true);
+    // Verified: The backend call must receive the actual UUID, not the display name or index
+    expect(contextInteractionService.resumeContext).toHaveBeenCalledWith(rawUuid);
+    expect(useWorkspaceStore.getState().selectWorkspace).toHaveBeenCalledWith(rawUuid);
+  });
+
+  // 13. Concurrency guard prevents duplicate submissions during inflight action
+  it('13. prevents duplicate submissions while an action is in progress', async () => {
+    let resolveResume!: (val: any) => void;
+    const inflightPromise = new Promise((resolve) => {
+      resolveResume = resolve;
+    });
+
+    vi.mocked(contextInteractionService.resumeContext).mockImplementationOnce(() => inflightPromise as any);
+
+    // First call starts execution
+    const firstCallPromise = useLauncherStore.getState().executeContextAction('context.resume', 'ctx-active-1');
+    expect(useLauncherStore.getState().isResuming).toBe(true);
+    expect(useLauncherStore.getState().isActionExecuting).toBe(true);
+
+    // Second call while in progress
+    const duplicateCallResult = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-active-1');
+    expect(duplicateCallResult.success).toBe(false);
+    expect(duplicateCallResult.outcome).toBe('BLOCKED');
+    expect(duplicateCallResult.message).toBe('An action is already in progress.');
+
+    // Only one call to contextInteractionService.resumeContext should have occurred
+    expect(contextInteractionService.resumeContext).toHaveBeenCalledTimes(1);
+
+    // Resolve first call
+    resolveResume({ context_id: 'ctx-active-1', status: 'active' });
+    const firstResult = await firstCallPromise;
+    expect(firstResult.success).toBe(true);
+  });
+
+  // 14. Refresh launcher state and display success only AFTER confirmation
+  it('14. refreshes launcher state and displays success toast only AFTER operation succeeds', async () => {
+    let resolveResume!: (val: any) => void;
+    const inflightPromise = new Promise((resolve) => {
+      resolveResume = resolve;
+    });
+
+    vi.mocked(contextInteractionService.resumeContext).mockImplementationOnce(() => inflightPromise as any);
+
+    const fetchLauncherDataSpy = vi.spyOn(useLauncherStore.getState(), 'fetchLauncherData');
+
+    const promise = useLauncherStore.getState().executeContextAction('context.resume', 'ctx-active-1');
+
+    // Before backend confirms:
+    expect(fetchLauncherDataSpy).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+
+    // Backend confirms:
+    resolveResume({ context_id: 'ctx-active-1', status: 'active' });
+    await promise;
+
+    // After backend confirms:
+    expect(fetchLauncherDataSpy).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(useLauncherStore.getState().isOpen).toBe(false);
+  });
+
+  // 15. Handles backend failures gracefully without success feedback or closing launcher
+  it('15. handles backend failures gracefully without success feedback or closing launcher', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockRejectedValueOnce(
+      new Error('Context Engine IPC timeout')
+    );
+
+    useLauncherStore.setState({
+      isOpen: true,
+      selectedContextId: 'ctx-active-1',
+    });
+
+    const result = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-active-1');
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe('ERROR');
+    expect(result.error).toBe('Context Engine IPC timeout');
+
+    // State reflects error
+    expect(useLauncherStore.getState().resumeStatus).toBe('error');
+    expect(useLauncherStore.getState().resumeError).toBe('Context Engine IPC timeout');
+    expect(useLauncherStore.getState().isResuming).toBe(false);
+
+    // Launcher remains open for user recovery; no false success toast
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  // 16. Handles contexts that become unavailable between selection and execution
+  it('16. handles contexts that become unavailable between selection and execution', async () => {
+    vi.mocked(contextInteractionService.resumeContext).mockRejectedValueOnce(
+      new Error("Workspace 'ctx-deleted-99' not found in database")
+    );
+
+    useLauncherStore.setState({
+      isOpen: true,
+      selectedContextId: 'ctx-deleted-99',
+      activePreview: {
+        contextId: 'ctx-deleted-99',
+        name: 'Deleted Workspace',
+        state: 'recent',
+        readinessBand: 'ready',
+        reasons: [],
+        importantItems: [],
+        worksetItems: [],
+        itemCount: 0,
+        isAmbiguous: false,
+        isStale: false,
+      },
+    });
+
+    const result = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-deleted-99');
+
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe('ERROR');
+    expect(result.message).toBe("Context 'ctx-deleted-99' is no longer available. It may have been closed or deleted.");
+
+    // Deselects and removes deleted context
+    expect(useLauncherStore.getState().selectedContextId).not.toBe('ctx-deleted-99');
+    expect(useLauncherStore.getState().activePreview?.contextId).not.toBe('ctx-deleted-99');
+    expect(useLauncherStore.getState().isOpen).toBe(true);
+    expect(toast.error).toHaveBeenCalledWith("Context 'ctx-deleted-99' is no longer available. It may have been closed or deleted.");
+  });
 });

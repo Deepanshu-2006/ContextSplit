@@ -93,12 +93,21 @@ export const quickActionsService = {
           };
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
+          const isUnavailable =
+            errMsg.toLowerCase().includes('not found') ||
+            errMsg.toLowerCase().includes('does not exist') ||
+            errMsg.toLowerCase().includes('unavailable') ||
+            errMsg.toLowerCase().includes('no such') ||
+            errMsg.toLowerCase().includes('deleted');
+          const message = isUnavailable
+            ? `Context '${cleanContextId}' is no longer available. It may have been closed or deleted.`
+            : `Failed to resume context: ${errMsg}`;
           return {
             actionId,
             success: false,
             outcome: 'ERROR',
             error: errMsg,
-            message: `Failed to resume context: ${errMsg}`,
+            message,
             resolvedContextId: cleanContextId,
           };
         }

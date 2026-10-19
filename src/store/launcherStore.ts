@@ -718,66 +718,21 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   },
 
   resumeContextById: async (contextId: string, force: boolean = false): Promise<boolean> => {
-    if (!contextId) return false;
-
-    // Check resume readiness unless forced
-    if (!force) {
-      const preview = get().activePreview;
-      if (preview && preview.contextId === contextId && preview.readinessBand === 'insufficient') {
-        const reason =
-          preview.readinessExplanation ||
-          (preview.reasons.length > 0 ? preview.reasons.join('. ') : 'This context has insufficient recorded working state.');
-        set({
-          resumeStatus: 'not_ready',
-          notReadyReason: reason,
-          isResuming: false,
-        });
-        return false;
-      }
-    }
-
-    set({
-      isResuming: true,
-      resumeStatus: 'loading',
-      resumeError: null,
-      notReadyReason: null,
-    });
-
-    try {
-      // 1. Send resume signal to Context Engine (authoritative state transition)
-      await contextInteractionService.resumeContext(contextId);
-
-      // 2. Select workspace in local store for UI canvas alignment
-      useWorkspaceStore.getState().selectWorkspace(contextId);
-
-      set({
-        resumeStatus: 'success',
-        isResuming: false,
-      });
-
-      // 3. Refresh launcher state so active context updates
-      await get().fetchLauncherData();
-
-      // 4. Close launcher smoothly and show feedback
-      const preview = get().activePreview;
-      const contextName = preview?.name || 'Context';
-      toast.success(`Resumed "${contextName}"`);
-      get().closeLauncher();
-
-      return true;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to resume context from engine';
-      set({
-        isResuming: false,
-        resumeStatus: 'error',
-        resumeError: msg,
-      });
-      toast.error(msg);
-      return false;
-    }
+    const result = await get().executeContextAction('context.resume', contextId, { force });
+    return result.success;
   },
 
   executeContextAction: async (actionId: ContextActionId, contextId?: string, options?: { force?: boolean }) => {
+    // 1. Concurrency guard: Prevent duplicate submissions while an action is in progress
+    if (get().isActionExecuting || (actionId === 'context.resume' && get().isResuming)) {
+      return {
+        actionId,
+        success: false,
+        outcome: 'BLOCKED',
+        message: 'An action is already in progress.',
+      };
+    }
+
     const targetId = contextId || get().selectedContextId;
     if (!targetId) {
       return {
@@ -818,8 +773,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
       if (result.success) {
         if (actionId === 'context.resume') {
+          // Refresh launcher data only after operation succeeds
           await get().fetchLauncherData();
-          toast.success(result.message || 'Context resumed');
+          // Display success feedback only after receiving confirmation
+          const preview = get().activePreview;
+          const contextName = preview?.name || result.resolvedContextId || 'Context';
+          toast.success(result.message || `Resumed "${contextName}"`);
           get().closeLauncher();
         } else if (actionId === 'context.pause' || actionId === 'context.archive') {
           await get().fetchLauncherData();
@@ -833,6 +792,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       } else if (result.outcome === 'BLOCKED') {
         if (actionId === 'context.resume') {
           set({
+            isResuming: false,
             resumeStatus: 'not_ready',
             notReadyReason: result.message || 'Context not ready',
           });
@@ -840,7 +800,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           toast.info(result.message || 'Action blocked');
         }
       } else if (result.outcome === 'ERROR') {
-        toast.error(result.message || result.error || 'Action failed');
+        const errorMsg = result.error || result.message || 'Action failed';
+        set({
+          isResuming: false,
+          resumeStatus: 'error',
+          resumeError: errorMsg,
+        });
+        toast.error(result.message || errorMsg);
+
+        // Handle contexts that become unavailable between selection and execution
+        const fullMsg = (result.message || '') + ' ' + (result.error || '');
+        if (fullMsg.includes('no longer available') || fullMsg.includes('not found') || fullMsg.includes('does not exist')) {
+          if (get().activePreview?.contextId === targetId) {
+            set({ activePreview: null });
+          }
+          await get().fetchLauncherData();
+          if (get().selectedContextId === targetId) {
+            set({ selectedContextId: null });
+          }
+        }
       }
 
       return result;
