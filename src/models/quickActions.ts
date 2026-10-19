@@ -80,6 +80,155 @@ export interface QuickActionResult<TActionId extends string = string> {
 // Context & State Evaluation Models
 // =========================================================================
 
+export type ContextOperationalLifecycleState = 'active' | 'paused' | 'dormant' | 'archived';
+
+export interface ContextLifecycleStateInput {
+  lifecycleState?: string | null;
+  isActive?: boolean;
+}
+
+/**
+ * Resolves the operational lifecycle state of a context.
+ * Normalizes between database lifecycle states and real-time active session states.
+ */
+export function resolveContextLifecycleState(input: ContextLifecycleStateInput): ContextOperationalLifecycleState {
+  if (input.isActive) return 'active';
+  const raw = (input.lifecycleState || '').trim().toLowerCase();
+  if (raw === 'active') return 'active';
+  if (raw === 'paused') return 'paused';
+  if (raw === 'archived' || raw === 'inactive') return 'archived';
+  return 'dormant';
+}
+
+export interface ContextActionTransitionValidation {
+  isValid: boolean;
+  reason?: string;
+}
+
+/**
+ * Validates whether a context action transition is permissible from the context's current lifecycle state.
+ * Encapsulates the domain rules of the Context Engine lifecycle model.
+ */
+export function validateContextActionTransition(
+  actionId: ContextActionId,
+  currentState: ContextOperationalLifecycleState
+): ContextActionTransitionValidation {
+  switch (actionId) {
+    case 'context.resume':
+      return { isValid: true };
+
+    case 'context.open_details':
+      return { isValid: true };
+
+    case 'context.pause': {
+      if (currentState === 'active') {
+        return { isValid: true };
+      }
+      if (currentState === 'paused') {
+        return {
+          isValid: false,
+          reason: 'Context is already paused and not currently active.',
+        };
+      }
+      if (currentState === 'dormant') {
+        return {
+          isValid: false,
+          reason: 'Cannot pause a dormant context.',
+        };
+      }
+      if (currentState === 'archived') {
+        return {
+          isValid: false,
+          reason: 'Cannot pause an archived context.',
+        };
+      }
+      return {
+        isValid: false,
+        reason: 'Context is not currently active.',
+      };
+    }
+
+    case 'context.archive': {
+      if (currentState === 'archived') {
+        return {
+          isValid: false,
+          reason: 'Context is already archived.',
+        };
+      }
+      return { isValid: true };
+    }
+
+    case 'context.delete':
+      return {
+        isValid: false,
+        reason: 'Context deletion must be performed from workspace management settings.',
+      };
+
+    default:
+      return {
+        isValid: false,
+        reason: `Action '${actionId}' is unsupported.`,
+      };
+  }
+}
+
+export interface PrimaryContextActionDescriptor {
+  actionId: ContextActionId;
+  label: string;
+  inProgressLabel: string;
+  description: string;
+  shortcut: string;
+  isSupported: boolean;
+  unsupportedReason?: string;
+}
+
+/**
+ * Generates the authoritative primary action descriptor for a context given its lifecycle state.
+ */
+export function getPrimaryContextActionDescriptor(
+  currentState: ContextOperationalLifecycleState
+): PrimaryContextActionDescriptor {
+  switch (currentState) {
+    case 'active':
+      return {
+        actionId: 'context.resume',
+        label: 'Focus Workspace',
+        inProgressLabel: 'Focusing...',
+        description: 'Switch to and focus this active workspace.',
+        shortcut: '↵',
+        isSupported: true,
+      };
+    case 'archived':
+      return {
+        actionId: 'context.resume',
+        label: 'Restore & Resume',
+        inProgressLabel: 'Restoring...',
+        description: 'Unarchive and resume this context.',
+        shortcut: '↵',
+        isSupported: true,
+      };
+    case 'paused':
+      return {
+        actionId: 'context.resume',
+        label: 'Resume Context',
+        inProgressLabel: 'Resuming...',
+        description: 'Resume work in this paused context.',
+        shortcut: '↵',
+        isSupported: true,
+      };
+    case 'dormant':
+    default:
+      return {
+        actionId: 'context.resume',
+        label: 'Resume Context',
+        inProgressLabel: 'Resuming...',
+        description: 'Resume work in this context and focus its workspace.',
+        shortcut: '↵',
+        isSupported: true,
+      };
+  }
+}
+
 export interface ContextActionEvaluationInput {
   contextId: string;
   lifecycleState?: 'active' | 'paused' | 'dormant' | 'archived' | string;
@@ -138,105 +287,73 @@ export function validateItemId(itemId: unknown): ValidationResult {
  * Returns available context quick actions dynamically grounded in the context's operational state.
  */
 export function getAvailableContextActions(input: ContextActionEvaluationInput): ContextQuickActionDescriptor[] {
-  const isArchived = (input.lifecycleState || '').toLowerCase() === 'archived';
-  const isActive = Boolean(input.isActive || (input.lifecycleState || '').toLowerCase() === 'active');
-  const isDormant = (input.lifecycleState || '').toLowerCase() === 'dormant';
+  const currentState = resolveContextLifecycleState({
+    lifecycleState: input.lifecycleState,
+    isActive: input.isActive,
+  });
 
   const actions: ContextQuickActionDescriptor[] = [];
 
-  // 1. Resume Context (Primary action)
-  if (isActive) {
-    actions.push({
-      id: 'context.resume',
-      label: 'Focus Workspace',
-      description: 'Switch to and focus this active workspace.',
-      targetType: 'context',
-      isSupported: true,
-      shortcut: '↵',
-    });
-  } else if (isArchived) {
-    actions.push({
-      id: 'context.resume',
-      label: 'Restore & Resume',
-      description: 'Unarchive and resume this context.',
-      targetType: 'context',
-      isSupported: true,
-      shortcut: '↵',
-    });
-  } else {
-    actions.push({
-      id: 'context.resume',
-      label: 'Resume Context',
-      description: 'Resume work in this context and focus its workspace.',
-      targetType: 'context',
-      isSupported: true,
-      shortcut: '↵',
-    });
-  }
+  // 1. Primary Action: Resume Context / Focus Workspace / Restore & Resume
+  const primaryDesc = getPrimaryContextActionDescriptor(currentState);
+  actions.push({
+    id: primaryDesc.actionId,
+    label: primaryDesc.label,
+    description: primaryDesc.description,
+    targetType: 'context',
+    isSupported: primaryDesc.isSupported,
+    unsupportedReason: primaryDesc.unsupportedReason,
+    shortcut: primaryDesc.shortcut,
+  });
 
   // 2. Open Details / Overview
+  const openDetailsValidation = validateContextActionTransition('context.open_details', currentState);
   actions.push({
     id: 'context.open_details',
     label: 'Open Details',
     description: 'Open full context overview, task goals, and timeline.',
     targetType: 'context',
-    isSupported: true,
+    isSupported: openDetailsValidation.isValid,
+    unsupportedReason: openDetailsValidation.reason,
     shortcut: '⌘O',
   });
 
-  // 3. Pause Context (Only supported for active contexts)
-  if (isActive) {
-    actions.push({
-      id: 'context.pause',
-      label: 'Pause Context',
-      description: 'Signal that work in this context has paused.',
-      targetType: 'context',
-      isSupported: true,
-      shortcut: '⌥P',
-    });
-  } else {
-    actions.push({
-      id: 'context.pause',
-      label: 'Pause Context',
-      description: 'Pause context is only valid for active contexts.',
-      targetType: 'context',
-      isSupported: false,
-      unsupportedReason: isArchived
-        ? 'Cannot pause an archived context.'
-        : isDormant
-        ? 'Cannot pause a dormant context.'
-        : 'Context is not currently active.',
-    });
-  }
+  // 3. Pause Context
+  const pauseValidation = validateContextActionTransition('context.pause', currentState);
+  actions.push({
+    id: 'context.pause',
+    label: 'Pause Context',
+    description: pauseValidation.isValid
+      ? 'Signal that work in this context has paused.'
+      : (pauseValidation.reason || 'Pause context is only valid for active contexts.'),
+    targetType: 'context',
+    isSupported: pauseValidation.isValid,
+    unsupportedReason: pauseValidation.reason,
+    shortcut: '⌥P',
+  });
 
   // 4. Archive Context
-  if (isArchived) {
-    actions.push({
-      id: 'context.archive',
-      label: 'Archive Context',
-      description: 'Context is already archived.',
-      targetType: 'context',
-      isSupported: false,
-      unsupportedReason: 'Context is already archived.',
-    });
-  } else {
-    actions.push({
-      id: 'context.archive',
-      label: 'Archive Context',
-      description: 'Safely move this context to archived state.',
-      targetType: 'context',
-      isSupported: true,
-    });
-  }
+  const archiveValidation = validateContextActionTransition('context.archive', currentState);
+  actions.push({
+    id: 'context.archive',
+    label: 'Archive Context',
+    description: archiveValidation.isValid
+      ? 'Safely move this context to archived state.'
+      : (archiveValidation.reason || 'Context is already archived.'),
+    targetType: 'context',
+    isSupported: archiveValidation.isValid,
+    unsupportedReason: archiveValidation.reason,
+  });
 
   // 5. Delete Context (Explicitly unsupported in launcher)
+  const deleteValidation = validateContextActionTransition('context.delete', currentState);
   actions.push({
     id: 'context.delete',
     label: 'Delete Context',
     description: 'Permanent deletion is not supported from the quick actions launcher.',
     targetType: 'context',
     isSupported: false,
-    unsupportedReason: 'Context deletion must be performed from workspace management settings.',
+    unsupportedReason: deleteValidation.reason || 'Context deletion must be performed from workspace management settings.',
   });
 
   return actions;
