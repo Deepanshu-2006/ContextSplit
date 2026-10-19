@@ -180,12 +180,10 @@ export function ContextLauncher() {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // If focus is currently inside an open menu or active menu trigger, let the menu manage keyboard navigation
       const activeEl = document.activeElement as HTMLElement | null;
-      if (
-        activeEl?.closest('[role="menu"]') ||
-        (activeEl?.getAttribute('aria-expanded') === 'true' && activeEl?.closest('[data-menu-trigger="true"]'))
-      ) {
+
+      // If focus is currently inside an open menu, let the menu manage its own keyboard navigation
+      if (activeEl?.closest('[role="menu"]')) {
         return;
       }
 
@@ -259,6 +257,10 @@ export function ContextLauncher() {
         e.key === 'Home' ||
         ((e.metaKey || e.ctrlKey) && e.key === 'ArrowUp')
       ) {
+        // If focused in interactive controls, do not hijack Home
+        if (activeEl?.tagName === 'BUTTON' || activeEl?.closest('[data-menu-trigger="true"]')) {
+          return;
+        }
         e.preventDefault();
         if (filteredList.length > 0) {
           setSelectedIndex(0);
@@ -270,6 +272,10 @@ export function ContextLauncher() {
         e.key === 'End' ||
         ((e.metaKey || e.ctrlKey) && e.key === 'ArrowDown')
       ) {
+        // If focused in interactive controls, do not hijack End
+        if (activeEl?.tagName === 'BUTTON' || activeEl?.closest('[data-menu-trigger="true"]')) {
+          return;
+        }
         e.preventDefault();
         if (filteredList.length > 0) {
           setSelectedIndex(filteredList.length - 1);
@@ -281,22 +287,33 @@ export function ContextLauncher() {
       const isNext = e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n');
       const isPrev = e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p');
 
-      if (isNext) {
-        e.preventDefault();
-        if (filteredList.length > 0) {
-          const nextIndex = (selectedIndex + 1) % filteredList.length;
-          setSelectedIndex(nextIndex);
+      if (isNext || isPrev) {
+        // If focused inside preview action buttons or menu triggers, let the element handle arrow navigation
+        if (
+          activeEl?.closest('[data-menu-trigger="true"]') ||
+          activeEl?.id === 'launcher-primary-action-btn' ||
+          activeEl?.closest('[role="menu"]')
+        ) {
+          return;
         }
-        return;
-      }
 
-      if (isPrev) {
-        e.preventDefault();
-        if (filteredList.length > 0) {
-          const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
-          setSelectedIndex(prevIndex);
+        if (isNext) {
+          e.preventDefault();
+          if (filteredList.length > 0) {
+            const nextIndex = (selectedIndex + 1) % filteredList.length;
+            setSelectedIndex(nextIndex);
+          }
+          return;
         }
-        return;
+
+        if (isPrev) {
+          e.preventDefault();
+          if (filteredList.length > 0) {
+            const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
+            setSelectedIndex(prevIndex);
+          }
+          return;
+        }
       }
 
       // 5. Context Quick Actions Shortcuts:
@@ -320,8 +337,29 @@ export function ContextLauncher() {
         return;
       }
 
+      // Alt+M / Option+M: Toggle Secondary Actions Menu for selected context
+      if (e.altKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        const moreActionsBtn = document.getElementById('launcher-more-actions-btn');
+        if (moreActionsBtn) {
+          moreActionsBtn.click();
+          moreActionsBtn.focus();
+        }
+        return;
+      }
+
       // 6. Enter Action: Open preview from list, or resume from preview
       if (e.key === 'Enter') {
+        // If an active button or menu item is focused, let the focused element handle its own native/custom click.
+        // This avoids accidental duplicate executions or executing context.resume when activating a menu trigger or button.
+        if (
+          activeEl?.tagName === 'BUTTON' ||
+          activeEl?.closest('[role="menu"]') ||
+          activeEl?.closest('[data-menu-trigger="true"]')
+        ) {
+          return;
+        }
+
         e.preventDefault();
         if (isResuming || isActionExecuting) return;
 
@@ -341,7 +379,7 @@ export function ContextLauncher() {
           // Enter: Open selected context preview
           setIsPreviewOpen(true);
         } else {
-          // Enter from preview: Resume selected context
+          // Enter from preview/search: Resume selected context
           const target = filteredList[selectedIndex];
           if (target) {
             executeContextAction('context.resume', target.id);
@@ -717,6 +755,7 @@ export function ContextLauncher() {
           <div className="flex items-center gap-3">
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌥M</kbd> Actions</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌘O</kbd> Details</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">Esc</kbd> Close</span>
           </div>
@@ -833,6 +872,16 @@ function ContextPreviewPane({
   }, [isMenuOpen, secondaryActions]);
 
   const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (secondaryActions.length === 0) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsMenuOpen(false);
+        triggerRef.current?.focus();
+      }
+      return;
+    }
+
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
@@ -860,6 +909,17 @@ function ContextPreviewPane({
       const last = secondaryActions.length - 1;
       setFocusedMenuIndex(last);
       menuItemRefs.current[last]?.focus();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetAction = secondaryActions[focusedMenuIndex];
+      if (targetAction && targetAction.isSupported && !isResuming && !isActionExecuting) {
+        setIsMenuOpen(false);
+        if (onExecuteContextAction) {
+          onExecuteContextAction(targetAction.id);
+        }
+        triggerRef.current?.focus();
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -1065,8 +1125,14 @@ function ContextPreviewPane({
               onResume(false);
             }
           }}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowRight') {
+              e.preventDefault();
+              triggerRef.current?.focus();
+            }
+          }}
           disabled={isResuming || isActionExecuting}
-          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:ring-offset-2 focus:ring-offset-stone-900"
           aria-label={primaryButtonLabel}
         >
           {isResuming ? (
@@ -1093,13 +1159,23 @@ function ContextPreviewPane({
             data-menu-trigger="true"
             type="button"
             onClick={() => setIsMenuOpen((prev) => !prev)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                document.getElementById('launcher-primary-action-btn')?.focus();
+              } else if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsMenuOpen(true);
+              }
+            }}
             disabled={isResuming || isActionExecuting}
-            className={`p-2.5 rounded-lg border border-white/10 transition-colors cursor-pointer flex items-center justify-center ${
+            className={`p-2.5 rounded-lg border border-white/10 transition-colors cursor-pointer flex items-center justify-center focus:outline-none focus:ring-2 focus:ring-orange-400/70 focus:ring-offset-1 focus:ring-offset-stone-900 ${
               isMenuOpen
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
                 : 'bg-stone-950/40 hover:bg-stone-800/80 text-stone-400 hover:text-stone-200'
             }`}
-            title="More context actions"
+            title="More context actions (⌥M)"
             aria-label="More actions for selected context"
             aria-haspopup="menu"
             aria-expanded={isMenuOpen}
@@ -1121,70 +1197,79 @@ function ContextPreviewPane({
               <div className="px-2.5 py-1 text-[10px] font-medium text-stone-500 uppercase tracking-wider">
                 Context Actions
               </div>
-              <div className="space-y-0.5">
-                {secondaryActions.map((action, idx) => {
-                  const isEnabled = action.isSupported;
-                  const isFocused = focusedMenuIndex === idx;
-                  return (
-                    <button
-                      key={action.id}
-                      ref={(el) => {
-                        menuItemRefs.current[idx] = el;
-                      }}
-                      role="menuitem"
-                      type="button"
-                      tabIndex={isFocused ? 0 : -1}
-                      disabled={!isEnabled || isResuming || isActionExecuting}
-                      aria-disabled={!isEnabled || isResuming || isActionExecuting}
-                      onClick={() => {
-                        if (!isEnabled || isResuming || isActionExecuting) return;
-                        setIsMenuOpen(false);
-                        if (onExecuteContextAction) {
-                          onExecuteContextAction(action.id);
-                        }
-                      }}
-                      title={!isEnabled ? action.unsupportedReason : action.description}
-                      className={`w-full flex items-start gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors ${
-                        !isEnabled
-                          ? 'opacity-40 cursor-not-allowed text-stone-500'
-                          : isFocused
-                          ? 'bg-white/10 text-stone-100 cursor-pointer'
-                          : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
-                      }`}
-                    >
-                      <div className="mt-0.5 shrink-0">
-                        {action.id === 'context.open_details' && (
-                          <ExternalLink size={13} />
-                        )}
-                        {action.id === 'context.pause' && (
-                          <Pause size={13} />
-                        )}
-                        {action.id === 'context.archive' && (
-                          <Archive size={13} />
-                        )}
-                        {action.id === 'context.delete' && (
-                          <Trash2 size={13} />
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="truncate font-medium">{action.label}</span>
-                          {action.shortcut && (
-                            <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
-                              {action.shortcut}
-                            </kbd>
+              {secondaryActions.length === 0 ? (
+                <div className="px-3 py-2 text-[11px] text-stone-500 italic text-center">
+                  No secondary actions available
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {secondaryActions.map((action, idx) => {
+                    const isEnabled = action.isSupported;
+                    const isFocused = focusedMenuIndex === idx;
+                    return (
+                      <button
+                        key={action.id}
+                        ref={(el) => {
+                          menuItemRefs.current[idx] = el;
+                        }}
+                        role="menuitem"
+                        type="button"
+                        tabIndex={isFocused ? 0 : -1}
+                        disabled={isResuming || isActionExecuting}
+                        aria-disabled={!isEnabled || isResuming || isActionExecuting}
+                        onClick={() => {
+                          if (!isEnabled || isResuming || isActionExecuting) return;
+                          setIsMenuOpen(false);
+                          if (onExecuteContextAction) {
+                            onExecuteContextAction(action.id);
+                          }
+                          triggerRef.current?.focus();
+                        }}
+                        title={!isEnabled ? action.unsupportedReason : action.description}
+                        className={`w-full flex items-start gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
+                          !isEnabled
+                            ? isFocused
+                              ? 'opacity-50 cursor-not-allowed text-stone-400 bg-white/5 ring-1 ring-white/10'
+                              : 'opacity-40 cursor-not-allowed text-stone-500'
+                            : isFocused
+                            ? 'bg-white/10 text-stone-100 cursor-pointer ring-1 ring-white/20'
+                            : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
+                        }`}
+                      >
+                        <div className="mt-0.5 shrink-0">
+                          {action.id === 'context.open_details' && (
+                            <ExternalLink size={13} />
+                          )}
+                          {action.id === 'context.pause' && (
+                            <Pause size={13} />
+                          )}
+                          {action.id === 'context.archive' && (
+                            <Archive size={13} />
+                          )}
+                          {action.id === 'context.delete' && (
+                            <Trash2 size={13} />
                           )}
                         </div>
-                        <p className="text-[10.5px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
-                          {!isEnabled && action.unsupportedReason
-                            ? action.unsupportedReason
-                            : action.description}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="truncate font-medium">{action.label}</span>
+                            {action.shortcut && (
+                              <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
+                                {action.shortcut}
+                              </kbd>
+                            )}
+                          </div>
+                          <p className="text-[10.5px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
+                            {!isEnabled && action.unsupportedReason
+                              ? action.unsupportedReason
+                              : action.description}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1263,6 +1348,16 @@ function WorksetPreviewRow({
   }, [isMenuOpen, itemActions]);
 
   const handleMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (itemActions.length === 0) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsMenuOpen(false);
+        triggerRef.current?.focus();
+      }
+      return;
+    }
+
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
@@ -1290,6 +1385,17 @@ function WorksetPreviewRow({
       const last = itemActions.length - 1;
       setFocusedMenuIndex(last);
       itemMenuItemRefs.current[last]?.focus();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetAction = itemActions[focusedMenuIndex];
+      if (targetAction && targetAction.isSupported && !isExecuting) {
+        setIsMenuOpen(false);
+        if (onExecuteItemAction) {
+          onExecuteItemAction(targetAction.id, contextId, item.id);
+        }
+        triggerRef.current?.focus();
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -1339,7 +1445,7 @@ function WorksetPreviewRow({
                 item.id
               );
             }}
-            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer ${
+            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 ${
               isImportant
                 ? 'opacity-100 text-amber-400'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-amber-400'
@@ -1368,7 +1474,7 @@ function WorksetPreviewRow({
               e.stopPropagation();
               onExecuteItemAction('item.remove_from_context', contextId, item.id);
             }}
-            className="p-1 rounded hover:bg-white/10 opacity-0 group-hover:opacity-100 text-stone-500 hover:text-red-400 transition-all cursor-pointer"
+            className="p-1 rounded hover:bg-white/10 opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 text-stone-500 hover:text-red-400 transition-all cursor-pointer"
             title="Remove item from this context workset without deleting the item"
             aria-label="Remove item from context"
           >
@@ -1388,9 +1494,16 @@ function WorksetPreviewRow({
               e.stopPropagation();
               setIsMenuOpen((prev) => !prev);
             }}
-            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer ${
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsMenuOpen(true);
+              }
+            }}
+            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 ${
               isMenuOpen
-                ? 'opacity-100 bg-white/10 text-stone-100'
+                ? 'opacity-100 bg-white/10 text-stone-100 ring-1 ring-white/20'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-stone-200'
             }`}
             title="More item actions"
@@ -1427,62 +1540,71 @@ function WorksetPreviewRow({
               </p>
             </div>
 
-            <div className="space-y-0.5">
-              {itemActions.map((action, idx) => {
-                const isEnabled = action.isSupported;
-                const isFocused = focusedMenuIndex === idx;
-                return (
-                  <button
-                    key={action.id}
-                    ref={(el) => {
-                      itemMenuItemRefs.current[idx] = el;
-                    }}
-                    role="menuitem"
-                    type="button"
-                    tabIndex={isFocused ? 0 : -1}
-                    disabled={!isEnabled || isExecuting}
-                    aria-disabled={!isEnabled || isExecuting}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!isEnabled || isExecuting) return;
-                      setIsMenuOpen(false);
-                      onExecuteItemAction(action.id, contextId, item.id);
-                    }}
-                    title={!isEnabled ? action.unsupportedReason : action.description}
-                    className={`w-full flex items-start gap-2.5 px-2 py-1.5 rounded-md text-xs text-left transition-colors ${
-                      !isEnabled
-                        ? 'opacity-40 cursor-not-allowed text-stone-500'
-                        : isFocused
-                        ? 'bg-white/10 text-stone-100 cursor-pointer'
-                        : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
-                    }`}
-                  >
-                    <div className="mt-0.5 shrink-0">
-                      {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
-                        <Star
-                          size={12}
-                          className={action.id === 'item.unmark_important' ? 'fill-amber-400 text-amber-400' : ''}
-                        />
-                      )}
-                      {action.id === 'item.remove_from_context' && (
-                        <X size={12} />
-                      )}
-                      {action.id === 'item.delete' && (
-                        <Trash2 size={12} />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <span className="truncate font-medium block">{action.label}</span>
-                      <p className="text-[10px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
-                        {!isEnabled && action.unsupportedReason
-                          ? action.unsupportedReason
-                          : action.description}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            {itemActions.length === 0 ? (
+              <div className="px-3 py-2 text-[10.5px] text-stone-500 italic text-center">
+                No actions available
+              </div>
+            ) : (
+              <div className="space-y-0.5">
+                {itemActions.map((action, idx) => {
+                  const isEnabled = action.isSupported;
+                  const isFocused = focusedMenuIndex === idx;
+                  return (
+                    <button
+                      key={action.id}
+                      ref={(el) => {
+                        itemMenuItemRefs.current[idx] = el;
+                      }}
+                      role="menuitem"
+                      type="button"
+                      tabIndex={isFocused ? 0 : -1}
+                      disabled={isExecuting}
+                      aria-disabled={!isEnabled || isExecuting}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!isEnabled || isExecuting) return;
+                        setIsMenuOpen(false);
+                        onExecuteItemAction(action.id, contextId, item.id);
+                        triggerRef.current?.focus();
+                      }}
+                      title={!isEnabled ? action.unsupportedReason : action.description}
+                      className={`w-full flex items-start gap-2.5 px-2 py-1.5 rounded-md text-xs text-left transition-colors focus:outline-none ${
+                        !isEnabled
+                          ? isFocused
+                            ? 'opacity-40 cursor-not-allowed text-stone-500 bg-white/5 ring-1 ring-white/10'
+                            : 'opacity-40 cursor-not-allowed text-stone-500'
+                          : isFocused
+                          ? 'bg-white/10 text-stone-100 cursor-pointer ring-1 ring-white/20'
+                          : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
+                      }`}
+                    >
+                      <div className="mt-0.5 shrink-0">
+                        {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
+                          <Star
+                            size={12}
+                            className={action.id === 'item.unmark_important' ? 'fill-amber-400 text-amber-400' : ''}
+                          />
+                        )}
+                        {action.id === 'item.remove_from_context' && (
+                          <X size={12} />
+                        )}
+                        {action.id === 'item.delete' && (
+                          <Trash2 size={12} />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <span className="truncate font-medium block">{action.label}</span>
+                        <p className="text-[10px] text-stone-500 line-clamp-1 leading-tight mt-0.5">
+                          {!isEnabled && action.unsupportedReason
+                            ? action.unsupportedReason
+                            : action.description}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
