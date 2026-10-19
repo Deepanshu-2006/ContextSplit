@@ -35,6 +35,7 @@ export interface LauncherContextItem {
   memoryStatement?: string | null;
   resumeReadiness?: LauncherResumeReadiness | null;
   workspacePath?: string | null;
+  createdAt?: string | null;
 }
 
 export type ContextFilterType = 'all' | 'active' | 'recent' | 'paused' | 'archived';
@@ -269,6 +270,7 @@ export interface LauncherPreviewModel {
   contextId: string;
   name: string;
   state: string;
+  description?: string | null;
   projectIdentifier?: string | null;
   repository?: string | null;
   workspacePath?: string | null;
@@ -591,10 +593,16 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           (wsMeta as any)?.path ||
           null;
 
+        const description =
+          targetContextItem?.description ||
+          (wsMeta as any)?.description ||
+          null;
+
         const previewModel: LauncherPreviewModel = {
           contextId,
           name,
           state: rawState,
+          description,
           projectIdentifier,
           repository,
           workspacePath,
@@ -686,6 +694,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             recentActivitySummary: activitySummary,
             memoryStatement: engineActive.memory_statement || null,
             resumeReadiness: readiness,
+            createdAt: wsMeta?.created_at || null,
           };
         }
       } catch (err) {
@@ -724,6 +733,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               itemCount: entry.item_count ?? (Array.isArray(entry.recent_items) ? entry.recent_items.length : undefined),
               sessionCount: entry.session_count,
               confidence: entry.task_confidence_band || undefined,
+              createdAt: wsMeta?.created_at || (entry as any)?.created_at || null,
             });
           }
         }
@@ -731,8 +741,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         console.warn('Could not fetch recent contexts from engine:', err);
       }
 
-      // 3. Fallback: Complement with stored workspaces if engine returned empty recents
-      if (recents.length === 0 && existingWorkspaces.length > 0) {
+      // 3. Complement recents with any remaining stored workspaces (preserving recents priority first)
+      if (existingWorkspaces.length > 0) {
         for (const ws of existingWorkspaces) {
           if (seenIds.has(ws.id)) continue;
           seenIds.add(ws.id);
@@ -741,7 +751,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             name: ws.name,
             isActive: ws.id === activeItem?.id,
             state: ws.lifecycle_state || 'dormant',
-            lastActiveAt: ws.updated_at || ws.created_at,
+            lastActiveAt: ws.last_activity_at || ws.updated_at || ws.created_at,
+            createdAt: ws.created_at || null,
           });
         }
       }

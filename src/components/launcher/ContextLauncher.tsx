@@ -37,6 +37,11 @@ import {
   getPrimaryContextActionDescriptor,
   resolveContextLifecycleState,
 } from '../../models/quickActions';
+import {
+  getDuplicateNameSet,
+  resolveContextDisplayIdentity,
+  formatGentleTime,
+} from '../../models/contextIdentification';
 
 const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -45,34 +50,6 @@ const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
   { id: 'paused', label: 'Paused' },
   { id: 'archived', label: 'Archived' },
 ];
-
-/**
- * Gentle relative time formatter without noisy raw timestamps.
- */
-function formatGentleTime(isoString?: string | null, durationEstimate?: string | null): string {
-  if (durationEstimate) return durationEstimate;
-  if (!isoString) return 'Ready to resume';
-
-  try {
-    const timestamp = new Date(isoString).getTime();
-    if (isNaN(timestamp)) return 'Recently active';
-    const now = Date.now();
-    const diffMs = Math.max(0, now - timestamp);
-    const diffSec = Math.floor(diffMs / 1000);
-    const diffMin = Math.floor(diffSec / 60);
-    const diffHour = Math.floor(diffMin / 60);
-    const diffDays = Math.floor(diffHour / 24);
-
-    if (diffMin < 2) return 'Active just now';
-    if (diffMin < 60) return `Active ${diffMin}m ago`;
-    if (diffHour < 24) return `Active ${diffHour}h ago`;
-    if (diffDays === 1) return 'Active yesterday';
-    if (diffDays < 7) return `Active ${diffDays}d ago`;
-    return 'Active recently';
-  } catch {
-    return 'Recently active';
-  }
-}
 
 export function ContextLauncher() {
   const {
@@ -154,6 +131,15 @@ export function ContextLauncher() {
     const matched = stateFiltered.filter((ctx) => matchContext(ctx, searchQuery));
     return sortContextMatches(matched, searchQuery);
   }, [activeContext, recentContexts, activeFilter, searchQuery]);
+
+  // Detect duplicate names across all available contexts for deterministic disambiguation
+  const duplicateNamesSet = useMemo(() => {
+    const allContexts = [
+      ...(activeContext ? [activeContext] : []),
+      ...recentContexts,
+    ];
+    return getDuplicateNameSet(allContexts);
+  }, [activeContext, recentContexts]);
 
   // Windowed visible slice for DOM rendering performance:
   // Guarantees rendering cost stays < 2ms during fast typing even with 5,000+ contexts
@@ -579,6 +565,7 @@ export function ContextLauncher() {
                     isSelected={selectedIndex === 0}
                     isPreviewOpen={selectedIndex === 0 && isPreviewOpen}
                     isResuming={isResuming && selectedContextId === activeContext.id}
+                    isDuplicate={duplicateNamesSet.has(activeContext.name.trim().toLowerCase())}
                     dataIndex={0}
                     onSelect={() => {
                       setSelectedIndex(0);
@@ -615,6 +602,7 @@ export function ContextLauncher() {
                           isSelected={isSelected}
                           isPreviewOpen={isSelected && isPreviewOpen}
                           isResuming={isResuming && selectedContextId === item.id}
+                          isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
                           dataIndex={idx}
                           onSelect={() => {
                             setSelectedIndex(idx);
@@ -662,6 +650,7 @@ export function ContextLauncher() {
                           isSelected={isSelected}
                           isPreviewOpen={isSelected && isPreviewOpen}
                           isResuming={isResuming && selectedContextId === item.id}
+                          isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
                           dataIndex={globalIdx}
                           onSelect={() => {
                             setSelectedIndex(globalIdx);
@@ -697,6 +686,7 @@ export function ContextLauncher() {
                         isSelected={isSelected}
                         isPreviewOpen={isSelected && isPreviewOpen}
                         isResuming={isResuming && selectedContextId === item.id}
+                        isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
                         dataIndex={idx}
                         onSelect={() => {
                           setSelectedIndex(idx);
@@ -737,6 +727,9 @@ export function ContextLauncher() {
               error={previewError}
               isActiveContext={Boolean(
                 activeContext && activePreview && activePreview.contextId === activeContext.id
+              )}
+              isDuplicate={Boolean(
+                activePreview && duplicateNamesSet.has(activePreview.name.trim().toLowerCase())
               )}
               onResume={(force) => {
                 if (activePreview) {
@@ -795,6 +788,7 @@ interface ContextPreviewPaneProps {
   notReadyReason: string | null;
   error: string | null;
   isActiveContext?: boolean;
+  isDuplicate?: boolean;
   onResume: (force?: boolean) => void;
   onExecuteContextAction?: (actionId: ContextActionId, options?: { force?: boolean }) => void;
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
@@ -815,6 +809,7 @@ function ContextPreviewPane({
   notReadyReason,
   error,
   isActiveContext = false,
+  isDuplicate = false,
   onResume,
   onExecuteContextAction,
   onExecuteItemAction,
@@ -1027,9 +1022,18 @@ function ContextPreviewPane({
         {/* 4. Selected Context: Header */}
         <div className="border-b border-white/5 pb-3">
           <div className="flex items-start justify-between gap-2">
-            <h3 className="text-sm font-semibold text-stone-100 truncate">
-              {preview.name}
-            </h3>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-stone-100 truncate">
+                  {preview.name}
+                </h3>
+                {isDuplicate && (
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 shrink-0">
+                    Duplicate Name
+                  </span>
+                )}
+              </div>
+            </div>
             {isArchived ? (
               <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-stone-800 text-stone-400 border border-white/5 shrink-0">
                 Archived
@@ -1061,17 +1065,28 @@ function ContextPreviewPane({
               </>
             )}
             <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
+            <span className="text-stone-600">•</span>
+            <span
+              className="font-mono text-[10px] text-stone-500 cursor-help"
+              title={`Context ID: ${preview.contextId}`}
+            >
+              #{preview.contextId.replace(/^ws-/, '').slice(0, 6)}
+            </span>
           </div>
         </div>
 
-        {/* Where You Left Off / Active Task */}
+        {/* Where You Left Off / Active Task / Description */}
         <div className="bg-stone-900/40 border border-white/5 rounded-lg p-2.5 space-y-1">
           <div className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
-            Where you left off
+            {preview.taskTitle ? 'Where you left off' : preview.description ? 'Description' : 'Where you left off'}
           </div>
           {preview.taskTitle ? (
             <p className="text-xs font-medium text-stone-200 line-clamp-2">
               {preview.taskTitle}
+            </p>
+          ) : preview.description ? (
+            <p className="text-xs text-stone-300 line-clamp-2 leading-snug">
+              {preview.description}
             </p>
           ) : preview.activitySummary ? (
             <p className="text-xs text-stone-300 line-clamp-2 leading-snug">
@@ -1079,6 +1094,12 @@ function ContextPreviewPane({
             </p>
           ) : (
             <p className="text-xs text-stone-500 italic">No specific task recorded</p>
+          )}
+
+          {preview.taskTitle && preview.description && preview.description !== preview.taskTitle && (
+            <p className="text-[11px] text-stone-400/90 line-clamp-2 pt-1 border-t border-white/5 mt-1.5">
+              {preview.description}
+            </p>
           )}
 
           {preview.readinessExplanation && (
@@ -1772,6 +1793,7 @@ interface ContextLauncherItemProps {
   isSelected: boolean;
   isPreviewOpen?: boolean;
   isResuming?: boolean;
+  isDuplicate?: boolean;
   dataIndex: number;
   onSelect: () => void;
   onResume: () => void;
@@ -1781,6 +1803,7 @@ function ContextLauncherItem({
   item,
   isSelected,
   isResuming = false,
+  isDuplicate = false,
   dataIndex,
   onSelect,
   onResume,
@@ -1788,9 +1811,7 @@ function ContextLauncherItem({
   const isPaused = item.state === 'paused';
   const isArchived = item.state === 'archived';
 
-  // Clean subtitle without redundant labels
-  const subtitle = item.taskTitle || item.description || (item.projectIdentifier ? `${item.projectIdentifier}` : null);
-  const timeStr = formatGentleTime(item.lastActiveAt, item.durationEstimate);
+  const identity = resolveContextDisplayIdentity(item, isDuplicate);
 
   return (
     <div
@@ -1820,13 +1841,20 @@ function ContextLauncherItem({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className={`text-xs font-medium truncate ${isArchived ? 'text-stone-400' : 'text-stone-100'}`}>
-              {item.name}
+              {identity.name}
             </span>
-            {item.projectIdentifier && (
+            {identity.disambiguationTag ? (
+              <span
+                className="text-[10px] px-1.5 py-0.2 rounded bg-white/5 text-stone-400 font-mono shrink-0 border border-white/5"
+                title={`Disambiguation: ${identity.disambiguationTag}`}
+              >
+                {identity.disambiguationTag}
+              </span>
+            ) : item.projectIdentifier ? (
               <span className="text-[10px] text-stone-500 font-mono shrink-0">
                 {item.projectIdentifier}
               </span>
-            )}
+            ) : null}
             {isPaused && (
               <span className="text-[10px] text-amber-400/90 shrink-0 font-medium">
                 Paused
@@ -1835,11 +1863,11 @@ function ContextLauncherItem({
           </div>
 
           <div className="flex items-center gap-1.5 text-[11px] text-stone-400 truncate mt-0.5">
-            {subtitle && (
-              <span className="truncate">{subtitle}</span>
+            {identity.subtitle && (
+              <span className="truncate">{identity.subtitle}</span>
             )}
-            {subtitle && <span className="text-stone-600">•</span>}
-            <span className="shrink-0">{timeStr}</span>
+            {identity.subtitle && <span className="text-stone-600">•</span>}
+            <span className="shrink-0">{identity.timeStr}</span>
           </div>
         </div>
       </div>
