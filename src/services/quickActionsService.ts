@@ -12,6 +12,9 @@ import {
   ItemActionEvaluationInput,
   getAvailableContextActions,
   getAvailableItemActions,
+  resolveContextLifecycleState,
+  validateContextActionTransition,
+  ContextOperationalLifecycleState,
 } from '../models/quickActions';
 
 export interface ExecuteContextActionOptions {
@@ -50,6 +53,71 @@ export const quickActionsService = {
 
     const cleanContextId = contextId.trim();
 
+    // 2. Revalidate live operational lifecycle state against live store
+    const workspaceStore = useWorkspaceStore.getState();
+    const liveWorkspaces = workspaceStore.workspaces;
+    const currentActiveWorkspaceId = workspaceStore.activeWorkspaceId;
+    const isCurrentlyActive = currentActiveWorkspaceId === cleanContextId;
+
+    const liveWorkspace = liveWorkspaces?.find((w) => w.id === cleanContextId);
+
+    let operationalState: ContextOperationalLifecycleState;
+    if (liveWorkspace) {
+      const isArchived = (liveWorkspace.lifecycle_state || '').toLowerCase() === 'archived';
+      if (isArchived) {
+        operationalState = 'archived';
+      } else if (isCurrentlyActive) {
+        operationalState = 'active';
+      } else {
+        const cached = (options?.lifecycleState || '').toLowerCase();
+        if (cached === 'paused') {
+          operationalState = 'paused';
+        } else if (cached === 'dormant' || (liveWorkspace.lifecycle_state || '').toLowerCase() === 'dormant') {
+          operationalState = 'dormant';
+        } else {
+          // If it was previously marked active in cached options but is no longer the active workspace,
+          // it transitioned to paused
+          operationalState = 'paused';
+        }
+      }
+    } else {
+      operationalState = resolveContextLifecycleState({
+        lifecycleState: options?.lifecycleState,
+        isActive: isCurrentlyActive || (options?.lifecycleState || '').toLowerCase() === 'active',
+      });
+    }
+
+    // 3. Centralized Lifecycle Transition Revalidation
+    const transitionValidation = validateContextActionTransition(actionId, operationalState);
+    if (!transitionValidation.isValid) {
+      if (actionId === 'context.delete') {
+        return {
+          actionId,
+          success: false,
+          outcome: 'UNSUPPORTED',
+          message: 'Direct context deletion is not supported from the quick actions launcher.',
+          resolvedContextId: cleanContextId,
+        };
+      }
+      const isKnownLifecycleAction = ['context.resume', 'context.open_details', 'context.pause', 'context.archive'].includes(actionId);
+      if (!isKnownLifecycleAction) {
+        return {
+          actionId,
+          success: false,
+          outcome: 'UNSUPPORTED',
+          message: transitionValidation.reason || 'Action is unsupported in the launcher.',
+          resolvedContextId: cleanContextId,
+        };
+      }
+      return {
+        actionId,
+        success: false,
+        outcome: 'BLOCKED',
+        message: `Action is no longer valid: ${transitionValidation.reason}`,
+        resolvedContextId: cleanContextId,
+      };
+    }
+
     switch (actionId) {
       // ---------------------------------------------------------------------
       // 1. Resume Context
@@ -70,8 +138,8 @@ export const quickActionsService = {
         }
 
         try {
-          // If context is archived, unarchive it first to restore active lifecycle
-          const isArchived = (options?.lifecycleState || '').toLowerCase() === 'archived';
+          // If context is archived in real operational state, unarchive it first to restore active lifecycle
+          const isArchived = operationalState === 'archived' || (options?.lifecycleState || '').toLowerCase() === 'archived';
           if (isArchived) {
             await db.unarchiveWorkspace(cleanContextId);
           }
@@ -143,18 +211,6 @@ export const quickActionsService = {
       // 3. Pause Context
       // ---------------------------------------------------------------------
       case 'context.pause': {
-        // State guard: Cannot pause archived or dormant contexts
-        const state = (options?.lifecycleState || '').toLowerCase();
-        if (state === 'archived' || state === 'dormant') {
-          return {
-            actionId,
-            success: false,
-            outcome: 'BLOCKED',
-            message: `Cannot pause context in '${state}' state. Only active contexts can be paused.`,
-            resolvedContextId: cleanContextId,
-          };
-        }
-
         try {
           // Emit pause user_action signal to Context Engine
           await contextInteractionService.pauseContext(cleanContextId);
@@ -183,17 +239,6 @@ export const quickActionsService = {
       // 4. Archive Context
       // ---------------------------------------------------------------------
       case 'context.archive': {
-        const isArchived = (options?.lifecycleState || '').toLowerCase() === 'archived';
-        if (isArchived) {
-          return {
-            actionId,
-            success: false,
-            outcome: 'BLOCKED',
-            message: `Context '${cleanContextId}' is already archived.`,
-            resolvedContextId: cleanContextId,
-          };
-        }
-
         try {
           // Safe archive execution via real db operation
           await db.archiveWorkspace(cleanContextId);

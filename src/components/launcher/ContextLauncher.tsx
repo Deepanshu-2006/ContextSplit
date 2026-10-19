@@ -33,6 +33,8 @@ import {
   ItemActionId,
   getAvailableContextActions,
   getAvailableItemActions,
+  getPrimaryContextActionDescriptor,
+  resolveContextLifecycleState,
 } from '../../models/quickActions';
 
 const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
@@ -787,7 +789,19 @@ function ContextPreviewPane({
   }, [isMenuOpen]);
 
   const isCurrentActive = Boolean(isActiveContext || (preview && preview.state === 'active'));
-  const isArchived = (preview?.state || '').toLowerCase() === 'archived';
+
+  const contextLifecycleState = useMemo(() => {
+    return resolveContextLifecycleState({
+      lifecycleState: preview?.state,
+      isActive: isCurrentActive,
+    });
+  }, [preview?.state, isCurrentActive]);
+
+  const primaryActionDescriptor = useMemo(() => {
+    return getPrimaryContextActionDescriptor(contextLifecycleState);
+  }, [contextLifecycleState]);
+
+  const isArchived = contextLifecycleState === 'archived';
 
   const availableActions = useMemo(() => {
     if (!preview) return [];
@@ -798,15 +812,6 @@ function ContextPreviewPane({
       readinessBand: preview.readinessBand,
     });
   }, [preview, isCurrentActive]);
-
-  const primaryAction = availableActions.find((a) => a.id === 'context.resume') || {
-    id: 'context.resume' as const,
-    label: isCurrentActive ? 'Focus Workspace' : isArchived ? 'Restore & Resume' : 'Resume',
-    description: 'Resume context',
-    targetType: 'context' as const,
-    isSupported: true,
-    shortcut: '↵',
-  };
 
   // Secondary actions: all context actions except primary resume
   const secondaryActions = useMemo(() => {
@@ -866,14 +871,10 @@ function ContextPreviewPane({
   };
 
   const primaryButtonLabel = isResuming
-    ? isCurrentActive
-      ? 'Focusing...'
-      : isArchived
-      ? 'Restoring...'
-      : 'Resuming...'
-    : primaryAction.label === 'Resume Context'
+    ? primaryActionDescriptor.inProgressLabel
+    : primaryActionDescriptor.label === 'Resume Context'
     ? 'Resume'
-    : primaryAction.label;
+    : primaryActionDescriptor.label;
 
   if (isLoading) {
     return (

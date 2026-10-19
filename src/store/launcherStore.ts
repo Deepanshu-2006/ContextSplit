@@ -7,7 +7,7 @@ import {
   ItemActionId,
   QuickActionResult,
 } from '../models/quickActions';
-import { quickActionsService } from '../services/quickActionsService';
+import { quickActionsService, ExecuteContextActionOptions } from '../services/quickActionsService';
 
 export type ResumeActionStatus = 'idle' | 'loading' | 'success' | 'error' | 'not_ready' | 'cancelled';
 
@@ -322,7 +322,7 @@ interface LauncherState {
   executeContextAction: (
     actionId: ContextActionId,
     contextId?: string,
-    options?: { force?: boolean }
+    options?: ExecuteContextActionOptions
   ) => Promise<QuickActionResult<ContextActionId>>;
   executeItemAction: (
     actionId: ItemActionId,
@@ -722,7 +722,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     return result.success;
   },
 
-  executeContextAction: async (actionId: ContextActionId, contextId?: string, options?: { force?: boolean }) => {
+  executeContextAction: async (actionId: ContextActionId, contextId?: string, options?: ExecuteContextActionOptions) => {
     // 1. Concurrency guard: Prevent duplicate submissions while an action is in progress
     if (get().isActionExecuting || (actionId === 'context.resume' && get().isResuming)) {
       return {
@@ -758,9 +758,9 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       const preview = get().activePreview;
       const result = await quickActionsService.executeContextAction(actionId, targetId, {
         force: options?.force,
-        lifecycleState: preview?.state,
-        readinessBand: preview?.readinessBand,
-        readinessExplanation: preview?.readinessExplanation,
+        lifecycleState: options?.lifecycleState || preview?.state,
+        readinessBand: options?.readinessBand || preview?.readinessBand,
+        readinessExplanation: options?.readinessExplanation || preview?.readinessExplanation,
       });
 
       if (actionId === 'context.resume') {
@@ -790,14 +790,23 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           get().closeLauncher();
         }
       } else if (result.outcome === 'BLOCKED') {
-        if (actionId === 'context.resume') {
+        if (actionId === 'context.resume' && !result.message?.startsWith('Action is no longer valid:')) {
           set({
             isResuming: false,
             resumeStatus: 'not_ready',
             notReadyReason: result.message || 'Context not ready',
           });
         } else {
-          toast.info(result.message || 'Action blocked');
+          toast.info(result.message || 'Action is no longer valid');
+        }
+
+        // When an action is blocked due to lifecycle transition invalidation or state change during interaction,
+        // refresh launcher data and selected preview to resync the UI with actual context state.
+        if (result.message?.startsWith('Action is no longer valid:')) {
+          await get().fetchLauncherData();
+          if (get().selectedContextId === targetId) {
+            await get().selectContextById(targetId);
+          }
         }
       } else if (result.outcome === 'ERROR') {
         const errorMsg = result.error || result.message || 'Action failed';
