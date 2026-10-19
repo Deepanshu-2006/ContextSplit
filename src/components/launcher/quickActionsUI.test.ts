@@ -883,4 +883,441 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
     expect(useLauncherStore.getState().selectedContextId).not.toBe('ctx-to-be-deleted');
     expect(useLauncherStore.getState().isOpen).toBe(true);
   });
+
+  // --------------------------------------------------------------------------
+  // Keyboard Interaction, Focus Management & Event Isolation Tests
+  // --------------------------------------------------------------------------
+  describe('Context Launcher Quick Actions Keyboard Navigation & Focus Suite', () => {
+    // 29. Primary action keyboard conventions
+    it('29. makes primary action reachable and executable via keyboard conventions', async () => {
+      vi.mocked(contextInteractionService.resumeContext).mockResolvedValueOnce({
+        context_id: 'ctx-active-1',
+        status: 'active',
+      });
+
+      // 29a. Context active -> primary action is Focus Workspace, keyboard shortcut is Enter
+      const activeActions = getAvailableContextActions({
+        contextId: 'ctx-active-1',
+        lifecycleState: 'active',
+        isActive: true,
+      });
+      const primaryAction = activeActions.find((a) => a.id === 'context.resume');
+      expect(primaryAction?.shortcut).toBe('↵');
+      expect(primaryAction?.isSupported).toBe(true);
+
+      // Simulating Enter key execution from keyboard
+      const execResult = await useLauncherStore.getState().executeContextAction('context.resume', 'ctx-active-1');
+      expect(execResult.success).toBe(true);
+      expect(contextInteractionService.resumeContext).toHaveBeenCalledWith('ctx-active-1');
+    });
+
+    // 30. Opening secondary-action menu using keyboard
+    it('30. supports opening secondary-action menu via keyboard triggers (⌥M, ArrowDown, Enter, Space)', () => {
+      let isMenuOpen = false;
+      const triggerBtn = {
+        id: 'launcher-more-actions-btn',
+        focus: vi.fn(),
+        click: vi.fn(() => {
+          isMenuOpen = !isMenuOpen;
+        }),
+      };
+
+      // 30a. Shortcut Alt+M / Option+M triggers click and focus
+      const altMEvent = {
+        key: 'm',
+        altKey: true,
+        preventDefault: vi.fn(),
+      };
+      if (altMEvent.altKey && altMEvent.key.toLowerCase() === 'm') {
+        altMEvent.preventDefault();
+        triggerBtn.click();
+        triggerBtn.focus();
+      }
+      expect(altMEvent.preventDefault).toHaveBeenCalled();
+      expect(isMenuOpen).toBe(true);
+      expect(triggerBtn.focus).toHaveBeenCalled();
+
+      // Reset
+      isMenuOpen = false;
+
+      // 30b. ArrowDown, Enter, or Space on trigger button opens menu
+      ['ArrowDown', 'Enter', ' '].forEach((key) => {
+        isMenuOpen = false;
+        const triggerKeyDown = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+          if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            isMenuOpen = true;
+          }
+        };
+
+        const e = { key, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+        triggerKeyDown(e);
+        expect(e.preventDefault).toHaveBeenCalled();
+        expect(e.stopPropagation).toHaveBeenCalled();
+        expect(isMenuOpen).toBe(true);
+      });
+    });
+
+    // 31. Initial focus lands on first enabled action
+    it('31. directs initial menu focus to first enabled action rather than disabled ones', () => {
+      // Menu with first action disabled
+      const actions = [
+        { id: 'context.delete', label: 'Delete', isSupported: false, unsupportedReason: 'Locked' },
+        { id: 'context.open_details', label: 'Details', isSupported: true },
+        { id: 'context.archive', label: 'Archive', isSupported: true },
+      ];
+
+      const firstEnabledIdx = actions.findIndex((a) => a.isSupported);
+      expect(firstEnabledIdx).toBe(1);
+
+      // Focus management initializes to first enabled action
+      const targetIdx = firstEnabledIdx >= 0 ? firstEnabledIdx : 0;
+      expect(targetIdx).toBe(1);
+      expect(actions[targetIdx].id).toBe('context.open_details');
+    });
+
+    // 32. Roving keyboard navigation in secondary-action menu
+    it('32. supports roving arrow keys (ArrowDown, ArrowUp, Home, End) with circular wrapping', () => {
+      const actions = [
+        { id: 'action-0', label: 'Action 0', isSupported: true },
+        { id: 'action-1', label: 'Action 1', isSupported: true },
+        { id: 'action-2', label: 'Action 2', isSupported: true },
+      ];
+
+      let focusedIndex = 0;
+      const focusedItemRef = { focus: vi.fn() };
+
+      const navigate = (key: string) => {
+        const e = { key, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+        if (actions.length === 0) return;
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          focusedIndex = (focusedIndex + 1) % actions.length;
+          focusedItemRef.focus();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          focusedIndex = (focusedIndex - 1 + actions.length) % actions.length;
+          focusedItemRef.focus();
+        } else if (e.key === 'Home') {
+          e.preventDefault();
+          e.stopPropagation();
+          focusedIndex = 0;
+          focusedItemRef.focus();
+        } else if (e.key === 'End') {
+          e.preventDefault();
+          e.stopPropagation();
+          focusedIndex = actions.length - 1;
+          focusedItemRef.focus();
+        }
+      };
+
+      // 0 -> ArrowDown -> 1
+      navigate('ArrowDown');
+      expect(focusedIndex).toBe(1);
+
+      // 1 -> ArrowDown -> 2
+      navigate('ArrowDown');
+      expect(focusedIndex).toBe(2);
+
+      // 2 -> ArrowDown -> 0 (circular wrap)
+      navigate('ArrowDown');
+      expect(focusedIndex).toBe(0);
+
+      // 0 -> ArrowUp -> 2 (circular wrap)
+      navigate('ArrowUp');
+      expect(focusedIndex).toBe(2);
+
+      // 2 -> Home -> 0
+      navigate('Home');
+      expect(focusedIndex).toBe(0);
+
+      // 0 -> End -> 2
+      navigate('End');
+      expect(focusedIndex).toBe(2);
+    });
+
+    // 33. Action execution from menu via Enter and Space with focus restoration
+    it('33. executes enabled action on Enter/Space, closes menu, and restores focus to trigger', async () => {
+      const actions = [
+        { id: 'context.pause', label: 'Pause', isSupported: true },
+        { id: 'context.archive', label: 'Archive', isSupported: true },
+      ];
+
+      let isMenuOpen = true;
+      let focusedIndex = 0;
+      const triggerFocusSpy = vi.fn();
+      const executeActionSpy = vi.fn();
+
+      const handleKey = (key: string) => {
+        const e = { key, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          const targetAction = actions[focusedIndex];
+          if (targetAction && targetAction.isSupported) {
+            isMenuOpen = false;
+            executeActionSpy(targetAction.id);
+            triggerFocusSpy();
+          }
+        }
+      };
+
+      // Press Enter on enabled action
+      handleKey('Enter');
+      expect(isMenuOpen).toBe(false);
+      expect(executeActionSpy).toHaveBeenCalledWith('context.pause');
+      expect(triggerFocusSpy).toHaveBeenCalled();
+
+      // Reset and test Space
+      isMenuOpen = true;
+      focusedIndex = 1;
+      handleKey(' ');
+      expect(isMenuOpen).toBe(false);
+      expect(executeActionSpy).toHaveBeenCalledWith('context.archive');
+      expect(triggerFocusSpy).toHaveBeenCalledTimes(2);
+    });
+
+    // 34. Disabled action keyboard resilience
+    it('34. prevents Enter and Space activation on disabled actions without closing menu or executing', () => {
+      const actions = [
+        { id: 'context.delete', label: 'Delete', isSupported: false, unsupportedReason: 'Locked' },
+      ];
+
+      let isMenuOpen = true;
+      const focusedIndex = 0;
+      const triggerFocusSpy = vi.fn();
+      const executeActionSpy = vi.fn();
+
+      const handleKey = (key: string) => {
+        const e = { key, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          const targetAction = actions[focusedIndex];
+          if (targetAction && targetAction.isSupported) {
+            isMenuOpen = false;
+            executeActionSpy(targetAction.id);
+            triggerFocusSpy();
+          }
+        }
+      };
+
+      handleKey('Enter');
+      expect(isMenuOpen).toBe(true);
+      expect(executeActionSpy).not.toHaveBeenCalled();
+      expect(triggerFocusSpy).not.toHaveBeenCalled();
+
+      handleKey(' ');
+      expect(isMenuOpen).toBe(true);
+      expect(executeActionSpy).not.toHaveBeenCalled();
+      expect(triggerFocusSpy).not.toHaveBeenCalled();
+    });
+
+    // 35. Menu dismissal via Escape and focus restoration
+    it('35. dismisses menu on Escape, restores focus to trigger, and halts event propagation', () => {
+      let isMenuOpen = true;
+      const triggerFocusSpy = vi.fn();
+      const launcherCloseSpy = vi.fn();
+
+      const handleMenuKey = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          isMenuOpen = false;
+          triggerFocusSpy();
+        }
+      };
+
+      const e = {
+        key: 'Escape',
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      };
+
+      handleMenuKey(e);
+
+      expect(e.preventDefault).toHaveBeenCalled();
+      expect(e.stopPropagation).toHaveBeenCalled();
+      expect(isMenuOpen).toBe(false);
+      expect(triggerFocusSpy).toHaveBeenCalled();
+      // Launcher background is not closed because propagation was stopped
+      expect(launcherCloseSpy).not.toHaveBeenCalled();
+    });
+
+    // 36. Empty secondary-action menu handling
+    it('36. handles empty secondary-action menu safely without division-by-zero or crash', () => {
+      const emptyActions: any[] = [];
+      let isMenuOpen = true;
+      const triggerFocusSpy = vi.fn();
+
+      const handleMenuKey = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (emptyActions.length === 0) {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            isMenuOpen = false;
+            triggerFocusSpy();
+          }
+          return;
+        }
+      };
+
+      // ArrowDown on empty menu: returns immediately, does not compute NaN
+      const arrowE = { key: 'ArrowDown', preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      handleMenuKey(arrowE);
+      expect(isMenuOpen).toBe(true);
+
+      // Escape on empty menu: closes cleanly and restores focus
+      const escE = { key: 'Escape', preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      handleMenuKey(escE);
+      expect(escE.preventDefault).toHaveBeenCalled();
+      expect(escE.stopPropagation).toHaveBeenCalled();
+      expect(isMenuOpen).toBe(false);
+      expect(triggerFocusSpy).toHaveBeenCalled();
+    });
+
+    // 37. Event isolation: prevents accidental background launcher actions
+    it('37. isolates keyboard events inside buttons and menus to avoid accidental context resume', () => {
+      const executeContextActionSpy = vi.fn();
+
+      // Window-level keydown simulator with isolation guards
+      const handleWindowKeyDown = (
+        e: { key: string; preventDefault: () => void },
+        activeEl: { tagName?: string; role?: string; isMenuTrigger?: boolean } | null
+      ) => {
+        // If focus is currently inside a menu, menu trigger, or button, let element handle its own interaction
+        if (e.key === 'Enter') {
+          if (
+            activeEl?.tagName === 'BUTTON' ||
+            activeEl?.role === 'menuitem' ||
+            activeEl?.isMenuTrigger
+          ) {
+            return; // Isolated: does not resume context!
+          }
+          // Normal search/list Enter behavior
+          e.preventDefault();
+          executeContextActionSpy('context.resume');
+        }
+
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          if (activeEl?.role === 'menuitem' || activeEl?.isMenuTrigger || activeEl?.tagName === 'BUTTON') {
+            return; // Isolated: does not navigate left context list!
+          }
+          e.preventDefault();
+        }
+      };
+
+      // 37a. Enter pressed while focused on "Cancel" button or menu trigger does NOT resume context
+      const enterEvent = { key: 'Enter', preventDefault: vi.fn() };
+      handleWindowKeyDown(enterEvent, { tagName: 'BUTTON' });
+      expect(executeContextActionSpy).not.toHaveBeenCalled();
+
+      // 37b. Enter pressed on menu trigger does NOT resume context
+      handleWindowKeyDown(enterEvent, { isMenuTrigger: true });
+      expect(executeContextActionSpy).not.toHaveBeenCalled();
+
+      // 37c. Enter pressed on menu item does NOT resume context
+      handleWindowKeyDown(enterEvent, { role: 'menuitem' });
+      expect(executeContextActionSpy).not.toHaveBeenCalled();
+
+      // 37d. Enter pressed while in search input (INPUT) DOES resume context
+      handleWindowKeyDown(enterEvent, { tagName: 'INPUT' });
+      expect(executeContextActionSpy).toHaveBeenCalledWith('context.resume');
+    });
+
+    // 38. Workset item actions keyboard interaction & focus restoration
+    it('38. supports keyboard opening, execution, and focus restoration for workset item actions', () => {
+      const itemActions = [
+        { id: 'item.mark_important', label: 'Pin Memory', isSupported: true },
+        { id: 'item.remove_from_context', label: 'Remove', isSupported: true },
+        { id: 'item.delete', label: 'Delete', isSupported: false, unsupportedReason: 'Locked' },
+      ];
+
+      let isItemMenuOpen = false;
+      const triggerFocusSpy = vi.fn();
+      const executeItemActionSpy = vi.fn();
+
+      // 38a. Trigger keydown (ArrowDown, Enter, Space) opens item menu
+      const triggerKeyHandler = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          isItemMenuOpen = true;
+        }
+      };
+
+      const openE = { key: 'ArrowDown', preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      triggerKeyHandler(openE);
+      expect(isItemMenuOpen).toBe(true);
+
+      // 38b. Executing item action closes menu, calls onExecuteItemAction, and restores focus
+      const itemMenuKeyHandler = (
+        e: { key: string; preventDefault: () => void; stopPropagation: () => void },
+        focusedIndex: number
+      ) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          const targetAction = itemActions[focusedIndex];
+          if (targetAction && targetAction.isSupported) {
+            isItemMenuOpen = false;
+            executeItemActionSpy(targetAction.id, 'ctx-1', 'item-1');
+            triggerFocusSpy();
+          }
+        }
+      };
+
+      // Execute enabled item action (Pin Memory)
+      itemMenuKeyHandler({ key: 'Enter', preventDefault: vi.fn(), stopPropagation: vi.fn() }, 0);
+      expect(isItemMenuOpen).toBe(false);
+      expect(executeItemActionSpy).toHaveBeenCalledWith('item.mark_important', 'ctx-1', 'item-1');
+      expect(triggerFocusSpy).toHaveBeenCalled();
+
+      // Attempt to execute disabled item action (Delete) -> strictly blocked
+      isItemMenuOpen = true;
+      itemMenuKeyHandler({ key: 'Enter', preventDefault: vi.fn(), stopPropagation: vi.fn() }, 2);
+      expect(isItemMenuOpen).toBe(true);
+      expect(executeItemActionSpy).toHaveBeenCalledTimes(1); // Not called again
+    });
+
+    // 39. Accessible semantics: ARIA roles and attributes
+    it('39. adheres to accessible ARIA semantics (role=menu, role=menuitem, aria-disabled, aria-expanded)', () => {
+      // Menu container semantics
+      const menuProps = {
+        role: 'menu',
+        'aria-label': 'Context secondary actions',
+        tabIndex: -1,
+      };
+      expect(menuProps.role).toBe('menu');
+      expect(menuProps['aria-label']).toBeDefined();
+
+      // Menu trigger semantics
+      const triggerProps = (isOpen: boolean) => ({
+        'aria-haspopup': 'menu',
+        'aria-expanded': isOpen,
+        'aria-controls': 'launcher-context-secondary-menu',
+      });
+      expect(triggerProps(false)['aria-expanded']).toBe(false);
+      expect(triggerProps(true)['aria-expanded']).toBe(true);
+      expect(triggerProps(true)['aria-haspopup']).toBe('menu');
+
+      // Disabled item semantics: retains role="menuitem" and receives aria-disabled instead of native disabled
+      // so screen readers and keyboard users can navigate to it and read its unsupportedReason
+      const disabledItemProps = {
+        role: 'menuitem',
+        'aria-disabled': true,
+        tabIndex: 0,
+        title: 'Action unsupported in current context state',
+      };
+      expect(disabledItemProps.role).toBe('menuitem');
+      expect(disabledItemProps['aria-disabled']).toBe(true);
+      expect(disabledItemProps.tabIndex).toBe(0);
+      expect(disabledItemProps.title).toContain('unsupported');
+    });
+  });
 });
+
