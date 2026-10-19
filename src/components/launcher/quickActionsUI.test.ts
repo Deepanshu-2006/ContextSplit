@@ -495,4 +495,167 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
     expect(useLauncherStore.getState().isOpen).toBe(true);
     expect(toast.error).toHaveBeenCalledWith("Context 'ctx-deleted-99' is no longer available. It may have been closed or deleted.");
   });
+
+  // 17. Context secondary-action menu availability across lifecycle states
+  it('17. accurately populates secondary actions across active, paused, archived, and dormant states', () => {
+    // 17a. Active state
+    const activeActions = getAvailableContextActions({
+      contextId: 'ctx-1',
+      lifecycleState: 'active',
+      isActive: true,
+    }).filter((a) => a.id !== 'context.resume');
+
+    expect(activeActions.map((a) => a.id)).toEqual([
+      'context.open_details',
+      'context.pause',
+      'context.archive',
+      'context.delete',
+    ]);
+    expect(activeActions.find((a) => a.id === 'context.pause')?.isSupported).toBe(true);
+    expect(activeActions.find((a) => a.id === 'context.archive')?.isSupported).toBe(true);
+    expect(activeActions.find((a) => a.id === 'context.delete')?.isSupported).toBe(false);
+
+    // 17b. Paused state
+    const pausedActions = getAvailableContextActions({
+      contextId: 'ctx-2',
+      lifecycleState: 'paused',
+      isActive: false,
+    }).filter((a) => a.id !== 'context.resume');
+
+    expect(pausedActions.find((a) => a.id === 'context.pause')?.isSupported).toBe(false);
+    expect(pausedActions.find((a) => a.id === 'context.pause')?.unsupportedReason).toContain('not currently active');
+    expect(pausedActions.find((a) => a.id === 'context.archive')?.isSupported).toBe(true);
+
+    // 17c. Archived state
+    const archivedActions = getAvailableContextActions({
+      contextId: 'ctx-3',
+      lifecycleState: 'archived',
+      isActive: false,
+    }).filter((a) => a.id !== 'context.resume');
+
+    expect(archivedActions.find((a) => a.id === 'context.pause')?.isSupported).toBe(false);
+    expect(archivedActions.find((a) => a.id === 'context.pause')?.unsupportedReason).toContain('Cannot pause an archived context');
+    expect(archivedActions.find((a) => a.id === 'context.archive')?.isSupported).toBe(false);
+    expect(archivedActions.find((a) => a.id === 'context.archive')?.unsupportedReason).toContain('already archived');
+  });
+
+  // 18. Clear explanations for unavailable actions without exposing them as clickable options
+  it('18. provides clear structured explanations for unavailable secondary actions', () => {
+    const actions = getAvailableContextActions({
+      contextId: 'ctx-dormant-1',
+      lifecycleState: 'dormant',
+      isActive: false,
+    });
+
+    const pauseAction = actions.find((a) => a.id === 'context.pause');
+    expect(pauseAction?.isSupported).toBe(false);
+    expect(pauseAction?.unsupportedReason).toBe('Cannot pause a dormant context.');
+
+    const deleteAction = actions.find((a) => a.id === 'context.delete');
+    expect(deleteAction?.isSupported).toBe(false);
+    expect(deleteAction?.unsupportedReason).toBe('Context deletion must be performed from workspace management settings.');
+  });
+
+  // 19. Item secondary-action menu availability and action generation
+  it('19. provides accurate item secondary actions and marks permanent deletion as unsupported in launcher', () => {
+    const unpinnedActions = getAvailableItemActions({
+      contextId: 'ctx-test-1',
+      itemId: 'item-note-1',
+      isImportant: false,
+    });
+
+    expect(unpinnedActions.map((a) => a.id)).toEqual([
+      'item.mark_important',
+      'item.remove_from_context',
+      'item.delete',
+    ]);
+    expect(unpinnedActions.find((a) => a.id === 'item.mark_important')?.label).toBe('Mark as Important');
+    expect(unpinnedActions.find((a) => a.id === 'item.delete')?.isSupported).toBe(false);
+    expect(unpinnedActions.find((a) => a.id === 'item.delete')?.unsupportedReason).toBe(
+      'Permanent item deletion must be performed in the main inbox or canvas.'
+    );
+
+    const pinnedActions = getAvailableItemActions({
+      contextId: 'ctx-test-1',
+      itemId: 'item-note-2',
+      isImportant: true,
+    });
+    expect(pinnedActions.find((a) => a.id === 'item.unmark_important')?.label).toBe('Unmark Important');
+  });
+
+  // 20. Target ID verification: contextId and itemId are correctly isolated and passed
+  it('20. ensures context operations receive exact contextId and item operations receive both contextId and itemId', async () => {
+    const contextId = 'c7e527f3-d029-450a-a921-9a70613d9641';
+    const itemId = 'item-98a4-bf23';
+
+    vi.mocked(contextWorksetService.controlContextMemory).mockResolvedValueOnce(true);
+
+    const result = await useLauncherStore.getState().executeItemAction('item.mark_important', contextId, itemId);
+    expect(result.success).toBe(true);
+
+    // Verified: First argument is contextId, second is itemId
+    expect(contextWorksetService.controlContextMemory).toHaveBeenCalledWith(contextId, itemId, 'keep_important');
+  });
+
+  // 21. Clearly distinguish item importance from parent context lifecycle state
+  it('21. clearly distinguishes item working-set memory from parent context lifecycle state', async () => {
+    const parentContextId = 'ctx-parent-100';
+    const initialParentState = 'active';
+
+    useWorkspaceStore.setState({
+      workspaces: [
+        {
+          id: parentContextId,
+          name: 'Parent Workspace',
+          lifecycle_state: initialParentState,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+      activeWorkspaceId: parentContextId,
+    });
+
+    vi.mocked(contextWorksetService.controlContextMemory).mockResolvedValueOnce(true);
+
+    // Toggle item importance in working set
+    const result = await useLauncherStore.getState().executeItemAction('item.mark_important', parentContextId, 'item-pinned');
+    expect(result.success).toBe(true);
+
+    // Verify parent workspace lifecycle state remains untouched
+    const currentWorkspace = useWorkspaceStore.getState().workspaces.find((w) => w.id === parentContextId);
+    expect(currentWorkspace?.lifecycle_state).toBe(initialParentState);
+    expect(db.archiveWorkspace).not.toHaveBeenCalled();
+    expect(db.unarchiveWorkspace).not.toHaveBeenCalled();
+  });
+
+  // 22. Guards against execution of unsupported actions
+  it('22. prevents execution of unsupported context.delete and item.delete actions', async () => {
+    const contextResult = await useLauncherStore.getState().executeContextAction('context.delete', 'ctx-1');
+    expect(contextResult.success).toBe(false);
+    expect(contextResult.outcome).toBe('UNSUPPORTED');
+    expect(contextResult.message).toContain('not supported');
+
+    const itemResult = await useLauncherStore.getState().executeItemAction('item.delete', 'ctx-1', 'item-1');
+    expect(itemResult.success).toBe(false);
+    expect(itemResult.outcome).toBe('UNSUPPORTED');
+    expect(itemResult.message).toContain('not supported');
+
+    // Context Engine mutator was never invoked
+    expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
+  });
+
+  // 23. Handles item action failure gracefully
+  it('23. handles item action failure gracefully with error toast and without corrupting state', async () => {
+    vi.mocked(contextWorksetService.controlContextMemory).mockRejectedValueOnce(
+      new Error('Disk write locked by another process')
+    );
+
+    const result = await useLauncherStore.getState().executeItemAction('item.remove_from_context', 'ctx-active-1', 'item-1');
+    expect(result.success).toBe(false);
+    expect(result.outcome).toBe('ERROR');
+    expect(result.error).toBe('Disk write locked by another process');
+
+    expect(toast.error).toHaveBeenCalledWith('Failed to remove item from context: Disk write locked by another process');
+    expect(useLauncherStore.getState().isActionExecuting).toBe(false);
+  });
 });
