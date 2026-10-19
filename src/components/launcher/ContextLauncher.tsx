@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -8,6 +8,11 @@ import {
   Play,
   FileText,
   Link2,
+  MoreHorizontal,
+  Pause,
+  Archive,
+  Star,
+  ExternalLink,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -22,6 +27,11 @@ import {
   getVisibleLauncherSlice,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
+import {
+  ContextActionId,
+  ItemActionId,
+  getAvailableContextActions,
+} from '../../models/quickActions';
 
 const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -69,6 +79,7 @@ export function ContextLauncher() {
     isLoading,
     isLoadingPreview,
     isResuming,
+    isActionExecuting,
     resumeStatus,
     resumeError,
     notReadyReason,
@@ -87,6 +98,8 @@ export function ContextLauncher() {
     fetchLauncherData,
     resumeContextById,
     clearResumeState,
+    executeContextAction,
+    executeItemAction,
   } = useLauncherStore();
 
   const { activeWorkspaceId } = useWorkspaceStore();
@@ -273,13 +286,36 @@ export function ContextLauncher() {
         return;
       }
 
-      // 5. Enter Action: Open preview from list, or resume from preview
+      // 5. Context Quick Actions Shortcuts:
+      // Cmd+O / Ctrl+O: Open Context Details
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+        if (targetId) {
+          executeContextAction('context.open_details', targetId);
+        }
+        return;
+      }
+
+      // Alt+P / Option+P: Pause Active Context
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+        if (targetId) {
+          executeContextAction('context.pause', targetId);
+        }
+        return;
+      }
+
+      // 6. Enter Action: Open preview from list, or resume from preview
       if (e.key === 'Enter') {
         e.preventDefault();
+        if (isResuming || isActionExecuting) return;
+
         if (notReadyReason) {
           // If prompt was already showing, Enter triggers forced resume
           if (selectedContextId) {
-            resumeContextById(selectedContextId, true);
+            executeContextAction('context.resume', selectedContextId, { force: true });
           }
           return;
         }
@@ -295,7 +331,7 @@ export function ContextLauncher() {
           // Enter from preview: Resume selected context
           const target = filteredList[selectedIndex];
           if (target) {
-            resumeContextById(target.id);
+            executeContextAction('context.resume', target.id);
           }
         }
         return;
@@ -310,6 +346,8 @@ export function ContextLauncher() {
     selectedIndex,
     selectedContextId,
     isPreviewOpen,
+    isResuming,
+    isActionExecuting,
     notReadyReason,
     resumeError,
     searchQuery,
@@ -321,6 +359,7 @@ export function ContextLauncher() {
     setIsPreviewOpen,
     resumeContextById,
     clearResumeState,
+    executeContextAction,
   ]);
 
   // Scroll active item into view
@@ -628,15 +667,27 @@ export function ContextLauncher() {
               preview={activePreview}
               isLoading={isLoadingPreview}
               isResuming={isResuming}
+              isActionExecuting={isActionExecuting}
               isPreviewOpen={isPreviewOpen}
               resumeStatus={resumeStatus}
               resumeError={resumeError}
               notReadyReason={notReadyReason}
               error={previewError}
+              isActiveContext={Boolean(
+                activeContext && activePreview && activePreview.contextId === activeContext.id
+              )}
               onResume={(force) => {
                 if (activePreview) {
-                  resumeContextById(activePreview.contextId, force);
+                  executeContextAction('context.resume', activePreview.contextId, { force });
                 }
+              }}
+              onExecuteContextAction={(actionId, options) => {
+                if (activePreview) {
+                  executeContextAction(actionId, activePreview.contextId, options);
+                }
+              }}
+              onExecuteItemAction={(actionId, contextId, itemId) => {
+                executeItemAction(actionId, contextId, itemId);
               }}
               onClearResumeState={clearResumeState}
               onClose={() => {
@@ -653,6 +704,7 @@ export function ContextLauncher() {
           <div className="flex items-center gap-3">
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌘O</kbd> Details</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">Esc</kbd> Close</span>
           </div>
         </div>
@@ -669,12 +721,16 @@ interface ContextPreviewPaneProps {
   preview: LauncherPreviewModel | null;
   isLoading: boolean;
   isResuming: boolean;
+  isActionExecuting?: boolean;
   isPreviewOpen?: boolean;
   resumeStatus: ResumeActionStatus;
   resumeError: string | null;
   notReadyReason: string | null;
   error: string | null;
+  isActiveContext?: boolean;
   onResume: (force?: boolean) => void;
+  onExecuteContextAction?: (actionId: ContextActionId, options?: { force?: boolean }) => void;
+  onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
   onClearResumeState: () => void;
   onClose: () => void;
 }
@@ -683,12 +739,82 @@ function ContextPreviewPane({
   preview,
   isLoading,
   isResuming,
+  isActionExecuting = false,
   resumeError,
   notReadyReason,
   error,
+  isActiveContext = false,
   onResume,
+  onExecuteContextAction,
+  onExecuteItemAction,
   onClearResumeState,
 }: ContextPreviewPaneProps) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close menu when selected context changes
+  useEffect(() => {
+    setIsMenuOpen(false);
+  }, [preview?.contextId]);
+
+  // Click outside and escape handling for menu
+  useEffect(() => {
+    if (!isMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isMenuOpen]);
+
+  const isCurrentActive = Boolean(isActiveContext || (preview && preview.state === 'active'));
+  const isArchived = (preview?.state || '').toLowerCase() === 'archived';
+
+  const availableActions = useMemo(() => {
+    if (!preview) return [];
+    return getAvailableContextActions({
+      contextId: preview.contextId,
+      lifecycleState: preview.state,
+      isActive: isCurrentActive,
+      readinessBand: preview.readinessBand,
+    });
+  }, [preview, isCurrentActive]);
+
+  const primaryAction = availableActions.find((a) => a.id === 'context.resume') || {
+    id: 'context.resume' as const,
+    label: isCurrentActive ? 'Focus Workspace' : isArchived ? 'Restore & Resume' : 'Resume',
+    description: 'Resume context',
+    targetType: 'context' as const,
+    isSupported: true,
+    shortcut: '↵',
+  };
+
+  // Supported secondary actions: all context actions except resume and unsupported delete
+  const secondaryActions = availableActions.filter(
+    (a) => a.id !== 'context.resume' && a.id !== 'context.delete'
+  );
+
+  const primaryButtonLabel = isResuming
+    ? isCurrentActive
+      ? 'Focusing...'
+      : isArchived
+      ? 'Restoring...'
+      : 'Resuming...'
+    : primaryAction.label === 'Resume Context'
+    ? 'Resume'
+    : primaryAction.label;
+
   if (isLoading) {
     return (
       <div className="space-y-3 animate-pulse p-1">
@@ -758,6 +884,12 @@ function ContextPreviewPane({
                 <span className="text-amber-400 font-medium">Paused</span>
               </>
             )}
+            {isArchived && (
+              <>
+                <span className="text-stone-600">•</span>
+                <span className="text-stone-500 font-medium">Archived</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -795,15 +927,21 @@ function ContextPreviewPane({
             </div>
             <div className="flex items-center gap-2 pt-1">
               <button
-                onClick={() => onResume(true)}
-                disabled={isResuming}
+                onClick={() => {
+                  if (onExecuteContextAction) {
+                    onExecuteContextAction('context.resume', { force: true });
+                  } else {
+                    onResume(true);
+                  }
+                }}
+                disabled={isResuming || isActionExecuting}
                 className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-stone-950 font-medium text-[11px] transition-colors cursor-pointer"
               >
                 {isResuming ? 'Resuming...' : 'Resume Anyway'}
               </button>
               <button
                 onClick={onClearResumeState}
-                disabled={isResuming}
+                disabled={isResuming || isActionExecuting}
                 className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] transition-colors cursor-pointer"
               >
                 Cancel
@@ -841,53 +979,151 @@ function ContextPreviewPane({
           ) : (
             <div className="space-y-1 max-h-[140px] overflow-y-auto">
               {preview.worksetItems.map((item) => (
-                <WorksetPreviewRow key={item.id} item={item} />
+                <WorksetPreviewRow
+                  key={item.id}
+                  item={item}
+                  contextId={preview.contextId}
+                  isExecuting={isActionExecuting}
+                  onExecuteItemAction={onExecuteItemAction}
+                />
               ))}
             </div>
           )}
         </div>
       </div>
 
-      {/* 5. Resume Action (Clear single primary button, no duplicate close button) */}
-      <div className="pt-3 border-t border-white/5">
+      {/* 5. Primary Action & Compact Secondary Actions Menu */}
+      <div className="pt-3 border-t border-white/5 flex items-center gap-2 relative">
         <button
-          onClick={() => onResume(false)}
-          disabled={isResuming}
-          className="w-full py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
-          aria-label="Resume context"
+          id="launcher-primary-action-btn"
+          onClick={() => {
+            if (onExecuteContextAction) {
+              onExecuteContextAction('context.resume', { force: false });
+            } else {
+              onResume(false);
+            }
+          }}
+          disabled={isResuming || isActionExecuting}
+          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+          aria-label={primaryButtonLabel}
         >
           {isResuming ? (
             <>
               <RefreshCw size={13} className="animate-spin" />
-              <span>Resuming...</span>
+              <span>{primaryButtonLabel}</span>
             </>
           ) : (
             <>
               <Play size={13} className="fill-current" />
-              <span>Resume</span>
+              <span>{primaryButtonLabel}</span>
               <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded">
                 ↵ Enter
               </kbd>
             </>
           )}
         </button>
+
+        {/* Compact Secondary Actions Menu Trigger */}
+        <div className="relative shrink-0" ref={menuRef}>
+          <button
+            id="launcher-more-actions-btn"
+            type="button"
+            onClick={() => setIsMenuOpen((prev) => !prev)}
+            disabled={isResuming || isActionExecuting}
+            className={`p-2.5 rounded-lg border border-white/10 transition-colors cursor-pointer flex items-center justify-center ${
+              isMenuOpen
+                ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
+                : 'bg-stone-950/40 hover:bg-stone-800/80 text-stone-400 hover:text-stone-200'
+            }`}
+            title="More actions"
+            aria-label="More actions for selected context"
+            aria-haspopup="menu"
+            aria-expanded={isMenuOpen}
+          >
+            <MoreHorizontal size={14} />
+          </button>
+
+          {/* Compact Popover Menu */}
+          {isMenuOpen && (
+            <div
+              role="menu"
+              aria-label="Context secondary actions"
+              className="absolute bottom-full mb-1.5 right-0 w-52 bg-stone-900 border border-white/10 rounded-lg shadow-2xl p-1 z-30 animate-in fade-in zoom-in-95 duration-100"
+            >
+              <div className="px-2.5 py-1 text-[10px] font-medium text-stone-500 uppercase tracking-wider">
+                Quick Actions
+              </div>
+              <div className="space-y-0.5">
+                {secondaryActions.map((action) => {
+                  const isEnabled = action.isSupported;
+                  return (
+                    <button
+                      key={action.id}
+                      role="menuitem"
+                      type="button"
+                      disabled={!isEnabled || isResuming || isActionExecuting}
+                      onClick={() => {
+                        if (!isEnabled || isResuming || isActionExecuting) return;
+                        setIsMenuOpen(false);
+                        if (onExecuteContextAction) {
+                          onExecuteContextAction(action.id);
+                        }
+                      }}
+                      title={!isEnabled ? action.unsupportedReason : action.description}
+                      className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs text-left transition-colors ${
+                        !isEnabled
+                          ? 'opacity-40 cursor-not-allowed text-stone-500'
+                          : 'text-stone-300 hover:text-stone-100 hover:bg-white/10 cursor-pointer'
+                      }`}
+                    >
+                      {action.id === 'context.open_details' && (
+                        <ExternalLink size={13} className="shrink-0" />
+                      )}
+                      {action.id === 'context.pause' && (
+                        <Pause size={13} className="shrink-0" />
+                      )}
+                      {action.id === 'context.archive' && (
+                        <Archive size={13} className="shrink-0" />
+                      )}
+                      <span className="flex-1 truncate">{action.label}</span>
+                      {action.shortcut && (
+                        <kbd className="text-[10px] font-mono text-stone-500 bg-white/5 px-1.5 py-0.5 rounded shrink-0">
+                          {action.shortcut}
+                        </kbd>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 /**
- * Lightweight Workset Item Row
+ * Lightweight Workset Item Row with quick item actions
  */
+interface WorksetPreviewRowProps {
+  item: LauncherPreviewItem;
+  contextId: string;
+  isExecuting?: boolean;
+  onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
+}
+
 function WorksetPreviewRow({
   item,
-}: {
-  item: LauncherPreviewItem;
-}) {
+  contextId,
+  isExecuting = false,
+  onExecuteItemAction,
+}: WorksetPreviewRowProps) {
   const isLink = item.itemType === 'url' || item.itemType === 'link';
+  const isImportant = Boolean(item.isImportant);
 
   return (
-    <div className="flex items-center justify-between py-1 text-xs gap-2 text-stone-300">
+    <div className="group flex items-center justify-between py-1 px-1.5 rounded hover:bg-white/[0.04] text-xs gap-2 text-stone-300 transition-colors">
       <div className="flex items-center gap-1.5 min-w-0 flex-1">
         {isLink ? (
           <Link2 size={12} className="text-stone-400 shrink-0" />
@@ -896,11 +1132,56 @@ function WorksetPreviewRow({
         )}
         <span className="truncate text-[11px]">{item.title}</span>
       </div>
-      {item.appName && (
-        <span className="text-[10px] text-stone-500 shrink-0 font-mono">
-          {item.appName}
-        </span>
-      )}
+
+      <div className="flex items-center gap-1 shrink-0">
+        {item.appName && (
+          <span className="text-[10px] text-stone-500 font-mono mr-1">
+            {item.appName}
+          </span>
+        )}
+
+        {/* Toggle Importance */}
+        {onExecuteItemAction && (
+          <button
+            type="button"
+            disabled={isExecuting}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExecuteItemAction(
+                isImportant ? 'item.unmark_important' : 'item.mark_important',
+                contextId,
+                item.id
+              );
+            }}
+            className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer ${
+              isImportant
+                ? 'opacity-100 text-amber-400'
+                : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-amber-400'
+            }`}
+            title={isImportant ? 'Unmark important' : 'Mark as important'}
+            aria-label={isImportant ? 'Unmark important' : 'Mark as important'}
+          >
+            <Star size={11} className={isImportant ? 'fill-current' : ''} />
+          </button>
+        )}
+
+        {/* Remove from Context */}
+        {onExecuteItemAction && (
+          <button
+            type="button"
+            disabled={isExecuting}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExecuteItemAction('item.remove_from_context', contextId, item.id);
+            }}
+            className="p-1 rounded hover:bg-white/10 opacity-0 group-hover:opacity-100 text-stone-500 hover:text-red-400 transition-all cursor-pointer"
+            title="Remove from context"
+            aria-label="Remove item from context"
+          >
+            <X size={11} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

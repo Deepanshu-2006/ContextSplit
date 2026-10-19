@@ -296,6 +296,7 @@ interface LauncherState {
   isLoading: boolean;
   isLoadingPreview: boolean;
   isResuming: boolean;
+  isActionExecuting: boolean;
   resumeStatus: ResumeActionStatus;
   resumeError: string | null;
   notReadyReason: string | null;
@@ -342,6 +343,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   isLoading: false,
   isLoadingPreview: false,
   isResuming: false,
+  isActionExecuting: false,
   resumeStatus: 'idle',
   resumeError: null,
   notReadyReason: null,
@@ -787,51 +789,81 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       };
     }
 
-    const preview = get().activePreview;
-    const result = await quickActionsService.executeContextAction(actionId, targetId, {
-      force: options?.force,
-      lifecycleState: preview?.state,
-      readinessBand: preview?.readinessBand,
-      readinessExplanation: preview?.readinessExplanation,
-    });
+    if (actionId === 'context.resume') {
+      set({
+        isResuming: true,
+        resumeStatus: 'loading',
+        resumeError: null,
+        notReadyReason: null,
+      });
+    }
+    set({ isActionExecuting: true });
 
-    if (result.success) {
-      if (actionId === 'context.resume') {
-        await get().fetchLauncherData();
-        toast.success(result.message || 'Context resumed');
-        get().closeLauncher();
-      } else if (actionId === 'context.pause' || actionId === 'context.archive') {
-        await get().fetchLauncherData();
-        toast.success(result.message || 'Action completed');
-      } else if (actionId === 'context.open_details') {
-        get().closeLauncher();
-      }
-    } else if (result.outcome === 'BLOCKED') {
+    try {
+      const preview = get().activePreview;
+      const result = await quickActionsService.executeContextAction(actionId, targetId, {
+        force: options?.force,
+        lifecycleState: preview?.state,
+        readinessBand: preview?.readinessBand,
+        readinessExplanation: preview?.readinessExplanation,
+      });
+
       if (actionId === 'context.resume') {
         set({
-          resumeStatus: 'not_ready',
-          notReadyReason: result.message || 'Context not ready',
+          isResuming: false,
+          resumeStatus: result.success ? 'success' : result.outcome === 'BLOCKED' ? 'not_ready' : 'error',
+          resumeError: result.outcome === 'ERROR' ? (result.error || result.message || 'Failed to resume') : null,
         });
-      } else {
-        toast.info(result.message || 'Action blocked');
       }
-    } else if (result.outcome === 'ERROR') {
-      toast.error(result.message || result.error || 'Action failed');
-    }
 
-    return result;
+      if (result.success) {
+        if (actionId === 'context.resume') {
+          await get().fetchLauncherData();
+          toast.success(result.message || 'Context resumed');
+          get().closeLauncher();
+        } else if (actionId === 'context.pause' || actionId === 'context.archive') {
+          await get().fetchLauncherData();
+          if (get().selectedContextId === targetId) {
+            await get().selectContextById(targetId);
+          }
+          toast.success(result.message || 'Action completed');
+        } else if (actionId === 'context.open_details') {
+          get().closeLauncher();
+        }
+      } else if (result.outcome === 'BLOCKED') {
+        if (actionId === 'context.resume') {
+          set({
+            resumeStatus: 'not_ready',
+            notReadyReason: result.message || 'Context not ready',
+          });
+        } else {
+          toast.info(result.message || 'Action blocked');
+        }
+      } else if (result.outcome === 'ERROR') {
+        toast.error(result.message || result.error || 'Action failed');
+      }
+
+      return result;
+    } finally {
+      set({ isActionExecuting: false });
+    }
   },
 
   executeItemAction: async (actionId: ItemActionId, contextId: string, itemId: string) => {
-    const result = await quickActionsService.executeItemAction(actionId, contextId, itemId);
-    if (result.success) {
-      toast.success(result.message || 'Item updated');
-      if (get().selectedContextId === contextId) {
-        get().selectContextById(contextId);
+    set({ isActionExecuting: true });
+    try {
+      const result = await quickActionsService.executeItemAction(actionId, contextId, itemId);
+      if (result.success) {
+        toast.success(result.message || 'Item updated');
+        if (get().selectedContextId === contextId) {
+          await get().selectContextById(contextId);
+        }
+      } else {
+        toast.error(result.message || result.error || 'Item action failed');
       }
-    } else {
-      toast.error(result.message || result.error || 'Item action failed');
+      return result;
+    } finally {
+      set({ isActionExecuting: false });
     }
-    return result;
   },
 }));
