@@ -48,22 +48,18 @@ describe('Context Pinning Architecture & Integration', () => {
         {
           id: 'ws-active-1',
           name: 'Active Project',
-          path: '/path/active',
-          is_active: true,
           is_pinned: false,
           lifecycle_state: 'active',
-          created_at: 1000,
-          updated_at: 2000,
+          created_at: '2026-10-20T10:00:00Z',
+          updated_at: '2026-10-20T11:00:00Z',
         },
         {
           id: 'ws-recent-2',
           name: 'Recent Research',
-          path: '/path/recent',
-          is_active: false,
           is_pinned: true,
           lifecycle_state: 'dormant',
-          created_at: 1100,
-          updated_at: 2100,
+          created_at: '2026-10-20T10:05:00Z',
+          updated_at: '2026-10-20T11:05:00Z',
         },
       ],
       activeWorkspaceId: 'ws-active-1',
@@ -124,12 +120,10 @@ describe('Context Pinning Architecture & Integration', () => {
       vi.mocked(db.setWorkspacePinned).mockResolvedValueOnce({
         id: 'ws-active-1',
         name: 'Active Project',
-        path: '/path/active',
-        is_active: true,
         is_pinned: true,
         lifecycle_state: 'active',
-        created_at: 1000,
-        updated_at: 3000,
+        created_at: '2026-10-20T10:00:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
       });
 
       const result = await quickActionsService.executeContextAction('context.pin', 'ws-active-1');
@@ -141,19 +135,17 @@ describe('Context Pinning Architecture & Integration', () => {
       const storeWorkspaces = useWorkspaceStore.getState().workspaces;
       const updated = storeWorkspaces.find((w) => w.id === 'ws-active-1');
       expect(updated?.is_pinned).toBe(true);
-      expect(updated?.updated_at).toBe(3000);
+      expect(updated?.updated_at).toBe('2026-10-20T12:00:00Z');
     });
 
     it('successfully executes context.unpin, calls db.setWorkspacePinned(id, false), and updates workspaceStore', async () => {
       vi.mocked(db.setWorkspacePinned).mockResolvedValueOnce({
         id: 'ws-recent-2',
         name: 'Recent Research',
-        path: '/path/recent',
-        is_active: false,
         is_pinned: false,
         lifecycle_state: 'dormant',
-        created_at: 1100,
-        updated_at: 3500,
+        created_at: '2026-10-20T10:05:00Z',
+        updated_at: '2026-10-20T12:30:00Z',
       });
 
       const result = await quickActionsService.executeContextAction('context.unpin', 'ws-recent-2');
@@ -212,13 +204,13 @@ describe('Context Pinning Architecture & Integration', () => {
   // 4. Stable Identity & Relationships Preservation
   // =========================================================================
   describe('Stable Context Identity & Relationship Preservation', () => {
-    it('preserves context stable ID, name, path, and lifecycle state when pinning/unpinning', async () => {
+    it('preserves context stable ID, name, and lifecycle state when pinning/unpinning', async () => {
       const original = useWorkspaceStore.getState().workspaces.find((w) => w.id === 'ws-active-1')!;
 
       vi.mocked(db.setWorkspacePinned).mockResolvedValueOnce({
         ...original,
         is_pinned: true,
-        updated_at: 4000,
+        updated_at: '2026-10-20T13:00:00Z',
       });
 
       await quickActionsService.executeContextAction('context.pin', 'ws-active-1');
@@ -226,7 +218,6 @@ describe('Context Pinning Architecture & Integration', () => {
       const afterPin = useWorkspaceStore.getState().workspaces.find((w) => w.id === 'ws-active-1')!;
       expect(afterPin.id).toBe(original.id);
       expect(afterPin.name).toBe(original.name);
-      expect(afterPin.path).toBe(original.path);
       expect(afterPin.lifecycle_state).toBe(original.lifecycle_state);
       expect(afterPin.is_pinned).toBe(true);
     });

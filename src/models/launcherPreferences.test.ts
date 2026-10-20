@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  LauncherPreferences,
   DEFAULT_LAUNCHER_PREFERENCES,
   LAUNCHER_PREFERENCES_STORAGE_KEY,
   isValidSortOrder,
@@ -184,24 +183,20 @@ describe('Launcher Preferences Persistence & Resilience', () => {
   // =========================================================================
   describe('Storage Fault Tolerance & Non-Corruption', () => {
     it('handles storage throwing on getItem without crashing', () => {
-      const faultStorage: Storage = {
-        ...mockStorage,
-        getItem: vi.fn().mockImplementation(() => {
-          throw new DOMException('SecurityError: Access Denied');
-        }),
-      };
+      const faultStorage = new MockStorage();
+      faultStorage.getItem = vi.fn().mockImplementation(() => {
+        throw new DOMException('SecurityError: Access Denied');
+      });
 
       const loaded = loadLauncherPreferences(faultStorage);
       expect(loaded).toEqual(DEFAULT_LAUNCHER_PREFERENCES);
     });
 
     it('handles storage throwing on setItem (e.g. QuotaExceededError) safely', () => {
-      const faultStorage: Storage = {
-        ...mockStorage,
-        setItem: vi.fn().mockImplementation(() => {
-          throw new DOMException('QuotaExceededError');
-        }),
-      };
+      const faultStorage = new MockStorage();
+      faultStorage.setItem = vi.fn().mockImplementation(() => {
+        throw new DOMException('QuotaExceededError');
+      });
 
       const saved = saveLauncherPreferences({ sortOrder: 'name' }, faultStorage);
       expect(saved).toBe(false);
@@ -209,12 +204,10 @@ describe('Launcher Preferences Persistence & Resilience', () => {
 
     it('ensures preferences failure never corrupts context evidence or lifecycle state', () => {
       // Faulty storage fails to save
-      const faultStorage: Storage = {
-        ...mockStorage,
-        setItem: vi.fn().mockImplementation(() => {
-          throw new Error('Disk full');
-        }),
-      };
+      const faultStorage = new MockStorage();
+      faultStorage.setItem = vi.fn().mockImplementation(() => {
+        throw new Error('Disk full');
+      });
 
       saveLauncherPreferences({ sortOrder: 'name' }, faultStorage);
 

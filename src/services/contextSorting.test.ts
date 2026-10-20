@@ -4,7 +4,6 @@ import {
   sortContextMatches,
   groupLauncherContexts,
   getContextRecencyTimestamp,
-  getContextSearchTier,
   LauncherContextItem,
   useLauncherStore,
 } from '../store/launcherStore';
@@ -207,11 +206,11 @@ describe('Context Sorting, Grouping & Organization', () => {
       expect(dupSet.has('backend sync')).toBe(true);
       expect(dupSet.has('unique service')).toBe(false);
 
-      const identity1 = resolveContextDisplayIdentity(all[0], dupSet);
-      const identity3 = resolveContextDisplayIdentity(all[2], dupSet);
+      const identity1 = resolveContextDisplayIdentity(all[0], dupSet.has(all[0].name.trim().toLowerCase()));
+      const identity3 = resolveContextDisplayIdentity(all[2], dupSet.has(all[2].name.trim().toLowerCase()));
 
       expect(identity1.disambiguationTag).toBe('proj-a');
-      expect(identity3.disambiguationTag).toBeUndefined();
+      expect(identity3.disambiguationTag).toBeNull();
     });
   });
 

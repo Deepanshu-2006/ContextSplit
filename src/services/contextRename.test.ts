@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { quickActionsService } from './quickActionsService';
 import { db } from './db';
 import { useWorkspaceStore } from '../store/workspaceStore';
-import { validateContextName, assertContextIdentityPreserved } from '../models/contextOrganization';
+import { assertContextIdentityPreserved } from '../models/contextOrganization';
 import { useLauncherStore } from '../store/launcherStore';
 
 vi.mock('./db', () => ({
@@ -64,20 +64,22 @@ describe('Context Renaming & Persistence Contract', () => {
         contextId,
         name: initialName,
         state: 'active',
-        items: [
+        importantItems: [],
+        worksetItems: [
           {
             id: 'item-1',
-            type: 'file',
-            uri: '/src/auth.ts',
-            displayText: 'auth.ts',
-            pinned: true,
+            itemType: 'file',
+            title: 'auth.ts',
+            isImportant: true,
           },
         ],
-        readinessScore: 0.9,
+        itemCount: 1,
+        reasons: [],
+        isAmbiguous: false,
+        isStale: false,
         readinessBand: 'ready',
         readinessExplanation: 'All files present',
-        missingFiles: [],
-        lastActiveAt: 1700000000,
+        lastActiveAt: '2026-10-20T10:00:00Z',
         activitySummary: 'Working on auth tokens',
       },
       recentContexts: [
@@ -99,7 +101,12 @@ describe('Context Renaming & Persistence Contract', () => {
   // =========================================================================
   describe('1. Successful Rename Operation', () => {
     it('successfully renames context using db.updateWorkspace and returns SUCCESS', async () => {
-      vi.mocked(db.updateWorkspace).mockResolvedValueOnce(undefined);
+      vi.mocked(db.updateWorkspace).mockResolvedValueOnce({
+        id: contextId,
+        name: 'OAuth & Token Service',
+        created_at: '2026-10-20T10:00:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
+      });
 
       const result = await quickActionsService.executeContextAction('context.rename', contextId, {
         newName: 'OAuth & Token Service',
@@ -124,7 +131,12 @@ describe('Context Renaming & Persistence Contract', () => {
     });
 
     it('trims leading and trailing whitespace on successful rename', async () => {
-      vi.mocked(db.updateWorkspace).mockResolvedValueOnce(undefined);
+      vi.mocked(db.updateWorkspace).mockResolvedValueOnce({
+        id: contextId,
+        name: 'Clean Context Name',
+        created_at: '2026-10-20T10:00:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
+      });
 
       const result = await quickActionsService.executeContextAction('context.rename', contextId, {
         newName: '   Clean Context Name   ',
@@ -241,7 +253,7 @@ describe('Context Renaming & Persistence Contract', () => {
     it('does not mutate launcher store state when persistence fails', async () => {
       vi.mocked(db.updateWorkspace).mockRejectedValueOnce(new Error('database disk image is malformed'));
 
-      await useLauncherStore.getState().executeContextAction('context.rename', {
+      await useLauncherStore.getState().executeContextAction('context.rename', contextId, {
         newName: 'Failed Rename',
       });
 
@@ -261,7 +273,12 @@ describe('Context Renaming & Persistence Contract', () => {
   // =========================================================================
   describe('5. Identity & Relationship Preservation', () => {
     it('preserves the context stable ID across rename', async () => {
-      vi.mocked(db.updateWorkspace).mockResolvedValueOnce(undefined);
+      vi.mocked(db.updateWorkspace).mockResolvedValueOnce({
+        id: contextId,
+        name: 'Brand New Title',
+        created_at: '2026-10-20T10:00:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
+      });
 
       const before = { id: contextId, name: initialName };
       await quickActionsService.executeContextAction('context.rename', contextId, {
@@ -275,20 +292,25 @@ describe('Context Renaming & Persistence Contract', () => {
     });
 
     it('preserves items, workset memberships, and lifecycle state', async () => {
-      vi.mocked(db.updateWorkspace).mockResolvedValueOnce(undefined);
+      vi.mocked(db.updateWorkspace).mockResolvedValueOnce({
+        id: contextId,
+        name: 'Refactored Workset Name',
+        created_at: '2026-10-20T10:00:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
+      });
 
       const beforePreview = useLauncherStore.getState().activePreview!;
-      const beforeItemCount = beforePreview.items.length;
+      const beforeItemCount = beforePreview.worksetItems.length;
       const beforeState = beforePreview.state;
 
-      await useLauncherStore.getState().executeContextAction('context.rename', {
+      await useLauncherStore.getState().executeContextAction('context.rename', contextId, {
         newName: 'Refactored Workset Name',
       });
 
       const afterPreview = useLauncherStore.getState().activePreview!;
       expect(afterPreview.contextId).toBe(contextId);
-      expect(afterPreview.items.length).toBe(beforeItemCount);
-      expect(afterPreview.items[0].id).toBe(beforePreview.items[0].id);
+      expect(afterPreview.worksetItems.length).toBe(beforeItemCount);
+      expect(afterPreview.worksetItems[0].id).toBe(beforePreview.worksetItems[0].id);
       expect(afterPreview.state).toBe(beforeState);
     });
   });
@@ -300,10 +322,11 @@ describe('Context Renaming & Persistence Contract', () => {
     it('blocks subsequent action execution while an action is already in-flight', async () => {
       useLauncherStore.setState({ isActionExecuting: true, executingActionId: 'context.rename' });
 
-      const result = await useLauncherStore.getState().executeContextAction('context.rename', {
+      const result = await useLauncherStore.getState().executeContextAction('context.rename', contextId, {
         newName: 'Concurrent Attempt',
       });
 
+      expect(result.outcome).toBe('BLOCKED');
       // Should be ignored/rejected without calling db
       expect(db.updateWorkspace).not.toHaveBeenCalled();
     });

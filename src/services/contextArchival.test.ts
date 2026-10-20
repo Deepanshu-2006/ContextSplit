@@ -11,7 +11,6 @@ import {
   groupLauncherContexts,
   getActionErrorTitle,
   LauncherContextItem,
-  useLauncherStore,
 } from '../store/launcherStore';
 import { db } from './db';
 import { useWorkspaceStore } from '../store/workspaceStore';
@@ -52,42 +51,34 @@ describe('Context Lifecycle, Archival & Restore Architecture', () => {
         {
           id: 'ws-active',
           name: 'Active Project',
-          path: '/path/active',
-          is_active: true,
           is_pinned: false,
           lifecycle_state: 'active',
-          created_at: 1000,
-          updated_at: 2000,
+          created_at: '2026-10-20T10:00:00Z',
+          updated_at: '2026-10-20T11:00:00Z',
         },
         {
           id: 'ws-paused',
           name: 'Paused Feature',
-          path: '/path/paused',
-          is_active: false,
           is_pinned: false,
-          lifecycle_state: 'paused',
-          created_at: 1050,
-          updated_at: 2050,
+          lifecycle_state: 'dormant',
+          created_at: '2026-10-20T10:05:00Z',
+          updated_at: '2026-10-20T11:05:00Z',
         },
         {
           id: 'ws-dormant',
           name: 'Dormant Experiment',
-          path: '/path/dormant',
-          is_active: false,
           is_pinned: false,
           lifecycle_state: 'dormant',
-          created_at: 1100,
-          updated_at: 2100,
+          created_at: '2026-10-20T10:10:00Z',
+          updated_at: '2026-10-20T11:10:00Z',
         },
         {
           id: 'ws-archived',
           name: 'Archived Reference',
-          path: '/path/archived',
-          is_active: false,
           is_pinned: false,
           lifecycle_state: 'archived',
-          created_at: 1200,
-          updated_at: 2200,
+          created_at: '2026-10-20T10:20:00Z',
+          updated_at: '2026-10-20T11:20:00Z',
         },
       ],
       activeWorkspaceId: 'ws-active',
@@ -215,12 +206,10 @@ describe('Context Lifecycle, Archival & Restore Architecture', () => {
       vi.mocked(db.archiveWorkspace).mockResolvedValueOnce({
         id: 'ws-dormant',
         name: 'Dormant Experiment',
-        path: '/path/dormant',
-        is_active: false,
         is_pinned: false,
         lifecycle_state: 'archived',
-        created_at: 1100,
-        updated_at: 3000,
+        created_at: '2026-10-20T10:10:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
       });
 
       const result = await quickActionsService.executeContextAction('context.archive', 'ws-dormant', {
@@ -237,12 +226,10 @@ describe('Context Lifecycle, Archival & Restore Architecture', () => {
       vi.mocked(db.unarchiveWorkspace).mockResolvedValueOnce({
         id: 'ws-archived',
         name: 'Archived Reference',
-        path: '/path/archived',
-        is_active: false,
         is_pinned: false,
         lifecycle_state: 'active',
-        created_at: 1200,
-        updated_at: 3500,
+        created_at: '2026-10-20T10:20:00Z',
+        updated_at: '2026-10-20T12:30:00Z',
       });
 
       const result = await quickActionsService.executeContextAction('context.restore', 'ws-archived', {
@@ -259,12 +246,10 @@ describe('Context Lifecycle, Archival & Restore Architecture', () => {
       vi.mocked(db.unarchiveWorkspace).mockResolvedValueOnce({
         id: 'ws-archived',
         name: 'Archived Reference',
-        path: '/path/archived',
-        is_active: true,
         is_pinned: false,
         lifecycle_state: 'active',
-        created_at: 1200,
-        updated_at: 3500,
+        created_at: '2026-10-20T10:20:00Z',
+        updated_at: '2026-10-20T12:30:00Z',
       });
 
       const result = await quickActionsService.executeContextAction('context.resume', 'ws-archived', {
@@ -280,12 +265,10 @@ describe('Context Lifecycle, Archival & Restore Architecture', () => {
       vi.mocked(db.archiveWorkspace).mockResolvedValueOnce({
         id: 'ws-dormant',
         name: 'Dormant Experiment',
-        path: '/path/dormant',
-        is_active: false,
         is_pinned: false,
         lifecycle_state: 'archived',
-        created_at: 1100,
-        updated_at: 3000,
+        created_at: '2026-10-20T10:10:00Z',
+        updated_at: '2026-10-20T12:00:00Z',
       });
 
       await quickActionsService.executeContextAction('context.archive', 'ws-dormant', {

@@ -7,7 +7,6 @@ import {
   resolveDisambiguationTag,
   resolveContextSubtitle,
   resolveContextDisplayIdentity,
-  ContextDisplayIdentity,
 } from './contextIdentification';
 import { LauncherContextItem } from '../store/launcherStore';
 
@@ -45,7 +44,7 @@ describe('Context Identification and Disambiguation', () => {
         state: 'active',
         description: null,
         taskTitle: null,
-        activitySummary: null,
+        recentActivitySummary: null,
       };
 
       const identity = resolveContextDisplayIdentity(item, false);
@@ -60,7 +59,7 @@ describe('Context Identification and Disambiguation', () => {
         state: 'recent',
         description: '   ',
         taskTitle: '',
-        activitySummary: '   ',
+        recentActivitySummary: '   ',
       };
 
       const subtitle = resolveContextSubtitle(item, false);
@@ -112,7 +111,7 @@ describe('Context Identification and Disambiguation', () => {
         id: 'ws-77777777-8888-9999-aaaa-bbbbbbbbbbbb',
         name: 'Data Pipeline',
         state: 'recent',
-        activitySummary: 'Edited schema.sql 10m ago',
+        recentActivitySummary: 'Edited schema.sql 10m ago',
       };
 
       const identity = resolveContextDisplayIdentity(item, false);
