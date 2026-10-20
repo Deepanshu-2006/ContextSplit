@@ -21,6 +21,7 @@
 export type ContextActionId =
   | 'context.resume'
   | 'context.open_details'
+  | 'context.rename'
   | 'context.pause'
   | 'context.archive'
   | 'context.delete'; // Explicitly unsupported action
@@ -118,6 +119,9 @@ export function validateContextActionTransition(
       return { isValid: true };
 
     case 'context.open_details':
+      return { isValid: true };
+
+    case 'context.rename':
       return { isValid: true };
 
     case 'context.pause': {
@@ -318,7 +322,19 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
     shortcut: '⌘O',
   });
 
-  // 3. Pause Context
+  // 3. Rename Context
+  const renameValidation = validateContextActionTransition('context.rename', currentState);
+  actions.push({
+    id: 'context.rename',
+    label: 'Rename Context',
+    description: 'Update the user-facing name of the context.',
+    targetType: 'context',
+    isSupported: renameValidation.isValid,
+    unsupportedReason: renameValidation.reason,
+    shortcut: '⌥R',
+  });
+
+  // 4. Pause Context
   const pauseValidation = validateContextActionTransition('context.pause', currentState);
   actions.push({
     id: 'context.pause',

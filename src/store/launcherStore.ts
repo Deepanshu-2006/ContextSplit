@@ -303,6 +303,8 @@ export function getActionErrorTitle(actionId: string): string {
       return 'Resume Failed';
     case 'context.pause':
       return 'Pause Failed';
+    case 'context.rename':
+      return 'Rename Failed';
     case 'context.archive':
       return 'Archive Failed';
     case 'context.open_details':
@@ -351,6 +353,7 @@ interface LauncherState {
   selectContextById: (contextId: string) => Promise<void>;
   fetchLauncherData: () => Promise<void>;
   resumeContextById: (contextId: string, force?: boolean) => Promise<boolean>;
+  renameContextById: (contextId: string, newName: string) => Promise<QuickActionResult<ContextActionId>>;
   clearResumeState: () => void;
   clearActionError: () => void;
   executeContextAction: (
@@ -652,7 +655,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const engineActive = await contextInteractionService.getActiveContext();
         if (engineActive && (engineActive.context_id || engineActive.id)) {
           const id = engineActive.context_id || engineActive.id;
-          const name = engineActive.context || engineActive.name || workspaceMap.get(id)?.name || 'Active Context';
+          const wsMeta = workspaceMap.get(id);
+          const name = wsMeta?.name || engineActive.context || engineActive.name || 'Active Context';
 
           let readiness: LauncherResumeReadiness | null = null;
           try {
@@ -676,8 +680,6 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           } else if (engineActive.memory_statement) {
             activitySummary = engineActive.memory_statement;
           }
-
-          const wsMeta = workspaceMap.get(id);
 
           activeItem = {
             id,
@@ -782,7 +784,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     return result.success;
   },
 
-  executeContextAction: async (actionId: ContextActionId, contextId?: string, options?: ExecuteContextActionOptions) => {
+  renameContextById: async (contextId: string, newName: string) => {
+    return await get().executeContextAction('context.rename', contextId, { newName });
+  },
+
+  executeContextAction: async (
+    actionId: ContextActionId,
+    contextIdOrOptions?: string | ExecuteContextActionOptions,
+    maybeOptions?: ExecuteContextActionOptions
+  ) => {
     // 1. Concurrency guard: Prevent duplicate submissions while an action is in progress
     if (get().isActionExecuting || (actionId === 'context.resume' && get().isResuming)) {
       return {
@@ -793,9 +803,23 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       };
     }
 
-    const targetId = contextId !== undefined ? contextId : get().selectedContextId;
-    if (!targetId || (typeof targetId === 'string' && targetId.trim().length === 0)) {
-      const isExplicitEmpty = typeof contextId === 'string' && contextId.trim().length === 0;
+    let targetId: string | undefined;
+    let effectiveOptions: ExecuteContextActionOptions | undefined;
+
+    if (typeof contextIdOrOptions === 'object' && contextIdOrOptions !== null) {
+      effectiveOptions = contextIdOrOptions as ExecuteContextActionOptions;
+      targetId = get().selectedContextId || get().activePreview?.contextId || undefined;
+    } else {
+      targetId =
+        typeof contextIdOrOptions === 'string'
+          ? contextIdOrOptions
+          : get().selectedContextId || get().activePreview?.contextId || undefined;
+      effectiveOptions = maybeOptions;
+    }
+
+    if (!targetId || targetId.trim().length === 0) {
+      const isExplicitEmpty =
+        typeof contextIdOrOptions === 'string' && contextIdOrOptions.trim().length === 0;
       return {
         actionId,
         success: false,
@@ -823,10 +847,11 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     try {
       const preview = get().activePreview;
       const result = await quickActionsService.executeContextAction(actionId, targetId, {
-        force: options?.force,
-        lifecycleState: options?.lifecycleState || preview?.state,
-        readinessBand: options?.readinessBand || preview?.readinessBand,
-        readinessExplanation: options?.readinessExplanation || preview?.readinessExplanation,
+        force: effectiveOptions?.force,
+        lifecycleState: effectiveOptions?.lifecycleState || preview?.state,
+        readinessBand: effectiveOptions?.readinessBand || preview?.readinessBand,
+        readinessExplanation: effectiveOptions?.readinessExplanation || preview?.readinessExplanation,
+        newName: effectiveOptions?.newName,
       });
 
       if (actionId === 'context.resume') {
@@ -846,6 +871,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           const contextName = preview?.name || result.resolvedContextId || 'Context';
           toast.success(result.message || `Resumed "${contextName}"`);
           get().closeLauncher();
+        } else if (actionId === 'context.rename') {
+          const newName = (effectiveOptions?.newName || '').trim();
+          if (newName) {
+            if (get().activePreview?.contextId === targetId) {
+              set((state) => ({
+                activePreview: state.activePreview ? { ...state.activePreview, name: newName } : null,
+              }));
+            }
+            if (get().activeContext?.id === targetId) {
+              set((state) => ({
+                activeContext: state.activeContext ? { ...state.activeContext, name: newName } : null,
+              }));
+            }
+            set((state) => ({
+              recentContexts: state.recentContexts.map((c) => (c.id === targetId ? { ...c, name: newName } : c)),
+            }));
+          }
+          await get().fetchLauncherData();
+          toast.success(result.message || 'Context renamed');
         } else if (actionId === 'context.pause' || actionId === 'context.archive') {
           await get().fetchLauncherData();
           if (get().selectedContextId === targetId) {

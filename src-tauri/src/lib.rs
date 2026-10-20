@@ -38,8 +38,15 @@ fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<Workspace>, String>
 
 #[tauri::command]
 fn update_workspace(id: &str, name: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Context name cannot be empty or whitespace only".to_string());
+    }
+    if trimmed.len() > 100 {
+        return Err("Context name cannot exceed 100 characters".to_string());
+    }
     let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
-    db::operations::update_workspace(&conn, id, name).map_err(|e| e.to_string())
+    db::operations::update_workspace(&conn, id, trimmed).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

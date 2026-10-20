@@ -70,12 +70,46 @@ pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>> {
 }
 
 pub fn update_workspace(conn: &Connection, id: &str, name: &str) -> Result<Workspace> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Context name cannot be empty or whitespace only",
+        ))));
+    }
+    if trimmed.len() > 100 {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Context name cannot exceed 100 characters",
+        ))));
+    }
+
+    let current = get_workspace(conn, id)?;
     let now = Utc::now().to_rfc3339();
     
     conn.execute(
         "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
-        params![name, now, id],
+        params![trimmed, now, id],
     )?;
+
+    // Record signal for workspace rename in Context Engine
+    let payload = serde_json::json!({
+        "action": "workspace_renamed",
+        "previous_name": current.name,
+        "new_name": trimmed,
+        "workspace_id": id,
+    }).to_string();
+
+    let _ = crate::context_engine::operations::create_context_signal(
+        conn,
+        Some(id),
+        None,
+        "user_action",
+        None,
+        &payload,
+    );
+
+    crate::context_engine::memory::invalidate_memory_cache(Some(id));
     
     get_workspace(conn, id)
 }

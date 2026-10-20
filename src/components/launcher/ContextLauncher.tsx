@@ -14,6 +14,7 @@ import {
   Star,
   ExternalLink,
   Trash2,
+  Pencil,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -42,6 +43,7 @@ import {
   resolveContextDisplayIdentity,
   formatGentleTime,
 } from '../../models/contextIdentification';
+import { validateContextName } from '../../models/contextOrganization';
 
 const FILTER_OPTIONS: { id: ContextFilterType; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -336,6 +338,16 @@ export function ContextLauncher() {
         if (moreActionsBtn) {
           moreActionsBtn.click();
           moreActionsBtn.focus();
+        }
+        return;
+      }
+
+      // Alt+R / Option+R: Rename Selected Context
+      if (e.altKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        const renameBtn = document.getElementById('launcher-rename-context-btn');
+        if (renameBtn) {
+          renameBtn.click();
         }
         return;
       }
@@ -738,7 +750,7 @@ export function ContextLauncher() {
               }}
               onExecuteContextAction={(actionId, options) => {
                 if (activePreview) {
-                  executeContextAction(actionId, activePreview.contextId, options);
+                  return executeContextAction(actionId, activePreview.contextId, options);
                 }
               }}
               onExecuteItemAction={(actionId, contextId, itemId) => {
@@ -760,6 +772,7 @@ export function ContextLauncher() {
           <div className="flex items-center gap-3">
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌥R</kbd> Rename</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥M</kbd> Actions</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌘O</kbd> Details</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">Esc</kbd> Close</span>
@@ -790,7 +803,7 @@ interface ContextPreviewPaneProps {
   isActiveContext?: boolean;
   isDuplicate?: boolean;
   onResume: (force?: boolean) => void;
-  onExecuteContextAction?: (actionId: ContextActionId, options?: { force?: boolean }) => void;
+  onExecuteContextAction?: (actionId: ContextActionId, options?: { force?: boolean; newName?: string }) => Promise<any> | any;
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
   onClearResumeState: () => void;
   onClearActionError?: () => void;
@@ -818,15 +831,84 @@ function ContextPreviewPane({
 }: ContextPreviewPaneProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameValidationError, setRenameValidationError] = useState<string | null>(null);
+  const [isSubmittingRename, setIsSubmittingRename] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  // Close menu when selected context changes
+  // Close menu and reset rename when selected context changes
   useEffect(() => {
     setIsMenuOpen(false);
     setFocusedMenuIndex(-1);
+    setIsRenaming(false);
+    setRenameValue('');
+    setRenameValidationError(null);
+    setIsSubmittingRename(false);
   }, [preview?.contextId]);
+
+  const handleStartRename = () => {
+    if (!preview) return;
+    setIsMenuOpen(false);
+    setIsRenaming(true);
+    setRenameValue(preview.name);
+    setRenameValidationError(null);
+    setTimeout(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }, 40);
+  };
+
+  const handleCancelRename = () => {
+    setIsRenaming(false);
+    setRenameValue('');
+    setRenameValidationError(null);
+    setIsSubmittingRename(false);
+  };
+
+  const handleRenameSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (isSubmittingRename || isActionExecuting || !preview) return;
+
+    const trimmed = renameValue.trim();
+    const validation = validateContextName(trimmed);
+    if (!validation.isValid) {
+      setRenameValidationError(validation.error || 'Invalid name');
+      renameInputRef.current?.focus();
+      return;
+    }
+
+    if (trimmed === preview.name.trim()) {
+      handleCancelRename();
+      return;
+    }
+
+    setIsSubmittingRename(true);
+    setRenameValidationError(null);
+
+    try {
+      if (onExecuteContextAction) {
+        const res = await onExecuteContextAction('context.rename', { newName: trimmed });
+        if (res && typeof res === 'object' && 'success' in res && !res.success) {
+          setRenameValidationError(res.error || res.message || 'Failed to rename context');
+          renameInputRef.current?.focus();
+          return;
+        }
+      }
+      setIsRenaming(false);
+      setRenameValue('');
+      setRenameValidationError(null);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setRenameValidationError(errMsg);
+      renameInputRef.current?.focus();
+    } finally {
+      setIsSubmittingRename(false);
+    }
+  };
 
   // Click outside handling for context secondary menu
   useEffect(() => {
@@ -930,10 +1012,14 @@ function ContextPreviewPane({
       const targetAction = secondaryActions[focusedMenuIndex];
       if (targetAction && targetAction.isSupported && !isResuming && !isActionExecuting) {
         setIsMenuOpen(false);
-        if (onExecuteContextAction) {
-          onExecuteContextAction(targetAction.id);
+        if (targetAction.id === 'context.rename') {
+          handleStartRename();
+        } else {
+          if (onExecuteContextAction) {
+            onExecuteContextAction(targetAction.id);
+          }
+          triggerRef.current?.focus();
         }
-        triggerRef.current?.focus();
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
@@ -1021,39 +1107,105 @@ function ContextPreviewPane({
       <div className="space-y-3.5">
         {/* 4. Selected Context: Header */}
         <div className="border-b border-white/5 pb-3">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-stone-100 truncate">
-                  {preview.name}
-                </h3>
-                {isDuplicate && (
-                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 shrink-0">
-                    Duplicate Name
-                  </span>
-                )}
+          {isRenaming ? (
+            <form onSubmit={handleRenameSubmit} className="space-y-1.5" id="launcher-rename-context-form">
+              <div className="flex items-center gap-1.5">
+                <input
+                  ref={renameInputRef}
+                  id="launcher-rename-context-input"
+                  type="text"
+                  value={renameValue}
+                  onChange={(e) => {
+                    setRenameValue(e.target.value);
+                    if (renameValidationError) setRenameValidationError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleCancelRename();
+                    }
+                  }}
+                  disabled={isSubmittingRename}
+                  maxLength={100}
+                  placeholder="Context name"
+                  aria-label="Rename context"
+                  className="flex-1 bg-stone-900 border border-white/20 focus:border-stone-400 focus:outline-none rounded px-2 py-1 text-xs text-stone-100 placeholder-stone-500 font-medium"
+                />
+                <button
+                  type="submit"
+                  id="launcher-rename-save-btn"
+                  disabled={isSubmittingRename || !renameValue.trim()}
+                  className="px-2.5 py-1 bg-stone-200 hover:bg-white text-stone-950 font-medium text-xs rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center gap-1 shrink-0"
+                >
+                  {isSubmittingRename ? (
+                    <RefreshCw size={11} className="animate-spin" />
+                  ) : null}
+                  <span>Save</span>
+                </button>
+                <button
+                  type="button"
+                  id="launcher-rename-cancel-btn"
+                  onClick={handleCancelRename}
+                  disabled={isSubmittingRename}
+                  className="px-2 py-1 bg-white/5 hover:bg-white/10 text-stone-400 hover:text-stone-200 text-xs rounded transition-colors disabled:opacity-50 cursor-pointer shrink-0"
+                >
+                  Cancel
+                </button>
               </div>
+              {renameValidationError && (
+                <p id="launcher-rename-error-text" className="text-[11px] text-red-400 flex items-center gap-1">
+                  <AlertCircle size={11} className="shrink-0" />
+                  <span>{renameValidationError}</span>
+                </p>
+              )}
+            </form>
+          ) : (
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 group">
+                  <h3 className="text-sm font-semibold text-stone-100 truncate">
+                    {preview.name}
+                  </h3>
+                  <button
+                    id="launcher-rename-context-btn"
+                    type="button"
+                    onClick={handleStartRename}
+                    disabled={isResuming || isActionExecuting}
+                    className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 text-stone-500 hover:text-stone-200 hover:bg-white/5 rounded transition-all cursor-pointer focus:outline-none focus:ring-1 focus:ring-white/20"
+                    title="Rename Context (⌥R)"
+                    aria-label="Rename Context"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                  {isDuplicate && (
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 shrink-0">
+                      Duplicate Name
+                    </span>
+                  )}
+                </div>
+              </div>
+              {isArchived ? (
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-stone-800 text-stone-400 border border-white/5 shrink-0">
+                  Archived
+                </span>
+              ) : preview.state === 'paused' ? (
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 shrink-0">
+                  Paused
+                </span>
+              ) : (
+                <span
+                  className={`text-[10px] font-medium px-2 py-0.5 rounded capitalize shrink-0 border ${
+                    isReady
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                  }`}
+                >
+                  {preview.readinessBand.replace('_', ' ')}
+                </span>
+              )}
             </div>
-            {isArchived ? (
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-stone-800 text-stone-400 border border-white/5 shrink-0">
-                Archived
-              </span>
-            ) : preview.state === 'paused' ? (
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 shrink-0">
-                Paused
-              </span>
-            ) : (
-              <span
-                className={`text-[10px] font-medium px-2 py-0.5 rounded capitalize shrink-0 border ${
-                  isReady
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                }`}
-              >
-                {preview.readinessBand.replace('_', ' ')}
-              </span>
-            )}
-          </div>
+          )}
 
           <div className="flex items-center gap-2 mt-1 text-[11px] text-stone-400 flex-wrap">
             {preview.projectIdentifier && (
@@ -1356,6 +1508,10 @@ function ContextPreviewPane({
                         onClick={() => {
                           if (!isEnabled || isResuming || isActionExecuting) return;
                           setIsMenuOpen(false);
+                          if (action.id === 'context.rename') {
+                            handleStartRename();
+                            return;
+                          }
                           if (onExecuteContextAction) {
                             onExecuteContextAction(action.id);
                           }
@@ -1378,6 +1534,9 @@ function ContextPreviewPane({
                               <RefreshCw size={13} className="animate-spin text-stone-200" />
                             ) : (
                               <>
+                                {action.id === 'context.rename' && (
+                                  <Pencil size={13} />
+                                )}
                                 {action.id === 'context.open_details' && (
                                   <ExternalLink size={13} />
                                 )}

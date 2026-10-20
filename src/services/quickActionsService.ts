@@ -16,12 +16,14 @@ import {
   validateContextActionTransition,
   ContextOperationalLifecycleState,
 } from '../models/quickActions';
+import { validateContextName } from '../models/contextOrganization';
 
 export interface ExecuteContextActionOptions {
   force?: boolean;
   lifecycleState?: string;
   readinessBand?: string;
   readinessExplanation?: string;
+  newName?: string;
 }
 
 /**
@@ -208,7 +210,61 @@ export const quickActionsService = {
       }
 
       // ---------------------------------------------------------------------
-      // 3. Pause Context
+      // 3. Rename Context
+      // ---------------------------------------------------------------------
+      case 'context.rename': {
+        const nameValidation = validateContextName(options?.newName);
+        if (!nameValidation.isValid) {
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: nameValidation.error,
+            message: nameValidation.error,
+            resolvedContextId: cleanContextId,
+          };
+        }
+
+        const sanitizedName = nameValidation.sanitizedName!;
+
+        try {
+          // Safe rename execution via real db operation
+          const updatedWorkspace = await db.updateWorkspace(cleanContextId, sanitizedName);
+
+          const finalName = updatedWorkspace?.name || sanitizedName;
+          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+
+          // Update workspace store state
+          useWorkspaceStore.setState((state) => ({
+            workspaces: state.workspaces.map((ws) =>
+              ws.id === cleanContextId
+                ? { ...ws, name: finalName, updated_at: finalUpdatedAt }
+                : ws
+            ),
+          }));
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: `Renamed context to "${sanitizedName}"`,
+            resolvedContextId: cleanContextId,
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: errMsg,
+            message: `Failed to rename context: ${errMsg}`,
+            resolvedContextId: cleanContextId,
+          };
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // 4. Pause Context
       // ---------------------------------------------------------------------
       case 'context.pause': {
         try {
