@@ -8,6 +8,7 @@ export interface Workspace {
   lifecycle_state?: "active" | "dormant" | "archived";
   last_activity_at?: string | null;
   archived_at?: string | null;
+  is_pinned?: boolean;
 }
 
 export interface Item {
@@ -869,6 +870,14 @@ export const db = {
 
   async deleteWorkspace(id: string): Promise<void> {
     return invoke("delete_workspace", { id });
+  },
+
+  async setWorkspacePinned(id: string, pinned: boolean): Promise<Workspace> {
+    return invoke("set_workspace_pinned", { id, pinned });
+  },
+
+  async toggleWorkspacePinned(id: string): Promise<Workspace> {
+    return invoke("toggle_workspace_pinned", { id });
   },
 
   // Item operations

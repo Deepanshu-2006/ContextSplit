@@ -565,6 +565,19 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
         user_version = 25;
     }
 
+    if user_version < 26 {
+        conn.execute(
+            "ALTER TABLE workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workspaces_pinned ON workspaces(is_pinned, updated_at DESC)",
+            [],
+        )?;
+
+        user_version = 26;
+    }
+
     conn.pragma_update(None, "user_version", user_version)?;
     
     // Enable foreign key support

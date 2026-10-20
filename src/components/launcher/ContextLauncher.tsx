@@ -15,6 +15,7 @@ import {
   ExternalLink,
   Trash2,
   Pencil,
+  Pin,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -126,8 +127,12 @@ export function ContextLauncher() {
     // 1. Compose with lifecycle filter
     const stateFiltered = all.filter((item) => matchesContextFilter(item, activeFilter));
 
-    // 2. If no search query, return state-filtered list
-    if (!searchQuery.trim()) return stateFiltered;
+    // 2. If no search query, prioritize pinned contexts, preserving engine ordering within groups
+    if (!searchQuery.trim()) {
+      const pinned = stateFiltered.filter((c) => c.isPinned);
+      const unpinned = stateFiltered.filter((c) => !c.isPinned);
+      return [...pinned, ...unpinned];
+    }
 
     // 3. Match search query terms against structured metadata within state-filtered contexts
     const matched = stateFiltered.filter((ctx) => matchContext(ctx, searchQuery));
@@ -321,12 +326,17 @@ export function ContextLauncher() {
         return;
       }
 
-      // Alt+P / Option+P: Pause Active Context
+      // Alt+P / Option+P: Toggle Pin on Selected Context
       if (e.altKey && e.key.toLowerCase() === 'p') {
         e.preventDefault();
         const targetId = selectedContextId || filteredList[selectedIndex]?.id;
         if (targetId) {
-          executeContextAction('context.pause', targetId);
+          const isCurrentlyPinned = Boolean(
+            activePreview?.contextId === targetId
+              ? activePreview.isPinned
+              : filteredList.find((c) => c.id === targetId)?.isPinned
+          );
+          executeContextAction(isCurrentlyPinned ? 'context.unpin' : 'context.pin', targetId);
         }
         return;
       }
@@ -772,6 +782,7 @@ export function ContextLauncher() {
           <div className="flex items-center gap-3">
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌥P</kbd> Pin</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥R</kbd> Rename</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥M</kbd> Actions</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌘O</kbd> Details</span>
@@ -946,6 +957,7 @@ function ContextPreviewPane({
       lifecycleState: preview.state,
       isActive: isCurrentActive,
       readinessBand: preview.readinessBand,
+      isPinned: preview.isPinned,
     });
   }, [preview, isCurrentActive]);
 
@@ -1177,6 +1189,26 @@ function ContextPreviewPane({
                     aria-label="Rename Context"
                   >
                     <Pencil size={12} />
+                  </button>
+                  <button
+                    id="launcher-pin-context-btn"
+                    type="button"
+                    onClick={() => {
+                      if (onExecuteContextAction && preview) {
+                        onExecuteContextAction(preview.isPinned ? 'context.unpin' : 'context.pin');
+                      }
+                    }}
+                    disabled={isResuming || isActionExecuting}
+                    className={`p-1 rounded transition-all cursor-pointer focus:outline-none focus:ring-1 focus:ring-white/20 ${
+                      preview.isPinned
+                        ? 'text-amber-400 hover:text-amber-300 hover:bg-amber-400/10'
+                        : 'opacity-0 group-hover:opacity-100 focus:opacity-100 text-stone-500 hover:text-stone-200 hover:bg-white/5'
+                    }`}
+                    title={preview.isPinned ? 'Unpin Context (⌥P)' : 'Pin Context (⌥P)'}
+                    aria-label={preview.isPinned ? 'Unpin Context' : 'Pin Context'}
+                    aria-pressed={preview.isPinned}
+                  >
+                    <Pin size={12} className={preview.isPinned ? 'fill-current' : ''} />
                   </button>
                   {isDuplicate && (
                     <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 shrink-0">
@@ -1536,6 +1568,12 @@ function ContextPreviewPane({
                               <>
                                 {action.id === 'context.rename' && (
                                   <Pencil size={13} />
+                                )}
+                                {(action.id === 'context.pin' || action.id === 'context.unpin') && (
+                                  <Pin
+                                    size={13}
+                                    className={action.id === 'context.unpin' ? 'fill-current text-amber-400' : ''}
+                                  />
                                 )}
                                 {action.id === 'context.open_details' && (
                                   <ExternalLink size={13} />
@@ -2014,6 +2052,15 @@ function ContextLauncherItem({
                 {item.projectIdentifier}
               </span>
             ) : null}
+            {item.isPinned && (
+              <span
+                title="Pinned Context"
+                aria-label="Pinned Context"
+                className="text-amber-400/90 shrink-0 flex items-center ml-0.5"
+              >
+                <Pin size={10} className="fill-current" />
+              </span>
+            )}
             {isPaused && (
               <span className="text-[10px] text-amber-400/90 shrink-0 font-medium">
                 Paused

@@ -9,6 +9,8 @@ pub struct Workspace {
     pub lifecycle_state: String,
     pub last_activity_at: Option<String>,
     pub archived_at: Option<String>,
+    #[serde(default)]
+    pub is_pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

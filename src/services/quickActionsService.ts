@@ -264,7 +264,81 @@ export const quickActionsService = {
       }
 
       // ---------------------------------------------------------------------
-      // 4. Pause Context
+      // 4. Pin Context
+      // ---------------------------------------------------------------------
+      case 'context.pin': {
+        try {
+          const updatedWorkspace = await db.setWorkspacePinned(cleanContextId, true);
+          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+
+          // Update workspace store state
+          useWorkspaceStore.setState((state) => ({
+            workspaces: state.workspaces.map((ws) =>
+              ws.id === cleanContextId
+                ? { ...ws, is_pinned: true, updated_at: finalUpdatedAt }
+                : ws
+            ),
+          }));
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: 'Pinned context for quick access',
+            resolvedContextId: cleanContextId,
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: errMsg,
+            message: `Failed to pin context: ${errMsg}`,
+            resolvedContextId: cleanContextId,
+          };
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // 5. Unpin Context
+      // ---------------------------------------------------------------------
+      case 'context.unpin': {
+        try {
+          const updatedWorkspace = await db.setWorkspacePinned(cleanContextId, false);
+          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+
+          // Update workspace store state
+          useWorkspaceStore.setState((state) => ({
+            workspaces: state.workspaces.map((ws) =>
+              ws.id === cleanContextId
+                ? { ...ws, is_pinned: false, updated_at: finalUpdatedAt }
+                : ws
+            ),
+          }));
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: 'Unpinned context',
+            resolvedContextId: cleanContextId,
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: errMsg,
+            message: `Failed to unpin context: ${errMsg}`,
+            resolvedContextId: cleanContextId,
+          };
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // 6. Pause Context
       // ---------------------------------------------------------------------
       case 'context.pause': {
         try {

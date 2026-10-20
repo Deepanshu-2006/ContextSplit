@@ -652,6 +652,7 @@ mod tests {
             lifecycle_state: lifecycle.to_string(),
             last_activity_at: last_activity.map(|s| s.to_string()),
             archived_at: if lifecycle == "archived" { Some(ts) } else { None },
+            is_pinned: false,
         }
     }
 

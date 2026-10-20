@@ -24,6 +24,7 @@ export interface LauncherContextItem {
   projectIdentifier?: string | null;
   repository?: string | null;
   isActive?: boolean;
+  isPinned?: boolean;
   state?: string;
   lastActiveAt?: string | null;
   durationEstimate?: string | null;
@@ -226,8 +227,9 @@ export function sortContextMatches(items: LauncherContextItem[], query: string):
   const decorated = items.map((item) => {
     const tier = getContextSearchTier(item, q);
     const recency = getContextRecencyTimestamp(item);
+    const isPinned = Boolean(item.isPinned);
     const wordLen = tier === 2 ? (item.name.split(/\s+/)[0] || item.name).length : 0;
-    return { item, tier, recency, wordLen };
+    return { item, tier, recency, isPinned, wordLen };
   });
 
   decorated.sort((a, b) => {
@@ -236,7 +238,12 @@ export function sortContextMatches(items: LauncherContextItem[], query: string):
       return a.tier - b.tier;
     }
 
-    // 5. Recency as a tie-breaker
+    // 5. Pinned contexts rank higher within equal ranking tiers
+    if (a.isPinned !== b.isPinned) {
+      return a.isPinned ? -1 : 1;
+    }
+
+    // 6. Recency as a tie-breaker
     if (a.recency !== b.recency) {
       return b.recency - a.recency; // Most recent first
     }
@@ -270,6 +277,7 @@ export interface LauncherPreviewModel {
   contextId: string;
   name: string;
   state: string;
+  isPinned?: boolean;
   description?: string | null;
   projectIdentifier?: string | null;
   repository?: string | null;
@@ -305,6 +313,10 @@ export function getActionErrorTitle(actionId: string): string {
       return 'Pause Failed';
     case 'context.rename':
       return 'Rename Failed';
+    case 'context.pin':
+      return 'Pin Failed';
+    case 'context.unpin':
+      return 'Unpin Failed';
     case 'context.archive':
       return 'Archive Failed';
     case 'context.open_details':
@@ -601,10 +613,17 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           (wsMeta as any)?.description ||
           null;
 
+        const isPinned = Boolean(
+          targetContextItem?.isPinned ??
+          (wsMeta as any)?.is_pinned ??
+          false
+        );
+
         const previewModel: LauncherPreviewModel = {
           contextId,
           name,
           state: rawState,
+          isPinned,
           description,
           projectIdentifier,
           repository,
@@ -688,6 +707,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             projectIdentifier: (wsMeta as any)?.project_identifier || (engineActive as any)?.project_identifier || null,
             repository: (wsMeta as any)?.repository || (engineActive as any)?.repository || (wsMeta as any)?.repo_name || null,
             isActive: true,
+            isPinned: Boolean((wsMeta as any)?.is_pinned),
             state: wsMeta?.lifecycle_state || engineActive.state || 'active',
             lastActiveAt: engineActive.last_active_at || wsMeta?.updated_at || null,
             taskTitle: engineActive.task || (engineActive.recent_task ? engineActive.recent_task.title : null),
@@ -728,6 +748,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               projectIdentifier: (wsMeta as any)?.project_identifier || (entry as any)?.project_identifier || null,
               repository: (wsMeta as any)?.repository || (entry as any)?.repository || (wsMeta as any)?.repo_name || null,
               isActive: false,
+              isPinned: Boolean((wsMeta as any)?.is_pinned || (entry as any)?.is_pinned),
               state: entry.state || entry.transition_type || wsMeta?.lifecycle_state || 'recent',
               lastActiveAt: entry.last_active_at || entry.ended_at || wsMeta?.updated_at || null,
               durationEstimate: entry.duration_estimate || null,
@@ -752,6 +773,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             id: ws.id,
             name: ws.name,
             isActive: ws.id === activeItem?.id,
+            isPinned: Boolean(ws.is_pinned),
             state: ws.lifecycle_state || 'dormant',
             lastActiveAt: ws.last_activity_at || ws.updated_at || ws.created_at,
             createdAt: ws.created_at || null,
@@ -890,6 +912,26 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           }
           await get().fetchLauncherData();
           toast.success(result.message || 'Context renamed');
+        } else if (actionId === 'context.pin' || actionId === 'context.unpin') {
+          const newPinnedState = actionId === 'context.pin';
+          if (get().activePreview?.contextId === targetId) {
+            set((state) => ({
+              activePreview: state.activePreview ? { ...state.activePreview, isPinned: newPinnedState } : null,
+            }));
+          }
+          if (get().activeContext?.id === targetId) {
+            set((state) => ({
+              activeContext: state.activeContext ? { ...state.activeContext, isPinned: newPinnedState } : null,
+            }));
+          }
+          set((state) => ({
+            recentContexts: state.recentContexts.map((c) => (c.id === targetId ? { ...c, isPinned: newPinnedState } : c)),
+          }));
+          await get().fetchLauncherData();
+          if (get().selectedContextId === targetId) {
+            await get().selectContextById(targetId);
+          }
+          toast.success(result.message || (newPinnedState ? 'Context pinned' : 'Context unpinned'));
         } else if (actionId === 'context.pause' || actionId === 'context.archive') {
           await get().fetchLauncherData();
           if (get().selectedContextId === targetId) {

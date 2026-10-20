@@ -8,8 +8,8 @@ pub fn create_workspace(conn: &Connection, name: &str) -> Result<Workspace> {
     let now = Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT INTO workspaces (id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at) 
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL)",
+        "INSERT INTO workspaces (id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at, is_pinned) 
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL, 0)",
         params![id, name, now, now, now],
     )?;
 
@@ -21,15 +21,17 @@ pub fn create_workspace(conn: &Connection, name: &str) -> Result<Workspace> {
         lifecycle_state: "active".to_string(),
         last_activity_at: Some(now),
         archived_at: None,
+        is_pinned: false,
     })
 }
 
 pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at 
+        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at, COALESCE(is_pinned, 0) 
          FROM workspaces WHERE id = ?1"
     )?;
     let workspace = stmt.query_row(params![id], |row| {
+        let is_pinned_int: i64 = row.get(7).unwrap_or(0);
         Ok(Workspace {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -38,6 +40,7 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
             lifecycle_state: row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "active".to_string()),
             last_activity_at: row.get(5)?,
             archived_at: row.get(6)?,
+            is_pinned: is_pinned_int != 0,
         })
     })?;
     
@@ -46,10 +49,11 @@ pub fn get_workspace(conn: &Connection, id: &str) -> Result<Workspace> {
 
 pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at 
+        "SELECT id, name, created_at, updated_at, lifecycle_state, last_activity_at, archived_at, COALESCE(is_pinned, 0) 
          FROM workspaces ORDER BY created_at DESC"
     )?;
     let workspace_iter = stmt.query_map([], |row| {
+        let is_pinned_int: i64 = row.get(7).unwrap_or(0);
         Ok(Workspace {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -58,6 +62,7 @@ pub fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>> {
             lifecycle_state: row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "active".to_string()),
             last_activity_at: row.get(5)?,
             archived_at: row.get(6)?,
+            is_pinned: is_pinned_int != 0,
         })
     })?;
 
@@ -117,6 +122,37 @@ pub fn update_workspace(conn: &Connection, id: &str, name: &str) -> Result<Works
 pub fn delete_workspace(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+pub fn set_workspace_pinned(conn: &Connection, id: &str, pinned: bool) -> Result<Workspace> {
+    // Ensure workspace exists
+    let _ = get_workspace(conn, id)?;
+    let now = Utc::now().to_rfc3339();
+    let pinned_int = if pinned { 1 } else { 0 };
+
+    conn.execute(
+        "UPDATE workspaces SET is_pinned = ?1, updated_at = ?2 WHERE id = ?3",
+        params![pinned_int, now, id],
+    )?;
+
+    let payload = serde_json::json!({
+        "action": if pinned { "workspace_pinned" } else { "workspace_unpinned" },
+        "workspace_id": id,
+        "is_pinned": pinned,
+    }).to_string();
+
+    let _ = crate::context_engine::operations::create_context_signal(
+        conn,
+        Some(id),
+        None,
+        "user_action",
+        None,
+        &payload,
+    );
+
+    crate::context_engine::memory::invalidate_memory_cache(Some(id));
+
+    get_workspace(conn, id)
 }
 
 pub fn update_workspace_lifecycle_state(

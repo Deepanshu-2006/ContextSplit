@@ -129,37 +129,39 @@ export const CONTEXT_ORGANIZATION_REGISTRY: Record<
     id: 'context.pin',
     label: 'Pin Context',
     description: 'Elevate context to stay pinned at the top of the launcher and sidebar.',
-    isSupported: false,
-    supportStatus: 'UNSUPPORTED_REQUIRES_PERSISTENCE',
-    unsupportedReason:
-      'Context pinning requires an is_pinned column in SQLite table workspaces. Unpersisted UI placeholders are prohibited.',
+    isSupported: true,
+    supportStatus: 'SUPPORTED',
+    underlyingOperation: 'db.setWorkspacePinned(id, true)',
+    requiresConfirmation: false,
+    hotkey: '⌥P',
   },
   'context.unpin': {
     id: 'context.unpin',
     label: 'Unpin Context',
     description: 'Remove context from the pinned group.',
-    isSupported: false,
-    supportStatus: 'UNSUPPORTED_REQUIRES_PERSISTENCE',
-    unsupportedReason:
-      'Context pinning requires an is_pinned column in SQLite table workspaces.',
+    isSupported: true,
+    supportStatus: 'SUPPORTED',
+    underlyingOperation: 'db.setWorkspacePinned(id, false)',
+    requiresConfirmation: false,
+    hotkey: '⌥P',
   },
   'context.favorite': {
     id: 'context.favorite',
     label: 'Favorite Context',
     description: 'Mark context as a starred favorite for quick navigational access.',
     isSupported: false,
-    supportStatus: 'UNSUPPORTED_REQUIRES_PERSISTENCE',
+    supportStatus: 'UNSUPPORTED_RESTRICTED',
     unsupportedReason:
-      'Context favoriting requires persistence support in SQLite table workspaces. Memory item starring (item.mark_important) must not be confused with context favoriting.',
+      'Context favoriting is omitted in favor of context pinning to avoid duplicate organizational concepts.',
   },
   'context.unfavorite': {
     id: 'context.unfavorite',
     label: 'Unfavorite Context',
     description: 'Remove context from starred favorites.',
     isSupported: false,
-    supportStatus: 'UNSUPPORTED_REQUIRES_PERSISTENCE',
+    supportStatus: 'UNSUPPORTED_RESTRICTED',
     unsupportedReason:
-      'Context favoriting requires persistence support in SQLite table workspaces.',
+      'Context favoriting is omitted in favor of context pinning to avoid duplicate organizational concepts.',
   },
   'context.set_metadata': {
     id: 'context.set_metadata',
@@ -445,6 +447,8 @@ export function validateOrganizationActionTransition(
 
     case 'context.pin':
     case 'context.unpin':
+      return { isValid: true, outcome: 'ALLOWED' };
+
     case 'context.favorite':
     case 'context.unfavorite':
     case 'context.set_metadata':
@@ -659,12 +663,21 @@ export function getBackendOperationMapping(
       };
 
     case 'context.pin':
-    case 'context.unpin':
       return {
-        supported: false,
+        supported: true,
+        serviceMethod: 'db.setWorkspacePinned(id, true)',
         isSafe: true,
         requiresConfirmation: false,
-        notes: 'Requires is_pinned column in SQLite workspaces table.',
+        notes: 'Updates is_pinned to 1 and records workspace_pinned user action signal.',
+      };
+
+    case 'context.unpin':
+      return {
+        supported: true,
+        serviceMethod: 'db.setWorkspacePinned(id, false)',
+        isSafe: true,
+        requiresConfirmation: false,
+        notes: 'Updates is_pinned to 0 and records workspace_unpinned user action signal.',
       };
 
     case 'context.favorite':

@@ -329,6 +329,7 @@ pub fn accept_candidate_and_create_workspace(
         lifecycle_state: "active".to_string(),
         last_activity_at: Some(now),
         archived_at: None,
+        is_pinned: false,
     })
 }
 

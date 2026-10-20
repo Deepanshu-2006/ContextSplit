@@ -22,6 +22,8 @@ export type ContextActionId =
   | 'context.resume'
   | 'context.open_details'
   | 'context.rename'
+  | 'context.pin'
+  | 'context.unpin'
   | 'context.pause'
   | 'context.archive'
   | 'context.delete'; // Explicitly unsupported action
@@ -152,6 +154,10 @@ export function validateContextActionTransition(
       };
     }
 
+    case 'context.pin':
+    case 'context.unpin':
+      return { isValid: true };
+
     case 'context.archive': {
       if (currentState === 'archived') {
         return {
@@ -238,6 +244,7 @@ export interface ContextActionEvaluationInput {
   lifecycleState?: 'active' | 'paused' | 'dormant' | 'archived' | string;
   isActive?: boolean;
   readinessBand?: 'ready' | 'mostly_ready' | 'partial' | 'insufficient' | string;
+  isPinned?: boolean;
 }
 
 export interface ItemActionEvaluationInput {
@@ -334,7 +341,20 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
     shortcut: '⌥R',
   });
 
-  // 4. Pause Context
+  // 4. Pin / Unpin Context
+  const isPinned = Boolean(input.isPinned);
+  actions.push({
+    id: isPinned ? 'context.unpin' : 'context.pin',
+    label: isPinned ? 'Unpin Context' : 'Pin Context',
+    description: isPinned
+      ? 'Remove this context from pinned priority.'
+      : 'Pin context to keep it elevated at the top of the launcher.',
+    targetType: 'context',
+    isSupported: true,
+    shortcut: '⌥P',
+  });
+
+  // 5. Pause Context
   const pauseValidation = validateContextActionTransition('context.pause', currentState);
   actions.push({
     id: 'context.pause',
@@ -345,7 +365,6 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
     targetType: 'context',
     isSupported: pauseValidation.isValid,
     unsupportedReason: pauseValidation.reason,
-    shortcut: '⌥P',
   });
 
   // 4. Archive Context

@@ -78,6 +78,19 @@ fn unarchive_workspace(id: &str, state: State<'_, AppState>) -> Result<Workspace
 }
 
 #[tauri::command]
+fn set_workspace_pinned(id: &str, pinned: bool, state: State<'_, AppState>) -> Result<Workspace, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    db::operations::set_workspace_pinned(&conn, id, pinned).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_workspace_pinned(id: &str, state: State<'_, AppState>) -> Result<Workspace, String> {
+    let conn = state.db_conn.lock().map_err(|_| "Database lock poisoned".to_string())?;
+    let current = db::operations::get_workspace(&conn, id).map_err(|e| e.to_string())?;
+    db::operations::set_workspace_pinned(&conn, id, !current.is_pinned).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn evaluate_workspace_lifecycle(
     id: &str,
     inactivity_days_threshold: Option<f64>,
@@ -1556,6 +1569,8 @@ pub fn run() {
             list_workspaces,
             update_workspace,
             delete_workspace,
+            set_workspace_pinned,
+            toggle_workspace_pinned,
             create_item,
             get_item,
             list_items,
