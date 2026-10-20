@@ -188,7 +188,18 @@ export function getContextSearchTier(item: LauncherContextItem, query: string): 
   return 5;
 }
 
-export type ContextSortOrder = 'recent' | 'name';
+export {
+  ContextSortOrder,
+  LauncherPreferences,
+  DEFAULT_LAUNCHER_PREFERENCES,
+  loadLauncherPreferences,
+  saveLauncherPreferences,
+} from '../models/launcherPreferences';
+import {
+  ContextSortOrder,
+  loadLauncherPreferences,
+  saveLauncherPreferences,
+} from '../models/launcherPreferences';
 
 /**
  * Extracts a deterministic numeric timestamp for recency tie-breaking.
@@ -568,14 +579,13 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   recentContexts: [],
   isPreviewOpen: false,
   activeFilter: 'all',
-  activeSort: 'recent',
+  activeSort: loadLauncherPreferences().sortOrder,
 
   openLauncher: () => {
     set({
       isOpen: true,
       searchQuery: '',
       activeFilter: 'all',
-      activeSort: 'recent',
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
@@ -632,11 +642,13 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   },
 
   setActiveSort: (sort: ContextSortOrder) => {
+    saveLauncherPreferences({ sortOrder: sort });
     set({ activeSort: sort, isPreviewOpen: false });
   },
 
   toggleActiveSort: () => {
     const nextSort: ContextSortOrder = get().activeSort === 'recent' ? 'name' : 'recent';
+    saveLauncherPreferences({ sortOrder: nextSort });
     set({ activeSort: nextSort, isPreviewOpen: false });
   },
 
