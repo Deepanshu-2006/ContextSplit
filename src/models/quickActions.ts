@@ -26,6 +26,7 @@ export type ContextActionId =
   | 'context.unpin'
   | 'context.pause'
   | 'context.archive'
+  | 'context.restore'
   | 'context.delete'; // Explicitly unsupported action
 
 /**
@@ -95,11 +96,12 @@ export interface ContextLifecycleStateInput {
  * Normalizes between database lifecycle states and real-time active session states.
  */
 export function resolveContextLifecycleState(input: ContextLifecycleStateInput): ContextOperationalLifecycleState {
-  if (input.isActive) return 'active';
   const raw = (input.lifecycleState || '').trim().toLowerCase();
+  // Archived or inactive is canonically archived and must never be treated as active
+  if (raw === 'archived' || raw === 'inactive') return 'archived';
+  if (input.isActive) return 'active';
   if (raw === 'active') return 'active';
   if (raw === 'paused') return 'paused';
-  if (raw === 'archived' || raw === 'inactive') return 'archived';
   return 'dormant';
 }
 
@@ -163,6 +165,16 @@ export function validateContextActionTransition(
         return {
           isValid: false,
           reason: 'Context is already archived.',
+        };
+      }
+      return { isValid: true };
+    }
+
+    case 'context.restore': {
+      if (currentState !== 'archived') {
+        return {
+          isValid: false,
+          reason: `Cannot restore context in '${currentState}' state. Only archived contexts can be restored.`,
         };
       }
       return { isValid: true };
@@ -367,18 +379,28 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
     unsupportedReason: pauseValidation.reason,
   });
 
-  // 4. Archive Context
-  const archiveValidation = validateContextActionTransition('context.archive', currentState);
-  actions.push({
-    id: 'context.archive',
-    label: 'Archive Context',
-    description: archiveValidation.isValid
-      ? 'Safely move this context to archived state.'
-      : (archiveValidation.reason || 'Context is already archived.'),
-    targetType: 'context',
-    isSupported: archiveValidation.isValid,
-    unsupportedReason: archiveValidation.reason,
-  });
+  // 6. Archive or Restore Context
+  if (currentState === 'archived') {
+    actions.push({
+      id: 'context.restore',
+      label: 'Restore Context',
+      description: 'Unarchive this context and restore it to the active lifecycle.',
+      targetType: 'context',
+      isSupported: true,
+    });
+  } else {
+    const archiveValidation = validateContextActionTransition('context.archive', currentState);
+    actions.push({
+      id: 'context.archive',
+      label: 'Archive Context',
+      description: archiveValidation.isValid
+        ? 'Safely move this context to archived state.'
+        : (archiveValidation.reason || 'Context is already archived.'),
+      targetType: 'context',
+      isSupported: archiveValidation.isValid,
+      unsupportedReason: archiveValidation.reason,
+    });
+  }
 
   // 5. Delete Context (Explicitly unsupported in launcher)
   const deleteValidation = validateContextActionTransition('context.delete', currentState);

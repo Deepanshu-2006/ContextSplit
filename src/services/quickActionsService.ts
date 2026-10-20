@@ -403,7 +403,38 @@ export const quickActionsService = {
       }
 
       // ---------------------------------------------------------------------
-      // 5. Unsupported Context Actions
+      // 5. Restore Context
+      // ---------------------------------------------------------------------
+      case 'context.restore': {
+        try {
+          // Safe restore execution via real db operation
+          await db.unarchiveWorkspace(cleanContextId);
+
+          // Reload workspaces list in store
+          await useWorkspaceStore.getState().loadWorkspaces();
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: `Restored context '${cleanContextId}'`,
+            resolvedContextId: cleanContextId,
+          };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: errMsg,
+            message: `Failed to restore context: ${errMsg}`,
+            resolvedContextId: cleanContextId,
+          };
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // 6. Unsupported Context Actions
       // ---------------------------------------------------------------------
       case 'context.delete': {
         return {

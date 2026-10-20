@@ -16,6 +16,7 @@ import {
   Trash2,
   Pencil,
   Pin,
+  RotateCcw,
 } from 'lucide-react';
 import {
   useLauncherStore,
@@ -395,6 +396,22 @@ export function ContextLauncher() {
         return;
       }
 
+      // Alt+A / Option+A: Archive or Restore Selected Context
+      if (e.altKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+        if (targetId) {
+          const targetContext = filteredList.find((c) => c.id === targetId);
+          const currentState = resolveContextLifecycleState({
+            lifecycleState: targetContext?.state,
+            isActive: targetContext?.isActive,
+          });
+          const actionToRun = currentState === 'archived' ? 'context.restore' : 'context.archive';
+          executeContextAction(actionToRun, targetId);
+        }
+        return;
+      }
+
       // 6. Enter Action: Open preview from list, or resume from preview
       if (e.key === 'Enter') {
         // If an active button or menu item is focused, let the focused element handle its own native/custom click.
@@ -740,7 +757,11 @@ export function ContextLauncher() {
               notReadyReason={notReadyReason}
               error={previewError}
               isActiveContext={Boolean(
-                activeContext && activePreview && activePreview.contextId === activeContext.id
+                activeContext &&
+                  activePreview &&
+                  activePreview.contextId === activeContext.id &&
+                  activePreview.state !== 'archived' &&
+                  activePreview.state !== 'inactive'
               )}
               isDuplicate={Boolean(
                 activePreview && duplicateNamesSet.has(activePreview.name.trim().toLowerCase())
@@ -775,6 +796,7 @@ export function ContextLauncher() {
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥S</kbd> Sort</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌥A</kbd> Archive</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥P</kbd> Pin</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥R</kbd> Rename</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥M</kbd> Actions</span>
@@ -1577,6 +1599,9 @@ function ContextPreviewPane({
                                 {action.id === 'context.archive' && (
                                   <Archive size={13} />
                                 )}
+                                {action.id === 'context.restore' && (
+                                  <RotateCcw size={13} />
+                                )}
                                 {action.id === 'context.delete' && (
                                   <Trash2 size={13} />
                                 )}
@@ -1998,8 +2023,12 @@ function ContextLauncherItem({
   onSelect,
   onResume,
 }: ContextLauncherItemProps) {
-  const isPaused = item.state === 'paused';
-  const isArchived = item.state === 'archived';
+  const lifecycle = resolveContextLifecycleState({
+    lifecycleState: item.state,
+    isActive: item.isActive,
+  });
+  const isPaused = lifecycle === 'paused';
+  const isArchived = lifecycle === 'archived';
 
   const identity = resolveContextDisplayIdentity(item, isDuplicate);
 
@@ -2020,10 +2049,12 @@ function ContextLauncherItem({
     >
       <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
         {/* Minimal status indicator */}
-        {item.isActive ? (
+        {item.isActive && !isArchived ? (
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Active" />
         ) : isPaused ? (
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Paused" />
+        ) : isArchived ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-stone-600 shrink-0" title="Archived" />
         ) : (
           <span className="w-1.5 h-1.5 rounded-full bg-transparent shrink-0" />
         )}
@@ -2057,6 +2088,11 @@ function ContextLauncherItem({
             {isPaused && (
               <span className="text-[10px] text-amber-400/90 shrink-0 font-medium">
                 Paused
+              </span>
+            )}
+            {isArchived && (
+              <span className="text-[10px] text-stone-400/90 shrink-0 font-medium px-1.5 py-0.2 rounded bg-white/5 border border-white/5">
+                Archived
               </span>
             )}
           </div>

@@ -49,19 +49,23 @@ export function matchesContextFilter(item: LauncherContextItem, filter: ContextF
   if (filter === 'all') return true;
 
   const state = (item.state || '').toLowerCase();
+  const isArchived = state === 'archived' || state === 'inactive';
 
   switch (filter) {
     case 'active':
-      return Boolean(item.isActive || state === 'active');
+      return !isArchived && Boolean(item.isActive || state === 'active');
     case 'recent':
-      return Boolean(
-        state === 'recent' ||
-        (!item.isActive && state !== 'paused' && state !== 'dormant' && state !== 'archived' && state !== 'inactive')
+      return (
+        !isArchived &&
+        Boolean(
+          state === 'recent' ||
+          (!item.isActive && state !== 'paused' && state !== 'dormant')
+        )
       );
     case 'paused':
-      return Boolean(state === 'paused' || state === 'dormant');
+      return !isArchived && Boolean(state === 'paused' || state === 'dormant');
     case 'archived':
-      return Boolean(state === 'archived' || state === 'inactive');
+      return isArchived;
     default:
       return true;
   }
@@ -397,7 +401,11 @@ export function groupLauncherContexts(
 
   // 2. Active Context (if in items, not already pinned, and viewing 'all' filter)
   const unpinned = items.filter((item) => !Boolean(item.isPinned));
-  const activeItem = unpinned.find((item) => item.id === activeContextId || Boolean(item.isActive));
+  const activeItem = unpinned.find((item) => {
+    const isArchived = (item.state || '').toLowerCase() === 'archived' || (item.state || '').toLowerCase() === 'inactive';
+    if (isArchived) return false;
+    return item.id === activeContextId || Boolean(item.isActive);
+  });
   const otherItems = unpinned.filter((item) => item !== activeItem);
 
   if (activeItem && activeFilter === 'all') {
@@ -490,6 +498,8 @@ export function getActionErrorTitle(actionId: string): string {
       return 'Unpin Failed';
     case 'context.archive':
       return 'Archive Failed';
+    case 'context.restore':
+      return 'Restore Failed';
     case 'context.open_details':
       return 'Could Not Open Details';
     case 'item.mark_important':
@@ -886,24 +896,27 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             activitySummary = engineActive.memory_statement;
           }
 
-          activeItem = {
-            id,
-            name,
-            description: (wsMeta as any)?.description || (engineActive as any)?.description || null,
-            projectIdentifier: (wsMeta as any)?.project_identifier || (engineActive as any)?.project_identifier || null,
-            repository: (wsMeta as any)?.repository || (engineActive as any)?.repository || (wsMeta as any)?.repo_name || null,
-            isActive: true,
-            isPinned: Boolean((wsMeta as any)?.is_pinned),
-            state: wsMeta?.lifecycle_state || engineActive.state || 'active',
-            lastActiveAt: engineActive.last_active_at || wsMeta?.updated_at || null,
-            taskTitle: engineActive.task || (engineActive.recent_task ? engineActive.recent_task.title : null),
-            confidence: engineActive.context_confidence || undefined,
-            itemCount: Array.isArray(engineActive.recent_items) ? engineActive.recent_items.length : undefined,
-            recentActivitySummary: activitySummary,
-            memoryStatement: engineActive.memory_statement || null,
-            resumeReadiness: readiness,
-            createdAt: wsMeta?.created_at || null,
-          };
+          const isArchived = wsMeta?.lifecycle_state === 'archived' || (wsMeta?.lifecycle_state as string) === 'inactive';
+          if (!isArchived) {
+            activeItem = {
+              id,
+              name,
+              description: (wsMeta as any)?.description || (engineActive as any)?.description || null,
+              projectIdentifier: (wsMeta as any)?.project_identifier || (engineActive as any)?.project_identifier || null,
+              repository: (wsMeta as any)?.repository || (engineActive as any)?.repository || (wsMeta as any)?.repo_name || null,
+              isActive: true,
+              isPinned: Boolean((wsMeta as any)?.is_pinned),
+              state: wsMeta?.lifecycle_state || engineActive.state || 'active',
+              lastActiveAt: engineActive.last_active_at || wsMeta?.updated_at || null,
+              taskTitle: engineActive.task || (engineActive.recent_task ? engineActive.recent_task.title : null),
+              confidence: engineActive.context_confidence || undefined,
+              itemCount: Array.isArray(engineActive.recent_items) ? engineActive.recent_items.length : undefined,
+              recentActivitySummary: activitySummary,
+              memoryStatement: engineActive.memory_statement || null,
+              resumeReadiness: readiness,
+              createdAt: wsMeta?.created_at || null,
+            };
+          }
         }
       } catch (err) {
         console.warn('Could not fetch active context from engine:', err);
@@ -926,6 +939,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
             const wsMeta = workspaceMap.get(id);
             const contextName = entry.context_name || entry.name || wsMeta?.name || 'Unnamed Context';
+            const isArchived = wsMeta?.lifecycle_state === 'archived' || (wsMeta?.lifecycle_state as string) === 'inactive';
+            const canonicalState = isArchived
+              ? 'archived'
+              : (entry.state || entry.transition_type || wsMeta?.lifecycle_state || 'recent');
 
             recents.push({
               id,
@@ -935,7 +952,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               repository: (wsMeta as any)?.repository || (entry as any)?.repository || (wsMeta as any)?.repo_name || null,
               isActive: false,
               isPinned: Boolean((wsMeta as any)?.is_pinned || (entry as any)?.is_pinned),
-              state: entry.state || entry.transition_type || wsMeta?.lifecycle_state || 'recent',
+              state: canonicalState,
               lastActiveAt: entry.last_active_at || entry.ended_at || wsMeta?.updated_at || null,
               durationEstimate: entry.duration_estimate || null,
               taskTitle: entry.task_title || entry.title || null,
@@ -955,10 +972,11 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         for (const ws of existingWorkspaces) {
           if (seenIds.has(ws.id)) continue;
           seenIds.add(ws.id);
+          const isArchived = ws.lifecycle_state === 'archived' || (ws.lifecycle_state as string) === 'inactive';
           recents.push({
             id: ws.id,
             name: ws.name,
-            isActive: ws.id === activeItem?.id,
+            isActive: !isArchived && ws.id === activeItem?.id,
             isPinned: Boolean(ws.is_pinned),
             state: ws.lifecycle_state || 'dormant',
             lastActiveAt: ws.last_activity_at || ws.updated_at || ws.created_at,
@@ -1118,7 +1136,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             await get().selectContextById(targetId);
           }
           toast.success(result.message || (newPinnedState ? 'Context pinned' : 'Context unpinned'));
-        } else if (actionId === 'context.pause' || actionId === 'context.archive') {
+        } else if (actionId === 'context.pause' || actionId === 'context.archive' || actionId === 'context.restore') {
           await get().fetchLauncherData();
           if (get().selectedContextId === targetId) {
             await get().selectContextById(targetId);
