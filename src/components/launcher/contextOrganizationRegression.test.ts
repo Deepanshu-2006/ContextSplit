@@ -1,18 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   useLauncherStore,
-  sortContextMatches,
   sortContextList,
   groupLauncherContexts,
   matchesContextFilter,
   getActionErrorTitle,
-  LauncherContextItem,
+  type LauncherContextItem,
 } from '../../store/launcherStore';
 import { useWorkspaceStore } from '../../store/workspaceStore';
 import { quickActionsService } from '../../services/quickActionsService';
 import { db } from '../../services/db';
 import { contextInteractionService } from '../../services/contextInteractionService';
-import { toast } from 'sonner';
 import {
   formatShortId,
   formatGentleTime,
@@ -154,8 +152,8 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
       activeSort: 'recent',
       selectedIndex: 0,
       selectedContextId: null,
-      isSubmittingAction: false,
-      activeActionId: null,
+      isActionExecuting: false,
+      executingActionId: null,
       actionError: null,
     });
   });
@@ -304,7 +302,7 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
     });
 
     it('prevents concurrent in-flight rename submissions in launcher store', async () => {
-      useLauncherStore.setState({ isSubmittingAction: true });
+      useLauncherStore.setState({ isActionExecuting: true });
 
       const result = await useLauncherStore
         .getState()
@@ -404,9 +402,9 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
 
     it('breaks ties between duplicate names deterministically using recency and stable ID', () => {
       const dupItems: LauncherContextItem[] = [
-        { id: 'uuid-b', name: 'Dup Name', isPinned: false, lastActiveAt: 1000 },
-        { id: 'uuid-a', name: 'Dup Name', isPinned: false, lastActiveAt: 1000 },
-        { id: 'uuid-c', name: 'Dup Name', isPinned: false, lastActiveAt: 2000 },
+        { id: 'uuid-b', name: 'Dup Name', isPinned: false, lastActiveAt: '2026-10-20T01:00:00Z' },
+        { id: 'uuid-a', name: 'Dup Name', isPinned: false, lastActiveAt: '2026-10-20T01:00:00Z' },
+        { id: 'uuid-c', name: 'Dup Name', isPinned: false, lastActiveAt: '2026-10-20T02:00:00Z' },
       ];
       const sorted = sortContextList(dupItems, 'name');
       expect(sorted[0].id).toBe('uuid-c'); // Higher recency
@@ -768,7 +766,7 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
       const items: LauncherContextItem[] = [
         { id: '1', name: 'No Timestamps', lastActiveAt: null, createdAt: null },
         { id: '2', name: 'Invalid Timestamps', lastActiveAt: 'bad-date', createdAt: undefined },
-        { id: '3', name: 'Valid Timestamp', lastActiveAt: 5000 },
+        { id: '3', name: 'Valid Timestamp', lastActiveAt: '2026-10-20T12:00:00Z' },
       ];
 
       const sorted = sortContextList(items, 'recent');
@@ -785,7 +783,7 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
         state: 'recent',
         description: null,
         taskTitle: null,
-        activitySummary: null,
+        recentActivitySummary: null,
       };
       expect(resolveContextSubtitle(item, false)).toBeNull();
     });

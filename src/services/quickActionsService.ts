@@ -232,7 +232,7 @@ export const quickActionsService = {
           const updatedWorkspace = await db.updateWorkspace(cleanContextId, sanitizedName);
 
           const finalName = updatedWorkspace?.name || sanitizedName;
-          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+          const finalUpdatedAt = updatedWorkspace?.updated_at || new Date().toISOString();
 
           // Update workspace store state
           useWorkspaceStore.setState((state) => ({
@@ -269,7 +269,7 @@ export const quickActionsService = {
       case 'context.pin': {
         try {
           const updatedWorkspace = await db.setWorkspacePinned(cleanContextId, true);
-          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+          const finalUpdatedAt = updatedWorkspace?.updated_at || new Date().toISOString();
 
           // Update workspace store state
           useWorkspaceStore.setState((state) => ({
@@ -306,7 +306,7 @@ export const quickActionsService = {
       case 'context.unpin': {
         try {
           const updatedWorkspace = await db.setWorkspacePinned(cleanContextId, false);
-          const finalUpdatedAt = updatedWorkspace?.updated_at || Date.now();
+          const finalUpdatedAt = updatedWorkspace?.updated_at || new Date().toISOString();
 
           // Update workspace store state
           useWorkspaceStore.setState((state) => ({

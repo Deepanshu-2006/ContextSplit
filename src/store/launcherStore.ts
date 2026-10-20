@@ -192,18 +192,20 @@ export function getContextSearchTier(item: LauncherContextItem, query: string): 
   return 5;
 }
 
-export {
+export type {
   ContextSortOrder,
   LauncherPreferences,
+} from '../models/launcherPreferences';
+export {
   DEFAULT_LAUNCHER_PREFERENCES,
   loadLauncherPreferences,
   saveLauncherPreferences,
 } from '../models/launcherPreferences';
 import {
-  ContextSortOrder,
   loadLauncherPreferences,
   saveLauncherPreferences,
 } from '../models/launcherPreferences';
+import type { ContextSortOrder } from '../models/launcherPreferences';
 
 /**
  * Extracts a deterministic numeric timestamp for recency tie-breaking.

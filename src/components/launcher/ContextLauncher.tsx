@@ -25,7 +25,6 @@ import {
   LauncherPreviewItem,
   ResumeActionStatus,
   ContextFilterType,
-  ContextSortOrder,
   matchesContextFilter,
   matchContext,
   sortContextMatches,
@@ -1651,7 +1650,7 @@ interface WorksetPreviewRowProps {
 function WorksetPreviewRow({
   item,
   contextId,
-  contextState,
+  contextState: _contextState,
   isExecuting = false,
   executingActionId,
   executingTargetId,

@@ -15,18 +15,22 @@
  */
 
 import {
-  ContextOperationalLifecycleState,
   resolveContextLifecycleState,
   validateContextId,
+} from './quickActions';
+import type {
+  ContextOperationalLifecycleState,
   ValidationResult,
 } from './quickActions';
-import type { Workspace } from '../services/db';
 
 // Re-export shared primitives to avoid duplicate definitions across the codebase
 export {
-  ContextOperationalLifecycleState,
   resolveContextLifecycleState,
   validateContextId,
+};
+export type {
+  ContextOperationalLifecycleState,
+  ValidationResult,
 };
 
 // =========================================================================

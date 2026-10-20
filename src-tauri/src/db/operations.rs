@@ -2746,6 +2746,59 @@ mod tests {
     }
 
     #[test]
+    fn test_context_rename_and_pinning_invariants() {
+        let conn = setup_db();
+
+        // 1. Initial creation
+        let ws = create_workspace(&conn, "Alpha Project").unwrap();
+        let initial_id = ws.id.clone();
+        assert_eq!(ws.name, "Alpha Project");
+        assert_eq!(ws.is_pinned, false);
+
+        // Attach an item to verify relationship preservation
+        let item = create_item(&conn, Some(&initial_id), None, "text", "Initial doc", Some("Doc"), "{}").unwrap();
+        assert_eq!(item.workspace_id.as_deref(), Some(initial_id.as_str()));
+
+        // 2. Renaming: changes name, preserves immutable ID
+        let renamed = update_workspace(&conn, &initial_id, "Alpha Project V2").unwrap();
+        assert_eq!(renamed.id, initial_id, "Renaming must preserve context identity");
+        assert_eq!(renamed.name, "Alpha Project V2");
+
+        // Verify item relationship remains intact
+        let item_check = get_item(&conn, &item.id).unwrap();
+        assert_eq!(item_check.workspace_id.as_deref(), Some(initial_id.as_str()));
+
+        // Verify context engine signal was created for rename
+        let signals = crate::context_engine::operations::list_context_signals(&conn, Some(&initial_id), None).unwrap();
+        assert!(signals.iter().any(|s| s.payload.contains("workspace_renamed") && s.payload.contains("Alpha Project V2")));
+
+        // 3. Pinning: sets is_pinned to true, preserves immutable ID
+        let pinned = set_workspace_pinned(&conn, &initial_id, true).unwrap();
+        assert_eq!(pinned.id, initial_id, "Pinning must preserve context identity");
+        assert_eq!(pinned.is_pinned, true);
+
+        // Verify context engine signal was created for pinning
+        let signals_after_pin = crate::context_engine::operations::list_context_signals(&conn, Some(&initial_id), None).unwrap();
+        assert!(signals_after_pin.iter().any(|s| s.payload.contains("workspace_pinned")));
+
+        // 4. Unpinning: sets is_pinned to false, preserves immutable ID
+        let unpinned = set_workspace_pinned(&conn, &initial_id, false).unwrap();
+        assert_eq!(unpinned.id, initial_id);
+        assert_eq!(unpinned.is_pinned, false);
+
+        // 5. Duplicate Names: creating another workspace with identical name keeps distinct identity
+        let ws_dup = create_workspace(&conn, "Alpha Project V2").unwrap();
+        assert_ne!(ws_dup.id, initial_id, "Duplicate name must have distinct ID");
+        assert_eq!(ws_dup.name, renamed.name);
+
+        // Mutating ws_dup does not mutate initial context
+        let pinned_dup = set_workspace_pinned(&conn, &ws_dup.id, true).unwrap();
+        assert_eq!(pinned_dup.is_pinned, true);
+        let orig_ws = get_workspace(&conn, &initial_id).unwrap();
+        assert_eq!(orig_ws.is_pinned, false, "Mutating duplicate context must not mutate original");
+    }
+
+    #[test]
     fn test_inbox_item_state_crud_and_cascade() {
         let conn = setup_db();
         let item = create_item(&conn, None, None, "text", "Inbox Test Item", None, "{}").unwrap();
