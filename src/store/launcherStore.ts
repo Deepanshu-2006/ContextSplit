@@ -188,8 +188,11 @@ export function getContextSearchTier(item: LauncherContextItem, query: string): 
   return 5;
 }
 
+export type ContextSortOrder = 'recent' | 'name';
+
 /**
  * Extracts a deterministic numeric timestamp for recency tie-breaking.
+ * Safely falls back to createdAt, or 0 if timestamps are absent or invalid.
  */
 export function getContextRecencyTimestamp(item: LauncherContextItem): number {
   if (item.isActive) {
@@ -200,25 +203,87 @@ export function getContextRecencyTimestamp(item: LauncherContextItem): number {
     return Date.now();
   }
 
-  if (!item.lastActiveAt) return 0;
-  const parsed = new Date(item.lastActiveAt).getTime();
-  return isNaN(parsed) ? 0 : parsed;
+  if (item.lastActiveAt) {
+    const parsed = new Date(item.lastActiveAt).getTime();
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  if (item.createdAt) {
+    const parsed = new Date(item.createdAt).getTime();
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  return 0;
+}
+
+/**
+ * Deterministically sorts contexts according to the requested sort order while keeping
+ * pinned contexts elevated at the top without duplication.
+ */
+export function sortContextList(
+  items: LauncherContextItem[],
+  sortOrder: ContextSortOrder = 'recent'
+): LauncherContextItem[] {
+  if (items.length <= 1) return items;
+
+  const pinned = items.filter((item) => Boolean(item.isPinned));
+  const unpinned = items.filter((item) => !Boolean(item.isPinned));
+
+  const compareItems = (a: LauncherContextItem, b: LauncherContextItem): number => {
+    if (sortOrder === 'name') {
+      // Alphabetical A-Z (case-insensitive, trimmed)
+      const nameA = a.name.trim().toLowerCase();
+      const nameB = b.name.trim().toLowerCase();
+      const comp = nameA.localeCompare(nameB);
+      if (comp !== 0) return comp;
+
+      // Secondary tie-breaker: Recency timestamp (most recent first)
+      const recA = getContextRecencyTimestamp(a);
+      const recB = getContextRecencyTimestamp(b);
+      if (recA !== recB) return recB - recA;
+
+      // Final tie-breaker: Deterministic stable ID
+      return a.id.localeCompare(b.id);
+    }
+
+    // Default 'recent' sort:
+    // Active context comes first if among unpinned or pinned
+    if (a.isActive !== b.isActive) {
+      return a.isActive ? -1 : 1;
+    }
+
+    // Recency timestamp descending
+    const recA = getContextRecencyTimestamp(a);
+    const recB = getContextRecencyTimestamp(b);
+    if (recA !== recB) return recB - recA;
+
+    // Secondary tie-breaker: Alphabetical by name
+    const comp = a.name.trim().toLowerCase().localeCompare(b.name.trim().toLowerCase());
+    if (comp !== 0) return comp;
+
+    // Final tie-breaker: Deterministic stable ID
+    return a.id.localeCompare(b.id);
+  };
+
+  const sortedPinned = [...pinned].sort(compareItems);
+  const sortedUnpinned = [...unpinned].sort(compareItems);
+
+  return [...sortedPinned, ...sortedUnpinned];
 }
 
 /**
  * Sorts matching contexts deterministically based on:
- * 1. Exact context name match
- * 2. Context name starts with query
- * 3. Context name contains query
- * 4. Description/project metadata match
- * 5. Recency as a tie-breaker
- *
- * Secondary tie-breakers for equal recency:
- * - Shorter matching prefix token (e.g. PayX before Payment for query "pay")
- * - Shorter overall name length
- * - Deterministic alphabetical order by name
+ * 1. Ranking tier (exact match -> prefix match -> substring -> metadata)
+ * 2. Pinned priority within equal ranking tiers
+ * 3. Requested sort order (alphabetical A-Z or recency)
+ * 4. Recency timestamp as a tie-breaker
+ * 5. Prefix token length and stable ID
  */
-export function sortContextMatches(items: LauncherContextItem[], query: string): LauncherContextItem[] {
+export function sortContextMatches(
+  items: LauncherContextItem[],
+  query: string,
+  sortOrder: ContextSortOrder = 'recent'
+): LauncherContextItem[] {
   const q = query.trim().toLowerCase();
   if (!q || items.length <= 1) return items;
 
@@ -243,7 +308,13 @@ export function sortContextMatches(items: LauncherContextItem[], query: string):
       return a.isPinned ? -1 : 1;
     }
 
-    // 6. Recency as a tie-breaker
+    // 6. Name sort option: alphabetical within equal tiers
+    if (sortOrder === 'name') {
+      const nameDiff = a.item.name.trim().toLowerCase().localeCompare(b.item.name.trim().toLowerCase());
+      if (nameDiff !== 0) return nameDiff;
+    }
+
+    // 7. Recency as primary tie-breaker (or primary comparator for 'recent' sort)
     if (a.recency !== b.recency) {
       return b.recency - a.recency; // Most recent first
     }
@@ -260,6 +331,95 @@ export function sortContextMatches(items: LauncherContextItem[], query: string):
   });
 
   return decorated.map((d) => d.item);
+}
+
+export interface LauncherContextGroup {
+  id: 'pinned' | 'active' | 'recent' | 'filtered' | 'results';
+  title: string;
+  items: LauncherContextItem[];
+  startIndex: number;
+}
+
+/**
+ * Organizes contexts into clear, deterministic groups grounded in actual data.
+ * Every item appears in exactly one group with a stable index for keyboard selection.
+ */
+export function groupLauncherContexts(
+  items: LauncherContextItem[],
+  options: {
+    searchQuery?: string;
+    activeFilter?: ContextFilterType;
+    activeSort?: ContextSortOrder;
+    activeContextId?: string | null;
+  }
+): LauncherContextGroup[] {
+  const { searchQuery = '', activeFilter = 'all', activeSort = 'recent', activeContextId = null } = options;
+
+  if (items.length === 0) return [];
+
+  // When search query is active, return a single unified results group
+  if (searchQuery.trim()) {
+    return [
+      {
+        id: 'results',
+        title: `Results (${items.length})`,
+        items,
+        startIndex: 0,
+      },
+    ];
+  }
+
+  const groups: LauncherContextGroup[] = [];
+  let currentIndex = 0;
+
+  // 1. Pinned Contexts (if any are present in the filtered slice)
+  const pinnedItems = items.filter((item) => Boolean(item.isPinned));
+  if (pinnedItems.length > 0) {
+    groups.push({
+      id: 'pinned',
+      title: 'Pinned',
+      items: pinnedItems,
+      startIndex: currentIndex,
+    });
+    currentIndex += pinnedItems.length;
+  }
+
+  // 2. Active Context (if in items, not already pinned, and viewing 'all' filter)
+  const unpinned = items.filter((item) => !Boolean(item.isPinned));
+  const activeItem = unpinned.find((item) => item.id === activeContextId || Boolean(item.isActive));
+  const otherItems = unpinned.filter((item) => item !== activeItem);
+
+  if (activeItem && activeFilter === 'all') {
+    groups.push({
+      id: 'active',
+      title: 'Active Context',
+      items: [activeItem],
+      startIndex: currentIndex,
+    });
+    currentIndex += 1;
+  }
+
+  // 3. Remaining Contexts (Recent, Filtered, or All)
+  const remainingItems = activeItem && activeFilter === 'all' ? otherItems : unpinned;
+  if (remainingItems.length > 0) {
+    let title: string;
+    if (activeFilter === 'all') {
+      title = activeSort === 'name' ? 'All Contexts' : 'Recent Contexts';
+    } else {
+      const filterLabel =
+        activeFilter.charAt(0).toUpperCase() + activeFilter.slice(1);
+      title = `${filterLabel} Contexts (${remainingItems.length})`;
+    }
+
+    groups.push({
+      id: activeFilter === 'all' ? 'recent' : 'filtered',
+      title,
+      items: remainingItems,
+      startIndex: currentIndex,
+    });
+  }
+
+  return groups;
 }
 
 export interface LauncherPreviewItem {
@@ -353,6 +513,7 @@ interface LauncherState {
   recentContexts: LauncherContextItem[];
   isPreviewOpen: boolean;
   activeFilter: ContextFilterType;
+  activeSort: ContextSortOrder;
   
   // Actions
   openLauncher: () => void;
@@ -360,6 +521,8 @@ interface LauncherState {
   toggleLauncher: () => void;
   setSearchQuery: (query: string) => void;
   setActiveFilter: (filter: ContextFilterType) => void;
+  setActiveSort: (sort: ContextSortOrder) => void;
+  toggleActiveSort: () => void;
   setSelectedIndex: (index: number) => void;
   setIsPreviewOpen: (open: boolean) => void;
   selectContextById: (contextId: string) => Promise<void>;
@@ -405,12 +568,14 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   recentContexts: [],
   isPreviewOpen: false,
   activeFilter: 'all',
+  activeSort: 'recent',
 
   openLauncher: () => {
     set({
       isOpen: true,
       searchQuery: '',
       activeFilter: 'all',
+      activeSort: 'recent',
       selectedIndex: 0,
       selectedContextId: null,
       activePreview: null,
@@ -464,6 +629,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
   setActiveFilter: (filter: ContextFilterType) => {
     set({ activeFilter: filter, selectedIndex: 0, isPreviewOpen: false });
+  },
+
+  setActiveSort: (sort: ContextSortOrder) => {
+    set({ activeSort: sort, isPreviewOpen: false });
+  },
+
+  toggleActiveSort: () => {
+    const nextSort: ContextSortOrder = get().activeSort === 'recent' ? 'name' : 'recent';
+    set({ activeSort: nextSort, isPreviewOpen: false });
   },
 
   setSelectedIndex: (index: number) => {
