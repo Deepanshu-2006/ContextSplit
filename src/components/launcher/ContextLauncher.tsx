@@ -24,9 +24,12 @@ import {
   LauncherPreviewItem,
   ResumeActionStatus,
   ContextFilterType,
+  ContextSortOrder,
   matchesContextFilter,
   matchContext,
   sortContextMatches,
+  sortContextList,
+  groupLauncherContexts,
   getVisibleLauncherSlice,
   ActionErrorInfo,
 } from '../../store/launcherStore';
@@ -77,10 +80,13 @@ export function ContextLauncher() {
     recentContexts,
     isPreviewOpen,
     activeFilter,
+    activeSort,
     setIsPreviewOpen,
     closeLauncher,
     setSearchQuery,
     setActiveFilter,
+    setActiveSort,
+    toggleActiveSort,
     setSelectedIndex,
     selectContextById,
     fetchLauncherData,
@@ -113,7 +119,7 @@ export function ContextLauncher() {
   }, [activeWorkspaceId, isOpen, fetchLauncherData]);
 
 
-  // Filter and rank contexts based on search query and active lifecycle filter
+  // Filter, sort, and rank contexts based on search query, active lifecycle filter, and sort order
   const filteredList = useMemo(() => {
     const all: LauncherContextItem[] = [];
     if (activeContext) {
@@ -127,17 +133,16 @@ export function ContextLauncher() {
     // 1. Compose with lifecycle filter
     const stateFiltered = all.filter((item) => matchesContextFilter(item, activeFilter));
 
-    // 2. If no search query, prioritize pinned contexts, preserving engine ordering within groups
+    // 2. If no search query, sort deterministically according to activeSort (recent or name)
+    // Pinned contexts are always elevated at the top without duplication
     if (!searchQuery.trim()) {
-      const pinned = stateFiltered.filter((c) => c.isPinned);
-      const unpinned = stateFiltered.filter((c) => !c.isPinned);
-      return [...pinned, ...unpinned];
+      return sortContextList(stateFiltered, activeSort);
     }
 
     // 3. Match search query terms against structured metadata within state-filtered contexts
     const matched = stateFiltered.filter((ctx) => matchContext(ctx, searchQuery));
-    return sortContextMatches(matched, searchQuery);
-  }, [activeContext, recentContexts, activeFilter, searchQuery]);
+    return sortContextMatches(matched, searchQuery, activeSort);
+  }, [activeContext, recentContexts, activeFilter, searchQuery, activeSort]);
 
   // Detect duplicate names across all available contexts for deterministic disambiguation
   const duplicateNamesSet = useMemo(() => {
@@ -155,23 +160,44 @@ export function ContextLauncher() {
     return getVisibleLauncherSlice(filteredList, selectedIndex);
   }, [filteredList, selectedIndex]);
 
-  const { visibleItems: visibleRecentList, hasMore: hasMoreRecent } = useMemo(() => {
-    return getVisibleLauncherSlice(recentContexts, selectedIndex);
-  }, [recentContexts, selectedIndex]);
+  // Compute structured groups grounded in actual data for organized presentation
+  const contextGroups = useMemo(() => {
+    return groupLauncherContexts(visibleFilteredList, {
+      searchQuery,
+      activeFilter,
+      activeSort,
+      activeContextId: activeContext?.id,
+    });
+  }, [visibleFilteredList, searchQuery, activeFilter, activeSort, activeContext?.id]);
 
-  // When selection index changes or filteredList updates, fetch preview or clear if empty
+  // Preserve stable selection: when filteredList order changes (e.g. sort toggled),
+  // ensure selectedIndex follows the currently selectedContextId
   useEffect(() => {
     if (filteredList.length === 0) {
       if (selectedContextId !== null) {
         useLauncherStore.setState({ selectedContextId: null, activePreview: null });
+      }
+    } else if (selectedContextId) {
+      const foundIdx = filteredList.findIndex((item) => item.id === selectedContextId);
+      if (foundIdx >= 0) {
+        if (foundIdx !== selectedIndex) {
+          setSelectedIndex(foundIdx);
+        }
+      } else {
+        // Selected context is no longer in filtered list (e.g. filtered out by lifecycle filter)
+        setSelectedIndex(0);
+        selectContextById(filteredList[0].id);
       }
     } else if (selectedIndex >= 0 && selectedIndex < filteredList.length) {
       const current = filteredList[selectedIndex];
       if (current && current.id !== selectedContextId) {
         selectContextById(current.id);
       }
+    } else {
+      setSelectedIndex(0);
+      selectContextById(filteredList[0].id);
     }
-  }, [selectedIndex, filteredList, selectedContextId, selectContextById]);
+  }, [filteredList, selectedContextId, selectedIndex, selectContextById, setSelectedIndex]);
 
   // Mac-native Keyboard Navigation with two-stage inspection & resume
   useEffect(() => {
@@ -362,6 +388,13 @@ export function ContextLauncher() {
         return;
       }
 
+      // Alt+S / Option+S: Toggle Context Sort Order (recent <-> name)
+      if (e.altKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        toggleActiveSort();
+        return;
+      }
+
       // 6. Enter Action: Open preview from list, or resume from preview
       if (e.key === 'Enter') {
         // If an active button or menu item is focused, let the focused element handle its own native/custom click.
@@ -500,35 +533,78 @@ export function ContextLauncher() {
           </span>
         </div>
 
-        {/* Filter Tabs */}
-        <div
-          role="tablist"
-          aria-label="Filter contexts by lifecycle state"
-          className="flex items-center gap-1 px-4 py-1.5 border-b border-white/5 bg-stone-950/20 text-xs"
-        >
-          {FILTER_OPTIONS.map((f) => {
-            const isSelected = activeFilter === f.id;
-            return (
-              <button
-                key={f.id}
-                role="tab"
-                id={`launcher-filter-tab-${f.id}`}
-                aria-selected={isSelected}
-                tabIndex={0}
-                onClick={() => {
-                  setActiveFilter(f.id);
-                  inputRef.current?.focus();
-                }}
-                className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
-                  isSelected
-                    ? 'bg-white/10 text-stone-100 font-medium'
-                    : 'text-stone-400 hover:text-stone-200'
-                }`}
-              >
-                {f.label}
-              </button>
-            );
-          })}
+        {/* Filter Tabs & Compact Sort Controls */}
+        <div className="flex items-center justify-between px-4 py-1.5 border-b border-white/5 bg-stone-950/20 text-xs">
+          <div
+            role="tablist"
+            aria-label="Filter contexts by lifecycle state"
+            className="flex items-center gap-1"
+          >
+            {FILTER_OPTIONS.map((f) => {
+              const isSelected = activeFilter === f.id;
+              return (
+                <button
+                  key={f.id}
+                  role="tab"
+                  id={`launcher-filter-tab-${f.id}`}
+                  aria-selected={isSelected}
+                  tabIndex={0}
+                  onClick={() => {
+                    setActiveFilter(f.id);
+                    inputRef.current?.focus();
+                  }}
+                  className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-white/10 text-stone-100 font-medium'
+                      : 'text-stone-400 hover:text-stone-200'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Compact Sort Segmented Control */}
+          <div
+            className="flex items-center gap-1 text-[11px] text-stone-400 shrink-0"
+            role="group"
+            aria-label="Sort contexts"
+          >
+            <span className="text-stone-500 mr-0.5 select-none font-medium">Sort:</span>
+            <button
+              id="launcher-sort-recent-btn"
+              type="button"
+              onClick={() => {
+                setActiveSort('recent');
+                inputRef.current?.focus();
+              }}
+              className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                activeSort === 'recent'
+                  ? 'bg-white/10 text-stone-200 font-medium'
+                  : 'text-stone-400 hover:text-stone-300'
+              }`}
+              title="Sort by recent activity (⌥S)"
+            >
+              Recent
+            </button>
+            <button
+              id="launcher-sort-name-btn"
+              type="button"
+              onClick={() => {
+                setActiveSort('name');
+                inputRef.current?.focus();
+              }}
+              className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
+                activeSort === 'name'
+                  ? 'bg-white/10 text-stone-200 font-medium'
+                  : 'text-stone-400 hover:text-stone-300'
+              }`}
+              title="Sort alphabetically A-Z (⌥S)"
+            >
+              Name
+            </button>
+          </div>
         </div>
 
         {/* Main Split View: Left List | Right Preview & Resume */}
@@ -574,156 +650,72 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* 2. Active Context Section (When no search query and All filter) */}
-            {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
-              <div className="space-y-1">
-                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400 flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  <span>Active Context</span>
-                </div>
-                {activeContext ? (
-                  <ContextLauncherItem
-                    item={activeContext}
-                    isSelected={selectedIndex === 0}
-                    isPreviewOpen={selectedIndex === 0 && isPreviewOpen}
-                    isResuming={isResuming && selectedContextId === activeContext.id}
-                    isDuplicate={duplicateNamesSet.has(activeContext.name.trim().toLowerCase())}
-                    dataIndex={0}
-                    onSelect={() => {
-                      setSelectedIndex(0);
-                      setIsPreviewOpen(true);
-                    }}
-                    onResume={() => resumeContextById(activeContext.id)}
-                  />
-                ) : (
-                  <p className="text-xs text-stone-500 px-2 py-1">No active context</p>
-                )}
-              </div>
-            )}
-
-            {/* 3. Results / Recent Contexts */}
-            {/* Filtered view when specific filter is selected and no search query */}
-            {!isLoading && !error && !searchQuery && activeFilter !== 'all' && (
-              <div className="space-y-1">
-                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
-                  {FILTER_OPTIONS.find((f) => f.id === activeFilter)?.label || activeFilter} Contexts ({filteredList.length})
-                </div>
-                {filteredList.length === 0 ? (
-                  <div className="py-8 text-center space-y-1">
-                    <p className="text-xs font-medium text-stone-300">No matching contexts</p>
-                    <p className="text-xs text-stone-500">Try a different name or keyword.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-0.5">
-                    {visibleFilteredList.map((item, idx) => {
-                      const isSelected = selectedIndex === idx;
-                      return (
-                        <ContextLauncherItem
-                          key={item.id}
-                          item={item}
-                          isSelected={isSelected}
-                          isPreviewOpen={isSelected && isPreviewOpen}
-                          isResuming={isResuming && selectedContextId === item.id}
-                          isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
-                          dataIndex={idx}
-                          onSelect={() => {
-                            setSelectedIndex(idx);
-                            setIsPreviewOpen(true);
-                          }}
-                          onResume={() => resumeContextById(item.id)}
-                        />
-                      );
-                    })}
-                    {hasMoreFiltered && (
-                      <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
-                        Showing top {visibleFilteredList.length} of {filteredList.length} contexts
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Empty search results state */}
-            {!isLoading && !error && searchQuery && filteredList.length === 0 && (
+            {/* Empty state */}
+            {!isLoading && !error && filteredList.length === 0 && (
               <div className="py-8 text-center space-y-1">
-                <p className="text-xs font-medium text-stone-300">No matching contexts</p>
-                <p className="text-xs text-stone-500">Try a different name or keyword.</p>
+                <p className="text-xs font-medium text-stone-300">
+                  {searchQuery ? 'No matching contexts' : 'No contexts available'}
+                </p>
+                <p className="text-xs text-stone-500">
+                  {searchQuery
+                    ? 'Try a different name or keyword.'
+                    : activeFilter !== 'all'
+                    ? `No contexts in the ${activeFilter} state.`
+                    : 'Create or activate a context to get started.'}
+                </p>
               </div>
             )}
 
-            {/* Recent Contexts list (When no search query and All filter) */}
-            {!isLoading && !error && !searchQuery && activeFilter === 'all' && (
-              <div className="space-y-1">
-                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
-                  Recent Contexts
-                </div>
-                {recentContexts.length === 0 ? (
-                  <p className="text-xs text-stone-500 px-2 py-1">No recent contexts</p>
-                ) : (
-                  <div className="space-y-0.5">
-                    {visibleRecentList.map((item, relIdx) => {
-                      const globalIdx = activeContext ? relIdx + 1 : relIdx;
-                      const isSelected = selectedIndex === globalIdx;
-                      return (
-                        <ContextLauncherItem
-                          key={item.id}
-                          item={item}
-                          isSelected={isSelected}
-                          isPreviewOpen={isSelected && isPreviewOpen}
-                          isResuming={isResuming && selectedContextId === item.id}
-                          isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
-                          dataIndex={globalIdx}
-                          onSelect={() => {
-                            setSelectedIndex(globalIdx);
-                            setIsPreviewOpen(true);
-                          }}
-                          onResume={() => resumeContextById(item.id)}
-                        />
-                      );
-                    })}
-                    {hasMoreRecent && (
-                      <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
-                        Showing top {visibleRecentList.length} of {recentContexts.length} contexts
+            {/* Context Groups List */}
+            {!isLoading && !error && filteredList.length > 0 && (
+              <div className="space-y-3">
+                {contextGroups.map((group) => (
+                  <div key={group.id} className="space-y-1">
+                    <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5">
+                        {group.id === 'pinned' && (
+                          <Pin className="w-3 h-3 text-amber-400 fill-amber-400/20" />
+                        )}
+                        {group.id === 'active' && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        )}
+                        <span>{group.title}</span>
                       </div>
-                    )}
+                      <span className="text-[10px] text-stone-500">
+                        {group.items.length}
+                      </span>
+                    </div>
+
+                    <div className="space-y-0.5">
+                      {group.items.map((item, relIdx) => {
+                        const globalIdx = group.startIndex + relIdx;
+                        const isSelected = selectedIndex === globalIdx;
+                        return (
+                          <ContextLauncherItem
+                            key={item.id}
+                            item={item}
+                            isSelected={isSelected}
+                            isPreviewOpen={isSelected && isPreviewOpen}
+                            isResuming={isResuming && selectedContextId === item.id}
+                            isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
+                            dataIndex={globalIdx}
+                            onSelect={() => {
+                              setSelectedIndex(globalIdx);
+                              setIsPreviewOpen(true);
+                            }}
+                            onResume={() => resumeContextById(item.id)}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+
+                {hasMoreFiltered && (
+                  <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
+                    Showing top {visibleFilteredList.length} of {filteredList.length} contexts
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* Search Results list (When search query is active) */}
-            {!isLoading && !error && searchQuery && filteredList.length > 0 && (
-              <div className="space-y-1">
-                <div className="px-2 py-0.5 text-[11px] font-medium text-stone-400">
-                  Results ({filteredList.length})
-                </div>
-                <div className="space-y-0.5">
-                  {visibleFilteredList.map((item, idx) => {
-                    const isSelected = selectedIndex === idx;
-                    return (
-                      <ContextLauncherItem
-                        key={item.id}
-                        item={item}
-                        isSelected={isSelected}
-                        isPreviewOpen={isSelected && isPreviewOpen}
-                        isResuming={isResuming && selectedContextId === item.id}
-                        isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
-                        dataIndex={idx}
-                        onSelect={() => {
-                          setSelectedIndex(idx);
-                          setIsPreviewOpen(true);
-                        }}
-                        onResume={() => resumeContextById(item.id)}
-                      />
-                    );
-                  })}
-                  {hasMoreFiltered && (
-                    <div className="px-3 py-1.5 text-center text-[10.5px] text-stone-500">
-                      Showing top {visibleFilteredList.length} of {filteredList.length} contexts
-                    </div>
-                  )}
-                </div>
               </div>
             )}
           </div>
@@ -782,6 +774,7 @@ export function ContextLauncher() {
           <div className="flex items-center gap-3">
             <span><kbd className="font-mono text-[10px] text-stone-400">↑↓</kbd> Navigate</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">↵</kbd> Resume</span>
+            <span><kbd className="font-mono text-[10px] text-stone-400">⌥S</kbd> Sort</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥P</kbd> Pin</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥R</kbd> Rename</span>
             <span><kbd className="font-mono text-[10px] text-stone-400">⌥M</kbd> Actions</span>
