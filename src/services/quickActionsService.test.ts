@@ -522,9 +522,11 @@ describe('Quick Actions Contract & Service', () => {
       expect(pauseAct?.isSupported).toBe(false);
       expect(pauseAct?.unsupportedReason).toContain('Cannot pause an archived context');
 
+      const restoreAct = actions.find((a) => a.id === 'context.restore');
+      expect(restoreAct?.isSupported).toBe(true);
+
       const archiveAct = actions.find((a) => a.id === 'context.archive');
-      expect(archiveAct?.isSupported).toBe(false);
-      expect(archiveAct?.unsupportedReason).toContain('already archived');
+      expect(archiveAct).toBeUndefined();
     });
 
     it('evaluates available item actions dynamically based on item importance', () => {

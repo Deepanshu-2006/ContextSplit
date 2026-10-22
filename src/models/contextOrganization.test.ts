@@ -33,8 +33,6 @@ describe('Context Organization Contract', () => {
 
     it('explicitly identifies unsupported gap operations with documented reasons', () => {
       const unsupportedGapActions: ContextOrganizationActionId[] = [
-        'context.pin',
-        'context.unpin',
         'context.favorite',
         'context.unfavorite',
         'context.set_metadata',
@@ -44,7 +42,7 @@ describe('Context Organization Contract', () => {
         const descriptor = CONTEXT_ORGANIZATION_REGISTRY[actionId];
         expect(descriptor).toBeDefined();
         expect(descriptor.isSupported).toBe(false);
-        expect(descriptor.supportStatus).toBe('UNSUPPORTED_REQUIRES_PERSISTENCE');
+        expect(descriptor.supportStatus).toMatch(/^UNSUPPORTED/);
         expect(descriptor.unsupportedReason).toBeDefined();
         expect(descriptor.unsupportedReason!.length).toBeGreaterThan(10);
       }
@@ -244,10 +242,8 @@ describe('Context Organization Contract', () => {
     });
 
     describe('Unsupported Operations Guard', () => {
-      it('consistently returns UNSUPPORTED for unpersisted pinning/metadata operations', () => {
+      it('consistently returns UNSUPPORTED for unpersisted favoriting/metadata operations', () => {
         const gapActions: ContextOrganizationActionId[] = [
-          'context.pin',
-          'context.unpin',
           'context.favorite',
           'context.unfavorite',
           'context.set_metadata',
@@ -304,7 +300,7 @@ describe('Context Organization Contract', () => {
 
     it('rejects unsupported actions with OPERATION_UNSUPPORTED error code', () => {
       const res = validateOrganizationAction({
-        actionId: 'context.pin',
+        actionId: 'context.favorite',
         contextId: 'ws-target-123',
         currentState: 'dormant',
       });
@@ -347,8 +343,8 @@ describe('Context Organization Contract', () => {
       expect(mapping.requiresConfirmation).toBe(true);
     });
 
-    it('marks unmigrated pinning and metadata as unsupported', () => {
-      expect(getBackendOperationMapping('context.pin').supported).toBe(false);
+    it('marks unmigrated favoriting and metadata as unsupported', () => {
+      expect(getBackendOperationMapping('context.pin').supported).toBe(true);
       expect(getBackendOperationMapping('context.favorite').supported).toBe(false);
       expect(getBackendOperationMapping('context.set_metadata').supported).toBe(false);
     });

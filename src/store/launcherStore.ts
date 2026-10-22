@@ -1239,8 +1239,24 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     return result.success;
   },
 
-  renameContextById: async (contextId: string, newName: string) => {
-    return await get().executeContextAction('context.rename', contextId, { newName });
+  renameContextById: (contextId: string, newName: string) => {
+    const trimmed = typeof newName === 'string' ? newName.trim() : '';
+    if (trimmed) {
+      set((state) => ({
+        activePreview:
+          state.activePreview?.contextId === contextId
+            ? { ...state.activePreview, name: trimmed }
+            : state.activePreview,
+        activeContext:
+          state.activeContext?.id === contextId
+            ? { ...state.activeContext, name: trimmed }
+            : state.activeContext,
+        recentContexts: state.recentContexts.map((c) =>
+          c.id === contextId ? { ...c, name: trimmed } : c
+        ),
+      }));
+    }
+    return get().executeContextAction('context.rename', contextId, { newName });
   },
 
   executeContextAction: async (
@@ -1263,12 +1279,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
     if (typeof contextIdOrOptions === 'object' && contextIdOrOptions !== null) {
       effectiveOptions = contextIdOrOptions as ExecuteContextActionOptions;
-      targetId = get().selectedContextId || get().activePreview?.contextId || undefined;
+      targetId = get().selectedContextId ?? undefined;
     } else {
       targetId =
         typeof contextIdOrOptions === 'string'
           ? contextIdOrOptions
-          : get().selectedContextId || get().activePreview?.contextId || undefined;
+          : get().selectedContextId ?? undefined;
       effectiveOptions = maybeOptions;
     }
 
@@ -1344,11 +1360,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               recentContexts: state.recentContexts.map((c) => (c.id === targetId ? { ...c, name: newName } : c)),
             }));
           }
-          invalidateLauncherPreviewCache(targetId);
           await get().fetchLauncherData();
-          if (get().selectedContextId === targetId) {
-            await get().selectContextById(targetId, { forceRefresh: true });
-          }
           toast.success(result.message || 'Context renamed');
         } else if (actionId === 'context.pin' || actionId === 'context.unpin') {
           const newPinnedState = actionId === 'context.pin';

@@ -194,8 +194,7 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
     expect(archivedPause?.unsupportedReason).toContain('archived');
 
     const archivedArchive = archivedActions.find((a) => a.id === 'context.archive');
-    expect(archivedArchive?.isSupported).toBe(false);
-    expect(archivedArchive?.unsupportedReason).toContain('already archived');
+    expect(archivedArchive).toBeUndefined();
   });
 
   // 3. Workset items quick actions
@@ -507,6 +506,8 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
 
     expect(activeActions.map((a) => a.id)).toEqual([
       'context.open_details',
+      'context.rename',
+      'context.pin',
       'context.pause',
       'context.archive',
       'context.delete',
@@ -535,8 +536,7 @@ describe('Context Launcher Quick Actions UI & Contract Integration Tests', () =>
 
     expect(archivedActions.find((a) => a.id === 'context.pause')?.isSupported).toBe(false);
     expect(archivedActions.find((a) => a.id === 'context.pause')?.unsupportedReason).toContain('Cannot pause an archived context');
-    expect(archivedActions.find((a) => a.id === 'context.archive')?.isSupported).toBe(false);
-    expect(archivedActions.find((a) => a.id === 'context.archive')?.unsupportedReason).toContain('already archived');
+    expect(archivedActions.find((a) => a.id === 'context.archive')).toBeUndefined();
   });
 
   // 18. Clear explanations for unavailable actions without exposing them as clickable options

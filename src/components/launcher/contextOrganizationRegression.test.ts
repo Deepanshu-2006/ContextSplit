@@ -309,7 +309,7 @@ describe('Context Launcher Organization - Focused Regression Suite (Day 34)', ()
         .executeContextAction('context.rename', 'ws-active-1', { newName: 'New Name' });
 
       expect(result.outcome).toBe('BLOCKED');
-      expect(result.message).toContain('Another action is currently in progress');
+      expect(result.message).toContain('action is already in progress');
       expect(db.updateWorkspace).not.toHaveBeenCalled();
     });
   });

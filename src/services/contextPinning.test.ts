@@ -157,7 +157,7 @@ describe('Context Pinning Architecture & Integration', () => {
       const storeWorkspaces = useWorkspaceStore.getState().workspaces;
       const updated = storeWorkspaces.find((w) => w.id === 'ws-recent-2');
       expect(updated?.is_pinned).toBe(false);
-      expect(updated?.updated_at).toBe(3500);
+      expect(updated?.updated_at).toBe('2026-10-20T12:30:00Z');
     });
   });
 

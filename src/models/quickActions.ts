@@ -381,6 +381,7 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
     targetType: 'context',
     isSupported: pauseValidation.isValid,
     unsupportedReason: pauseValidation.reason,
+    shortcut: '⌥P',
   });
 
   // 6. Archive or Restore Context
@@ -391,14 +392,7 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
       description: 'Unarchive this context and restore it to the active lifecycle.',
       targetType: 'context',
       isSupported: true,
-    });
-    actions.push({
-      id: 'context.archive',
-      label: 'Archive Context',
-      description: 'Context is already archived.',
-      targetType: 'context',
-      isSupported: false,
-      unsupportedReason: 'Context is already archived.',
+      shortcut: '⌥A',
     });
   } else {
     const archiveValidation = validateContextActionTransition('context.archive', currentState);
@@ -411,6 +405,7 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
       targetType: 'context',
       isSupported: archiveValidation.isValid,
       unsupportedReason: archiveValidation.reason,
+      shortcut: '⌥A',
     });
   }
 

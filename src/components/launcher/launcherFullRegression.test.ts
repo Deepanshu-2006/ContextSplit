@@ -289,6 +289,7 @@ describe('Context Launcher & Phase 1 Full Regression Suite', () => {
 
     // 8. Persistence
     it('8. persistence: maintains workspace relationships and survives launcher open/close cycles', async () => {
+      useWorkspaceStore.setState({ workspaces: [] });
       vi.mocked(contextInteractionService.getActiveContext).mockResolvedValue({
         context_id: 'ctx-active-engine',
         context: 'PayX Core Engine',

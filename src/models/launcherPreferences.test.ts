@@ -131,14 +131,14 @@ describe('Launcher Preferences Persistence & Resilience', () => {
 
     it('survives application restart simulation by rehydrating persisted sort preference', () => {
       // 1. User sets preference to 'name' in storage
-      saveLauncherPreferences({ sortOrder: 'name' });
+      saveLauncherPreferences({ sortOrder: 'name' }, mockStorage);
 
       // 2. Rehydrate state from storage (simulating app boot)
-      const preferences = loadLauncherPreferences();
+      const preferences = loadLauncherPreferences(mockStorage);
       expect(preferences.sortOrder).toBe('name');
 
       // Clean up global localStorage
-      resetLauncherPreferences();
+      resetLauncherPreferences(mockStorage);
     });
   });
 

@@ -213,6 +213,16 @@ export const quickActionsService = {
       // 3. Rename Context
       // ---------------------------------------------------------------------
       case 'context.rename': {
+        if (options?.newName === undefined || options?.newName === null) {
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: 'New context name is required.',
+            message: 'New context name is required.',
+            resolvedContextId: cleanContextId,
+          };
+        }
         const nameValidation = validateContextName(options?.newName);
         if (!nameValidation.isValid) {
           return {
