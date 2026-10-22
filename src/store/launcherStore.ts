@@ -589,6 +589,7 @@ interface LauncherState {
 
 // Debounce timer for preview fetching to avoid IPC jitter
 let previewDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingDebounceResolve: (() => void) | null = null;
 let activePreviewRequestId = 0;
 
 export interface CachedPreviewEntry {
@@ -664,6 +665,10 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = null;
     }
+    if (pendingDebounceResolve) {
+      pendingDebounceResolve();
+      pendingDebounceResolve = null;
+    }
     invalidateLauncherPreviewCache();
     set({
       isOpen: false,
@@ -737,7 +742,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   selectContextById: async (contextId: string, options?: { forceRefresh?: boolean }) => {
     if (!contextId) return;
 
-    // Check cache first to avoid redundant IPC/DB queries (Requirement 9)
+    // Check cache first to avoid redundant IPC/DB queries (Requirement 5)
     if (!options?.forceRefresh) {
       const cached = launcherPreviewCache.get(contextId);
       if (cached && Date.now() - cached.timestamp < WORKSET_CACHE_TTL_MS) {
@@ -755,8 +760,15 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       }
     }
 
+    // Context switching guard (Requirement 7):
+    // When switching to a different context, immediately clear activePreview to prevent
+    // briefly displaying another context's items as if they belonged to the newly selected context.
+    // If refreshing the same context, preserve activePreview to avoid layout flicker.
+    const isContextSwitch = get().activePreview?.contextId !== contextId;
+
     set({
       selectedContextId: contextId,
+      activePreview: isContextSwitch ? null : get().activePreview,
       isLoadingPreview: true,
       previewError: null,
       resumeStatus: 'idle',
@@ -769,11 +781,16 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
     if (previewDebounceTimer) {
       clearTimeout(previewDebounceTimer);
+      previewDebounceTimer = null;
+    }
+    if (pendingDebounceResolve) {
+      pendingDebounceResolve();
+      pendingDebounceResolve = null;
     }
 
-    previewDebounceTimer = setTimeout(async () => {
+    const executeFetch = async (requestId: number) => {
       try {
-        if (currentRequestId !== activePreviewRequestId || get().selectedContextId !== contextId) {
+        if (requestId !== activePreviewRequestId || get().selectedContextId !== contextId) {
           return;
         }
 
@@ -787,7 +804,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           contextInteractionService.getResumeReadiness(contextId),
         ]);
 
-        if (currentRequestId !== activePreviewRequestId || get().selectedContextId !== contextId) {
+        if (requestId !== activePreviewRequestId || get().selectedContextId !== contextId) {
           return;
         }
 
@@ -795,14 +812,28 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const minimalWorkset = worksetRes.status === 'fulfilled' ? worksetRes.value : null;
         const readinessData = readinessRes.status === 'fulfilled' ? readinessRes.value : null;
 
+        // Existing valid preview for failure recovery (Requirement 8)
+        const existingValidPreview =
+          (get().activePreview?.contextId === contextId ? get().activePreview : null) ||
+          launcherPreviewCache.get(contextId)?.model ||
+          null;
+
+        const worksetError =
+          worksetRes.status === 'rejected'
+            ? worksetRes.reason instanceof Error
+              ? worksetRes.reason.message
+              : String(worksetRes.reason)
+            : null;
+
         const name =
           wsMeta?.name ||
           stateData?.context_name ||
           minimalWorkset?.contextName ||
           readinessData?.context_name ||
+          existingValidPreview?.name ||
           'Context';
 
-        const rawState = (stateData?.state || wsMeta?.lifecycle_state || 'recent').toLowerCase();
+        const rawState = (stateData?.state || wsMeta?.lifecycle_state || existingValidPreview?.state || 'recent').toLowerCase();
         const isAmbiguous = rawState === 'uncertain' || rawState === 'insufficient_evidence';
         const isStale = rawState === 'dormant' || rawState === 'archived' || rawState === 'very_stale';
 
@@ -816,39 +847,46 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             }
           : null;
 
-        const presentation = effectiveWorkset
-          ? createWorksetPresentationModel(effectiveWorkset)
-          : createEmptyWorksetPresentation(contextId, name, rawState as any);
+        let presentation: WorksetPresentationModel | null = null;
+        let previewItems: LauncherPreviewItem[] = [];
 
-        // Extract and categorize workset items
-        const previewItems: LauncherPreviewItem[] = [
-          ...presentation.primaryFocus,
-          ...presentation.references,
-          ...presentation.suggestedAdditions,
-        ].map((pItem) => {
-          const itemSnippet =
-            minimalWorkset?.primaryItems.find((i) => i.id === pItem.id)?.contentSnippet ||
-            minimalWorkset?.supportingItems.find((i) => i.id === pItem.id)?.contentSnippet ||
-            minimalWorkset?.referenceItems.find((i) => i.id === pItem.id)?.contentSnippet ||
-            minimalWorkset?.suggestedAdditions.find((i) => i.id === pItem.id)?.contentSnippet ||
-            null;
+        if (effectiveWorkset) {
+          presentation = createWorksetPresentationModel(effectiveWorkset);
+          previewItems = [
+            ...presentation.primaryFocus,
+            ...presentation.references,
+            ...presentation.suggestedAdditions,
+          ].map((pItem) => {
+            const itemSnippet =
+              minimalWorkset?.primaryItems.find((i) => i.id === pItem.id)?.contentSnippet ||
+              minimalWorkset?.supportingItems.find((i) => i.id === pItem.id)?.contentSnippet ||
+              minimalWorkset?.referenceItems.find((i) => i.id === pItem.id)?.contentSnippet ||
+              minimalWorkset?.suggestedAdditions.find((i) => i.id === pItem.id)?.contentSnippet ||
+              null;
 
-          return {
-            id: pItem.id,
-            title: pItem.title,
-            itemType: pItem.itemType,
-            relevance: pItem.relevanceTier === 'primary' ? 'primary' : 'secondary',
-            isImportant: pItem.isImportant,
-            appName: pItem.appName,
-            domain: pItem.domain,
-            snippet: itemSnippet,
-            isSuggestedAddition: pItem.isSuggestedAddition,
-            provenance: pItem.provenance,
-            status: pItem.status,
-            confidence: pItem.confidence,
-            relevanceTier: pItem.relevanceTier,
-          };
-        });
+            return {
+              id: pItem.id,
+              title: pItem.title,
+              itemType: pItem.itemType,
+              relevance: pItem.relevanceTier === 'primary' ? 'primary' : 'secondary',
+              isImportant: pItem.isImportant,
+              appName: pItem.appName,
+              domain: pItem.domain,
+              snippet: itemSnippet,
+              isSuggestedAddition: pItem.isSuggestedAddition,
+              provenance: pItem.provenance,
+              status: pItem.status,
+              confidence: pItem.confidence,
+              relevanceTier: pItem.relevanceTier,
+            };
+          });
+        } else if (worksetError && existingValidPreview && existingValidPreview.worksetItems.length > 0) {
+          // Requirement 8: Preserve valid workset items and presentation when refresh fails
+          previewItems = existingValidPreview.worksetItems;
+          presentation = existingValidPreview.worksetPresentation || null;
+        } else {
+          presentation = createEmptyWorksetPresentation(contextId, name, rawState as any);
+        }
 
         const importantItems = previewItems
           .filter((i) => i.isImportant || i.relevance === 'primary')
@@ -858,29 +896,34 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const readinessBand =
           readinessData?.readiness?.readiness ||
           stateData?.readiness?.readiness ||
-          presentation.readinessBand ||
+          presentation?.readinessBand ||
+          existingValidPreview?.readinessBand ||
           (isStale ? 'partial' : 'ready');
 
         const readinessSummary =
           readinessData?.formatted_resume_summary ||
           stateData?.resume_state?.formatted_resume_summary ||
+          existingValidPreview?.readinessSummary ||
           'Ready to continue working in this context.';
 
         const readinessExplanation =
           readinessData?.readiness?.formatted_explanation ||
           stateData?.readiness?.formatted_explanation ||
-          presentation.readinessExplanation ||
+          presentation?.readinessExplanation ||
+          existingValidPreview?.readinessExplanation ||
           undefined;
 
         const reasons =
           readinessData?.readiness?.reasons ||
           stateData?.readiness?.reasons ||
+          existingValidPreview?.reasons ||
           [];
 
         const taskTitle =
-          presentation.activeTaskTitle ||
+          presentation?.activeTaskTitle ||
           stateData?.task_title ||
           readinessData?.left_off_on ||
+          existingValidPreview?.taskTitle ||
           null;
 
         const targetContextItem =
@@ -891,6 +934,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           targetContextItem?.projectIdentifier ||
           (wsMeta as any)?.project_identifier ||
           (stateData as any)?.project_identifier ||
+          existingValidPreview?.projectIdentifier ||
           null;
 
         const repository =
@@ -898,21 +942,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           (wsMeta as any)?.repository ||
           (wsMeta as any)?.repo_name ||
           (stateData as any)?.repository ||
+          existingValidPreview?.repository ||
           null;
 
         const workspacePath =
           targetContextItem?.workspacePath ||
           (wsMeta as any)?.path ||
+          existingValidPreview?.workspacePath ||
           null;
 
         const description =
           targetContextItem?.description ||
           (wsMeta as any)?.description ||
+          existingValidPreview?.description ||
           null;
 
         const isPinned = Boolean(
           targetContextItem?.isPinned ??
           (wsMeta as any)?.is_pinned ??
+          existingValidPreview?.isPinned ??
           false
         );
 
@@ -926,33 +974,29 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           repository,
           workspacePath,
           taskTitle,
-          lastActiveAt: presentation.lastActiveAt || stateData?.last_active_at || wsMeta?.updated_at || null,
-          durationEstimate: stateData?.freshness_display || null,
+          lastActiveAt: presentation?.lastActiveAt || stateData?.last_active_at || wsMeta?.updated_at || existingValidPreview?.lastActiveAt || null,
+          durationEstimate: stateData?.freshness_display || existingValidPreview?.durationEstimate || null,
           readinessBand,
           readinessSummary,
           readinessExplanation,
           reasons,
           importantItems,
           worksetItems: previewItems,
-          itemCount: presentation.totalItemCount,
-          activitySummary: presentation.recentActivitySummary || stateData?.last_meaningful_activity || readinessData?.last_meaningful_activity || null,
+          itemCount: presentation?.totalItemCount ?? previewItems.length,
+          activitySummary: presentation?.recentActivitySummary || stateData?.last_meaningful_activity || readinessData?.last_meaningful_activity || existingValidPreview?.activitySummary || null,
           isAmbiguous,
           isStale,
           worksetPresentation: presentation,
         };
 
-        // Cache the retrieved model
-        launcherPreviewCache.set(contextId, {
-          model: previewModel,
-          timestamp: Date.now(),
-        });
+        // Cache the retrieved model only on successful retrieval
+        if (!worksetError) {
+          launcherPreviewCache.set(contextId, {
+            model: previewModel,
+            timestamp: Date.now(),
+          });
+        }
 
-        const worksetError =
-          worksetRes.status === 'rejected'
-            ? worksetRes.reason instanceof Error
-              ? worksetRes.reason.message
-              : String(worksetRes.reason)
-            : null;
         const stateError =
           stateRes.status === 'rejected'
             ? stateRes.reason instanceof Error
@@ -962,7 +1006,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const effectiveError = worksetError || (stateError && !minimalWorkset ? stateError : null);
 
         // Only update if this context is still selected and matches latest request
-        if (currentRequestId === activePreviewRequestId && get().selectedContextId === contextId) {
+        if (requestId === activePreviewRequestId && get().selectedContextId === contextId) {
           set({
             activePreview: previewModel,
             isLoadingPreview: false,
@@ -970,7 +1014,24 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           });
         }
       } catch (err) {
-        if (currentRequestId === activePreviewRequestId && get().selectedContextId === contextId) {
+        if (requestId === activePreviewRequestId && get().selectedContextId === contextId) {
+          const existingValidPreview =
+            (get().activePreview?.contextId === contextId ? get().activePreview : null) ||
+            launcherPreviewCache.get(contextId)?.model ||
+            null;
+
+          const errorMsg = err instanceof Error ? err.message : 'Context unavailable or failed to load preview';
+
+          // Requirement 8: If valid data exists for this context, preserve it!
+          if (existingValidPreview && existingValidPreview.worksetItems.length > 0) {
+            set({
+              isLoadingPreview: false,
+              previewError: errorMsg,
+              activePreview: existingValidPreview,
+            });
+            return;
+          }
+
           const targetContextItem =
             (get().activeContext?.id === contextId ? get().activeContext : null) ||
             get().recentContexts.find((c) => c.id === contextId);
@@ -981,7 +1042,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
           set({
             isLoadingPreview: false,
-            previewError: err instanceof Error ? err.message : 'Context unavailable or failed to load preview',
+            previewError: errorMsg,
             activePreview: {
               contextId,
               name: fallbackName,
@@ -1009,7 +1070,20 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
           });
         }
       }
-    }, 40);
+    };
+
+    if (options?.forceRefresh) {
+      await executeFetch(currentRequestId);
+    } else {
+      await new Promise<void>((resolve) => {
+        pendingDebounceResolve = resolve;
+        previewDebounceTimer = setTimeout(async () => {
+          pendingDebounceResolve = null;
+          await executeFetch(currentRequestId);
+          resolve();
+        }, 40);
+      });
+    }
   },
 
   fetchLauncherData: async () => {
@@ -1270,7 +1344,11 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
               recentContexts: state.recentContexts.map((c) => (c.id === targetId ? { ...c, name: newName } : c)),
             }));
           }
+          invalidateLauncherPreviewCache(targetId);
           await get().fetchLauncherData();
+          if (get().selectedContextId === targetId) {
+            await get().selectContextById(targetId, { forceRefresh: true });
+          }
           toast.success(result.message || 'Context renamed');
         } else if (actionId === 'context.pin' || actionId === 'context.unpin') {
           const newPinnedState = actionId === 'context.pin';

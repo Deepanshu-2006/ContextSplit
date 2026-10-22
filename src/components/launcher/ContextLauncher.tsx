@@ -193,16 +193,11 @@ export function ContextLauncher() {
         setSelectedIndex(0);
         selectContextById(filteredList[0].id);
       }
-    } else if (selectedIndex >= 0 && selectedIndex < filteredList.length) {
-      const current = filteredList[selectedIndex];
-      if (current && current.id !== selectedContextId) {
-        selectContextById(current.id);
-      }
     } else {
       setSelectedIndex(0);
       selectContextById(filteredList[0].id);
     }
-  }, [filteredList, selectedContextId, selectedIndex, selectContextById, setSelectedIndex]);
+  }, [filteredList, selectedContextId, selectContextById, setSelectedIndex]);
 
   // Mac-native Keyboard Navigation with two-stage inspection & resume
   useEffect(() => {
@@ -294,6 +289,7 @@ export function ContextLauncher() {
         e.preventDefault();
         if (filteredList.length > 0) {
           setSelectedIndex(0);
+          selectContextById(filteredList[0].id);
         }
         return;
       }
@@ -308,7 +304,9 @@ export function ContextLauncher() {
         }
         e.preventDefault();
         if (filteredList.length > 0) {
-          setSelectedIndex(filteredList.length - 1);
+          const lastIdx = filteredList.length - 1;
+          setSelectedIndex(lastIdx);
+          selectContextById(filteredList[lastIdx].id);
         }
         return;
       }
@@ -332,6 +330,10 @@ export function ContextLauncher() {
           if (filteredList.length > 0) {
             const nextIndex = (selectedIndex + 1) % filteredList.length;
             setSelectedIndex(nextIndex);
+            const target = filteredList[nextIndex];
+            if (target) {
+              selectContextById(target.id);
+            }
           }
           return;
         }
@@ -341,6 +343,10 @@ export function ContextLauncher() {
           if (filteredList.length > 0) {
             const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
             setSelectedIndex(prevIndex);
+            const target = filteredList[prevIndex];
+            if (target) {
+              selectContextById(target.id);
+            }
           }
           return;
         }
@@ -727,6 +733,7 @@ export function ContextLauncher() {
                             dataIndex={globalIdx}
                             onSelect={() => {
                               setSelectedIndex(globalIdx);
+                              selectContextById(item.id);
                               setIsPreviewOpen(true);
                             }}
                             onResume={() => resumeContextById(item.id)}
@@ -753,7 +760,7 @@ export function ContextLauncher() {
             aria-label="Selected Context Preview"
           >
             <ContextPreviewPane
-              preview={activePreview}
+              preview={activePreview?.contextId === selectedContextId ? activePreview : null}
               isLoading={isLoadingPreview}
               isResuming={isResuming}
               isActionExecuting={isActionExecuting}
@@ -1422,6 +1429,30 @@ function ContextPreviewPane({
             </button>
           </div>
         ) : null}
+
+        {error && (
+          <div
+            id="launcher-refresh-error-banner"
+            data-testid="workset-refresh-error-banner"
+            role="alert"
+            className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/20 text-amber-200 flex items-start gap-2 text-xs"
+          >
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="font-medium text-amber-300">Workset Refresh Notice</p>
+              <p className="text-[11px] text-amber-400/90 mt-0.5">{error}</p>
+            </div>
+            <button
+              onClick={() => {
+                useLauncherStore.setState({ previewError: null });
+              }}
+              className="text-stone-400 hover:text-white cursor-pointer"
+              aria-label="Dismiss error"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
 
         {/* Working Set Section (Requirements 2, 3, 4, 7, 8, 9, 10, 11) */}
         <div className="space-y-1.5 flex-1 min-h-0">
