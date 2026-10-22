@@ -250,12 +250,12 @@ export function normalizeWorksetItem(
 
   // 4. Resolve Clean Title (Zero Fabrication, Graceful Fallback)
   let cleanTitle = (raw.title || '').trim();
-  if (!cleanTitle) {
-    if (status === 'deleted') {
-      cleanTitle = '[Deleted Item]';
-    } else if (status === 'missing') {
-      cleanTitle = '[Unavailable Item]';
-    } else if (raw.contentSnippet) {
+  if (status === 'deleted') {
+    cleanTitle = '[Deleted Item]';
+  } else if (status === 'missing') {
+    cleanTitle = '[Unavailable Item]';
+  } else if (!cleanTitle) {
+    if (raw.contentSnippet) {
       cleanTitle = raw.contentSnippet.trim();
     } else if (raw.itemType === 'url') {
       cleanTitle = raw.domain ? `Link (${raw.domain})` : 'Captured Link';
@@ -433,7 +433,16 @@ export function deriveMinimalWorkset(input: WorksetDerivationInput): MinimalCont
     if (diff !== 0) return diff;
 
     // Confidence descending
-    return b.confidence - a.confidence;
+    const confDiff = b.confidence - a.confidence;
+    if (Math.abs(confDiff) > 0.0001) return confDiff;
+
+    // Recency descending
+    const timeA = a.lastActiveAt || a.createdAt || '';
+    const timeB = b.lastActiveAt || b.createdAt || '';
+    if (timeA !== timeB) return timeB.localeCompare(timeA);
+
+    // Stable tie-breaker: item id ascending
+    return a.id.localeCompare(b.id);
   });
 
   // 3. Partition into categorized slices

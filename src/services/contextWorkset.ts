@@ -183,3 +183,14 @@ export const getActiveWorkset = contextWorksetService.getActiveWorkset;
 export const submitWorksetFeedback = contextWorksetService.submitWorksetFeedback;
 export const controlContextMemory = contextWorksetService.controlContextMemory;
 
+export {
+  contextWorksetRetrievalService,
+  retrieveContextWorkset,
+  retrieveFromRepository,
+  retrieveFromEngine,
+} from "./contextWorksetRetrieval";
+export type {
+  WorksetRetrievalOptions,
+  WorksetRetrievalLogMeta,
+} from "./contextWorksetRetrieval";
+
