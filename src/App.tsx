@@ -37,7 +37,14 @@ function App() {
   const { checkForCandidates } = useDiscoveryStore();
   const { toggleLauncher } = useLauncherStore();
   
-  const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
+  let windowLabel = '';
+  try {
+    if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+      windowLabel = getCurrentWindow()?.label || '';
+    }
+  } catch (err) {
+    console.warn("Could not determine window label:", err);
+  }
   const isNotchTarget = windowLabel === "macos-notch-target";
   const isOrbTarget = windowLabel === "windows-orb-target";
   
@@ -122,7 +129,12 @@ function App() {
   }
 
   if (isLoading) {
-    return <div className="w-screen h-screen bg-white flex items-center justify-center">Loading...</div>;
+    return (
+      <div className="w-screen h-screen bg-stone-900 text-stone-100 flex flex-col items-center justify-center gap-3">
+        <div className="w-6 h-6 border-2 border-stone-600 border-t-amber-400 rounded-full animate-spin" />
+        <span className="text-sm font-medium text-stone-300">Loading ContextSplit...</span>
+      </div>
+    );
   }
 
   return (

@@ -6,7 +6,14 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 export function useDragAndDrop() {
   useEffect(() => {
     let dragCounter = 0;
-    const windowLabel = typeof window !== 'undefined' ? getCurrentWindow().label : '';
+    let windowLabel = '';
+    try {
+      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
+        windowLabel = getCurrentWindow()?.label || '';
+      }
+    } catch (err) {
+      console.warn("Could not determine window label in useDragAndDrop:", err);
+    }
     const isNotch = windowLabel === "macos-notch-target";
     const isWindowsOrb = windowLabel === "windows-orb-target";
 
