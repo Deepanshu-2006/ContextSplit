@@ -161,46 +161,77 @@ export interface MinimalContextWorkset {
 }
 ```
 
-### 3.2 Launcher Presentation Slice
+### 3.2 Context Launcher Presentation Model (`WorksetPresentationModel`)
+
+To keep launcher rendering performant, deterministic, and free of hallucinations, the presentation layer uses an independent projection model defined in [`src/models/contextWorksetPresentation.ts`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972%40gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/models/contextWorksetPresentation.ts):
 
 ```typescript
-export interface LauncherWorksetSlice {
+export type WorksetPopulationState = 'empty' | 'partial' | 'complete';
+
+export interface WorksetPresentationItem {
+  id: string;
+  contextId: string;
+  title: string;
+  itemType: string;
+  relevanceTier: WorksetItemRelevanceTier;
+  provenance: WorksetProvenance;
+  isSuggestedAddition: boolean;
+  isImportant: boolean;
+  status: WorksetItemStatus;
+  appName: string | null;
+  domain: string | null;
+  confidence: number;
+  action: WorksetItemActionDescriptor;
+}
+
+export interface WorksetPresentationModel {
   contextId: string;
   contextName: string;
+  lifecycleState: ContextOperationalLifecycleState;
+  readinessBand: string;
+  readinessExplanation: string | null;
+  activeTaskId: string | null;
   activeTaskTitle: string | null;
-  primaryFocus: MinimalWorksetItem[];
-  references: MinimalWorksetItem[];
-  suggestedAdditions: MinimalWorksetItem[];
-  totalCount: number;
+  taskConfidence: number | null;
+  hasTask: boolean;
+  recentActivitySummary: string | null;
+  lastActiveAt: string | null;
+  primaryFocus: WorksetPresentationItem[]; // Max 3
+  references: WorksetPresentationItem[];   // Max 3
+  suggestedAdditions: WorksetPresentationItem[]; // Max 2
+  totalItemCount: number;
+  populationState: WorksetPopulationState;
   hasItems: boolean;
+  hasSuggestions: boolean;
 }
 ```
+
+#### Key Presentation Decisions
+1. **Zero-Invention Guarantee:** When an active task or recent activity summary does not exist in persisted data, the presentation model assigns `null` and `hasTask: false`. Placeholder text (e.g., *"Working on context"*) is strictly forbidden.
+2. **Explicit Population States:** Contexts are explicitly classified into `'empty'` (0 items, no task), `'partial'` (items without task, task without items, or references only), or `'complete'` (task grounding + primary focus items).
+3. **Bounded Density:** Prevents cognitive overload by capping collections to 3 primary, 3 reference, and 2 suggested additions.
+4. **Action-Precomputed:** Every item carries its pre-resolved click action (`open_browser`, `open_file`, `copy_content`, `accept_suggestion`), disabling actions for deleted or missing records with explanatory reasons.
+5. **Reference Efficiency:** Omits large text bodies, full metadata JSON, and vector embeddings, preserving only IDs and metadata needed by the launcher preview pane.
 
 ---
 
 ## 4. Verification & Test Suite
 
-The contract is verified by a dedicated test suite in [`src/models/contextWorkset.test.ts`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972@gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/models/contextWorkset.test.ts):
+The contract, retrieval service, and presentation models are verified by 48 tests across 3 dedicated test suites:
 
-| Test Suite Section | Scenarios Verified | Status |
+| Test Suite File | Coverage Domain | Status |
 |---|---|---|
-| **1. Minimal Workset & Model Reuse** | Essential fields populated, clean handling of empty contexts without fabricated tasks | **PASSED (2/2)** |
-| **2. Confirmed vs Inferred** | Strict separation of provenance, confirmed items outrank inferred suggestions | **PASSED (2/2)** |
-| **3. Selective Relevance** | Stale workspace items below 0.28 excluded, pinned items retained despite age | **PASSED (2/2)** |
-| **4. Physical Location & Multi-Context** | Inbox items retain `physicalLocation: 'inbox'`, cross-context sharing without leakage | **PASSED (2/2)** |
-| **5. Relevance Tiers & Sizing** | Correct partitioning, Primary tier capped at 5 with demotion of overflow | **PASSED (2/2)** |
-| **6. Missing & Deleted Items** | Predictable `[Deleted Item]` fallback, removal from primary tier, disabled action states | **PASSED (4/4)** |
-| **7. Zero AI Requirement** | Derives in $< 15\text{ms}$ offline, accepts optional background AI enrichment | **PASSED (2/2)** |
-| **8. Backend DTO Compatibility** | Seamless adaptation from Rust backend `ContextWorkset` struct | **PASSED (1/1)** |
-| **9. Launcher Presentation Slice** | Bounded presentation slices (3 primary, 3 ref, 2 sug), action resolution for click/copy | **PASSED (2/2)** |
-| **Overall Vitest Execution** | **19 tests run across 9 domain suites** | **100% PASSED (0 failures)** |
+| [`src/models/contextWorkset.test.ts`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972%40gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/models/contextWorkset.test.ts) | Contract models, normalization, provenance, tier demotion, edge-case statuses, offline derivation | **PASSED (19/19)** |
+| [`src/services/contextWorksetRetrieval.test.ts`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972%40gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/services/contextWorksetRetrieval.test.ts) | Targeted indexed queries, empty contexts, multi-context items, deduplication, clutter exclusion, zero-AI, privacy logging | **PASSED (19/19)** |
+| [`src/models/contextWorksetPresentation.test.ts`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972%40gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/models/contextWorksetPresentation.test.ts) | Empty/partial/complete population states, zero-invention invariants, bounded collections, disabled actions for missing/deleted items | **PASSED (10/10)** |
+| **Total Test Execution** | **Full Context Workset Architecture Verification** | **100% PASSED (48/48)** |
 
 ---
 
 ## 5. Summary & Next Steps
 
-This contract formally establishes the boundaries, guarantees, and adapters for the Context Workset.
+This contract formally establishes the boundaries, guarantees, retrieval service, and presentation model for the Context Workset.
 
-With this specification ratified and unit-tested:
-1. The **Context Launcher UI** can bind to `LauncherWorksetSlice` and `resolveWorksetItemAction` to render interactive, tiered workset rows with click-to-open and keyboard navigation.
-2. The **Resume Flow** can pass the minimal workset to `workspaceStore` to highlight active working items on the canvas upon context activation.
+Next Steps:
+1. Bind [`WorksetPresentationModel`](file:///Users/deepanshukhatri/Library/CloudStorage/GoogleDrive-deepanshukhatri20061972%40gmail.com/My%20Drive/Cloud%20Desktop/ContextSplit/src/models/contextWorksetPresentation.ts) to the Context Launcher preview pane (`WorksetPreviewRow` and section headers) in `src/components/launcher/ContextLauncher.tsx`.
+2. Connect keyboard traversal (`ArrowRight` into workset items).

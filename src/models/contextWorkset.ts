@@ -663,3 +663,19 @@ export function resolveWorksetItemAction(item: MinimalWorksetItem): WorksetItemA
     isExecutable: true,
   };
 }
+
+// =========================================================================
+// 10. Presentation Model Re-Exports
+// =========================================================================
+
+export {
+  toWorksetPresentationItem,
+  createWorksetPresentationModel,
+  createEmptyWorksetPresentation,
+} from './contextWorksetPresentation';
+
+export type {
+  WorksetPopulationState,
+  WorksetPresentationItem,
+  WorksetPresentationModel,
+} from './contextWorksetPresentation';
