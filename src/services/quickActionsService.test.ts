@@ -33,7 +33,14 @@ vi.mock('./db', () => ({
   db: {
     archiveWorkspace: vi.fn(),
     unarchiveWorkspace: vi.fn(),
+    getItem: vi.fn(),
   },
+}));
+
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
+  revealItemInDir: vi.fn().mockResolvedValue(undefined),
+  openPath: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('Quick Actions Contract & Service', () => {
@@ -318,6 +325,162 @@ describe('Quick Actions Contract & Service', () => {
         expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
       });
     });
+
+    describe('item.open and item.reveal', () => {
+      it('successfully opens valid URL item in external browser and preserves context state', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-url-1',
+          workspace_id: 'ctx-1',
+          session_id: null,
+          item_type: 'url',
+          content: 'https://docs.rs/tauri/latest',
+          title: 'Tauri Documentation',
+          metadata: '{}',
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const { openUrl } = await import('@tauri-apps/plugin-opener');
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-url-1');
+
+        expect(result.success).toBe(true);
+        expect(result.outcome).toBe('SUCCESS');
+        expect(result.message).toContain('Opened link in browser');
+        expect(result.targetItemId).toBe('item-url-1');
+        expect(result.resolvedContextId).toBe('ctx-1');
+        expect(openUrl).toHaveBeenCalledWith('https://docs.rs/tauri/latest');
+
+        // Epistemic Invariants: Zero mutation of contextual memberships or workspace locations
+        expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
+        expect(db.archiveWorkspace).not.toHaveBeenCalled();
+      });
+
+      it('successfully reveals valid File item in directory without moving it', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-file-1',
+          workspace_id: 'ctx-1',
+          session_id: null,
+          item_type: 'file',
+          content: '/Users/test/workspace/report.pdf',
+          title: 'Report PDF',
+          metadata: '{}',
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const { revealItemInDir } = await import('@tauri-apps/plugin-opener');
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-file-1');
+
+        expect(result.success).toBe(true);
+        expect(result.outcome).toBe('SUCCESS');
+        expect(result.message).toContain('Revealed file');
+        expect(revealItemInDir).toHaveBeenCalledWith('/Users/test/workspace/report.pdf');
+
+        // Epistemic Invariants: Viewing an item never confirms its relationship
+        expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
+      });
+
+      it('rejects unsupported item types (e.g. text notes) without inventing operations', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-text-1',
+          workspace_id: 'ctx-1',
+          session_id: null,
+          item_type: 'text',
+          content: 'Plain text note snippet with no external target.',
+          title: 'Quick Scratchpad',
+          metadata: '{}',
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const { openUrl, revealItemInDir } = await import('@tauri-apps/plugin-opener');
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-text-1');
+
+        expect(result.success).toBe(false);
+        expect(result.outcome).toBe('UNSUPPORTED');
+        expect(result.message).toContain("Opening is not supported for item type 'text'");
+        expect(openUrl).not.toHaveBeenCalled();
+        expect(revealItemInDir).not.toHaveBeenCalled();
+      });
+
+      it('safely handles unavailable or non-existent items without throwing', async () => {
+        vi.mocked(db.getItem).mockRejectedValueOnce(new Error('Record not found in SQLite'));
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-missing');
+
+        expect(result.success).toBe(false);
+        expect(result.outcome).toBe('ERROR');
+        expect(result.message).toContain('Item is unavailable or has been removed');
+        expect(result.targetItemId).toBe('item-missing');
+      });
+
+      it('blocks opening deleted items with appropriate feedback', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-del-1',
+          workspace_id: 'ctx-1',
+          session_id: null,
+          item_type: 'url',
+          content: 'https://example.com',
+          title: 'Deleted Link',
+          metadata: JSON.stringify({ is_deleted: true }),
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-del-1');
+
+        expect(result.success).toBe(false);
+        expect(result.outcome).toBe('BLOCKED');
+        expect(result.message).toContain('Item has been deleted and cannot be opened');
+      });
+
+      it('rejects unsafe URL protocols (e.g. javascript: schemes)', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-unsafe',
+          workspace_id: 'ctx-1',
+          session_id: null,
+          item_type: 'url',
+          content: 'javascript:alert(document.cookie)',
+          title: 'Unsafe Link',
+          metadata: '{}',
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const { openUrl } = await import('@tauri-apps/plugin-opener');
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-1', 'item-unsafe');
+
+        expect(result.success).toBe(false);
+        expect(result.outcome).toBe('ERROR');
+        expect(result.message).toContain('Invalid or unsafe URL format');
+        expect(openUrl).not.toHaveBeenCalled();
+      });
+
+      it('does not treat viewing an inferred item as confirmation that its relationship is correct', async () => {
+        vi.mocked(db.getItem).mockResolvedValueOnce({
+          id: 'item-inferred-url',
+          workspace_id: 'other-ws',
+          session_id: null,
+          item_type: 'url',
+          content: 'https://github.com/pulls',
+          title: 'Inferred PR Link',
+          metadata: '{}',
+          created_at: '2026-10-22T08:00:00Z',
+          updated_at: '2026-10-22T08:00:00Z',
+        });
+
+        const result = await quickActionsService.executeItemAction('item.open', 'ctx-target', 'item-inferred-url');
+
+        expect(result.success).toBe(true);
+        expect(result.outcome).toBe('SUCCESS');
+        // Must never alter memberships, provenance, or workspace assignments
+        expect(contextWorksetService.controlContextMemory).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // =========================================================================
@@ -386,6 +549,48 @@ describe('Quick Actions Contract & Service', () => {
       const deleteAct = importantActions.find((a) => a.id === 'item.delete');
       expect(deleteAct?.isSupported).toBe(false);
       expect(deleteAct?.unsupportedReason).toBeDefined();
+    });
+
+    it('evaluates available item actions for url, file, text, and deleted items', () => {
+      const urlActions = getAvailableItemActions({
+        contextId: 'ctx-1',
+        itemId: 'item-url',
+        itemType: 'url',
+        isImportant: false,
+      });
+      const urlOpen = urlActions.find((a) => a.id === 'item.open');
+      expect(urlOpen?.isSupported).toBe(true);
+      expect(urlOpen?.label).toBe('Open Link in Browser');
+
+      const fileActions = getAvailableItemActions({
+        contextId: 'ctx-1',
+        itemId: 'item-file',
+        itemType: 'file',
+        isImportant: false,
+      });
+      const fileOpen = fileActions.find((a) => a.id === 'item.open');
+      expect(fileOpen?.isSupported).toBe(true);
+      expect(fileOpen?.label).toBe('Reveal File in Folder');
+
+      const textActions = getAvailableItemActions({
+        contextId: 'ctx-1',
+        itemId: 'item-text',
+        itemType: 'text',
+        isImportant: false,
+      });
+      const textOpen = textActions.find((a) => a.id === 'item.open');
+      expect(textOpen?.isSupported).toBe(false);
+      expect(textOpen?.unsupportedReason).toContain('not supported for item type');
+
+      const deletedActions = getAvailableItemActions({
+        contextId: 'ctx-1',
+        itemId: 'item-del',
+        itemType: 'url',
+        status: 'deleted',
+      });
+      const delOpen = deletedActions.find((a) => a.id === 'item.open');
+      expect(delOpen?.isSupported).toBe(false);
+      expect(delOpen?.unsupportedReason).toContain('deleted');
     });
   });
 });
