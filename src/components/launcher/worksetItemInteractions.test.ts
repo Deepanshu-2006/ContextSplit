@@ -3,7 +3,6 @@ import {
   useLauncherStore,
   invalidateLauncherPreviewCache,
 } from '../../store/launcherStore';
-import { contextInteractionService } from '../../services/contextInteractionService';
 import { contextWorksetService } from '../../services/contextWorkset';
 import { db } from '../../services/db';
 import { useWorkspaceStore } from '../../store/workspaceStore';
