@@ -1080,7 +1080,7 @@ function ContextPreviewPane({
       executingActionId !== 'context.resume'
   );
 
-  if (isLoading) {
+  if (isLoading && !preview) {
     return (
       <div className="space-y-3 animate-pulse p-1">
         <div className="h-5 w-40 bg-stone-800 rounded" />
@@ -1092,7 +1092,7 @@ function ContextPreviewPane({
     );
   }
 
-  if (error) {
+  if (error && !preview) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-center p-4 space-y-2">
         <AlertCircle size={20} className="text-red-400" />
@@ -1425,12 +1425,26 @@ function ContextPreviewPane({
         {/* Working Set Items */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-[11px] font-medium text-stone-400">
-            <span>Working Set</span>
+            <div className="flex items-center gap-1.5">
+              <span>Working Set</span>
+              {isLoading && (
+                <RefreshCw
+                  size={10}
+                  className="animate-spin text-stone-500"
+                  data-testid="workset-loading-indicator"
+                />
+              )}
+            </div>
             <span className="text-[10px] text-stone-500">{preview.itemCount} items</span>
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <p className="text-xs text-stone-500 py-1.5 text-center italic">No items in active workset</p>
+            <div className="py-2.5 px-2 text-center rounded bg-white/[0.02] border border-white/5 space-y-0.5">
+              <p className="text-xs text-stone-400 italic">No items in active workset</p>
+              {preview.readinessExplanation && (
+                <p className="text-[10px] text-stone-500">{preview.readinessExplanation}</p>
+              )}
+            </div>
           ) : (
             <div className="space-y-0.5 max-h-[140px] overflow-y-auto pr-0.5">
               {preview.worksetItems.map((item) => (
@@ -1789,10 +1803,47 @@ function WorksetPreviewRow({
         ) : (
           <FileText size={12} className="text-stone-400 shrink-0" />
         )}
-        <span className="truncate text-[11px] text-stone-200">{item.title}</span>
+        <span
+          className={`truncate text-[11px] ${
+            item.status === 'deleted'
+              ? 'line-through text-stone-500'
+              : item.status === 'missing'
+              ? 'italic text-stone-400'
+              : 'text-stone-200'
+          }`}
+        >
+          {item.title}
+        </span>
       </div>
 
-      <div className="flex items-center gap-0.5 shrink-0 relative" ref={menuRef}>
+      <div className="flex items-center gap-1 shrink-0 relative" ref={menuRef}>
+        {item.isSuggestedAddition && (
+          <span
+            className="text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono shrink-0"
+            title="Suggested addition inferred from recent activity"
+            data-testid={`badge-suggested-${item.id}`}
+          >
+            Suggested
+          </span>
+        )}
+        {item.status === 'deleted' && (
+          <span
+            className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/20 font-mono shrink-0"
+            title="Item has been deleted"
+            data-testid={`badge-deleted-${item.id}`}
+          >
+            Deleted
+          </span>
+        )}
+        {item.status === 'missing' && (
+          <span
+            className="text-[9px] px-1 py-0.5 rounded bg-stone-500/10 text-stone-400 border border-stone-500/20 font-mono shrink-0"
+            title="Item is unavailable"
+            data-testid={`badge-unavailable-${item.id}`}
+          >
+            Unavailable
+          </span>
+        )}
         {item.appName && (
           <span className="text-[10px] text-stone-500 font-mono mr-1">
             {item.appName}

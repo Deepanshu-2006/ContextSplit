@@ -24,6 +24,7 @@
 
 import { db, Workspace, Item, ContextMembership } from './db';
 import { contextWorksetService } from './contextWorkset';
+import { contextInteractionService } from './contextInteractionService';
 import {
   MinimalContextWorkset,
   RawWorksetItemInput,
@@ -477,7 +478,13 @@ export async function retrieveFromEngine(
   const cleanContextId = contextId.trim();
 
   try {
-    const engineWorkset = await contextWorksetService.getContextWorkset(cleanContextId);
+    let engineWorkset: any = null;
+    try {
+      engineWorkset = await contextInteractionService.getContextWorkset(cleanContextId);
+    } catch {
+      engineWorkset = await contextWorksetService.getContextWorkset(cleanContextId);
+    }
+
     if (!engineWorkset) {
       log({
         contextId: cleanContextId,

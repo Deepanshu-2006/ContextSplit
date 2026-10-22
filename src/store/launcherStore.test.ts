@@ -142,6 +142,7 @@ describe('useLauncherStore', () => {
       projectIdentifier: null,
       repository: null,
       isActive: true,
+      isPinned: false,
       state: 'active',
       lastActiveAt: null,
       taskTitle: 'Hero animation',
@@ -149,6 +150,7 @@ describe('useLauncherStore', () => {
       itemCount: 1,
       memoryStatement: null,
       recentActivitySummary: null,
+      createdAt: null,
       resumeReadiness: {
         readiness: 'ready',
         formattedExplanation: 'Ready with 3 active workset items',

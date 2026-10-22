@@ -388,8 +388,8 @@ export interface WorksetDerivationInput {
  * Reuses existing context, task, session, and membership outputs.
  */
 export function deriveMinimalWorkset(input: WorksetDerivationInput): MinimalContextWorkset {
-  const contextId = input.contextId.trim();
-  const contextName = input.contextName.trim() || 'Untitled Context';
+  const contextId = (input.contextId || '').trim();
+  const contextName = (input.contextName || '').trim() || 'Untitled Context';
   const lifecycleState = input.lifecycleState || 'active';
   const worksetState = input.worksetState || 'active';
 
