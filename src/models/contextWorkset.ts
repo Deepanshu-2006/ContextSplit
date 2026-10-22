@@ -272,7 +272,7 @@ export function normalizeWorksetItem(
     relevanceTier = 'suggested';
   } else if (raw.relevanceTier) {
     const r = raw.relevanceTier.toLowerCase();
-    if (r === 'primary') relevanceTier = 'primary';
+    if (r === 'primary' || r === 'focus') relevanceTier = 'primary';
     else if (r === 'supporting') relevanceTier = 'supporting';
     else if (r === 'recent') relevanceTier = 'recent';
     else if (r === 'suggested' || r === 'related') relevanceTier = 'suggested';

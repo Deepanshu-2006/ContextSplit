@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Play,
   FileText,
+  FileCode,
   Link2,
   MoreHorizontal,
   Pause,
@@ -17,7 +18,13 @@ import {
   Pencil,
   Pin,
   RotateCcw,
+  CheckSquare,
+  Activity,
+  FolderOpen,
+  Copy,
+  Plus,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   useLauncherStore,
   LauncherContextItem,
@@ -1281,39 +1288,35 @@ function ContextPreviewPane({
           </div>
         </div>
 
-        {/* Where You Left Off / Active Task / Description */}
-        <div className="bg-stone-900/40 border border-white/5 rounded-lg p-2.5 space-y-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
-            {preview.taskTitle ? 'Where you left off' : preview.description ? 'Description' : 'Where you left off'}
+        {/* Context Description (when available and distinct from task) */}
+        {preview.description && preview.description !== preview.taskTitle && (
+          <p className="text-xs text-stone-400 line-clamp-2 leading-relaxed px-0.5">
+            {preview.description}
+          </p>
+        )}
+
+        {/* Next Action / Active Task (Requirement 6 - Genuine Data Only) */}
+        {preview.taskTitle && (
+          <div className="flex items-start gap-2.5 px-3 py-2 rounded-lg bg-stone-900/60 border border-white/5 shadow-xs">
+            <CheckSquare size={13} className="text-orange-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
+                Next Action
+              </div>
+              <p className="text-xs font-medium text-stone-200 line-clamp-2 mt-0.5">
+                {preview.taskTitle}
+              </p>
+            </div>
           </div>
-          {preview.taskTitle ? (
-            <p className="text-xs font-medium text-stone-200 line-clamp-2">
-              {preview.taskTitle}
-            </p>
-          ) : preview.description ? (
-            <p className="text-xs text-stone-300 line-clamp-2 leading-snug">
-              {preview.description}
-            </p>
-          ) : preview.activitySummary ? (
-            <p className="text-xs text-stone-300 line-clamp-2 leading-snug">
-              {preview.activitySummary}
-            </p>
-          ) : (
-            <p className="text-xs text-stone-500 italic">No specific task recorded</p>
-          )}
+        )}
 
-          {preview.taskTitle && preview.description && preview.description !== preview.taskTitle && (
-            <p className="text-[11px] text-stone-400/90 line-clamp-2 pt-1 border-t border-white/5 mt-1.5">
-              {preview.description}
-            </p>
-          )}
-
-          {preview.readinessExplanation && (
-            <p className="text-[11px] text-stone-400/90 pt-1 border-t border-white/5 mt-1.5">
-              {preview.readinessExplanation}
-            </p>
-          )}
-        </div>
+        {/* Recent Activity (Requirement 5 - Genuine Data Only) */}
+        {preview.activitySummary && (
+          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-stone-900/30 border border-white/5 text-[11px] text-stone-400">
+            <Activity size={12} className="text-stone-500 shrink-0" />
+            <span className="truncate flex-1">{preview.activitySummary}</span>
+          </div>
+        )}
 
         {/* Warnings / Errors */}
         {notReadyReason && (
@@ -1422,8 +1425,8 @@ function ContextPreviewPane({
           </div>
         ) : null}
 
-        {/* Working Set Items */}
-        <div className="space-y-1.5">
+        {/* Working Set Section (Requirements 2, 3, 4, 7, 8, 9, 10, 11) */}
+        <div className="space-y-1.5 flex-1 min-h-0">
           <div className="flex items-center justify-between text-[11px] font-medium text-stone-400">
             <div className="flex items-center gap-1.5">
               <span>Working Set</span>
@@ -1435,19 +1438,22 @@ function ContextPreviewPane({
                 />
               )}
             </div>
-            <span className="text-[10px] text-stone-500">{preview.itemCount} items</span>
+            <span className="text-[10px] text-stone-500 font-mono">
+              {preview.itemCount} {preview.itemCount === 1 ? 'item' : 'items'}
+            </span>
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <div className="py-2.5 px-2 text-center rounded bg-white/[0.02] border border-white/5 space-y-0.5">
-              <p className="text-xs text-stone-400 italic">No items in active workset</p>
-              {preview.readinessExplanation && (
-                <p className="text-[10px] text-stone-500">{preview.readinessExplanation}</p>
-              )}
+            <div className="py-4 px-3 text-center rounded-lg border border-dashed border-white/10 bg-white/[0.01] flex flex-col items-center justify-center gap-1">
+              <FolderOpen size={16} className="text-stone-600 mb-0.5" />
+              <p className="text-xs font-medium text-stone-400">No items in working set</p>
+              <p className="text-[11px] text-stone-500 max-w-[260px] leading-tight">
+                {preview.readinessExplanation || 'Items opened or captured in this context will appear here.'}
+              </p>
             </div>
           ) : (
-            <div className="space-y-0.5 max-h-[140px] overflow-y-auto pr-0.5">
-              {preview.worksetItems.map((item) => (
+            <div className="space-y-1 max-h-[160px] overflow-y-auto pr-0.5">
+              {preview.worksetItems.slice(0, 5).map((item) => (
                 <WorksetPreviewRow
                   key={item.id}
                   item={item}
@@ -1680,11 +1686,13 @@ function WorksetPreviewRow({
 }: WorksetPreviewRowProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
+  const rowRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemMenuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const isLink = item.itemType === 'url' || item.itemType === 'link';
+  const isFile = item.itemType === 'file';
   const isImportant = Boolean(item.isImportant);
 
   const isItemExecuting = Boolean(isExecuting && executingTargetId === item.id);
@@ -1735,6 +1743,78 @@ function WorksetPreviewRow({
       setFocusedMenuIndex(-1);
     }
   }, [isMenuOpen, itemActions]);
+
+  const handleOpenOrReveal = (e?: React.MouseEvent | React.KeyboardEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+
+    if (item.status === 'deleted') {
+      toast.error('Item has been deleted and cannot be opened.');
+      return;
+    }
+    if (item.status === 'missing') {
+      toast.error('Item is missing or unavailable.');
+      return;
+    }
+
+    // Supported Action: Inferred suggestion accept into context
+    if (item.isSuggestedAddition) {
+      if (onExecuteItemAction) {
+        onExecuteItemAction('item.mark_important', contextId, item.id);
+        toast.success(`Accepted "${item.title}" into context`);
+      }
+      return;
+    }
+
+    // Supported Action: Web Link open in default browser
+    if (isLink) {
+      const targetUrl = item.snippet?.startsWith('http')
+        ? item.snippet
+        : item.domain
+        ? `https://${item.domain}`
+        : item.title?.startsWith('http')
+        ? item.title
+        : null;
+
+      if (targetUrl) {
+        window.open(targetUrl, '_blank');
+        toast.success(`Opening ${item.title}`);
+      } else {
+        useWorkspaceStore.getState().openOverview(contextId);
+      }
+      return;
+    }
+
+    // Supported Action: File open / reveal path
+    if (isFile) {
+      if (item.snippet) {
+        navigator.clipboard?.writeText(item.snippet);
+        toast.success(`Copied path: ${item.snippet}`);
+      }
+      useWorkspaceStore.getState().openOverview(contextId);
+      return;
+    }
+
+    // Supported Action: Note / text copy content
+    const textToCopy = item.snippet || item.title;
+    if (textToCopy) {
+      navigator.clipboard?.writeText(textToCopy);
+      toast.success(`Copied note content`);
+    } else {
+      useWorkspaceStore.getState().openOverview(contextId);
+    }
+  };
+
+  const handleRowKeyDown = (e: React.KeyboardEvent) => {
+    if (e.target === rowRef.current) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        handleOpenOrReveal();
+      }
+    }
+  };
 
   const handleMenuKeyDown = (e: React.KeyboardEvent) => {
     if (itemActions.length === 0) {
@@ -1796,10 +1876,22 @@ function WorksetPreviewRow({
   };
 
   return (
-    <div className="group relative flex items-center justify-between py-1 px-1.5 rounded hover:bg-white/[0.04] text-xs gap-2 text-stone-300 transition-colors">
+    <div
+      ref={rowRef}
+      role="button"
+      tabIndex={0}
+      onClick={handleOpenOrReveal}
+      onKeyDown={handleRowKeyDown}
+      aria-label={`${item.isSuggestedAddition ? 'Accept' : 'Open'} ${item.title}`}
+      className={`group relative flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-white/[0.05] focus:bg-white/[0.05] focus:outline-none focus:ring-1 focus:ring-orange-400/80 text-xs gap-2 text-stone-300 transition-colors select-none cursor-pointer ${
+        item.status === 'deleted' ? 'opacity-60' : ''
+      }`}
+    >
       <div className="flex items-center gap-1.5 min-w-0 flex-1">
         {isLink ? (
-          <Link2 size={12} className="text-stone-400 shrink-0" />
+          <Link2 size={12} className="text-blue-400/90 shrink-0" />
+        ) : isFile ? (
+          <FileCode size={12} className="text-emerald-400/90 shrink-0" />
         ) : (
           <FileText size={12} className="text-stone-400 shrink-0" />
         )}
@@ -1814,21 +1906,39 @@ function WorksetPreviewRow({
         >
           {item.title}
         </span>
+        {item.domain ? (
+          <span className="text-[10px] text-stone-500 font-mono shrink-0 truncate max-w-[90px]">
+            {item.domain}
+          </span>
+        ) : item.appName ? (
+          <span className="text-[10px] text-stone-500 font-mono shrink-0 truncate max-w-[80px]">
+            {item.appName}
+          </span>
+        ) : null}
       </div>
 
       <div className="flex items-center gap-1 shrink-0 relative" ref={menuRef}>
         {item.isSuggestedAddition && (
           <span
-            className="text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono shrink-0"
+            className="text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono shrink-0 font-medium"
             title="Suggested addition inferred from recent activity"
             data-testid={`badge-suggested-${item.id}`}
           >
             Suggested
           </span>
         )}
+        {!item.isSuggestedAddition && item.provenance === 'inferred' && (
+          <span
+            className="text-[9px] px-1 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/20 font-mono shrink-0 font-medium"
+            title="Inferred contextual relationship"
+            data-testid={`badge-inferred-${item.id}`}
+          >
+            Inferred
+          </span>
+        )}
         {item.status === 'deleted' && (
           <span
-            className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/20 font-mono shrink-0"
+            className="text-[9px] px-1 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/20 font-mono shrink-0 font-medium"
             title="Item has been deleted"
             data-testid={`badge-deleted-${item.id}`}
           >
@@ -1837,17 +1947,46 @@ function WorksetPreviewRow({
         )}
         {item.status === 'missing' && (
           <span
-            className="text-[9px] px-1 py-0.5 rounded bg-stone-500/10 text-stone-400 border border-stone-500/20 font-mono shrink-0"
+            className="text-[9px] px-1 py-0.5 rounded bg-stone-500/10 text-stone-400 border border-stone-500/20 font-mono shrink-0 font-medium"
             title="Item is unavailable"
             data-testid={`badge-unavailable-${item.id}`}
           >
             Unavailable
           </span>
         )}
-        {item.appName && (
-          <span className="text-[10px] text-stone-500 font-mono mr-1">
-            {item.appName}
-          </span>
+
+        {/* Action Cue (Click to open / reveal / copy / accept) */}
+        {(!item.status || (item.status !== 'deleted' && item.status !== 'missing')) && (
+          <button
+            type="button"
+            onClick={handleOpenOrReveal}
+            tabIndex={-1}
+            className="p-1 rounded text-stone-500 hover:text-stone-200 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer shrink-0"
+            title={
+              item.isSuggestedAddition
+                ? 'Accept into context'
+                : isLink
+                ? 'Open in browser'
+                : isFile
+                ? 'Reveal file / copy path'
+                : 'Copy note'
+            }
+            aria-label={
+              item.isSuggestedAddition
+                ? `Accept ${item.title} into context`
+                : `Open ${item.title}`
+            }
+          >
+            {item.isSuggestedAddition ? (
+              <Plus size={11} className="text-amber-400" />
+            ) : isLink ? (
+              <ExternalLink size={11} />
+            ) : isFile ? (
+              <ExternalLink size={11} />
+            ) : (
+              <Copy size={11} />
+            )}
+          </button>
         )}
 
         {/* Quick Shortcut: Toggle Importance */}

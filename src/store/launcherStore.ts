@@ -803,8 +803,17 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         const isStale = rawState === 'dormant' || rawState === 'archived' || rawState === 'very_stale';
 
         // Adapt minimal workset into presentation model
-        const presentation = minimalWorkset
-          ? createWorksetPresentationModel(minimalWorkset)
+        const effectiveWorkset = minimalWorkset
+          ? {
+              ...minimalWorkset,
+              activeTaskTitle: minimalWorkset.activeTaskTitle || stateData?.task_title || null,
+              recentActivitySummary:
+                minimalWorkset.recentActivitySummary || stateData?.last_meaningful_activity || null,
+            }
+          : null;
+
+        const presentation = effectiveWorkset
+          ? createWorksetPresentationModel(effectiveWorkset)
           : createEmptyWorksetPresentation(contextId, name, rawState as any);
 
         // Extract and categorize workset items

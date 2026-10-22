@@ -510,4 +510,95 @@ describe('Context Workset Launcher Integration Tests', () => {
     expect(resumeResult.success).toBe(true);
     expect(resumeActionSpy).toHaveBeenCalledWith('context.resume', 'ctx-alpha', expect.anything());
   });
+
+  // =========================================================================
+  // 7. Minimal Context Workset Presentation & Distinction Contract
+  // =========================================================================
+
+  it('7. distinguishes confirmed vs inferred items, shows genuine task/activity data, and handles empty worksets cleanly', async () => {
+    // 7a. Setup context with confirmed item, inferred item, suggested inbox item, real task, and real activity
+    vi.mocked(contextInteractionService.getContextWorkset).mockResolvedValueOnce({
+      context_id: 'ctx-rich',
+      context_name: 'Rich Context',
+      items: [
+        {
+          id: 'item-confirmed-doc',
+          title: 'Architecture Doc.md',
+          item_type: 'file',
+          relevance: 'focus',
+          relevance_score: 0.95,
+          provenance: 'confirmed',
+          app_name: 'VS Code',
+          created_at: '2026-10-22T08:00:00Z',
+        },
+        {
+          id: 'item-inferred-pr',
+          title: 'PR #142: Workset Integration',
+          item_type: 'url',
+          relevance: 'related',
+          relevance_score: 0.88,
+          provenance: 'inferred',
+          domain: 'github.com',
+          created_at: '2026-10-22T08:30:00Z',
+        },
+        {
+          id: 'item-suggested-inbox',
+          title: 'Notes on OAuth.txt',
+          item_type: 'text',
+          relevance: 'related',
+          relevance_score: 0.82,
+          is_suggested_addition: true,
+          provenance: 'inferred',
+          created_at: '2026-10-22T09:00:00Z',
+        },
+      ],
+    } as any);
+
+    vi.mocked(contextInteractionService.getContextState).mockResolvedValueOnce({
+      context_id: 'ctx-rich',
+      context_name: 'Rich Context',
+      task_title: 'Implement OAuth refresh token rotation',
+      last_meaningful_activity: 'Committed initial refresh token tests',
+    } as any);
+
+    vi.mocked(contextInteractionService.getResumeReadiness).mockResolvedValueOnce({
+      readiness: {
+        readiness: 'ready',
+        formatted_explanation: 'Active task and working documents ready for resumption',
+      },
+    } as any);
+
+    useLauncherStore.getState().selectContextById('ctx-rich');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    const preview = useLauncherStore.getState().activePreview;
+    expect(preview?.contextId).toBe('ctx-rich');
+
+    // Genuine Task & Activity verification
+    expect(preview?.taskTitle).toBe('Implement OAuth refresh token rotation');
+    expect(preview?.activitySummary).toBe('Committed initial refresh token tests');
+
+    // Workset items verification
+    expect(preview?.worksetItems).toHaveLength(3);
+
+    const confirmedItem = preview?.worksetItems.find((i) => i.id === 'item-confirmed-doc');
+    expect(confirmedItem?.provenance).toBe('confirmed');
+    expect(confirmedItem?.isSuggestedAddition).toBe(false);
+    expect(confirmedItem?.appName).toBe('VS Code');
+
+    const inferredItem = preview?.worksetItems.find((i) => i.id === 'item-inferred-pr');
+    expect(inferredItem?.provenance).toBe('inferred');
+    expect(inferredItem?.isSuggestedAddition).toBe(false);
+    expect(inferredItem?.domain).toBe('github.com');
+
+    const suggestedItem = preview?.worksetItems.find((i) => i.id === 'item-suggested-inbox');
+    expect(suggestedItem?.provenance).toBe('inferred');
+    expect(suggestedItem?.isSuggestedAddition).toBe(true);
+
+    // Presentation model checks
+    expect(preview?.worksetPresentation?.populationState).toBe('complete');
+    expect(preview?.worksetPresentation?.hasTask).toBe(true);
+    expect(preview?.worksetPresentation?.hasItems).toBe(true);
+    expect(preview?.worksetPresentation?.hasSuggestions).toBe(true);
+  });
 });
