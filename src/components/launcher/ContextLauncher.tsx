@@ -882,6 +882,17 @@ function ContextPreviewPane({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
+  // Streamlined activity summary removing duplicate context names
+  const cleanActivitySummary = useMemo(() => {
+    if (!preview?.activitySummary) return null;
+    const prefix = new RegExp(`^Active in\\s+${preview.name}\\s+with\\s+`, 'i');
+    if (prefix.test(preview.activitySummary)) {
+      const streamlined = preview.activitySummary.replace(prefix, '');
+      return streamlined.charAt(0).toUpperCase() + streamlined.slice(1);
+    }
+    return preview.activitySummary;
+  }, [preview?.activitySummary, preview?.name]);
+
   // Close menu and reset rename when selected context changes
   useEffect(() => {
     setIsMenuOpen(false);
@@ -1283,13 +1294,6 @@ function ContextPreviewPane({
               </>
             )}
             <span>{formatGentleTime(preview.lastActiveAt, preview.durationEstimate)}</span>
-            <span className="text-stone-600">•</span>
-            <span
-              className="font-mono text-[10px] text-stone-500 cursor-help"
-              title={`Context ID: ${preview.contextId}`}
-            >
-              #{preview.contextId.replace(/^ws-/, '').slice(0, 6)}
-            </span>
           </div>
         </div>
 
@@ -1302,24 +1306,24 @@ function ContextPreviewPane({
 
         {/* Next Action / Active Task (Requirement 6 - Genuine Data Only) */}
         {preview.taskTitle && (
-          <div className="flex items-start gap-2.5 px-3 py-2 rounded-lg bg-stone-900/60 border border-white/5 shadow-xs">
+          <div className="flex items-start gap-2 px-2.5 py-1.5 rounded-md bg-white/[0.03] border border-white/5 shadow-xs">
             <CheckSquare size={13} className="text-orange-400 shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-stone-500">
-                Next Action
-              </div>
-              <p className="text-xs font-medium text-stone-200 line-clamp-2 mt-0.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-stone-500 mr-1.5">
+                Task:
+              </span>
+              <span className="text-xs font-medium text-stone-200 line-clamp-2">
                 {preview.taskTitle}
-              </p>
+              </span>
             </div>
           </div>
         )}
 
-        {/* Recent Activity (Requirement 5 - Genuine Data Only) */}
-        {preview.activitySummary && (
-          <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-stone-900/30 border border-white/5 text-[11px] text-stone-400">
+        {/* Recent Activity (Requirement 5 - Genuine Data Only, without duplicate context label) */}
+        {cleanActivitySummary && (
+          <div className="flex items-center gap-2 px-1 text-[11px] text-stone-400">
             <Activity size={12} className="text-stone-500 shrink-0" />
-            <span className="truncate flex-1">{preview.activitySummary}</span>
+            <span className="truncate flex-1">{cleanActivitySummary}</span>
           </div>
         )}
 
@@ -1362,27 +1366,17 @@ function ContextPreviewPane({
           <div
             id="launcher-action-error-banner"
             role="alert"
-            className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 space-y-2 text-xs"
+            className="px-2.5 py-1.5 rounded-md bg-red-950/40 border border-red-500/20 text-red-200 text-xs flex items-center justify-between gap-2 shadow-xs"
           >
-            <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-              <div className="min-w-0 flex-1">
-                <p className="font-medium text-red-300">{actionError.title}</p>
-                <p className="text-[11px] text-red-400/90 mt-0.5">{actionError.message}</p>
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+              <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
+                <p className="font-semibold text-red-300 text-[11px] shrink-0">{actionError.title}</p>
+                <p className="text-[11px] text-red-400/90 truncate">{actionError.message}</p>
               </div>
-              <button
-                onClick={() => {
-                  onClearActionError?.();
-                  onClearResumeState();
-                }}
-                className="text-stone-400 hover:text-white cursor-pointer"
-                aria-label="Dismiss error"
-              >
-                <X size={12} />
-              </button>
             </div>
-            {actionError.isRetryable && (
-              <div className="flex items-center gap-2 pt-0.5">
+            <div className="flex items-center gap-1.5 shrink-0">
+              {actionError.isRetryable && (
                 <button
                   onClick={() => {
                     const actionId = actionError.actionId;
@@ -1396,33 +1390,36 @@ function ContextPreviewPane({
                     }
                   }}
                   disabled={isResuming || isActionExecuting}
-                  className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 font-medium text-[11px] transition-colors cursor-pointer flex items-center gap-1.5"
+                  className="px-1.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 font-medium text-[10px] transition-colors cursor-pointer flex items-center gap-1"
                 >
-                  <RefreshCw size={10} />
+                  <RefreshCw size={9} />
                   <span>Retry</span>
                 </button>
-                <button
-                  onClick={() => {
-                    onClearActionError?.();
-                    onClearResumeState();
-                  }}
-                  className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 text-stone-300 text-[11px] transition-colors cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
+              )}
+              <button
+                onClick={() => {
+                  onClearActionError?.();
+                  onClearResumeState();
+                }}
+                className="text-stone-400 hover:text-white p-0.5 cursor-pointer rounded"
+                aria-label="Dismiss error"
+              >
+                <X size={12} />
+              </button>
+            </div>
           </div>
         ) : resumeError ? (
-          <div className="p-2.5 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-red-300">Resume Failed</p>
-              <p className="text-[11px] text-red-400/90 mt-0.5">{resumeError}</p>
+          <div className="px-2.5 py-1.5 rounded-md bg-red-950/40 border border-red-500/20 text-red-200 flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+              <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
+                <p className="font-semibold text-red-300 text-[11px] shrink-0">Resume Failed</p>
+                <p className="text-[11px] text-red-400/90 truncate">{resumeError}</p>
+              </div>
             </div>
             <button
               onClick={onClearResumeState}
-              className="text-stone-400 hover:text-white cursor-pointer"
+              className="text-stone-400 hover:text-white p-0.5 cursor-pointer rounded"
               aria-label="Dismiss error"
             >
               <X size={12} />
@@ -1435,18 +1432,20 @@ function ContextPreviewPane({
             id="launcher-refresh-error-banner"
             data-testid="workset-refresh-error-banner"
             role="alert"
-            className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/20 text-amber-200 flex items-start gap-2 text-xs"
+            className="px-2.5 py-1.5 rounded-md bg-amber-950/30 border border-amber-500/20 text-amber-200 flex items-center justify-between gap-2 text-xs"
           >
-            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-amber-300">Workset Refresh Notice</p>
-              <p className="text-[11px] text-amber-400/90 mt-0.5">{error}</p>
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
+                <p className="font-semibold text-amber-300 text-[11px] shrink-0">Notice</p>
+                <p className="text-[11px] text-amber-400/90 truncate">{error}</p>
+              </div>
             </div>
             <button
               onClick={() => {
                 useLauncherStore.setState({ previewError: null });
               }}
-              className="text-stone-400 hover:text-white cursor-pointer"
+              className="text-stone-400 hover:text-white p-0.5 cursor-pointer rounded"
               aria-label="Dismiss error"
             >
               <X size={12} />
@@ -1473,15 +1472,15 @@ function ContextPreviewPane({
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <div className="py-4 px-3 text-center rounded-lg border border-dashed border-white/10 bg-white/[0.01] flex flex-col items-center justify-center gap-1">
+            <div className="py-4 px-3 text-center rounded-lg border border-dashed border-white/10 bg-white/[0.01] flex flex-col items-center justify-center gap-1.5">
               <FolderOpen size={16} className="text-stone-600 mb-0.5" />
-              <p className="text-xs font-medium text-stone-400">No items in working set</p>
-              <p className="text-[11px] text-stone-500 max-w-[260px] leading-tight">
-                {preview.readinessExplanation || 'Items opened or captured in this context will appear here.'}
+              <p className="text-xs font-medium text-stone-300">No items in working set</p>
+              <p className="text-[11px] text-stone-500 max-w-[260px] leading-relaxed">
+                Resume this workspace to begin capturing files, web links, or notes.
               </p>
             </div>
           ) : (
-            <div className="space-y-1 max-h-[160px] overflow-y-auto pr-0.5">
+            <div className="space-y-1 max-h-[175px] overflow-y-auto pr-0.5">
               {preview.worksetItems.slice(0, 5).map((item) => (
                 <WorksetPreviewRow
                   key={item.id}
@@ -1869,6 +1868,8 @@ function WorksetPreviewRow({
     }
   };
 
+  const displayTitle = item.title?.trim() || 'Untitled Item';
+
   return (
     <div
       ref={rowRef}
@@ -1876,13 +1877,13 @@ function WorksetPreviewRow({
       tabIndex={0}
       onClick={handleOpenOrReveal}
       onKeyDown={handleRowKeyDown}
-      aria-label={`Open ${item.title}`}
+      aria-label={`Open ${displayTitle}`}
       aria-busy={isOpenExecuting}
-      className={`group relative flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-white/[0.05] focus:bg-white/[0.05] focus:outline-none focus:ring-1 focus:ring-orange-400/80 text-xs gap-2 text-stone-300 transition-colors select-none cursor-pointer ${
+      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] focus:outline-none focus:ring-1 focus:ring-orange-400/80 text-xs gap-2 text-stone-300 transition-colors select-none cursor-pointer ${
         item.status === 'deleted' ? 'opacity-60' : ''
       }`}
     >
-      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+      <div className="flex items-center gap-2 min-w-0 flex-1">
         {isOpenExecuting ? (
           <RefreshCw
             size={12}
@@ -1897,18 +1898,18 @@ function WorksetPreviewRow({
           <FileText size={12} className="text-stone-400 shrink-0" />
         )}
         <span
-          className={`truncate text-[11px] ${
+          className={`truncate text-[11.5px] ${
             item.status === 'deleted'
               ? 'line-through text-stone-500'
               : item.status === 'missing'
               ? 'italic text-stone-400'
-              : 'text-stone-200'
+              : 'text-stone-200 font-medium'
           }`}
         >
-          {item.title}
+          {displayTitle}
         </span>
         {item.domain ? (
-          <span className="text-[10px] text-stone-500 font-mono shrink-0 truncate max-w-[90px]">
+          <span className="text-[10px] text-stone-500 font-mono shrink-0 truncate max-w-[85px]">
             {item.domain}
           </span>
         ) : item.appName ? (
