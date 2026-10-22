@@ -526,6 +526,10 @@ export function getActionErrorTitle(actionId: string): string {
       return 'Memory Update Failed';
     case 'item.remove_from_context':
       return 'Remove Item Failed';
+    case 'item.open':
+      return 'Could Not Open Item';
+    case 'item.reveal':
+      return 'Could Not Reveal Item';
     default:
       return 'Action Failed';
   }
@@ -1389,9 +1393,12 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     try {
       const result = await quickActionsService.executeItemAction(actionId, contextId, itemId);
       if (result.success) {
-        invalidateLauncherPreviewCache(contextId);
+        if (actionId !== 'item.open' && actionId !== 'item.reveal') {
+          invalidateLauncherPreviewCache(contextId);
+        }
         toast.success(result.message || 'Item updated');
-        if (get().selectedContextId === contextId) {
+        // Preserve selected context (Requirement 2)
+        if (get().selectedContextId === contextId && actionId !== 'item.open' && actionId !== 'item.reveal') {
           await get().selectContextById(contextId, { forceRefresh: true });
         }
       } else {
@@ -1402,7 +1409,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
             title: getActionErrorTitle(actionId),
             message: errorMsg,
             targetId: itemId,
-            isRetryable: true,
+            isRetryable: result.outcome !== 'UNSUPPORTED' && result.outcome !== 'BLOCKED',
           },
         });
         toast.error(errorMsg);

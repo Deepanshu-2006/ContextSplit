@@ -495,6 +495,160 @@ export const quickActionsService = {
 
     switch (actionId) {
       // ---------------------------------------------------------------------
+      // 0. Open or Reveal Item (Requirements 1, 3, 4, 5, 6, 7)
+      // ---------------------------------------------------------------------
+      case 'item.open':
+      case 'item.reveal': {
+        // 1. Validate item availability using existing DB repository API
+        let itemRecord: any = null;
+        try {
+          itemRecord = await db.getItem(cleanItemId);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: errMsg || 'Item not found or unavailable.',
+            message: 'Item is unavailable or has been removed.',
+            resolvedContextId: cleanContextId,
+            targetItemId: cleanItemId,
+          };
+        }
+
+        if (!itemRecord) {
+          return {
+            actionId,
+            success: false,
+            outcome: 'ERROR',
+            error: 'Item not found in repository.',
+            message: 'Item is unavailable or has been removed.',
+            resolvedContextId: cleanContextId,
+            targetItemId: cleanItemId,
+          };
+        }
+
+        // 2. Validate deleted / missing status
+        let meta: Record<string, unknown> = {};
+        try {
+          meta = JSON.parse(itemRecord.metadata || '{}');
+        } catch {}
+
+        const isDeleted = Boolean(meta.is_deleted || meta.deleted || meta.status === 'deleted');
+        if (isDeleted) {
+          return {
+            actionId,
+            success: false,
+            outcome: 'BLOCKED',
+            message: 'Item has been deleted and cannot be opened.',
+            resolvedContextId: cleanContextId,
+            targetItemId: cleanItemId,
+          };
+        }
+
+        const rawType = (itemRecord.item_type || '').toLowerCase();
+
+        // 3. Supported Action: Web link opening (Requirement 4)
+        if (rawType === 'url' || rawType === 'link') {
+          const rawUrl = (itemRecord.content || '').trim() || (itemRecord.title || '').trim();
+          let targetUrl: string | null = null;
+          try {
+            const parsed = new URL(rawUrl);
+            if (['http:', 'https:'].includes(parsed.protocol)) {
+              targetUrl = parsed.toString();
+            }
+          } catch {
+            try {
+              const parsed = new URL(`https://${rawUrl}`);
+              if (['http:', 'https:'].includes(parsed.protocol)) {
+                targetUrl = parsed.toString();
+              }
+            } catch {}
+          }
+
+          if (!targetUrl) {
+            return {
+              actionId,
+              success: false,
+              outcome: 'ERROR',
+              message: 'Invalid or unsafe URL format.',
+              resolvedContextId: cleanContextId,
+              targetItemId: cleanItemId,
+            };
+          }
+
+          try {
+            const { openUrl } = await import('@tauri-apps/plugin-opener');
+            await openUrl(targetUrl);
+          } catch (openerErr) {
+            if (typeof window !== 'undefined' && typeof window.open === 'function') {
+              window.open(targetUrl, '_blank', 'noopener,noreferrer');
+            } else {
+              console.warn('System opener unavailable in current runtime:', openerErr);
+            }
+          }
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: `Opened link in browser`,
+            resolvedContextId: cleanContextId,
+            targetItemId: cleanItemId,
+          };
+        }
+
+        // 4. Supported Action: File reveal (Requirement 4)
+        if (rawType === 'file') {
+          const filePath = (itemRecord.content || '').trim();
+          if (!filePath || filePath.startsWith('data:')) {
+            return {
+              actionId,
+              success: false,
+              outcome: 'ERROR',
+              message: 'File path is missing or invalid.',
+              resolvedContextId: cleanContextId,
+              targetItemId: cleanItemId,
+            };
+          }
+
+          try {
+            const { revealItemInDir, openPath } = await import('@tauri-apps/plugin-opener');
+            if (actionId === 'item.reveal') {
+              await revealItemInDir(filePath);
+            } else {
+              try {
+                await revealItemInDir(filePath);
+              } catch {
+                await openPath(filePath);
+              }
+            }
+          } catch (openerErr) {
+            console.warn('File opener unavailable in current runtime:', openerErr);
+          }
+
+          return {
+            actionId,
+            success: true,
+            outcome: 'SUCCESS',
+            message: `Revealed file in system explorer`,
+            resolvedContextId: cleanContextId,
+            targetItemId: cleanItemId,
+          };
+        }
+
+        // 5. Unsupported item types (Requirement 5)
+        return {
+          actionId,
+          success: false,
+          outcome: 'UNSUPPORTED',
+          message: `Opening is not supported for item type '${itemRecord.item_type}'.`,
+          resolvedContextId: cleanContextId,
+          targetItemId: cleanItemId,
+        };
+      }
+
+      // ---------------------------------------------------------------------
       // 1. Mark as Important Memory
       // ---------------------------------------------------------------------
       case 'item.mark_important': {

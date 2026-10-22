@@ -21,8 +21,6 @@ import {
   CheckSquare,
   Activity,
   FolderOpen,
-  Copy,
-  Plus,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -1696,19 +1694,21 @@ function WorksetPreviewRow({
   const isImportant = Boolean(item.isImportant);
 
   const isItemExecuting = Boolean(isExecuting && executingTargetId === item.id);
+  const isOpenExecuting =
+    isItemExecuting && (executingActionId === 'item.open' || executingActionId === 'item.reveal');
   const isPinExecuting =
     isItemExecuting &&
     (executingActionId === 'item.mark_important' || executingActionId === 'item.unmark_important');
-  const isRemoveExecuting =
-    isItemExecuting && executingActionId === 'item.remove_from_context';
 
   const itemActions = useMemo(() => {
     return getAvailableItemActions({
       contextId,
       itemId: item.id,
+      itemType: item.itemType,
       isImportant,
+      status: item.status,
     });
-  }, [contextId, item.id, isImportant]);
+  }, [contextId, item.id, item.itemType, isImportant, item.status]);
 
   // Close item menu when contextId changes
   useEffect(() => {
@@ -1749,6 +1749,11 @@ function WorksetPreviewRow({
       e.stopPropagation();
     }
 
+    // Concurrency guard: Prevent duplicate action execution (Requirement 9)
+    if (isExecuting || isItemExecuting) {
+      return;
+    }
+
     if (item.status === 'deleted') {
       toast.error('Item has been deleted and cannot be opened.');
       return;
@@ -1758,51 +1763,9 @@ function WorksetPreviewRow({
       return;
     }
 
-    // Supported Action: Inferred suggestion accept into context
-    if (item.isSuggestedAddition) {
-      if (onExecuteItemAction) {
-        onExecuteItemAction('item.mark_important', contextId, item.id);
-        toast.success(`Accepted "${item.title}" into context`);
-      }
-      return;
-    }
-
-    // Supported Action: Web Link open in default browser
-    if (isLink) {
-      const targetUrl = item.snippet?.startsWith('http')
-        ? item.snippet
-        : item.domain
-        ? `https://${item.domain}`
-        : item.title?.startsWith('http')
-        ? item.title
-        : null;
-
-      if (targetUrl) {
-        window.open(targetUrl, '_blank');
-        toast.success(`Opening ${item.title}`);
-      } else {
-        useWorkspaceStore.getState().openOverview(contextId);
-      }
-      return;
-    }
-
-    // Supported Action: File open / reveal path
-    if (isFile) {
-      if (item.snippet) {
-        navigator.clipboard?.writeText(item.snippet);
-        toast.success(`Copied path: ${item.snippet}`);
-      }
-      useWorkspaceStore.getState().openOverview(contextId);
-      return;
-    }
-
-    // Supported Action: Note / text copy content
-    const textToCopy = item.snippet || item.title;
-    if (textToCopy) {
-      navigator.clipboard?.writeText(textToCopy);
-      toast.success(`Copied note content`);
-    } else {
-      useWorkspaceStore.getState().openOverview(contextId);
+    // Dispatch supported open/reveal action through existing item service (Requirements 1, 2, 3, 4, 5, 6, 7)
+    if (onExecuteItemAction) {
+      onExecuteItemAction('item.open', contextId, item.id);
     }
   };
 
@@ -1882,13 +1845,20 @@ function WorksetPreviewRow({
       tabIndex={0}
       onClick={handleOpenOrReveal}
       onKeyDown={handleRowKeyDown}
-      aria-label={`${item.isSuggestedAddition ? 'Accept' : 'Open'} ${item.title}`}
+      aria-label={`Open ${item.title}`}
+      aria-busy={isOpenExecuting}
       className={`group relative flex items-center justify-between py-1 px-1.5 rounded-md hover:bg-white/[0.05] focus:bg-white/[0.05] focus:outline-none focus:ring-1 focus:ring-orange-400/80 text-xs gap-2 text-stone-300 transition-colors select-none cursor-pointer ${
         item.status === 'deleted' ? 'opacity-60' : ''
       }`}
     >
       <div className="flex items-center gap-1.5 min-w-0 flex-1">
-        {isLink ? (
+        {isOpenExecuting ? (
+          <RefreshCw
+            size={12}
+            className="text-orange-400 animate-spin shrink-0"
+            data-testid={`item-loading-spinner-${item.id}`}
+          />
+        ) : isLink ? (
           <Link2 size={12} className="text-blue-400/90 shrink-0" />
         ) : isFile ? (
           <FileCode size={12} className="text-emerald-400/90 shrink-0" />
@@ -1955,38 +1925,15 @@ function WorksetPreviewRow({
           </span>
         )}
 
-        {/* Action Cue (Click to open / reveal / copy / accept) */}
+        {/* Action Cue (Compact indicator on hover) */}
         {(!item.status || (item.status !== 'deleted' && item.status !== 'missing')) && (
-          <button
-            type="button"
-            onClick={handleOpenOrReveal}
-            tabIndex={-1}
-            className="p-1 rounded text-stone-500 hover:text-stone-200 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity cursor-pointer shrink-0"
-            title={
-              item.isSuggestedAddition
-                ? 'Accept into context'
-                : isLink
-                ? 'Open in browser'
-                : isFile
-                ? 'Reveal file / copy path'
-                : 'Copy note'
-            }
-            aria-label={
-              item.isSuggestedAddition
-                ? `Accept ${item.title} into context`
-                : `Open ${item.title}`
-            }
+          <span
+            className="opacity-0 group-hover:opacity-100 transition-opacity text-stone-500 hover:text-stone-300 shrink-0 px-0.5"
+            title={isLink ? 'Open link in browser' : isFile ? 'Reveal file in folder' : 'Open item'}
+            data-testid={`action-cue-${item.id}`}
           >
-            {item.isSuggestedAddition ? (
-              <Plus size={11} className="text-amber-400" />
-            ) : isLink ? (
-              <ExternalLink size={11} />
-            ) : isFile ? (
-              <ExternalLink size={11} />
-            ) : (
-              <Copy size={11} />
-            )}
-          </button>
+            {isLink ? <ExternalLink size={11} /> : isFile ? <FolderOpen size={11} /> : null}
+          </span>
         )}
 
         {/* Quick Shortcut: Toggle Importance */}
@@ -2032,35 +1979,6 @@ function WorksetPreviewRow({
           </button>
         )}
 
-        {/* Quick Shortcut: Remove from Context */}
-        {onExecuteItemAction && (
-          <button
-            type="button"
-            disabled={isExecuting}
-            onClick={(e) => {
-              e.stopPropagation();
-              onExecuteItemAction('item.remove_from_context', contextId, item.id);
-            }}
-            className={`p-1 rounded hover:bg-white/10 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 transition-all cursor-pointer ${
-              isRemoveExecuting
-                ? 'opacity-100 text-red-400'
-                : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-red-400'
-            }`}
-            title={
-              isRemoveExecuting
-                ? 'Removing item...'
-                : 'Remove item from this context'
-            }
-            aria-label={isRemoveExecuting ? 'Removing item' : 'Remove item from context'}
-          >
-            {isRemoveExecuting ? (
-              <RefreshCw size={11} className="animate-spin text-red-400" />
-            ) : (
-              <X size={11} />
-            )}
-          </button>
-        )}
-
         {/* Item Secondary Actions Menu Trigger */}
         {onExecuteItemAction && (
           <button
@@ -2083,7 +2001,7 @@ function WorksetPreviewRow({
             className={`p-1 rounded hover:bg-white/10 transition-all cursor-pointer focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-orange-400 ${
               isMenuOpen
                 ? 'opacity-100 bg-white/10 text-stone-100 ring-1 ring-white/20'
-                : isItemExecuting && !isPinExecuting && !isRemoveExecuting
+                : isItemExecuting && !isPinExecuting && !isOpenExecuting
                 ? 'opacity-100 text-stone-200'
                 : 'opacity-0 group-hover:opacity-100 text-stone-500 hover:text-stone-200'
             }`}
@@ -2093,7 +2011,7 @@ function WorksetPreviewRow({
             aria-expanded={isMenuOpen}
             aria-controls={`launcher-item-menu-${item.id}`}
           >
-            {isItemExecuting && !isPinExecuting && !isRemoveExecuting ? (
+            {isItemExecuting && !isPinExecuting && !isOpenExecuting ? (
               <RefreshCw size={11} className="animate-spin text-stone-300" />
             ) : (
               <MoreHorizontal size={11} />

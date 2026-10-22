@@ -33,6 +33,8 @@ export type ContextActionId =
  * Operations that target an Item within a Context workset.
  */
 export type ItemActionId =
+  | 'item.open'
+  | 'item.reveal'
   | 'item.mark_important'
   | 'item.unmark_important'
   | 'item.remove_from_context'
@@ -263,6 +265,8 @@ export interface ItemActionEvaluationInput {
   contextId: string;
   itemId: string;
   isImportant?: boolean;
+  itemType?: string;
+  status?: string;
 }
 
 // =========================================================================
@@ -388,6 +392,14 @@ export function getAvailableContextActions(input: ContextActionEvaluationInput):
       targetType: 'context',
       isSupported: true,
     });
+    actions.push({
+      id: 'context.archive',
+      label: 'Archive Context',
+      description: 'Context is already archived.',
+      targetType: 'context',
+      isSupported: false,
+      unsupportedReason: 'Context is already archived.',
+    });
   } else {
     const archiveValidation = validateContextActionTransition('context.archive', currentState);
     actions.push({
@@ -423,6 +435,52 @@ export function getAvailableItemActions(input: ItemActionEvaluationInput): ItemQ
   const isImportant = Boolean(input.isImportant);
 
   const actions: ItemQuickActionDescriptor[] = [];
+
+  // 1. Primary open / reveal action (evaluated dynamically when itemType is provided)
+  if (input.itemType !== undefined) {
+    const isUrl = input.itemType === 'url' || input.itemType === 'link';
+    const isFile = input.itemType === 'file';
+    const isDeleted = input.status === 'deleted';
+    const isMissing = input.status === 'missing';
+
+    if (isUrl) {
+      actions.push({
+        id: 'item.open',
+        label: 'Open Link in Browser',
+        description: 'Open this saved web link in the default browser.',
+        targetType: 'item',
+        isSupported: !isDeleted && !isMissing,
+        unsupportedReason: isDeleted
+          ? 'Item has been deleted and cannot be opened.'
+          : isMissing
+          ? 'Item is missing or unavailable.'
+          : undefined,
+      });
+    } else if (isFile) {
+      actions.push({
+        id: 'item.open',
+        label: 'Reveal File in Folder',
+        description: 'Reveal this file in the system file explorer.',
+        targetType: 'item',
+        isSupported: !isDeleted && !isMissing,
+        unsupportedReason: isDeleted
+          ? 'Item has been deleted and cannot be opened.'
+          : isMissing
+          ? 'Item is missing or unavailable.'
+          : undefined,
+      });
+    } else {
+      // Requirement 5: Do not invent operations for unsupported item types
+      actions.push({
+        id: 'item.open',
+        label: 'Open Item',
+        description: `Opening or revealing is not supported for item type '${input.itemType}'.`,
+        targetType: 'item',
+        isSupported: false,
+        unsupportedReason: `Opening or revealing is not supported for item type '${input.itemType}'.`,
+      });
+    }
+  }
 
   if (isImportant) {
     actions.push({
