@@ -645,7 +645,7 @@ export function ContextLauncher() {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-16 pb-12 px-4 bg-black/60 backdrop-blur-sm transition-all"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-16 pb-12 px-4 bg-black/60 backdrop-blur-sm transition-opacity duration-150 motion-reduce:transition-none"
       onClick={(e) => {
         if (e.target === e.currentTarget) closeLauncher();
       }}
@@ -656,7 +656,7 @@ export function ContextLauncher() {
       <div
         ref={modalRef}
         onKeyDown={handleModalKeyDown}
-        className="w-full max-w-4xl bg-stone-900 border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col text-stone-100 animate-in fade-in duration-100"
+        className="w-full max-w-4xl bg-stone-900 border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col text-stone-100 launcher-dialog-enter"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 1. Search */}
@@ -683,7 +683,7 @@ export function ContextLauncher() {
             aria-label="Search contexts"
           />
           {isLoading && (
-            <RefreshCw size={14} className="text-stone-400 animate-spin shrink-0 mr-2" aria-label="Loading contexts..." />
+            <RefreshCw size={14} className="text-stone-400 animate-spin shrink-0 mr-2 motion-reduce:animate-none" aria-label="Loading contexts..." />
           )}
           {searchQuery && (
             <button
@@ -692,7 +692,7 @@ export function ContextLauncher() {
                 setSearchQuery('');
                 inputRef.current?.focus();
               }}
-              className="p-1 rounded text-stone-400 hover:text-white active:text-stone-300 transition-colors duration-75 cursor-pointer mr-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95"
+              className="p-1 rounded text-stone-400 hover:text-white active:text-stone-300 transition-colors duration-75 cursor-pointer mr-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transition-none motion-reduce:transform-none"
               title="Clear search"
               aria-label="Clear search"
             >
@@ -725,7 +725,7 @@ export function ContextLauncher() {
                     setActiveFilter(f.id);
                     inputRef.current?.focus();
                   }}
-                  className={`px-2.5 py-1 rounded-md text-xs transition-all duration-75 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 select-none ${
+                  className={`px-2.5 py-1 rounded-md text-xs transition-colors duration-75 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 select-none motion-reduce:transition-none ${
                     isSelected
                       ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                       : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -755,7 +755,7 @@ export function ContextLauncher() {
                   setActiveSort('recent');
                   inputRef.current?.focus();
                 }}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 ${
+                className={`px-2 py-0.5 rounded text-[11px] transition-colors duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 motion-reduce:transition-none ${
                   activeSort === 'recent'
                     ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                     : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -775,7 +775,7 @@ export function ContextLauncher() {
                   setActiveSort('name');
                   inputRef.current?.focus();
                 }}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 ${
+                className={`px-2 py-0.5 rounded text-[11px] transition-colors duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 motion-reduce:transition-none ${
                   activeSort === 'name'
                     ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                     : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -802,7 +802,7 @@ export function ContextLauncher() {
           >
             {/* Loading state */}
             {isLoading && (
-              <div className="space-y-2 p-1 animate-pulse">
+              <div className="space-y-2 p-1 animate-pulse motion-reduce:animate-none">
                 <div className="h-2.5 w-16 bg-stone-800 rounded" />
                 <div className="h-10 bg-stone-800/40 rounded-lg" />
                 <div className="h-2.5 w-20 bg-stone-800 rounded mt-3" />
@@ -822,9 +822,9 @@ export function ContextLauncher() {
                   <p className="text-red-400/80 mt-0.5">{error}</p>
                   <button
                     onClick={fetchLauncherData}
-                    className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 active:bg-red-900/80 text-[11px] text-red-200 transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400 active:scale-95"
+                    className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 active:bg-red-900/80 text-[11px] text-red-200 transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400 active:scale-95 motion-reduce:transition-none motion-reduce:transform-none"
                   >
-                    <RefreshCw size={10} />
+                    <RefreshCw size={10} className="motion-reduce:animate-none" />
                     Retry
                   </button>
                 </div>
@@ -858,7 +858,7 @@ export function ContextLauncher() {
                           <Pin className="w-2.5 h-2.5 text-amber-400 fill-amber-400/20 shrink-0" />
                         )}
                         {group.id === 'active' && (
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 shadow-[0_0_6px_rgba(52,211,153,0.4)]" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
                         )}
                         <span>{group.title}</span>
                       </div>
@@ -1262,7 +1262,7 @@ function ContextPreviewPane({
 
   if (isLoading && !preview) {
     return (
-      <div className="space-y-3 animate-pulse p-1">
+      <div className="space-y-3 animate-pulse p-1 motion-reduce:animate-none">
         <div className="h-5 w-40 bg-stone-800 rounded" />
         <div className="h-3 w-28 bg-stone-800/60 rounded" />
         <div className="h-16 bg-stone-800/30 rounded-lg mt-4" />
@@ -1294,7 +1294,7 @@ function ContextPreviewPane({
               onClearActionError?.();
               onClearResumeState();
             }}
-            className="mt-2 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors cursor-pointer"
+            className="mt-2 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 motion-reduce:transition-none cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none"
           >
             Dismiss
           </button>
@@ -1348,16 +1348,16 @@ function ContextPreviewPane({
                   maxLength={100}
                   placeholder="Context name"
                   aria-label="Rename context"
-                  className="flex-1 bg-stone-950 border border-white/15 focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/40 focus:outline-none rounded-md px-2.5 py-1 text-xs text-stone-100 placeholder-stone-500 font-medium transition-all"
+                  className="flex-1 bg-stone-950 border border-white/15 focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/40 focus:outline-none rounded-md px-2.5 py-1 text-xs text-stone-100 placeholder-stone-500 font-medium transition-colors duration-75 motion-reduce:transition-none"
                 />
                 <button
                   type="submit"
                   id="launcher-rename-save-btn"
                   disabled={isSubmittingRename || !renameValue.trim()}
-                  className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs rounded-md transition-all duration-75 cursor-pointer flex items-center gap-1 shrink-0 shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
+                  className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs rounded-md transition-colors duration-75 cursor-pointer flex items-center gap-1 shrink-0 shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
                 >
                   {isSubmittingRename ? (
-                    <RefreshCw size={11} className="animate-spin" />
+                    <RefreshCw size={11} className="animate-spin motion-reduce:animate-none" />
                   ) : null}
                   <span>Save</span>
                 </button>
@@ -1366,7 +1366,7 @@ function ContextPreviewPane({
                   id="launcher-rename-cancel-btn"
                   onClick={handleCancelRename}
                   disabled={isSubmittingRename}
-                  className="px-2.5 py-1 bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-[0.98] text-stone-300 hover:text-stone-100 text-xs rounded-md transition-all duration-75 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900"
+                  className="px-2.5 py-1 bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none text-stone-300 hover:text-stone-100 text-xs rounded-md transition-colors duration-75 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900"
                 >
                   Cancel
                 </button>
@@ -1390,7 +1390,7 @@ function ContextPreviewPane({
                     type="button"
                     onClick={handleStartRename}
                     disabled={isResuming || isActionExecuting}
-                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 disabled:opacity-40 disabled:pointer-events-none"
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 disabled:opacity-40 disabled:pointer-events-none"
                     title="Rename Context (⌥R)"
                     aria-label="Rename Context"
                   >
@@ -1405,7 +1405,7 @@ function ContextPreviewPane({
                       }
                     }}
                     disabled={isResuming || isActionExecuting}
-                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:pointer-events-none ${
                       preview.isPinned
                         ? 'text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 active:bg-amber-400/20'
                         : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20'
@@ -1511,14 +1511,14 @@ function ContextPreviewPane({
                   }
                 }}
                 disabled={isResuming || isActionExecuting}
-                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 active:bg-amber-700 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-medium text-[11px] transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-300"
+                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 active:bg-amber-700 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-medium text-[11px] transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-300"
               >
                 {isResuming ? 'Resuming...' : 'Resume Anyway'}
               </button>
               <button
                 onClick={onClearResumeState}
                 disabled={isResuming || isActionExecuting}
-                className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-95 text-stone-300 text-[11px] transition-all duration-75 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+                className="px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none text-stone-300 text-[11px] transition-colors duration-75 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
               >
                 Cancel
               </button>
@@ -1554,9 +1554,9 @@ function ContextPreviewPane({
                     }
                   }}
                   disabled={isResuming || isActionExecuting}
-                  className="px-1.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 active:bg-red-500/40 active:scale-95 text-red-300 border border-red-500/30 font-medium text-[10px] transition-all duration-75 cursor-pointer flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400"
+                  className="px-1.5 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 active:bg-red-500/40 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none text-red-300 border border-red-500/30 font-medium text-[10px] transition-colors duration-75 cursor-pointer flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400"
                 >
-                  <RefreshCw size={9} />
+                  <RefreshCw size={9} className="motion-reduce:animate-none" />
                   <span>Retry</span>
                 </button>
               )}
@@ -1565,7 +1565,7 @@ function ContextPreviewPane({
                   onClearActionError?.();
                   onClearResumeState();
                 }}
-                className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95"
+                className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
                 aria-label="Dismiss error"
               >
                 <X size={12} />
@@ -1583,7 +1583,7 @@ function ContextPreviewPane({
             </div>
             <button
               onClick={onClearResumeState}
-              className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95"
+              className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
               aria-label="Dismiss error"
             >
               <X size={12} />
@@ -1609,7 +1609,7 @@ function ContextPreviewPane({
               onClick={() => {
                 useLauncherStore.setState({ previewError: null });
               }}
-              className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95"
+              className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
               aria-label="Dismiss error"
             >
               <X size={12} />
@@ -1625,7 +1625,7 @@ function ContextPreviewPane({
               {isLoading && (
                 <RefreshCw
                   size={10}
-                  className="animate-spin text-stone-500"
+                  className="animate-spin text-stone-500 motion-reduce:animate-none"
                   data-testid="workset-loading-indicator"
                 />
               )}
@@ -1680,12 +1680,12 @@ function ContextPreviewPane({
             }
           }}
           disabled={isResuming || isActionExecuting}
-          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.99] disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs transition-all duration-75 flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-900"
+          className="flex-1 py-2.5 px-4 rounded-lg bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.99] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs transition-colors duration-75 flex items-center justify-center gap-2 cursor-pointer shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-2 focus-visible:ring-offset-stone-900"
           aria-label={primaryButtonLabel}
         >
           {isPrimaryExecuting ? (
             <>
-              <RefreshCw size={13} className="animate-spin" />
+              <RefreshCw size={13} className="animate-spin motion-reduce:animate-none" />
               <span>{primaryButtonLabel}</span>
             </>
           ) : (
@@ -1718,7 +1718,7 @@ function ContextPreviewPane({
               }
             }}
             disabled={isResuming || isActionExecuting}
-            className={`p-2.5 rounded-lg border border-white/10 transition-all duration-75 cursor-pointer flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none ${
+            className={`p-2.5 rounded-lg border border-white/10 transition-colors duration-75 cursor-pointer flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none ${
               isMenuOpen
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
                 : 'bg-stone-900/60 hover:bg-stone-800 active:bg-stone-800/80 text-stone-400 hover:text-stone-200'
@@ -1730,7 +1730,7 @@ function ContextPreviewPane({
             aria-controls="launcher-context-secondary-menu"
           >
             {isContextSecondaryExecuting ? (
-              <RefreshCw size={14} className="animate-spin text-stone-200" />
+              <RefreshCw size={14} className="animate-spin text-stone-200 motion-reduce:animate-none" />
             ) : (
               <MoreHorizontal size={14} />
             )}
@@ -1744,7 +1744,7 @@ function ContextPreviewPane({
               aria-label="Context secondary actions"
               onKeyDown={handleMenuKeyDown}
               tabIndex={-1}
-              className="absolute bottom-full mb-1.5 right-0 w-60 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-30 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
+              className="absolute bottom-full mb-1.5 right-0 w-60 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-30 launcher-popover-enter focus:outline-none"
             >
               <div className="px-2.5 py-1 text-[10px] font-medium text-stone-500 uppercase tracking-wider">
                 Context Actions
@@ -1797,7 +1797,7 @@ function ContextPreviewPane({
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="shrink-0 text-stone-400">
                             {isThisActionExecuting ? (
-                              <RefreshCw size={13} className="animate-spin text-stone-200" />
+                              <RefreshCw size={13} className="animate-spin text-stone-200 motion-reduce:animate-none" />
                             ) : (
                               <>
                                 {action.id === 'context.rename' && (
@@ -2083,7 +2083,7 @@ function WorksetPreviewRow({
         {isOpenExecuting ? (
           <RefreshCw
             size={12}
-            className="text-orange-400 animate-spin shrink-0"
+            className="text-orange-400 animate-spin shrink-0 motion-reduce:animate-none"
             data-testid={`item-loading-spinner-${item.id}`}
           />
         ) : isLink ? (
@@ -2156,7 +2156,7 @@ function WorksetPreviewRow({
         {/* Action Cue (Compact indicator on hover) */}
         {(!item.status || (item.status !== 'deleted' && item.status !== 'missing')) && (
           <span
-            className="opacity-0 group-hover:opacity-100 transition-opacity text-stone-500 hover:text-stone-300 shrink-0 px-0.5"
+            className="opacity-0 group-hover:opacity-100 transition-opacity duration-75 motion-reduce:transition-none text-stone-500 hover:text-stone-300 shrink-0 px-0.5"
             title={isLink ? 'Open link in browser' : isFile ? 'Reveal file in folder' : 'Open item'}
             data-testid={`action-cue-${item.id}`}
           >
@@ -2177,7 +2177,7 @@ function WorksetPreviewRow({
                 item.id
               );
             }}
-            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-colors duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:pointer-events-none ${
               isPinExecuting
                 ? 'opacity-100 text-amber-400'
                 : isImportant
@@ -2200,7 +2200,7 @@ function WorksetPreviewRow({
             }
           >
             {isPinExecuting ? (
-              <RefreshCw size={11} className="animate-spin text-amber-400" />
+              <RefreshCw size={11} className="animate-spin text-amber-400 motion-reduce:animate-none" />
             ) : (
               <Star size={11} className={isImportant ? 'fill-current' : ''} />
             )}
@@ -2226,7 +2226,7 @@ function WorksetPreviewRow({
                 setIsMenuOpen(true);
               }
             }}
-            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-colors duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:pointer-events-none ${
               isMenuOpen
                 ? 'opacity-100 bg-white/10 text-stone-100 ring-1 ring-white/20'
                 : isItemExecuting && !isPinExecuting && !isOpenExecuting
@@ -2240,7 +2240,7 @@ function WorksetPreviewRow({
             aria-controls={`launcher-item-menu-${item.id}`}
           >
             {isItemExecuting && !isPinExecuting && !isOpenExecuting ? (
-              <RefreshCw size={11} className="animate-spin text-stone-300" />
+              <RefreshCw size={11} className="animate-spin text-stone-300 motion-reduce:animate-none" />
             ) : (
               <MoreHorizontal size={11} />
             )}
@@ -2255,7 +2255,7 @@ function WorksetPreviewRow({
             aria-label={`Item actions for ${item.title}`}
             onKeyDown={handleMenuKeyDown}
             tabIndex={-1}
-            className="absolute right-0 bottom-full mb-1 w-56 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-40 animate-in fade-in zoom-in-95 duration-100 focus:outline-none"
+            className="absolute right-0 bottom-full mb-1 w-56 bg-stone-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-2xl p-1 z-40 launcher-popover-enter focus:outline-none"
           >
             <div className="px-2 py-1 border-b border-white/5 mb-1">
               <span className="text-[10.5px] font-medium text-stone-300 truncate block">
@@ -2305,7 +2305,7 @@ function WorksetPreviewRow({
                     >
                       <span className="shrink-0 text-stone-400">
                         {isThisItemActionExecuting ? (
-                          <RefreshCw size={12} className="animate-spin text-stone-300" />
+                          <RefreshCw size={12} className="animate-spin text-stone-300 motion-reduce:animate-none" />
                         ) : (
                           <>
                             {(action.id === 'item.mark_important' || action.id === 'item.unmark_important') && (
@@ -2391,7 +2391,7 @@ const ContextLauncherItem = React.memo(function ContextLauncherItem({
           onResume();
         }
       }}
-      className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] ${
+      className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] motion-reduce:transform-none motion-reduce:transition-none ${
         isSelected
           ? 'bg-stone-800 border-orange-500 hover:bg-stone-750 text-stone-100 ring-1 ring-white/15 shadow-xs'
           : 'border-transparent hover:bg-white/[0.05] hover:text-stone-100 active:bg-white/[0.08] text-stone-300'
@@ -2402,7 +2402,7 @@ const ContextLauncherItem = React.memo(function ContextLauncherItem({
       <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
         {/* Minimal status indicator */}
         {item.isActive && !isArchived ? (
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 shadow-[0_0_6px_rgba(52,211,153,0.4)]" title="Active" />
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" title="Active" />
         ) : isPaused ? (
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Paused" />
         ) : isArchived ? (
@@ -2468,7 +2468,7 @@ const ContextLauncherItem = React.memo(function ContextLauncherItem({
       {/* Selected Action Cue */}
       <div className="flex items-center shrink-0">
         {isSelected && isResuming ? (
-          <RefreshCw size={12} className="animate-spin text-orange-400" />
+          <RefreshCw size={12} className="animate-spin text-orange-400 motion-reduce:animate-none" />
         ) : isSelected ? (
           <span className="text-[11px] font-mono text-stone-400 px-1.5 py-0.5 rounded bg-white/5">
             ↵
