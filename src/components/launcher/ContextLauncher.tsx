@@ -1366,7 +1366,7 @@ function ContextPreviewPane({
             type="button"
             onClick={onRetryPreview}
             disabled={isLoading}
-            className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 motion-reduce:transition-none cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
+            className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
           >
             <RefreshCw size={11} className={isLoading ? 'animate-spin motion-reduce:animate-none' : 'motion-reduce:animate-none'} />
             Retry
@@ -1388,7 +1388,7 @@ function ContextPreviewPane({
               onClearActionError?.();
               onClearResumeState();
             }}
-            className="mt-2 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 motion-reduce:transition-none cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none"
+            className="mt-2 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
           >
             Dismiss
           </button>

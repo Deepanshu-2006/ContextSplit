@@ -169,7 +169,7 @@ describe('Context Launcher - Empty States and Common Edge Cases', () => {
         worksetItems: [],
       };
 
-      const isCurrentActiveInactive = Boolean(inactivePreview.state === 'active');
+      const isCurrentActiveInactive = Boolean((inactivePreview.state as string) === 'active');
       expect(isCurrentActiveInactive).toBe(false);
 
       const inactiveGuidance = isCurrentActiveInactive
@@ -454,15 +454,12 @@ describe('Context Launcher - Empty States and Common Edge Cases', () => {
     });
 
     it('handles deleted item with only unmark action supported', () => {
-      const itemActions = getAvailableItemActions(
-        {
-          id: 'item-deleted',
-          title: 'Deleted file',
-          itemType: 'file',
-          status: 'deleted',
-        },
-        'active'
-      );
+      const itemActions = getAvailableItemActions({
+        contextId: 'ctx-1',
+        itemId: 'item-deleted',
+        itemType: 'file',
+        status: 'deleted',
+      });
 
       const openAction = itemActions.find((a) => a.id === 'item.open');
       expect(openAction?.isSupported).toBe(false);
