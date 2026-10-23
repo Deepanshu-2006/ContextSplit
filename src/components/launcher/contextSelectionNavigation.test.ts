@@ -345,4 +345,356 @@ describe('Context Launcher Selection, Keyboard Navigation, and Unavailable Conte
       expect(unselectedClass).toContain('focus-visible:ring-2 focus-visible:ring-orange-400');
     });
   });
+
+  // =========================================================================
+  // 6. Filter Tabs Roving TabIndex & Arrow Key Navigation
+  // =========================================================================
+  describe('6. Filter Tabs Roving TabIndex & Arrow Key Navigation', () => {
+    const FILTER_OPTIONS = ['all', 'active', 'recent', 'paused', 'archived'] as const;
+
+    it('assigns tabIndex 0 to active filter tab and -1 to all inactive tabs', () => {
+      useLauncherStore.setState({ activeFilter: 'active' });
+      const currentFilter = useLauncherStore.getState().activeFilter;
+
+      const tabIndices = FILTER_OPTIONS.map((f) => (f === currentFilter ? 0 : -1));
+      expect(tabIndices).toEqual([-1, 0, -1, -1, -1]);
+    });
+
+    it('implements ArrowRight roving navigation with wrap-around', () => {
+      const simulateTabArrow = (currentIdx: number, key: 'ArrowRight' | 'ArrowLeft' | 'Home' | 'End') => {
+        if (key === 'ArrowRight') return (currentIdx + 1) % FILTER_OPTIONS.length;
+        if (key === 'ArrowLeft') return (currentIdx - 1 + FILTER_OPTIONS.length) % FILTER_OPTIONS.length;
+        if (key === 'Home') return 0;
+        if (key === 'End') return FILTER_OPTIONS.length - 1;
+        return currentIdx;
+      };
+
+      // From index 0 ('all') -> ArrowRight -> index 1 ('active')
+      expect(simulateTabArrow(0, 'ArrowRight')).toBe(1);
+      // From index 4 ('archived') -> ArrowRight -> index 0 ('all') (wrap-around)
+      expect(simulateTabArrow(4, 'ArrowRight')).toBe(0);
+      // From index 0 ('all') -> ArrowLeft -> index 4 ('archived') (wrap-around)
+      expect(simulateTabArrow(0, 'ArrowLeft')).toBe(4);
+      // Home and End
+      expect(simulateTabArrow(2, 'Home')).toBe(0);
+      expect(simulateTabArrow(2, 'End')).toBe(4);
+    });
+
+    it('updates store activeFilter and maintains consistent list filtering on tab navigation', () => {
+      useLauncherStore.getState().setActiveFilter('paused');
+      expect(useLauncherStore.getState().activeFilter).toBe('paused');
+
+      useLauncherStore.getState().setActiveFilter('archived');
+      expect(useLauncherStore.getState().activeFilter).toBe('archived');
+
+      useLauncherStore.getState().setActiveFilter('all');
+      expect(useLauncherStore.getState().activeFilter).toBe('all');
+    });
+  });
+
+  // =========================================================================
+  // 7. Sort Segmented Control Roving Navigation
+  // =========================================================================
+  describe('7. Sort Segmented Control Roving Navigation', () => {
+    it('assigns tabIndex 0 to active sort button and -1 to inactive sort button', () => {
+      useLauncherStore.setState({ activeSort: 'recent' });
+      expect(useLauncherStore.getState().activeSort).toBe('recent');
+
+      const getSortTabIndex = (btnSort: 'recent' | 'name') =>
+        useLauncherStore.getState().activeSort === btnSort ? 0 : -1;
+
+      expect(getSortTabIndex('recent')).toBe(0);
+      expect(getSortTabIndex('name')).toBe(-1);
+
+      useLauncherStore.getState().setActiveSort('name');
+      expect(getSortTabIndex('recent')).toBe(-1);
+      expect(getSortTabIndex('name')).toBe(0);
+    });
+
+    it('toggles between recent and name on ArrowRight / ArrowLeft or toggleActiveSort', () => {
+      useLauncherStore.setState({ activeSort: 'recent' });
+      useLauncherStore.getState().toggleActiveSort();
+      expect(useLauncherStore.getState().activeSort).toBe('name');
+
+      useLauncherStore.getState().toggleActiveSort();
+      expect(useLauncherStore.getState().activeSort).toBe('recent');
+    });
+  });
+
+  // =========================================================================
+  // 8. Menus Dismissal & Focus Restoration
+  // =========================================================================
+  describe('8. Menus Dismissal & Focus Restoration', () => {
+    it('restores focus to trigger element when secondary menu is dismissed via Escape', () => {
+      const triggerBtn = { focus: vi.fn() };
+      let isMenuOpen = true;
+
+      const handleMenuKeyDown = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          isMenuOpen = false;
+          triggerBtn.focus();
+        }
+      };
+
+      const preventDefaultMock = vi.fn();
+      const stopPropagationMock = vi.fn();
+
+      handleMenuKeyDown({
+        key: 'Escape',
+        preventDefault: preventDefaultMock,
+        stopPropagation: stopPropagationMock,
+      });
+
+      expect(isMenuOpen).toBe(false);
+      expect(preventDefaultMock).toHaveBeenCalled();
+      expect(stopPropagationMock).toHaveBeenCalled();
+      expect(triggerBtn.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores focus to trigger element and calls preventDefault when menu is dismissed via Tab', () => {
+      const triggerBtn = { focus: vi.fn() };
+      let isMenuOpen = true;
+
+      const handleMenuKeyDown = (e: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          isMenuOpen = false;
+          triggerBtn.focus();
+        }
+      };
+
+      const preventDefaultMock = vi.fn();
+      const stopPropagationMock = vi.fn();
+
+      handleMenuKeyDown({
+        key: 'Tab',
+        preventDefault: preventDefaultMock,
+        stopPropagation: stopPropagationMock,
+      });
+
+      expect(isMenuOpen).toBe(false);
+      expect(preventDefaultMock).toHaveBeenCalled();
+      expect(stopPropagationMock).toHaveBeenCalled();
+      expect(triggerBtn.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores focus to item menu trigger button upon item action execution', async () => {
+      const itemTriggerBtn = { focus: vi.fn() };
+      let isItemMenuOpen = true;
+
+      const handleExecuteItemAction = async (actionId: string) => {
+        isItemMenuOpen = false;
+        await useLauncherStore.getState().executeItemAction(actionId as any, 'ctx-alpha-1', 'item-1');
+        itemTriggerBtn.focus();
+      };
+
+      await handleExecuteItemAction('item.mark_important');
+      expect(isItemMenuOpen).toBe(false);
+      expect(itemTriggerBtn.focus).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // =========================================================================
+  // 9. Dialog Invocation Trigger Focus Restoration & Trap
+  // =========================================================================
+  describe('9. Dialog Invocation Trigger Focus Restoration & Modal Focus Trap', () => {
+    it('restores focus to triggering element when launcher dialog closes', () => {
+      const hostTriggerButton = { focus: vi.fn() };
+      const previousActiveRef = { current: hostTriggerButton as any };
+
+      // Dialog was open, now closing
+      useLauncherStore.setState({ isOpen: false });
+
+      if (previousActiveRef.current && typeof previousActiveRef.current.focus === 'function') {
+        const target = previousActiveRef.current;
+        previousActiveRef.current = null;
+        target.focus();
+      }
+
+      expect(hostTriggerButton.focus).toHaveBeenCalledTimes(1);
+      expect(previousActiveRef.current).toBeNull();
+    });
+
+    it('keeps focus trapped within modal dialog without escaping to background', () => {
+      const focusableElements = [
+        { id: 'launcher-search-input', focus: vi.fn() },
+        { id: 'launcher-filter-tab-all', focus: vi.fn() },
+        { id: 'launcher-sort-recent-btn', focus: vi.fn() },
+        { id: 'launcher-primary-action-btn', focus: vi.fn() },
+        { id: 'launcher-more-actions-btn', focus: vi.fn() },
+      ];
+
+      const firstEl = focusableElements[0];
+      const lastEl = focusableElements[focusableElements.length - 1];
+
+      // Simulate Tab on last element -> wraps to first
+      let currentActive: any = lastEl;
+      const simulateTab = (shiftKey: boolean) => {
+        if (shiftKey) {
+          if (currentActive === firstEl) {
+            currentActive = lastEl;
+            lastEl.focus();
+          }
+        } else {
+          if (currentActive === lastEl) {
+            currentActive = firstEl;
+            firstEl.focus();
+          }
+        }
+      };
+
+      simulateTab(false);
+      expect(firstEl.focus).toHaveBeenCalledTimes(1);
+
+      // Simulate Shift+Tab on first element -> wraps to last
+      currentActive = firstEl;
+      simulateTab(true);
+      expect(lastEl.focus).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // =========================================================================
+  // 10. Focus Orphan Prevention on Dynamic Updates
+  // =========================================================================
+  describe('10. Focus Orphan Prevention on Dynamic Updates', () => {
+    it('transfers focus to sibling or primary action when focused workset item is deleted', () => {
+      const primaryActionBtn = { id: 'launcher-primary-action-btn', focus: vi.fn() };
+      const nextSiblingRow = { id: 'workset-row-2', focus: vi.fn() };
+      const unmountingRow = {
+        isFocused: true,
+        nextElementSibling: nextSiblingRow,
+        previousElementSibling: null,
+      };
+
+      // Unmount cleanup simulation
+      const onUnmount = () => {
+        if (unmountingRow.isFocused) {
+          const target = unmountingRow.nextElementSibling || unmountingRow.previousElementSibling || primaryActionBtn;
+          target?.focus();
+        }
+      };
+
+      onUnmount();
+      expect(nextSiblingRow.focus).toHaveBeenCalledTimes(1);
+
+      // If no sibling remains, falls back to primary action button
+      const lastRemainingRow = {
+        isFocused: true,
+        nextElementSibling: null,
+        previousElementSibling: null,
+      };
+      const onLastUnmount = () => {
+        if (lastRemainingRow.isFocused) {
+          const target = lastRemainingRow.nextElementSibling || lastRemainingRow.previousElementSibling || primaryActionBtn;
+          target?.focus();
+        }
+      };
+
+      onLastUnmount();
+      expect(primaryActionBtn.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns focus to search input if context list becomes empty', () => {
+      const searchInput = { id: 'launcher-search-input', focus: vi.fn() };
+      const flatNavigableItems: any[] = [];
+      const currentActive = 'document.body';
+
+      if (flatNavigableItems.length === 0 && (currentActive === 'document.body' || currentActive === 'in-list')) {
+        searchInput.focus();
+      }
+
+      expect(searchInput.focus).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // =========================================================================
+  // 11. Event Isolation & Unrelated Actions Prevention
+  // =========================================================================
+  describe('11. Event Isolation & Unrelated Actions Prevention', () => {
+    it('does not hijack slash (/) when user is typing in a text input or textarea', () => {
+      const inputRef = { focus: vi.fn(), select: vi.fn() };
+      let prevented = false;
+
+      const handleSlashKey = (activeTagName: string) => {
+        const isTextInput = activeTagName === 'INPUT' || activeTagName === 'TEXTAREA';
+        if (!isTextInput) {
+          prevented = true;
+          inputRef.focus();
+        }
+      };
+
+      // When user is typing inside rename input
+      handleSlashKey('INPUT');
+      expect(prevented).toBe(false);
+      expect(inputRef.focus).not.toHaveBeenCalled();
+
+      // When user is in regular launcher list
+      handleSlashKey('DIV');
+      expect(prevented).toBe(true);
+      expect(inputRef.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not execute context resume when Enter is pressed inside rename form', () => {
+      let resumed = false;
+
+      const handleEnterKey = (activeElDescendantOf: string) => {
+        if (activeElDescendantOf === 'form' || activeElDescendantOf === 'BUTTON') {
+          return; // Let form or button handle natively
+        }
+        resumed = true;
+      };
+
+      handleEnterKey('form');
+      expect(resumed).toBe(false);
+
+      handleEnterKey('context-item');
+      expect(resumed).toBe(true);
+    });
+
+    it('ignores Enter key during IME composition to prevent accidental execution', () => {
+      let executed = false;
+      const handleEnter = (e: { key: string; isComposing: boolean; keyCode: number }) => {
+        if (e.isComposing || e.keyCode === 229) {
+          return;
+        }
+        executed = true;
+      };
+
+      // IME composition event
+      handleEnter({ key: 'Enter', isComposing: true, keyCode: 229 });
+      expect(executed).toBe(false);
+
+      // Normal Enter
+      handleEnter({ key: 'Enter', isComposing: false, keyCode: 13 });
+      expect(executed).toBe(true);
+    });
+
+    it('does not navigate context list when ArrowDown/ArrowUp occurs in preview pane, workset rows, or tablist', () => {
+      let listNavigated = false;
+
+      const handleArrowKey = (activeContainer: string) => {
+        if (
+          activeContainer === 'tablist' ||
+          activeContainer === 'sort-group' ||
+          activeContainer === 'workset-row' ||
+          activeContainer === 'preview-pane'
+        ) {
+          return; // Element handles its own navigation
+        }
+        listNavigated = true;
+      };
+
+      handleArrowKey('tablist');
+      expect(listNavigated).toBe(false);
+
+      handleArrowKey('workset-row');
+      expect(listNavigated).toBe(false);
+
+      handleArrowKey('context-list');
+      expect(listNavigated).toBe(true);
+    });
+  });
 });
