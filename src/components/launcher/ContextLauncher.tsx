@@ -112,12 +112,17 @@ export function ContextLauncher() {
   const handleModalKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Tab') {
       const focusable = modalRef.current?.querySelectorAll<HTMLElement>(
-        'input:not([disabled]), button:not([disabled]):not([aria-disabled="true"]):not([tabindex="-1"]), [role="button"]:not([tabindex="-1"]), [tabindex="0"]'
+        'input:not([disabled]), button:not([disabled]):not([aria-disabled="true"]):not([tabindex="-1"]), [role="button"]:not([tabindex="-1"]), [role="option"][tabindex="0"], [role="tab"][tabindex="0"], [tabindex="0"]'
       );
       if (!focusable || focusable.length === 0) return;
 
-      const firstEl = focusable[0];
-      const lastEl = focusable[focusable.length - 1];
+      const visibleFocusable = Array.from(focusable).filter((el) => {
+        return el.offsetParent !== null || el.getClientRects().length > 0 || el === document.activeElement;
+      });
+      if (visibleFocusable.length === 0) return;
+
+      const firstEl = visibleFocusable[0];
+      const lastEl = visibleFocusable[visibleFocusable.length - 1];
 
       if (e.shiftKey) {
         if (document.activeElement === firstEl) {
@@ -133,12 +138,26 @@ export function ContextLauncher() {
     }
   };
 
-  // Focus input on open
+  const previousActiveElement = useRef<HTMLElement | null>(null);
+
+  // Focus management: capture triggering active element on open, focus search input, and restore focus on close
   useEffect(() => {
     if (isOpen) {
-      setTimeout(() => {
+      previousActiveElement.current = (document.activeElement as HTMLElement) || null;
+      const timer = setTimeout(() => {
         inputRef.current?.focus();
       }, 50);
+      return () => clearTimeout(timer);
+    } else {
+      if (previousActiveElement.current && typeof previousActiveElement.current.focus === 'function') {
+        const elToFocus = previousActiveElement.current;
+        previousActiveElement.current = null;
+        setTimeout(() => {
+          if (document.contains(elToFocus)) {
+            elToFocus.focus();
+          }
+        }, 0);
+      }
     }
   }, [isOpen]);
 
@@ -222,6 +241,48 @@ export function ContextLauncher() {
     },
     [resumeContextById]
   );
+
+  // Keyboard roving navigation for filter tablist
+  const handleTabKeyDown = useCallback((e: React.KeyboardEvent, index: number) => {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      const nextIdx = (index + 1) % FILTER_OPTIONS.length;
+      const nextFilter = FILTER_OPTIONS[nextIdx].id;
+      setActiveFilter(nextFilter);
+      document.getElementById(`launcher-filter-tab-${nextFilter}`)?.focus();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      e.stopPropagation();
+      const prevIdx = (index - 1 + FILTER_OPTIONS.length) % FILTER_OPTIONS.length;
+      const prevFilter = FILTER_OPTIONS[prevIdx].id;
+      setActiveFilter(prevFilter);
+      document.getElementById(`launcher-filter-tab-${prevFilter}`)?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      const firstFilter = FILTER_OPTIONS[0].id;
+      setActiveFilter(firstFilter);
+      document.getElementById(`launcher-filter-tab-${firstFilter}`)?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      const lastFilter = FILTER_OPTIONS[FILTER_OPTIONS.length - 1].id;
+      setActiveFilter(lastFilter);
+      document.getElementById(`launcher-filter-tab-${lastFilter}`)?.focus();
+    }
+  }, [setActiveFilter]);
+
+  // Keyboard navigation for sort control
+  const handleSortKeyDown = useCallback((e: React.KeyboardEvent, sortType: 'recent' | 'name') => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetSort = sortType === 'recent' ? 'name' : 'recent';
+      setActiveSort(targetSort);
+      document.getElementById(`launcher-sort-${targetSort}-btn`)?.focus();
+    }
+  }, [setActiveSort]);
 
   // Preserve stable selection: ensure selectedIndex follows the currently selectedContextId
   // in flatNavigableItems, and handle contexts disappearing gracefully
@@ -318,9 +379,10 @@ export function ContextLauncher() {
       }
 
       // 3. Focus Search: Cmd+F, Ctrl+F, or '/' (when not typing in an input)
+      const isTextInput = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
       if (
         ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') ||
-        (e.key === '/' && document.activeElement !== inputRef.current)
+        (e.key === '/' && document.activeElement !== inputRef.current && !isTextInput)
       ) {
         e.preventDefault();
         setIsPreviewOpen(false);
@@ -368,13 +430,15 @@ export function ContextLauncher() {
       const isPrev = e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p');
 
       if (isNext || isPrev) {
-        // If focused inside preview action buttons, menu triggers, preview pane, or workset item rows, let the element handle arrow navigation
+        // If focused inside interactive controls, preview action buttons, menu triggers, preview pane, workset item rows, tablist, or sort group, let the element handle arrow navigation
         if (
           activeEl?.closest('[data-menu-trigger="true"]') ||
           activeEl?.id === 'launcher-primary-action-btn' ||
           activeEl?.closest('[role="menu"]') ||
           activeEl?.closest('[data-workset-row="true"]') ||
-          activeEl?.closest('[data-preview-pane="true"]')
+          activeEl?.closest('[data-preview-pane="true"]') ||
+          activeEl?.closest('[role="tablist"]') ||
+          activeEl?.closest('[role="group"][aria-label="Sort contexts"]')
         ) {
           return;
         }
@@ -407,7 +471,6 @@ export function ContextLauncher() {
       }
 
       // 5. Context Quick Actions Shortcuts (disabled during text editing):
-      const isTextInput = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
       if (!isTextInput) {
         // Cmd+O / Ctrl+O: Open Context Details
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
@@ -486,13 +549,14 @@ export function ContextLauncher() {
           return;
         }
 
-        // If an active button, menu item, or workset row is focused, let the focused element handle its own native/custom click.
+        // If an active button, menu item, workset row, or form input is focused, let the focused element handle its own native/custom click or submit.
         // This avoids accidental duplicate executions or executing context.resume when activating a menu trigger or button.
         if (
           activeEl?.tagName === 'BUTTON' ||
           activeEl?.closest('[role="menu"]') ||
           activeEl?.closest('[data-menu-trigger="true"]') ||
-          activeEl?.closest('[data-workset-row="true"]')
+          activeEl?.closest('[data-workset-row="true"]') ||
+          activeEl?.closest('form')
         ) {
           return;
         }
@@ -551,15 +615,31 @@ export function ContextLauncher() {
     selectContextById,
   ]);
 
-  // Scroll active item into view
+  // Scroll active item into view and retain focus if navigating in the list or if element was removed
   useEffect(() => {
     if (listRef.current) {
-      const activeEl = listRef.current.querySelector(`[data-index="${selectedIndex}"]`);
+      const activeEl = listRef.current.querySelector<HTMLElement>(`[data-index="${selectedIndex}"]`);
       if (activeEl) {
         activeEl.scrollIntoView({ block: 'nearest' });
+        const currentActive = document.activeElement;
+        const wasInList = currentActive && listRef.current.contains(currentActive);
+        const isOrphaned = !currentActive || currentActive === document.body || !document.contains(currentActive);
+        if (wasInList || (isOrphaned && currentActive !== inputRef.current)) {
+          activeEl.focus();
+        }
       }
     }
   }, [selectedIndex]);
+
+  // When context list becomes empty, ensure focus returns to search input
+  useEffect(() => {
+    if (flatNavigableItems.length === 0 && isOpen) {
+      const currentActive = document.activeElement;
+      if (!currentActive || currentActive === document.body || (listRef.current && listRef.current.contains(currentActive))) {
+        inputRef.current?.focus();
+      }
+    }
+  }, [flatNavigableItems.length, isOpen]);
 
   if (!isOpen) return null;
 
@@ -612,7 +692,7 @@ export function ContextLauncher() {
                 setSearchQuery('');
                 inputRef.current?.focus();
               }}
-              className="p-1 rounded text-stone-400 hover:text-white active:text-stone-300 transition-colors duration-75 cursor-pointer mr-1.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95"
+              className="p-1 rounded text-stone-400 hover:text-white active:text-stone-300 transition-colors duration-75 cursor-pointer mr-1.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95"
               title="Clear search"
               aria-label="Clear search"
             >
@@ -631,7 +711,7 @@ export function ContextLauncher() {
             aria-label="Filter contexts by lifecycle state"
             className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5"
           >
-            {FILTER_OPTIONS.map((f) => {
+            {FILTER_OPTIONS.map((f, idx) => {
               const isSelected = activeFilter === f.id;
               return (
                 <button
@@ -640,11 +720,12 @@ export function ContextLauncher() {
                   id={`launcher-filter-tab-${f.id}`}
                   aria-selected={isSelected}
                   tabIndex={isSelected ? 0 : -1}
+                  onKeyDown={(e) => handleTabKeyDown(e, idx)}
                   onClick={() => {
                     setActiveFilter(f.id);
                     inputRef.current?.focus();
                   }}
-                  className={`px-2.5 py-1 rounded-md text-xs transition-all duration-75 shrink-0 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:bg-white/10 select-none ${
+                  className={`px-2.5 py-1 rounded-md text-xs transition-all duration-75 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 select-none ${
                     isSelected
                       ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                       : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -666,12 +747,15 @@ export function ContextLauncher() {
               <button
                 id="launcher-sort-recent-btn"
                 type="button"
-                aria-pressed={activeSort === 'recent'}
+                role="radio"
+                aria-checked={activeSort === 'recent'}
+                tabIndex={activeSort === 'recent' ? 0 : -1}
+                onKeyDown={(e) => handleSortKeyDown(e, 'recent')}
                 onClick={() => {
                   setActiveSort('recent');
                   inputRef.current?.focus();
                 }}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:bg-white/10 ${
+                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 ${
                   activeSort === 'recent'
                     ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                     : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -683,12 +767,15 @@ export function ContextLauncher() {
               <button
                 id="launcher-sort-name-btn"
                 type="button"
-                aria-pressed={activeSort === 'name'}
+                role="radio"
+                aria-checked={activeSort === 'name'}
+                tabIndex={activeSort === 'name' ? 0 : -1}
+                onKeyDown={(e) => handleSortKeyDown(e, 'name')}
                 onClick={() => {
                   setActiveSort('name');
                   inputRef.current?.focus();
                 }}
-                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:bg-white/10 ${
+                className={`px-2 py-0.5 rounded text-[11px] transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:bg-white/10 ${
                   activeSort === 'name'
                     ? 'bg-white/10 text-stone-100 font-medium shadow-xs cursor-default'
                     : 'text-stone-400 hover:text-stone-200 hover:bg-white/[0.04] cursor-pointer'
@@ -1148,6 +1235,8 @@ function ContextPreviewPane({
       setIsMenuOpen(false);
       triggerRef.current?.focus();
     } else if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
       setIsMenuOpen(false);
       triggerRef.current?.focus();
     }
@@ -1277,7 +1366,7 @@ function ContextPreviewPane({
                   id="launcher-rename-cancel-btn"
                   onClick={handleCancelRename}
                   disabled={isSubmittingRename}
-                  className="px-2.5 py-1 bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-[0.98] text-stone-300 hover:text-stone-100 text-xs rounded-md transition-all duration-75 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none cursor-pointer shrink-0 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+                  className="px-2.5 py-1 bg-white/5 hover:bg-white/10 active:bg-white/15 active:scale-[0.98] text-stone-300 hover:text-stone-100 text-xs rounded-md transition-all duration-75 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none cursor-pointer shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900"
                 >
                   Cancel
                 </button>
@@ -1301,7 +1390,7 @@ function ContextPreviewPane({
                     type="button"
                     onClick={handleStartRename}
                     disabled={isResuming || isActionExecuting}
-                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 disabled:opacity-40 disabled:pointer-events-none"
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 disabled:opacity-40 disabled:pointer-events-none"
                     title="Rename Context (⌥R)"
                     aria-label="Rename Context"
                   >
@@ -1316,7 +1405,7 @@ function ContextPreviewPane({
                       }
                     }}
                     disabled={isResuming || isActionExecuting}
-                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
                       preview.isPinned
                         ? 'text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 active:bg-amber-400/20'
                         : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20'
@@ -1849,6 +1938,26 @@ function WorksetPreviewRow({
     }
   }, [isMenuOpen, itemActions]);
 
+  // Focus orphan prevention: If this row (or any control inside it) had focus when unmounting
+  // (e.g., item deleted or removed from context), transfer focus to adjacent row or fallback
+  useEffect(() => {
+    return () => {
+      if (
+        rowRef.current &&
+        (rowRef.current === document.activeElement || rowRef.current.contains(document.activeElement))
+      ) {
+        const nextRow = rowRef.current.nextElementSibling as HTMLElement | null;
+        const prevRow = rowRef.current.previousElementSibling as HTMLElement | null;
+        const targetToFocus = nextRow || prevRow || document.getElementById('launcher-primary-action-btn');
+        if (targetToFocus) {
+          setTimeout(() => {
+            targetToFocus.focus();
+          }, 0);
+        }
+      }
+    };
+  }, []);
+
   const handleOpenOrReveal = (e?: React.MouseEvent | React.KeyboardEvent) => {
     if (e) {
       e.stopPropagation();
@@ -1947,6 +2056,8 @@ function WorksetPreviewRow({
       setIsMenuOpen(false);
       triggerRef.current?.focus();
     } else if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
       setIsMenuOpen(false);
       triggerRef.current?.focus();
     }
@@ -1964,7 +2075,7 @@ function WorksetPreviewRow({
       onKeyDown={handleRowKeyDown}
       aria-label={`Open ${displayTitle}`}
       aria-busy={isOpenExecuting}
-      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] focus:outline-none focus-visible:ring-1 focus-visible:ring-orange-400/80 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none cursor-pointer ${
+      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none cursor-pointer ${
         item.status === 'deleted' ? 'opacity-60' : ''
       }`}
     >
@@ -2066,7 +2177,7 @@ function WorksetPreviewRow({
                 item.id
               );
             }}
-            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-orange-400 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
               isPinExecuting
                 ? 'opacity-100 text-amber-400'
                 : isImportant
@@ -2115,7 +2226,7 @@ function WorksetPreviewRow({
                 setIsMenuOpen(true);
               }
             }}
-            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-orange-400 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
+            className={`p-1 rounded hover:bg-white/10 active:bg-white/15 transition-all duration-75 cursor-pointer focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
               isMenuOpen
                 ? 'opacity-100 bg-white/10 text-stone-100 ring-1 ring-white/20'
                 : isItemExecuting && !isPinExecuting && !isOpenExecuting
