@@ -325,7 +325,7 @@ describe('Context Launcher Selection, Keyboard Navigation, and Unavailable Conte
       const getClasses = (isSelected: boolean) =>
         `group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] ${
           isSelected
-            ? 'bg-stone-800 border-orange-500 hover:bg-stone-750 text-stone-100 ring-1 ring-white/15 shadow-xs'
+            ? 'bg-stone-800 border-orange-500 hover:bg-stone-800 text-stone-100 ring-1 ring-white/15 shadow-xs'
             : 'border-transparent hover:bg-white/[0.05] hover:text-stone-100 active:bg-white/[0.08] text-stone-300'
         }`;
 

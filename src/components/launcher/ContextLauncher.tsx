@@ -896,7 +896,7 @@ export function ContextLauncher() {
                     <button
                       type="button"
                       onClick={() => setSearchQuery('')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-500/50 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors duration-75 motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 cursor-pointer"
                       data-testid="clear-search-button"
                     >
                       Clear search
@@ -908,7 +908,7 @@ export function ContextLauncher() {
                     <button
                       type="button"
                       onClick={() => setActiveFilter('all')}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-500/50 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors duration-75 motion-reduce:transition-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 cursor-pointer"
                       data-testid="show-all-contexts-button"
                     >
                       Show all contexts
@@ -1448,7 +1448,7 @@ function ContextPreviewPane({
                   type="submit"
                   id="launcher-rename-save-btn"
                   disabled={isSubmittingRename || !renameValue.trim()}
-                  className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs rounded-md transition-colors duration-75 cursor-pointer flex items-center gap-1 shrink-0 shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400"
+                  className="px-2.5 py-1 bg-orange-500 hover:bg-orange-600 active:bg-orange-700 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none text-stone-950 font-semibold text-xs rounded-md transition-colors duration-75 cursor-pointer flex items-center gap-1 shrink-0 shadow-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900"
                 >
                   {isSubmittingRename ? (
                     <RefreshCw size={11} className="animate-spin motion-reduce:animate-none" />
@@ -1487,7 +1487,7 @@ function ContextPreviewPane({
                     type="button"
                     onClick={handleStartRename}
                     disabled={isResuming || isActionExecuting}
-                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 disabled:opacity-40 disabled:pointer-events-none"
+                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 w-6 h-6 shrink-0 flex items-center justify-center text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 disabled:opacity-40 disabled:pointer-events-none"
                     title="Rename Context (⌥R)"
                     aria-label="Rename Context"
                   >
@@ -1502,7 +1502,7 @@ function ContextPreviewPane({
                       }
                     }}
                     disabled={isResuming || isActionExecuting}
-                    className={`w-6 h-6 flex items-center justify-center rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:pointer-events-none ${
+                    className={`w-6 h-6 shrink-0 flex items-center justify-center rounded-md transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:pointer-events-none ${
                       preview.isPinned
                         ? 'text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 active:bg-amber-400/20'
                         : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-stone-400 hover:text-stone-100 hover:bg-white/10 active:bg-white/20'
@@ -1842,7 +1842,7 @@ function ContextPreviewPane({
               }
             }}
             disabled={isResuming || isActionExecuting}
-            className={`p-2.5 rounded-lg border border-white/10 transition-colors duration-75 cursor-pointer flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none ${
+            className={`p-2.5 rounded-lg border border-white/10 transition-colors duration-75 cursor-pointer flex items-center justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 active:scale-[0.98] motion-reduce:transform-none motion-reduce:transition-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none ${
               isMenuOpen
                 ? 'bg-stone-800 text-stone-100 ring-1 ring-white/20'
                 : 'bg-stone-900/60 hover:bg-stone-800 active:bg-stone-800/80 text-stone-400 hover:text-stone-200'
@@ -2203,12 +2203,12 @@ function WorksetPreviewRow({
       onKeyDown={handleRowKeyDown}
       aria-label={`Open ${displayTitle}`}
       aria-busy={isOpenExecuting}
-      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none ${
+      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none ${
         isExecuting || isItemExecuting
-          ? 'cursor-wait opacity-80'
+          ? 'cursor-wait opacity-80 hover:bg-white/[0.04]'
           : item.status === 'deleted'
           ? 'opacity-60 cursor-not-allowed'
-          : 'cursor-pointer'
+          : 'hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] cursor-pointer'
       }`}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -2527,7 +2527,7 @@ const ContextLauncherItem = React.memo(function ContextLauncherItem({
       }}
       className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] motion-reduce:transform-none motion-reduce:transition-none ${
         isSelected
-          ? 'bg-stone-800 border-orange-500 hover:bg-stone-750 text-stone-100 ring-1 ring-white/15 shadow-xs'
+          ? 'bg-stone-800 border-orange-500 hover:bg-stone-800 text-stone-100 ring-1 ring-white/15 shadow-xs'
           : 'border-transparent hover:bg-white/[0.05] hover:text-stone-100 active:bg-white/[0.08] text-stone-300'
       }`}
       role="option"
