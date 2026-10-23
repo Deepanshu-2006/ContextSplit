@@ -1214,17 +1214,25 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         }
       }
 
+      // Preserve selection if currently selected context still exists
+      const currentSelectedId = get().selectedContextId;
+      const contextStillExists =
+        Boolean(currentSelectedId &&
+        (activeItem?.id === currentSelectedId || recents.some((r) => r.id === currentSelectedId)));
+
+      const targetSelectId = contextStillExists
+        ? currentSelectedId
+        : activeItem?.id || (recents.length > 0 ? recents[0].id : null);
+
       set({
         activeContext: activeItem,
         recentContexts: recents,
         isLoading: false,
-        selectedIndex: 0,
       });
 
-      // Auto-preview top item if available and not currently displaying an action error
-      const firstId = activeItem?.id || (recents.length > 0 ? recents[0].id : null);
-      if (firstId && !get().actionError) {
-        get().selectContextById(firstId);
+      // Auto-preview target item if available and not currently displaying an action error
+      if (targetSelectId && !get().actionError) {
+        get().selectContextById(targetSelectId);
       }
     } catch (err) {
       set({

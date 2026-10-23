@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search,
@@ -201,29 +201,55 @@ export function ContextLauncher() {
     });
   }, [visibleFilteredList, searchQuery, activeFilter, activeSort, activeContext?.id]);
 
-  // Preserve stable selection: when filteredList order changes (e.g. sort toggled),
-  // ensure selectedIndex follows the currently selectedContextId
+  // Flat list of navigable items matching the visual order of rendered groups
+  const flatNavigableItems = useMemo(() => {
+    return contextGroups.flatMap((g) => g.items);
+  }, [contextGroups]);
+
+  // Stable selection and resume callbacks to prevent unnecessary re-rendering
+  const handleItemSelect = useCallback(
+    (id: string, index: number) => {
+      setSelectedIndex(index);
+      selectContextById(id);
+      setIsPreviewOpen(true);
+    },
+    [selectContextById, setSelectedIndex, setIsPreviewOpen]
+  );
+
+  const handleItemResume = useCallback(
+    (id: string) => {
+      resumeContextById(id);
+    },
+    [resumeContextById]
+  );
+
+  // Preserve stable selection: ensure selectedIndex follows the currently selectedContextId
+  // in flatNavigableItems, and handle contexts disappearing gracefully
   useEffect(() => {
-    if (filteredList.length === 0) {
+    if (flatNavigableItems.length === 0) {
       if (selectedContextId !== null) {
-        useLauncherStore.setState({ selectedContextId: null, activePreview: null });
+        useLauncherStore.setState({ selectedContextId: null, activePreview: null, selectedIndex: 0 });
       }
     } else if (selectedContextId) {
-      const foundIdx = filteredList.findIndex((item) => item.id === selectedContextId);
+      const foundIdx = flatNavigableItems.findIndex((item) => item.id === selectedContextId);
       if (foundIdx >= 0) {
         if (foundIdx !== selectedIndex) {
           setSelectedIndex(foundIdx);
         }
       } else {
-        // Selected context is no longer in filtered list (e.g. filtered out by lifecycle filter)
-        setSelectedIndex(0);
-        selectContextById(filteredList[0].id);
+        // Selected context is no longer in visible list (e.g. filtered out by lifecycle filter or deleted)
+        const safeIdx = Math.min(selectedIndex, flatNavigableItems.length - 1);
+        const fallbackTarget = flatNavigableItems[safeIdx >= 0 ? safeIdx : 0];
+        if (fallbackTarget) {
+          setSelectedIndex(safeIdx >= 0 ? safeIdx : 0);
+          selectContextById(fallbackTarget.id);
+        }
       }
     } else {
       setSelectedIndex(0);
-      selectContextById(filteredList[0].id);
+      selectContextById(flatNavigableItems[0].id);
     }
-  }, [filteredList, selectedContextId, selectContextById, setSelectedIndex]);
+  }, [flatNavigableItems, selectedContextId, selectContextById, setSelectedIndex, selectedIndex]);
 
   // Mac-native Keyboard Navigation with two-stage inspection & resume
   useEffect(() => {
@@ -313,9 +339,9 @@ export function ContextLauncher() {
           return;
         }
         e.preventDefault();
-        if (filteredList.length > 0) {
+        if (flatNavigableItems.length > 0) {
           setSelectedIndex(0);
-          selectContextById(filteredList[0].id);
+          selectContextById(flatNavigableItems[0].id);
         }
         return;
       }
@@ -329,10 +355,10 @@ export function ContextLauncher() {
           return;
         }
         e.preventDefault();
-        if (filteredList.length > 0) {
-          const lastIdx = filteredList.length - 1;
+        if (flatNavigableItems.length > 0) {
+          const lastIdx = flatNavigableItems.length - 1;
           setSelectedIndex(lastIdx);
-          selectContextById(filteredList[lastIdx].id);
+          selectContextById(flatNavigableItems[lastIdx].id);
         }
         return;
       }
@@ -342,22 +368,23 @@ export function ContextLauncher() {
       const isPrev = e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p');
 
       if (isNext || isPrev) {
-        // If focused inside preview action buttons, menu triggers, or workset item rows, let the element handle arrow navigation
+        // If focused inside preview action buttons, menu triggers, preview pane, or workset item rows, let the element handle arrow navigation
         if (
           activeEl?.closest('[data-menu-trigger="true"]') ||
           activeEl?.id === 'launcher-primary-action-btn' ||
           activeEl?.closest('[role="menu"]') ||
-          activeEl?.closest('[data-workset-row="true"]')
+          activeEl?.closest('[data-workset-row="true"]') ||
+          activeEl?.closest('[data-preview-pane="true"]')
         ) {
           return;
         }
 
         if (isNext) {
           e.preventDefault();
-          if (filteredList.length > 0) {
-            const nextIndex = (selectedIndex + 1) % filteredList.length;
+          if (flatNavigableItems.length > 0) {
+            const nextIndex = (selectedIndex + 1) % flatNavigableItems.length;
             setSelectedIndex(nextIndex);
-            const target = filteredList[nextIndex];
+            const target = flatNavigableItems[nextIndex];
             if (target) {
               selectContextById(target.id);
             }
@@ -367,10 +394,10 @@ export function ContextLauncher() {
 
         if (isPrev) {
           e.preventDefault();
-          if (filteredList.length > 0) {
-            const prevIndex = (selectedIndex - 1 + filteredList.length) % filteredList.length;
+          if (flatNavigableItems.length > 0) {
+            const prevIndex = (selectedIndex - 1 + flatNavigableItems.length) % flatNavigableItems.length;
             setSelectedIndex(prevIndex);
-            const target = filteredList[prevIndex];
+            const target = flatNavigableItems[prevIndex];
             if (target) {
               selectContextById(target.id);
             }
@@ -385,7 +412,7 @@ export function ContextLauncher() {
         // Cmd+O / Ctrl+O: Open Context Details
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
           e.preventDefault();
-          const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+          const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
             executeContextAction('context.open_details', targetId);
           }
@@ -395,12 +422,12 @@ export function ContextLauncher() {
         // Alt+P / Option+P: Toggle Pin on Selected Context
         if (e.altKey && e.key.toLowerCase() === 'p') {
           e.preventDefault();
-          const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+          const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
             const isCurrentlyPinned = Boolean(
               activePreview?.contextId === targetId
                 ? activePreview.isPinned
-                : filteredList.find((c) => c.id === targetId)?.isPinned
+                : (flatNavigableItems.find((c) => c.id === targetId)?.isPinned ?? filteredList.find((c) => c.id === targetId)?.isPinned)
             );
             executeContextAction(isCurrentlyPinned ? 'context.unpin' : 'context.pin', targetId);
           }
@@ -438,9 +465,9 @@ export function ContextLauncher() {
         // Alt+A / Option+A: Archive or Restore Selected Context
         if (e.altKey && e.key.toLowerCase() === 'a') {
           e.preventDefault();
-          const targetId = selectedContextId || filteredList[selectedIndex]?.id;
+          const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
-            const targetContext = filteredList.find((c) => c.id === targetId);
+            const targetContext = flatNavigableItems.find((c) => c.id === targetId) || filteredList.find((c) => c.id === targetId);
             const currentState = resolveContextLifecycleState({
               lifecycleState: targetContext?.state,
               isActive: targetContext?.isActive,
@@ -454,6 +481,11 @@ export function ContextLauncher() {
 
       // 6. Enter Action: Resume from preview or list
       if (e.key === 'Enter') {
+        // Prevent accidental execution during IME composition
+        if (e.isComposing || (e as any).keyCode === 229) {
+          return;
+        }
+
         // If an active button, menu item, or workset row is focused, let the focused element handle its own native/custom click.
         // This avoids accidental duplicate executions or executing context.resume when activating a menu trigger or button.
         if (
@@ -476,11 +508,11 @@ export function ContextLauncher() {
           return;
         }
 
-        if (filteredList.length === 0 || selectedIndex < 0 || selectedIndex >= filteredList.length) {
+        if (flatNavigableItems.length === 0 || selectedIndex < 0 || selectedIndex >= flatNavigableItems.length) {
           return;
         }
 
-        const target = filteredList[selectedIndex];
+        const target = flatNavigableItems[selectedIndex];
         if (target) {
           setIsPreviewOpen(true);
           executeContextAction('context.resume', target.id);
@@ -493,9 +525,11 @@ export function ContextLauncher() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     isOpen,
+    flatNavigableItems,
     filteredList,
     selectedIndex,
     selectedContextId,
+    activePreview,
     isPreviewOpen,
     isResuming,
     isActionExecuting,
@@ -513,6 +547,8 @@ export function ContextLauncher() {
     clearResumeState,
     clearActionError,
     executeContextAction,
+    toggleActiveSort,
+    selectContextById,
   ]);
 
   // Scroll active item into view
@@ -749,7 +785,7 @@ export function ContextLauncher() {
                     <div className="space-y-0.5">
                       {group.items.map((item, relIdx) => {
                         const globalIdx = group.startIndex + relIdx;
-                        const isSelected = selectedIndex === globalIdx;
+                        const isSelected = selectedContextId ? item.id === selectedContextId : selectedIndex === globalIdx;
                         return (
                           <ContextLauncherItem
                             key={item.id}
@@ -759,12 +795,8 @@ export function ContextLauncher() {
                             isResuming={isResuming && selectedContextId === item.id}
                             isDuplicate={duplicateNamesSet.has(item.name.trim().toLowerCase())}
                             dataIndex={globalIdx}
-                            onSelect={() => {
-                              setSelectedIndex(globalIdx);
-                              selectContextById(item.id);
-                              setIsPreviewOpen(true);
-                            }}
-                            onResume={() => resumeContextById(item.id)}
+                            onSelect={() => handleItemSelect(item.id, globalIdx)}
+                            onResume={() => handleItemResume(item.id)}
                           />
                         );
                       })}
@@ -783,9 +815,10 @@ export function ContextLauncher() {
 
           {/* Right Column: 4. Selected Context Preview & 5. Resume */}
           <div
-            className="md:col-span-6 lg:col-span-7 p-4 overflow-y-auto flex flex-col justify-between bg-stone-950/20"
+            className="md:col-span-6 lg:col-span-7 p-4 overflow-y-auto flex flex-col justify-between bg-stone-950/20 min-h-[380px]"
             role="region"
             aria-label="Selected Context Preview"
+            data-preview-pane="true"
           >
             <ContextPreviewPane
               preview={activePreview?.contextId === selectedContextId ? activePreview : null}
@@ -948,6 +981,9 @@ function ContextPreviewPane({
     setRenameValue('');
     setRenameValidationError(null);
     setIsSubmittingRename(false);
+    setTimeout(() => {
+      document.getElementById('launcher-rename-context-btn')?.focus();
+    }, 20);
   };
 
   const handleRenameSubmit = async (e?: React.FormEvent) => {
@@ -982,6 +1018,9 @@ function ContextPreviewPane({
       setIsRenaming(false);
       setRenameValue('');
       setRenameValidationError(null);
+      setTimeout(() => {
+        document.getElementById('launcher-rename-context-btn')?.focus();
+      }, 20);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       setRenameValidationError(errMsg);
@@ -1208,6 +1247,13 @@ function ContextPreviewPane({
                       e.stopPropagation();
                       handleCancelRename();
                     }
+                  }}
+                  onBlur={(e) => {
+                    const related = e.relatedTarget as HTMLElement | null;
+                    if (related?.closest('#launcher-rename-context-form')) {
+                      return;
+                    }
+                    handleCancelRename();
                   }}
                   disabled={isSubmittingRename}
                   maxLength={100}
@@ -2200,7 +2246,7 @@ interface ContextLauncherItemProps {
   onResume: () => void;
 }
 
-function ContextLauncherItem({
+const ContextLauncherItem = React.memo(function ContextLauncherItem({
   item,
   isSelected,
   isResuming = false,
@@ -2222,12 +2268,22 @@ function ContextLauncherItem({
     <div
       id={`launcher-item-${item.id}`}
       data-index={dataIndex}
+      tabIndex={isSelected ? 0 : -1}
       onClick={onSelect}
       onDoubleClick={onResume}
-      className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-all duration-75 select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-[0.99] ${
+      onKeyDown={(e) => {
+        if (e.key === ' ') {
+          e.preventDefault();
+          onSelect();
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          onResume();
+        }
+      }}
+      className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-all duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] ${
         isSelected
-          ? 'bg-stone-800 hover:bg-stone-800/90 text-stone-100 ring-1 ring-white/10 shadow-xs'
-          : 'hover:bg-white/[0.04] active:bg-white/[0.07] text-stone-300'
+          ? 'bg-stone-800 border-orange-500 hover:bg-stone-750 text-stone-100 ring-1 ring-white/15 shadow-xs'
+          : 'border-transparent hover:bg-white/[0.05] hover:text-stone-100 active:bg-white/[0.08] text-stone-300'
       }`}
       role="option"
       aria-selected={isSelected}
@@ -2245,8 +2301,11 @@ function ContextLauncherItem({
         )}
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <span className={`text-xs font-medium truncate ${isArchived ? 'text-stone-400' : 'text-stone-100'}`}>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              className={`text-xs font-medium truncate ${isArchived ? 'text-stone-400' : 'text-stone-100'}`}
+              title={identity.name}
+            >
               {identity.name}
             </span>
             {identity.disambiguationTag ? (
@@ -2257,7 +2316,10 @@ function ContextLauncherItem({
                 {identity.disambiguationTag}
               </span>
             ) : item.projectIdentifier ? (
-              <span className="text-[10px] text-stone-500 font-mono shrink-0">
+              <span
+                className="text-[10px] text-stone-500 font-mono shrink-0 truncate max-w-[120px]"
+                title={`Project: ${item.projectIdentifier}`}
+              >
                 {item.projectIdentifier}
               </span>
             ) : null}
@@ -2284,9 +2346,9 @@ function ContextLauncherItem({
 
           <div className="flex items-center gap-1.5 text-[11px] text-stone-400 truncate mt-0.5">
             {identity.subtitle && (
-              <span className="truncate">{identity.subtitle}</span>
+              <span className="truncate" title={identity.subtitle}>{identity.subtitle}</span>
             )}
-            {identity.subtitle && <span className="text-stone-600">•</span>}
+            {identity.subtitle && <span className="text-stone-600 shrink-0">•</span>}
             <span className="shrink-0">{identity.timeStr}</span>
           </div>
         </div>
@@ -2304,4 +2366,4 @@ function ContextLauncherItem({
       </div>
     </div>
   );
-}
+});
