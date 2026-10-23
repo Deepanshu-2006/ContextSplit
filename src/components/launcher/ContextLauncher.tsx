@@ -1737,7 +1737,7 @@ function ContextPreviewPane({
                   item={item}
                   contextId={preview.contextId}
                   contextState={preview.state}
-                  isExecuting={isActionExecuting}
+                  isExecuting={isActionExecuting || isResuming}
                   executingActionId={executingActionId}
                   executingTargetId={executingTargetId}
                   onExecuteItemAction={onExecuteItemAction}
@@ -1776,7 +1776,11 @@ function ContextPreviewPane({
             </>
           ) : (
             <>
-              <Play size={13} className="fill-current" />
+              {isArchived ? (
+                <RotateCcw size={13} />
+              ) : (
+                <Play size={13} className="fill-current" />
+              )}
               <span>{primaryButtonLabel}</span>
               <kbd className="ml-1 px-1.5 py-0.5 text-[10px] font-mono bg-stone-950/20 text-stone-950 rounded leading-none font-semibold">
                 ↵
@@ -2083,6 +2087,10 @@ function WorksetPreviewRow({
         e.preventDefault();
         const prev = rowRef.current?.previousElementSibling as HTMLElement | null;
         prev?.focus();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const firstBtn = rowRef.current?.querySelector('button') as HTMLButtonElement | null;
+        firstBtn?.focus();
       }
     }
   };
@@ -2161,8 +2169,12 @@ function WorksetPreviewRow({
       onKeyDown={handleRowKeyDown}
       aria-label={`Open ${displayTitle}`}
       aria-busy={isOpenExecuting}
-      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none cursor-pointer ${
-        item.status === 'deleted' ? 'opacity-60' : ''
+      className={`group relative flex items-center justify-between py-1.5 px-2 rounded-md hover:bg-white/[0.04] focus:bg-white/[0.04] active:bg-white/[0.07] focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 text-xs gap-2 text-stone-300 transition-colors duration-75 select-none ${
+        isExecuting || isItemExecuting
+          ? 'cursor-wait opacity-80'
+          : item.status === 'deleted'
+          ? 'opacity-60 cursor-not-allowed'
+          : 'cursor-pointer'
       }`}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -2254,7 +2266,7 @@ function WorksetPreviewRow({
         {onExecuteItemAction && (
           <button
             type="button"
-            disabled={isExecuting}
+            disabled={isExecuting || isItemExecuting}
             onClick={(e) => {
               e.stopPropagation();
               onExecuteItemAction(
@@ -2300,7 +2312,7 @@ function WorksetPreviewRow({
             ref={triggerRef}
             data-menu-trigger="true"
             type="button"
-            disabled={isExecuting}
+            disabled={isExecuting || isItemExecuting}
             onClick={(e) => {
               e.stopPropagation();
               setIsMenuOpen((prev) => !prev);
@@ -2369,11 +2381,11 @@ function WorksetPreviewRow({
                       role="menuitem"
                       type="button"
                       tabIndex={isFocused ? 0 : -1}
-                      disabled={!isEnabled || isExecuting}
-                      aria-disabled={!isEnabled || isExecuting}
+                      disabled={!isEnabled || isExecuting || isItemExecuting}
+                      aria-disabled={!isEnabled || isExecuting || isItemExecuting}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (!isEnabled || isExecuting) return;
+                        if (!isEnabled || isExecuting || isItemExecuting) return;
                         setIsMenuOpen(false);
                         onExecuteItemAction(action.id, contextId, item.id);
                         triggerRef.current?.focus();
