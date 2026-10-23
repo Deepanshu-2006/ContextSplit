@@ -237,9 +237,10 @@ export function ContextLauncher() {
 
   const handleItemResume = useCallback(
     (id: string) => {
+      if (isResuming || isActionExecuting) return;
       resumeContextById(id);
     },
-    [resumeContextById]
+    [resumeContextById, isResuming, isActionExecuting]
   );
 
   // Keyboard roving navigation for filter tablist
@@ -475,6 +476,7 @@ export function ContextLauncher() {
         // Cmd+O / Ctrl+O: Open Context Details
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {
           e.preventDefault();
+          if (isResuming || isActionExecuting) return;
           const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
             executeContextAction('context.open_details', targetId);
@@ -485,6 +487,7 @@ export function ContextLauncher() {
         // Alt+P / Option+P: Toggle Pin on Selected Context
         if (e.altKey && e.key.toLowerCase() === 'p') {
           e.preventDefault();
+          if (isResuming || isActionExecuting) return;
           const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
             const isCurrentlyPinned = Boolean(
@@ -500,6 +503,7 @@ export function ContextLauncher() {
         // Alt+M / Option+M: Toggle Secondary Actions Menu for selected context
         if (e.altKey && e.key.toLowerCase() === 'm') {
           e.preventDefault();
+          if (isResuming || isActionExecuting) return;
           const moreActionsBtn = document.getElementById('launcher-more-actions-btn');
           if (moreActionsBtn) {
             moreActionsBtn.click();
@@ -511,6 +515,7 @@ export function ContextLauncher() {
         // Alt+R / Option+R: Rename Selected Context
         if (e.altKey && e.key.toLowerCase() === 'r') {
           e.preventDefault();
+          if (isResuming || isActionExecuting) return;
           const renameBtn = document.getElementById('launcher-rename-context-btn');
           if (renameBtn) {
             renameBtn.click();
@@ -528,6 +533,7 @@ export function ContextLauncher() {
         // Alt+A / Option+A: Archive or Restore Selected Context
         if (e.altKey && e.key.toLowerCase() === 'a') {
           e.preventDefault();
+          if (isResuming || isActionExecuting) return;
           const targetId = selectedContextId || flatNavigableItems[selectedIndex]?.id;
           if (targetId) {
             const targetContext = flatNavigableItems.find((c) => c.id === targetId) || filteredList.find((c) => c.id === targetId);
@@ -800,9 +806,9 @@ export function ContextLauncher() {
             className="md:col-span-6 lg:col-span-5 overflow-y-auto p-2.5 space-y-3 focus:outline-none"
             tabIndex={-1}
           >
-            {/* Loading state */}
-            {isLoading && (
-              <div className="space-y-2 p-1 animate-pulse motion-reduce:animate-none">
+            {/* Loading skeleton: only on initial load when no data exists */}
+            {isLoading && filteredList.length === 0 && (
+              <div className="space-y-2 p-1 animate-pulse motion-reduce:animate-none" data-testid="context-list-loading-skeleton">
                 <div className="h-2.5 w-16 bg-stone-800 rounded" />
                 <div className="h-10 bg-stone-800/40 rounded-lg" />
                 <div className="h-2.5 w-20 bg-stone-800 rounded mt-3" />
@@ -811,9 +817,47 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Error state */}
-            {!isLoading && error && (
-              <div className="p-3 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs">
+            {/* Error state: non-disruptive inline banner when valid data is preserved */}
+            {error && filteredList.length > 0 && (
+              <div
+                role="alert"
+                className="p-2.5 rounded-lg bg-red-950/40 border border-red-500/20 text-red-200 flex items-center justify-between gap-2 text-xs mb-2 shadow-xs"
+                data-testid="context-list-inline-error-banner"
+              >
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                  <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
+                    <p className="font-semibold text-red-300 text-[11px] shrink-0">
+                      {searchQuery ? 'Search Error' : 'Connection Error'}
+                    </p>
+                    <p className="text-[11px] text-red-400/90 truncate">{error}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={fetchLauncherData}
+                    disabled={isLoading}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 active:bg-red-900/80 text-[11px] text-red-200 transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400 active:scale-95 motion-reduce:transition-none motion-reduce:transform-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
+                  >
+                    <RefreshCw size={10} className={isLoading ? 'animate-spin motion-reduce:animate-none' : 'motion-reduce:animate-none'} />
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => useLauncherStore.getState().clearError()}
+                    className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
+                    aria-label="Dismiss error"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Error state: full card when no data exists */}
+            {!isLoading && error && filteredList.length === 0 && (
+              <div className="p-3 rounded-lg bg-red-950/30 border border-red-500/20 text-red-200 flex items-start gap-2 text-xs" data-testid="context-list-empty-error">
                 <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-red-300">
@@ -821,6 +865,7 @@ export function ContextLauncher() {
                   </p>
                   <p className="text-red-400/80 mt-0.5">{error}</p>
                   <button
+                    type="button"
                     onClick={fetchLauncherData}
                     className="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 active:bg-red-900/80 text-[11px] text-red-200 transition-colors duration-75 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-red-400 active:scale-95 motion-reduce:transition-none motion-reduce:transform-none"
                   >
@@ -831,9 +876,9 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Empty state */}
+            {/* Empty state: when not loading, no error, and list is empty */}
             {!isLoading && !error && filteredList.length === 0 && (
-              <div className="py-8 text-center space-y-1">
+              <div className="py-8 text-center space-y-1" data-testid="context-list-empty-state">
                 <p className="text-xs font-medium text-stone-300">
                   {searchQuery ? 'No matching contexts' : 'No contexts available'}
                 </p>
@@ -847,8 +892,8 @@ export function ContextLauncher() {
               </div>
             )}
 
-            {/* Context Groups List */}
-            {!isLoading && !error && filteredList.length > 0 && (
+            {/* Context Groups List: rendered whenever filteredList.length > 0 */}
+            {filteredList.length > 0 && (
               <div className="space-y-3">
                 {contextGroups.map((group) => (
                   <div key={group.id} className="space-y-1">
@@ -930,6 +975,14 @@ export function ContextLauncher() {
               isDuplicate={Boolean(
                 activePreview && duplicateNamesSet.has(activePreview.name.trim().toLowerCase())
               )}
+              onRetryPreview={() => {
+                if (selectedContextId) {
+                  selectContextById(selectedContextId, { forceRefresh: true });
+                }
+              }}
+              onClearPreviewError={() => {
+                useLauncherStore.getState().clearPreviewError();
+              }}
               onResume={(force) => {
                 if (activePreview) {
                   executeContextAction('context.resume', activePreview.contextId, { force });
@@ -997,6 +1050,8 @@ interface ContextPreviewPaneProps {
   onExecuteItemAction?: (actionId: ItemActionId, contextId: string, itemId: string) => void;
   onClearResumeState: () => void;
   onClearActionError?: () => void;
+  onRetryPreview?: () => void;
+  onClearPreviewError?: () => void;
   onClose: () => void;
 }
 
@@ -1018,6 +1073,8 @@ function ContextPreviewPane({
   onExecuteItemAction,
   onClearResumeState,
   onClearActionError,
+  onRetryPreview,
+  onClearPreviewError,
 }: ContextPreviewPaneProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [focusedMenuIndex, setFocusedMenuIndex] = useState(-1);
@@ -1278,6 +1335,17 @@ function ContextPreviewPane({
         <AlertCircle size={20} className="text-red-400" />
         <p className="text-xs font-semibold text-stone-200">Context Preview Unavailable</p>
         <p className="text-[11px] text-stone-400 max-w-xs">{error}</p>
+        {onRetryPreview && (
+          <button
+            type="button"
+            onClick={onRetryPreview}
+            disabled={isLoading}
+            className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded bg-white/10 hover:bg-white/15 text-stone-200 text-xs transition-colors duration-75 motion-reduce:transition-none cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
+          >
+            <RefreshCw size={11} className={isLoading ? 'animate-spin motion-reduce:animate-none' : 'motion-reduce:animate-none'} />
+            Retry
+          </button>
+        )}
       </div>
     );
   }
@@ -1605,15 +1673,33 @@ function ContextPreviewPane({
                 <p className="text-[11px] text-amber-400/90 truncate">{error}</p>
               </div>
             </div>
-            <button
-              onClick={() => {
-                useLauncherStore.setState({ previewError: null });
-              }}
-              className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
-              aria-label="Dismiss error"
-            >
-              <X size={12} />
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onRetryPreview && (
+                <button
+                  type="button"
+                  onClick={onRetryPreview}
+                  disabled={isLoading}
+                  className="px-1.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 active:bg-amber-500/40 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none text-amber-300 border border-amber-500/30 font-medium text-[10px] transition-colors duration-75 cursor-pointer flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-400"
+                >
+                  <RefreshCw size={9} className={isLoading ? 'animate-spin motion-reduce:animate-none' : 'motion-reduce:animate-none'} />
+                  <span>Retry</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (onClearPreviewError) {
+                    onClearPreviewError();
+                  } else {
+                    useLauncherStore.setState({ previewError: null });
+                  }
+                }}
+                className="text-stone-400 hover:text-white active:text-stone-300 p-0.5 cursor-pointer rounded transition-colors duration-75 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 active:scale-95 motion-reduce:transform-none motion-reduce:transition-none"
+                aria-label="Dismiss error"
+              >
+                <X size={12} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -2043,7 +2129,7 @@ function WorksetPreviewRow({
       e.preventDefault();
       e.stopPropagation();
       const targetAction = itemActions[focusedMenuIndex];
-      if (targetAction && targetAction.isSupported && !isExecuting) {
+      if (targetAction && targetAction.isSupported && !isExecuting && !isItemExecuting) {
         setIsMenuOpen(false);
         if (onExecuteItemAction) {
           onExecuteItemAction(targetAction.id, contextId, item.id);
@@ -2381,14 +2467,16 @@ const ContextLauncherItem = React.memo(function ContextLauncherItem({
       data-index={dataIndex}
       tabIndex={isSelected ? 0 : -1}
       onClick={onSelect}
-      onDoubleClick={onResume}
+      onDoubleClick={() => {
+        if (!isResuming) onResume();
+      }}
       onKeyDown={(e) => {
         if (e.key === ' ') {
           e.preventDefault();
           onSelect();
         } else if (e.key === 'Enter') {
           e.preventDefault();
-          onResume();
+          if (!isResuming) onResume();
         }
       }}
       className={`group flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors duration-75 select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-400 focus-visible:ring-offset-1 focus-visible:ring-offset-stone-900 border-l-2 active:scale-[0.99] motion-reduce:transform-none motion-reduce:transition-none ${

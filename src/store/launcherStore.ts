@@ -575,6 +575,8 @@ interface LauncherState {
   renameContextById: (contextId: string, newName: string) => Promise<QuickActionResult<ContextActionId>>;
   clearResumeState: () => void;
   clearActionError: () => void;
+  clearError: () => void;
+  clearPreviewError: () => void;
   executeContextAction: (
     actionId: ContextActionId,
     contextId?: string,
@@ -737,6 +739,14 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
       resumeError: null,
       notReadyReason: null,
     });
+  },
+
+  clearError: () => {
+    set({ error: null });
+  },
+
+  clearPreviewError: () => {
+    set({ previewError: null });
   },
 
   selectContextById: async (contextId: string, options?: { forceRefresh?: boolean }) => {
@@ -1022,8 +1032,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
 
           const errorMsg = err instanceof Error ? err.message : 'Context unavailable or failed to load preview';
 
-          // Requirement 8: If valid data exists for this context, preserve it!
-          if (existingValidPreview && existingValidPreview.worksetItems.length > 0) {
+          // Requirement 6: If valid data exists for this context, preserve it!
+          if (existingValidPreview) {
             set({
               isLoadingPreview: false,
               previewError: errorMsg,
@@ -1228,6 +1238,7 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         activeContext: activeItem,
         recentContexts: recents,
         isLoading: false,
+        error: null,
       });
 
       // Auto-preview target item if available and not currently displaying an action error
@@ -1235,7 +1246,11 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
         get().selectContextById(targetSelectId);
       }
     } catch (err) {
+      const prevActive = get().activeContext;
+      const prevRecents = get().recentContexts;
       set({
+        activeContext: prevActive,
+        recentContexts: prevRecents,
         isLoading: false,
         error: err instanceof Error ? err.message : 'Failed to load contexts from engine',
       });
@@ -1272,8 +1287,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
     contextIdOrOptions?: string | ExecuteContextActionOptions,
     maybeOptions?: ExecuteContextActionOptions
   ) => {
-    // 1. Concurrency guard: Prevent duplicate submissions while an action is in progress
-    if (get().isActionExecuting || (actionId === 'context.resume' && get().isResuming)) {
+    // 1. Concurrency guard: Prevent duplicate submissions while an action or resume is in progress
+    if (get().isActionExecuting || get().isResuming) {
       return {
         actionId,
         success: false,
@@ -1472,8 +1487,8 @@ export const useLauncherStore = create<LauncherState>((set, get) => ({
   },
 
   executeItemAction: async (actionId: ItemActionId, contextId: string, itemId: string) => {
-    // Concurrency guard: Prevent duplicate submissions while an action is in progress
-    if (get().isActionExecuting) {
+    // Concurrency guard: Prevent duplicate submissions while an action or resume is in progress
+    if (get().isActionExecuting || get().isResuming) {
       return {
         actionId,
         success: false,
