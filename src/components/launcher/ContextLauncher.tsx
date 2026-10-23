@@ -878,17 +878,43 @@ export function ContextLauncher() {
 
             {/* Empty state: when not loading, no error, and list is empty */}
             {!isLoading && !error && filteredList.length === 0 && (
-              <div className="py-8 text-center space-y-1" data-testid="context-list-empty-state">
-                <p className="text-xs font-medium text-stone-300">
-                  {searchQuery ? 'No matching contexts' : 'No contexts available'}
-                </p>
-                <p className="text-xs text-stone-500">
-                  {searchQuery
-                    ? 'Try a different name or keyword.'
-                    : activeFilter !== 'all'
-                    ? `No contexts in the ${activeFilter} state.`
-                    : 'Create or activate a context to get started.'}
-                </p>
+              <div className="py-8 text-center space-y-2" data-testid="context-list-empty-state">
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-stone-300">
+                    {searchQuery ? 'No matching contexts' : 'No contexts available'}
+                  </p>
+                  <p className="text-xs text-stone-500">
+                    {searchQuery
+                      ? 'Try a different name or keyword.'
+                      : activeFilter !== 'all'
+                      ? `No contexts in the ${activeFilter} state.`
+                      : 'Create or activate a context to get started.'}
+                  </p>
+                </div>
+                {searchQuery && (
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-500/50 cursor-pointer"
+                      data-testid="clear-search-button"
+                    >
+                      Clear search
+                    </button>
+                  </div>
+                )}
+                {!searchQuery && activeFilter !== 'all' && (
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setActiveFilter('all')}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 active:bg-stone-600 text-xs text-stone-300 hover:text-white transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-amber-500/50 cursor-pointer"
+                      data-testid="show-all-contexts-button"
+                    >
+                      Show all contexts
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1235,7 +1261,7 @@ function ContextPreviewPane({
 
   const handleMenuKeyDown = (e: React.KeyboardEvent) => {
     if (secondaryActions.length === 0) {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' || e.key === 'Tab') {
         e.preventDefault();
         e.stopPropagation();
         setIsMenuOpen(false);
@@ -1450,7 +1476,10 @@ function ContextPreviewPane({
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5 group">
-                  <h3 className="text-sm font-semibold text-stone-100 truncate">
+                  <h3
+                    className="text-sm font-semibold text-stone-100 truncate"
+                    title={preview.name}
+                  >
                     {preview.name}
                   </h3>
                   <button
@@ -1722,11 +1751,16 @@ function ContextPreviewPane({
           </div>
 
           {preview.worksetItems.length === 0 ? (
-            <div className="py-4 px-3 text-center rounded-lg border border-dashed border-white/10 bg-white/[0.01] flex flex-col items-center justify-center gap-1.5">
+            <div
+              className="py-4 px-3 text-center rounded-lg border border-dashed border-white/10 bg-white/[0.01] flex flex-col items-center justify-center gap-1.5"
+              data-testid="workset-empty-state"
+            >
               <FolderOpen size={16} className="text-stone-600 mb-0.5" />
               <p className="text-xs font-medium text-stone-300">No items in working set</p>
               <p className="text-[11px] text-stone-500 max-w-[260px] leading-relaxed">
-                Resume this workspace to begin capturing files, web links, or notes.
+                {isCurrentActive
+                  ? 'Open or capture files, web links, or notes to build this working set.'
+                  : 'Resume this workspace to begin capturing files, web links, or notes.'}
               </p>
             </div>
           ) : (
@@ -2097,7 +2131,7 @@ function WorksetPreviewRow({
 
   const handleMenuKeyDown = (e: React.KeyboardEvent) => {
     if (itemActions.length === 0) {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' || e.key === 'Tab') {
         e.preventDefault();
         e.stopPropagation();
         setIsMenuOpen(false);
